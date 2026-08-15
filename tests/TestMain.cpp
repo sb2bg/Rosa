@@ -2607,6 +2607,23 @@ void testOrShortImmediateGeneratedExecution() {
     static_cast<void>(block.execute(state));
     expectEqual(state.rax, UINT64_MAX, "OR r64, imm8 result differs");
     expectEqual(state.rflags, std::uint64_t{0x86}, "OR r64, imm8 flags differ");
+
+    constexpr std::array<std::uint8_t, 4> legacyCode{
+        0x83, 0xC9, 0x04, 0xC3};
+    const auto legacyDecoded = decoder.decodeBlock(
+        legacyCode, rosa::guest::GuestAddress{0x2000});
+    expectEqual(
+        std::get<rosa::x86::RegisterOperand>(legacyDecoded[0].operands[0]).width,
+        std::uint8_t{32}, "OR r32, imm8 width differs");
+    const auto legacyBlock = translator.translate(
+        legacyCode, rosa::guest::GuestAddress{0x2000});
+    state.rcx = 0xAAAAAAAA00000002ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(legacyBlock.execute(state));
+    expectEqual(state.rcx, std::uint64_t{6},
+                "OR r32, imm8 result did not zero-extend");
+    expectEqual(state.rflags, std::uint64_t{0x6},
+                "OR r32, imm8 flags differ");
 }
 
 void testOr32BitRegistersGeneratedExecution() {
