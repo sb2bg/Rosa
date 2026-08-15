@@ -1436,7 +1436,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
         }
-        if (opcode >= 0xB8U && opcode <= 0xBFU) {
+        if (opcode == 0x98U && rexW) {
+            instruction.opcode = Opcode::Cdqe;
+        } else if (opcode >= 0xB8U && opcode <= 0xBFU) {
             const auto immediateSize = rexW ? sizeof(std::uint64_t) : sizeof(std::uint32_t);
             if (code.size() - cursor < immediateSize) {
                 throw DecodeError(address, remaining, "truncated mov register, immediate");

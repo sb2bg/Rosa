@@ -507,6 +507,12 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cdqe_negative", CaseId::cdqe_negative,
+                             differentialBytes_cdqe_negative);
+        testCase.request.state.rax = 0xAAAAAAAA80000001ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("lea_scaled", CaseId::lea_scaled,
                              differentialBytes_lea_scaled);
         testCase.request.state.rax = 0x1000;
@@ -3172,6 +3178,36 @@ void testMovsxdScaledGuestDword() {
                 "MOVSXD sign-extended result differs");
     expectEqual(state.rax, std::uint64_t{0x8000}, "MOVSXD changed base");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVSXD changed flags");
+}
+
+void testCdqeGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0x48, 0x98, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::Cdqe,
+           "CDQE opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2}, "CDQE length differs");
+    expect(decoded[0].operands.empty(), "CDQE unexpectedly has explicit operands");
+    expect(rosa::debug::dumpX86(decoded).find("cdqe") != std::string::npos,
+           "CDQE dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State negative;
+    negative.rax = 0xAAAAAAAA80000001ULL;
+    negative.rflags = 0x8D7;
+    static_cast<void>(block.execute(negative));
+    expectEqual(negative.rax, std::uint64_t{0xFFFFFFFF80000001ULL},
+                "CDQE negative result differs");
+    expectEqual(negative.rflags, std::uint64_t{0x8D7}, "CDQE changed flags");
+
+    rosa::x86::X86State positive;
+    positive.rax = 0xFFFFFFFF7FFFFFFFULL;
+    positive.rflags = 0xAD7;
+    static_cast<void>(block.execute(positive));
+    expectEqual(positive.rax, std::uint64_t{0x7FFFFFFF},
+                "CDQE positive result differs");
+    expectEqual(positive.rflags, std::uint64_t{0xAD7}, "CDQE changed flags");
 }
 
 void testMovGuestMemoryToLegacy32BitRegister() {
@@ -6010,6 +6046,7 @@ int main() {
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},
         {"MOVZX guest word with scaled index", testMovzxGuestWordWithScaledIndex},
         {"MOVSXD scaled guest dword", testMovsxdScaledGuestDword},
+        {"CDQE generated execution", testCdqeGeneratedExecution},
         {"legacy MOV guest memory to 32-bit register",
          testMovGuestMemoryToLegacy32BitRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},

@@ -1054,6 +1054,17 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::Cdqe: {
+            if (!instruction.operands.empty()) {
+                throw std::runtime_error("internal decoder error: CDQE operands");
+            }
+            const auto value = builder.readGuestRegister(
+                x86::Register::Rax, ir::Width::I32, instruction.address);
+            const auto extended = builder.signExtend32(value, instruction.address);
+            builder.writeGuestRegister(x86::Register::Rax, extended,
+                                       ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::MovMemImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: mov memory immediate count");
