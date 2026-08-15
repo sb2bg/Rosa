@@ -304,6 +304,17 @@ void Builder::updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width wid
     });
 }
 
+void Builder::updateIncFlags(ValueId original, ValueId result, Width width,
+                             guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateIncFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = original,
+        .rhs = result,
+    });
+}
+
 void Builder::updateSubFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                              guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -542,6 +553,10 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "left");
             checkUse(operation.rhs, "right");
             checkUse(operation.third, "result");
+            break;
+        case Opcode::UpdateIncFlags:
+            checkUse(operation.lhs, "original");
+            checkUse(operation.rhs, "result");
             break;
         case Opcode::UpdateLogicFlags:
             checkUse(operation.lhs, "result");

@@ -1153,46 +1153,56 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (extension != 0x2U || mode > 0x2U || rexR || rexX ||
-                (mode == 0 && rmEncoding == 0x5U)) {
+            if (extension == 0x0U && mode == 0x3U && !rexR && !rexX) {
+                instruction.opcode = Opcode::IncReg;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, rexB),
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+            } else if (extension != 0x2U || mode > 0x2U || rexR || rexX ||
+                       (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only CALL qword [base+disp8/disp32] from opcode FF /2 is supported");
+                    "only register INC /0 and CALL qword [base+disp8/disp32] /2 are supported from opcode FF");
+            } else {
+                auto baseEncoding = rmEncoding;
+                if (rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated indirect CALL SIB byte");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits = static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    if (scaleBits != 0 || indexEncoding != 0x4U ||
+                        (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only no-index SIB addressing is supported for indirect CALL");
+                    }
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated indirect CALL disp8");
+                    }
+                    displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated indirect CALL disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                instruction.opcode = Opcode::CallMem;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(baseEncoding, rexB), displacement, 64});
+                instruction.fallthrough = guest::GuestAddress{
+                    address.value + (cursor - instructionStart)};
             }
-            auto baseEncoding = rmEncoding;
-            if (rmEncoding == 0x4U) {
-                if (cursor >= code.size()) {
-                    throw DecodeError(address, remaining, "truncated indirect CALL SIB byte");
-                }
-                const auto sib = code[cursor++];
-                const auto scaleBits = static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
-                const auto indexEncoding = static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
-                baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-                if (scaleBits != 0 || indexEncoding != 0x4U ||
-                    (mode == 0 && baseEncoding == 0x5U && !rexB)) {
-                    throw DecodeError(
-                        address, remaining,
-                        "only no-index SIB addressing is supported for indirect CALL");
-                }
-            }
-            std::int64_t displacement = 0;
-            if (mode == 0x1U) {
-                if (cursor >= code.size()) {
-                    throw DecodeError(address, remaining, "truncated indirect CALL disp8");
-                }
-                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-            } else if (mode == 0x2U) {
-                if (code.size() - cursor < 4) {
-                    throw DecodeError(address, remaining, "truncated indirect CALL disp32");
-                }
-                displacement = readI32(code.subspan(cursor, 4));
-                cursor += 4;
-            }
-            instruction.opcode = Opcode::CallMem;
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(baseEncoding, rexB), displacement, 64});
-            instruction.fallthrough = guest::GuestAddress{address.value +
-                                                          (cursor - instructionStart)};
         } else if (opcode == 0x83U) {
             if (code.size() - cursor < 2) {
                 throw DecodeError(address, remaining, "truncated add r64, imm8");

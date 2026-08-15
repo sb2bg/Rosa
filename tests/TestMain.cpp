@@ -568,6 +568,37 @@ void testAddRegisterToRegister() {
     expectEqual(state.rflags, std::uint64_t{0x13}, "ADD r64, r64 flags differ");
 }
 
+void testIncrement32BitRegister() {
+    constexpr std::array<std::uint8_t, 4> code{0x41, 0xFF, 0xC7, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::IncReg,
+           "INC r32 opcode differs");
+    const auto operand = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(operand.reg == rosa::x86::Register::R15,
+           "INC extended register differs");
+    expectEqual(operand.width, std::uint8_t{32}, "INC r32 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State overflowState;
+    overflowState.r15 = 0xAAAAAAAA7FFFFFFFULL;
+    overflowState.rflags = 0x8D7 | 1U;
+    static_cast<void>(block.execute(overflowState));
+    expectEqual(overflowState.r15, std::uint64_t{0x80000000},
+                "INC r32 did not zero-extend its result");
+    expectEqual(overflowState.rflags, std::uint64_t{0x897},
+                "INC r32 overflow flags differ or CF was not preserved");
+
+    rosa::x86::X86State zeroState;
+    zeroState.r15 = UINT64_MAX;
+    zeroState.rflags = 0x8D6 & ~std::uint64_t{1};
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.r15, std::uint64_t{0}, "INC r32 wrapped result differs");
+    expectEqual(zeroState.rflags, std::uint64_t{0x56},
+                "INC r32 zero flags differ or CF was not preserved");
+}
+
 void testCompare32BitRegisterWithGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x44, 0x3B, 0x46, 0x18, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2374,6 +2405,7 @@ int main() {
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
+        {"INC 32-bit register", testIncrement32BitRegister},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
         {"legacy CMP 32-bit register with guest memory",
          testLegacyCompare32BitRegisterWithGuestMemory},

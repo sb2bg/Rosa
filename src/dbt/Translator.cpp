@@ -279,6 +279,44 @@ updateAddFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std
     return state;
 }
 
+template <typename Value>
+x86::X86State *updateIncFlags(x86::X86State *state, std::uint64_t originalValue,
+                              std::uint64_t resultValue) {
+    const auto original = static_cast<Value>(originalValue);
+    const auto result = static_cast<Value>(resultValue);
+    auto flags = (state->rflags & ~(arithmeticFlagMask & ~flagCarry)) | flagReservedOne;
+    if ((std::popcount(static_cast<unsigned>(result & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (((original ^ Value{1} ^ result) & Value{0x10}) != 0) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    constexpr auto signBit = static_cast<Value>(Value{1} << (sizeof(Value) * 8U - 1U));
+    if ((result & signBit) != 0) {
+        flags |= flagSign;
+    }
+    if (original == static_cast<Value>(signBit - 1U)) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+updateIncFlags32(x86::X86State *state, std::uint64_t original,
+                 std::uint64_t result) {
+    return updateIncFlags<std::uint32_t>(state, original, result);
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+updateIncFlags64(x86::X86State *state, std::uint64_t original,
+                 std::uint64_t result) {
+    return updateIncFlags<std::uint64_t>(state, original, result);
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *
 updateSubFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std::uint64_t result) {
     auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
@@ -702,6 +740,28 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
                                        instruction.address);
             builder.updateAddFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
+            break;
+        }
+        case x86::Opcode::IncReg: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: increment operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto width = destination.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto original = builder.readGuestRegister(destination.reg, width,
+                                                            instruction.address);
+            const auto one = builder.constant(1, width, instruction.address);
+            auto result = builder.add(original, one, width, instruction.address);
+            if (width == ir::Width::I32) {
+                const auto mask = builder.constant(UINT32_MAX, ir::Width::I64,
+                                                   instruction.address);
+                result = builder.bitAnd(result, mask, ir::Width::I64,
+                                        instruction.address);
+            }
+            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+                                       instruction.address);
+            builder.updateIncFlags(original, result, width, instruction.address);
             break;
         }
         case x86::Opcode::SubRegImm: {
@@ -1155,6 +1215,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
     bool hasExecutionContextCall = false;
     for (const auto &operation : block.operations) {
         hasHelperCall |= operation.opcode == ir::Opcode::UpdateAddFlags ||
+                         operation.opcode == ir::Opcode::UpdateIncFlags ||
                          operation.opcode == ir::Opcode::UpdateSubFlags ||
                          operation.opcode == ir::Opcode::UpdateLogicFlags ||
                          operation.opcode == ir::Opcode::UpdateShiftLeftFlags ||
@@ -1422,6 +1483,15 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                                        ? pointerBits(&updateSubFlags32)
                                                        : pointerBits(&updateSubFlags64));
             }
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::UpdateIncFlags:
+            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x2, hostRegister(*operation.rhs));
+            assembler.movImmediate(arm64::x16,
+                                   operation.width == ir::Width::I32
+                                       ? pointerBits(&updateIncFlags32)
+                                       : pointerBits(&updateIncFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateLogicFlags:
