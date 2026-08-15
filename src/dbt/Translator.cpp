@@ -496,6 +496,24 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::MovMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: mov memory immediate count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            const auto base =
+                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                instruction.address);
+            const auto address =
+                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            const auto value = builder.constant(immediate.value, ir::Width::I64,
+                                                instruction.address);
+            builder.storeGuest(address, value, ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::MovapsMemReg:
         case x86::Opcode::MovupsMemReg:
         case x86::Opcode::MovdquMemReg: {

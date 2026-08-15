@@ -877,21 +877,45 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
         } else if (opcode == 0xC7U) {
-            if (code.size() - cursor < 5) {
-                throw DecodeError(address, remaining, "truncated mov r64, imm32");
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated mov opcode C7");
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            if (mode != 0x3U || extension != 0 || rexR || rexX) {
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (extension != 0 || rexR || rexX ||
+                (mode != 0x3U && (rmEncoding == 0x4U ||
+                                  (mode == 0 && rmEncoding == 0x5U)))) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct MOV from opcode C7 /0 is supported");
+                                  "only register or [base+disp] MOV from opcode C7 /0 is supported");
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated MOV memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated MOV memory disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            if (code.size() - cursor < 4) {
+                throw DecodeError(address, remaining, "truncated MOV imm32");
             }
             const auto immediate = readI32(code.subspan(cursor, 4));
             cursor += 4;
-            instruction.opcode = Opcode::MovRegImm;
-            instruction.operands.push_back(
-                RegisterOperand{decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
+            instruction.opcode = mode == 0x3U ? Opcode::MovRegImm : Opcode::MovMemImm;
+            if (mode == 0x3U) {
+                instruction.operands.push_back(
+                    RegisterOperand{decodeRegister(rmEncoding, rexB), 64});
+            } else {
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, rexB), displacement, 64});
+            }
             instruction.operands.push_back(ImmediateOperand{
                 static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 32});
         } else if (opcode == 0x81U) {

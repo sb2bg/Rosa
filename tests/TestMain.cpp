@@ -696,6 +696,42 @@ void testMovRegisterToGuestMemory() {
                 "failed guest-memory MOV changed the source register");
 }
 
+void testMovImmediateToGuestMemory() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x48, 0xC7, 0x03, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "MOV [mem], imm32 opcode differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                UINT64_MAX, "MOV [mem], imm32 sign extension differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbx = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8100}), UINT64_MAX,
+                "MOV [mem], imm32 stored value differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOV [mem], imm32 changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOV immediate to unmapped guest memory did not fail");
+}
+
 void testMovGuestMemoryToRegister() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x8B, 0x03, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -1871,6 +1907,7 @@ int main() {
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
+        {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"legacy MOV guest memory to 32-bit register",
