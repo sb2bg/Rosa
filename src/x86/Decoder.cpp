@@ -135,28 +135,43 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
-        if (code[cursor] == 0xF6U) {
-            if (code.size() - cursor < 3) {
+        const bool testImmediateHasRex =
+            code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+        const auto testImmediateOpcodeOffset =
+            cursor + (testImmediateHasRex ? 1U : 0U);
+        if (testImmediateOpcodeOffset < code.size() &&
+            code[testImmediateOpcodeOffset] == 0xF6U) {
+            if (code.size() - testImmediateOpcodeOffset < 3) {
                 throw DecodeError(address, remaining, "truncated test r8, imm8");
             }
-            const auto modrm = code[cursor + 1];
+            const auto rex = testImmediateHasRex ? code[cursor] : 0U;
+            const bool rexW = (rex & 0x8U) != 0;
+            const bool rexR = (rex & 0x4U) != 0;
+            const bool rexX = (rex & 0x2U) != 0;
+            const bool rexB = (rex & 0x1U) != 0;
+            const auto modrm = code[testImmediateOpcodeOffset + 1];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto registerEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode != 0x3U || extension != 0 || registerEncoding >= 0x4U) {
+            if (mode != 0x3U || extension != 0 || rexW || rexR || rexX ||
+                (!testImmediateHasRex && registerEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct TEST AL/CL/DL/BL, imm8 from opcode F6 /0 is supported");
+                    "only register-direct representable low-byte TEST from opcode F6 /0 is supported");
             }
             instruction.opcode = Opcode::TestRegImm;
-            instruction.length = 3;
-            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 3,
+            const auto length = static_cast<std::uint8_t>(
+                3U + (testImmediateHasRex ? 1U : 0U));
+            instruction.length = length;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor),
+                        instruction.length,
                         instruction.bytes.begin());
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(registerEncoding, false), 8});
-            instruction.operands.push_back(ImmediateOperand{code[cursor + 2], 8});
+                decodeRegister(registerEncoding, rexB), 8});
+            instruction.operands.push_back(
+                ImmediateOperand{code[testImmediateOpcodeOffset + 2], 8});
             result.push_back(std::move(instruction));
-            cursor += 3;
+            cursor += length;
             if (result.size() == maximumInstructions) {
                 return result;
             }

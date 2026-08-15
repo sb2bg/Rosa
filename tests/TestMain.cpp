@@ -412,6 +412,14 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("test8_extended_register_immediate",
+                             CaseId::test8_extended_register_immediate,
+                             differentialBytes_test8_extended_register_immediate);
+        testCase.request.state.r14 = 0x8877665544332202ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp64_register", CaseId::cmp64_register,
                              differentialBytes_cmp64_register);
         testCase.request.state.r14 = 5;
@@ -4096,11 +4104,36 @@ void testTestLowByteRegisterImmediateGeneratedExecution() {
     expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 7U},
                 "TEST DL, imm8 sign-result flags differ");
 
+    constexpr std::array<std::uint8_t, 5> extendedCode{
+        0x41, 0xF6, 0xC6, 0x02, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x3000});
+    expectEqual(extendedDecoded[0].length, std::uint8_t{4},
+                "TEST r14b, imm8 length differs");
+    const auto extendedOperand =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[0]);
+    expect(extendedOperand.reg == rosa::x86::Register::R14 &&
+               extendedOperand.width == 8,
+           "TEST r14b, imm8 register differs");
+    expect(rosa::debug::dumpX86(extendedDecoded).find("test r14b, 0x2") !=
+               std::string::npos,
+           "TEST r14b, imm8 dump differs");
+    const auto extendedBlock = translator.translate(
+        extendedCode, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State extendedState;
+    extendedState.r14 = 0x8877665544332202ULL;
+    extendedState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.r14, std::uint64_t{0x8877665544332202ULL},
+                "TEST r14b, imm8 changed R14");
+    expectEqual(extendedState.rflags & definedLogicFlags, std::uint64_t{0},
+                "TEST r14b, imm8 defined flags differ");
+
     constexpr std::array<std::uint8_t, 4> highByteCode{0xF6, 0xE6, 0x01, 0xC3};
     bool rejected = false;
     try {
         static_cast<void>(decoder.decodeBlock(
-            highByteCode, rosa::guest::GuestAddress{0x3000}));
+            highByteCode, rosa::guest::GuestAddress{0x4000}));
     } catch (const rosa::x86::DecodeError &) {
         rejected = true;
     }
