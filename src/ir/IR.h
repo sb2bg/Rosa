@@ -52,6 +52,7 @@ enum class Opcode {
     BitScanForward,
     Push,
     IncrementGuestMemory,
+    DecrementGuestMemory,
     LoadFence,
     ReadTimestampCounter,
     UpdateAddFlags,
@@ -147,6 +148,8 @@ class Builder {
                         Width width, guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void incrementGuestMemory(ValueId address, Width width,
+                              guest::GuestAddress rip);
+    void decrementGuestMemory(ValueId address, Width width,
                               guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
     void readTimestampCounter(guest::GuestAddress rip);

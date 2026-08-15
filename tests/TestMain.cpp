@@ -360,6 +360,17 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("dec64_memory", CaseId::dec64_memory,
+                             differentialBytes_dec64_memory);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        const std::uint64_t value = std::uint64_t{1} << 63U;
+        std::memcpy(testCase.request.memory.data() + 0x18, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x18;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("and32_mask", CaseId::and32_mask,
                              differentialBytes_and32_mask);
         testCase.request.state.r15 = 0xFFFFFFFF80000800ULL;
@@ -1770,6 +1781,79 @@ void testIncrement64BitGuestMemory() {
                 sentinel, "failed INC qword changed guest memory");
     expectEqual(state.rflags, std::uint64_t{0xAD7},
                 "failed INC qword changed flags");
+}
+
+void testDecrement64BitGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0xFF, 0x4B, 0x18, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::DecMem,
+           "DEC qword memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "DEC qword memory length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rbx &&
+               memory.displacement == 0x18 && memory.width == 64,
+           "DEC qword [rbx+0x18] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("dec qword [rbx+0x18]") !=
+               std::string::npos,
+           "DEC qword memory dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbx = 0x8000;
+    state.rflags = 0x3;
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8018},
+                          std::uint64_t{1} << 63U);
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8018}),
+                std::uint64_t{0x7FFFFFFFFFFFFFFFULL},
+                "DEC qword overflow result differs");
+    expectEqual(state.rbx, std::uint64_t{0x8000},
+                "DEC qword changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0x817},
+                "DEC qword overflow flags differ or CF changed");
+
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8018}, 0);
+    state.rflags = 0x2;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8018}),
+                UINT64_MAX, "DEC qword wrap result differs");
+    expectEqual(state.rflags, std::uint64_t{0x96},
+                "DEC qword wrap flags differ or CF changed");
+
+    std::array<std::uint8_t, 0x20> readOnlyBytes{};
+    constexpr std::uint64_t sentinel = 7;
+    std::memcpy(readOnlyBytes.data() + 0x18, &sentinel, sizeof(sentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        rosa::guest::GuestAddress{0x9000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read, readOnlyBytes,
+        "read-only qword decrement test");
+    rosa::x86::X86State faultState;
+    faultState.rbx = 0x9000;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "DEC qword on read-only guest memory did not fault");
+    expectEqual(readOnlyAddressSpace.readU64(rosa::guest::GuestAddress{0x9018}),
+                sentinel, "failed DEC qword changed guest memory");
+    expectEqual(faultState.rbx, std::uint64_t{0x9000},
+                "failed DEC qword changed its base register");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed DEC qword changed flags");
 }
 
 void testCompare32BitRegisterWithGuestMemory() {
@@ -7594,6 +7678,7 @@ int main() {
         {"DEC 32-bit register", testDecrement32BitRegister},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},
         {"INC 64-bit guest memory", testIncrement64BitGuestMemory},
+        {"DEC 64-bit guest memory", testDecrement64BitGuestMemory},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
         {"CMP byte register with scaled guest memory",
          testCompareByteRegisterWithScaledGuestMemory},

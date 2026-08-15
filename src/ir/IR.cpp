@@ -372,6 +372,16 @@ void Builder::incrementGuestMemory(ValueId address, Width width,
     });
 }
 
+void Builder::decrementGuestMemory(ValueId address, Width width,
+                                   guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::DecrementGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+    });
+}
+
 void Builder::loadFence(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::LoadFence,
@@ -669,6 +679,7 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.rhs, "pushed value");
             break;
         case Opcode::IncrementGuestMemory:
+        case Opcode::DecrementGuestMemory:
             checkUse(operation.lhs, "guest address");
             break;
         case Opcode::StoreGuest:
