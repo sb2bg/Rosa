@@ -2531,8 +2531,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            const bool ripRelative =
-                mode == 0 && rmEncoding == 0x5U && !rexB;
+            // In 64-bit mode mod=00,r/m=101 remains RIP-relative even when
+            // REX.B is present; REX.B does not turn this special encoding into
+            // an R13 base.
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             if (extension != 0x7U || rexW || rexR || rexX ||
                 (mode != 0x3U && rmEncoding == 0x4U) ||
                 (mode == 0x3U && !hasRex && rmEncoding >= 0x4U)) {

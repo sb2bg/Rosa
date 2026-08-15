@@ -2600,16 +2600,16 @@ void testCompare8BitRegisterWithImmediate() {
     }
     expect(rejected, "CMP AH, imm8 was silently treated as a low-byte register");
 
-    constexpr std::array<std::uint8_t, 5> rexBMemoryCode{
-        0x41, 0x80, 0x3D, 0x01, 0xC3};
+    constexpr std::array<std::uint8_t, 9> rexBMemoryCode{
+        0x41, 0x80, 0x3D, 0x01, 0x00, 0x00, 0x00, 0x01, 0xC3};
     const auto rexBMemoryDecoded = decoder.decodeBlock(
         rexBMemoryCode, rosa::guest::GuestAddress{0x3000});
     const auto rexBMemory =
         std::get<rosa::x86::MemoryOperand>(rexBMemoryDecoded[0].operands[0]);
     expect(rexBMemoryDecoded[0].opcode == rosa::x86::Opcode::CmpMemImm &&
-               rexBMemory.base == rosa::x86::Register::R13 &&
-               !rexBMemory.ripRelative && rexBMemory.displacement == 0,
-           "REX.B opcode-80 memory form was misdecoded as RIP-relative");
+               !rexBMemory.hasBase && rexBMemory.ripRelative &&
+               rexBMemory.displacement == 1,
+           "REX.B changed opcode-80 RIP-relative addressing");
 }
 
 void testCompare32BitRegisterWithImmediate() {
