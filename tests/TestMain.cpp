@@ -758,6 +758,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmp8_accumulator_equal",
+                             CaseId::cmp8_accumulator_equal,
+                             differentialBytes_cmp8_accumulator_equal);
+        testCase.request.state.rax = 0xAABBCCDDEEFF0039ULL;
+        run(testCase);
+    }
+    {
+        auto testCase = make("cmp8_accumulator_borrow",
+                             CaseId::cmp8_accumulator_borrow,
+                             differentialBytes_cmp8_accumulator_borrow);
+        testCase.request.state.rax = 0xAABBCCDDEEFF0000ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp64_memory_register",
                              CaseId::cmp64_memory_register,
                              differentialBytes_cmp64_memory_register);
@@ -4846,6 +4860,25 @@ void testCompareAccumulatorImmediate() {
     expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
                 std::uint64_t{0x80000022}, "CMP accumulator immediate differs");
 
+    constexpr std::array<std::uint8_t, 3> byteCode{0x3C, 0x39, 0xC3};
+    const auto byteDecoded = decoder.decodeBlock(
+        byteCode, rosa::guest::GuestAddress{0x7FF800059948ULL});
+    expect(byteDecoded[0].opcode == rosa::x86::Opcode::CmpRegImm,
+           "CMP AL, imm8 opcode differs");
+    expectEqual(byteDecoded[0].length, std::uint8_t{2},
+                "CMP AL, imm8 length differs");
+    const auto byteDestination =
+        std::get<rosa::x86::RegisterOperand>(byteDecoded[0].operands[0]);
+    const auto byteImmediate =
+        std::get<rosa::x86::ImmediateOperand>(byteDecoded[0].operands[1]);
+    expect(byteDestination.reg == rosa::x86::Register::Rax &&
+               byteDestination.width == 8 && byteImmediate.value == 0x39 &&
+               byteImmediate.width == 8,
+           "CMP AL, imm8 operands differ");
+    expect(rosa::debug::dumpX86(byteDecoded).find("cmp al, 0x39") !=
+               std::string::npos,
+           "CMP AL, imm8 dump differs");
+
     const rosa::dbt::Translator translator;
     const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
     rosa::x86::X86State state;
@@ -4856,6 +4889,24 @@ void testCompareAccumulatorImmediate() {
                 "CMP EAX, imm32 changed RAX");
     expectEqual(state.rflags, std::uint64_t{0x46},
                 "CMP EAX, imm32 equal flags differ");
+
+    const auto byteBlock = translator.translate(
+        byteCode, rosa::guest::GuestAddress{0x7FF800059948ULL});
+    state.rax = 0xAABBCCDDEEFF0039ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(byteBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xAABBCCDDEEFF0039ULL},
+                "CMP AL, imm8 changed RAX");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP AL, imm8 equal flags differ");
+
+    state.rax = 0xAABBCCDDEEFF0000ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(byteBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xAABBCCDDEEFF0000ULL},
+                "CMP AL, imm8 borrow changed RAX");
+    expectEqual(state.rflags, std::uint64_t{0x93},
+                "CMP AL, imm8 borrow flags differ");
 
     constexpr std::array<std::uint8_t, 7> observed{
         0x48, 0x3D, 0x01, 0x00, 0x02, 0x00, 0xC3};
