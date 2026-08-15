@@ -461,6 +461,14 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("and64_sign_extended_mask",
+                             CaseId::and64_sign_extended_mask,
+                             differentialBytes_and64_sign_extended_mask);
+        testCase.request.state.rcx = 0x123456789ABCDEF0ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("and8_accumulator", CaseId::and8_accumulator,
                              differentialBytes_and8_accumulator);
         testCase.request.state.rax = 0x11223344556677A5ULL;
@@ -9262,6 +9270,39 @@ void testAnd32BitRegisterImmediate() {
     expectEqual(state.rflags & definedLogicFlags,
                 std::uint64_t{(1U << 2U) | (1U << 7U)},
                 "AND ECX, imm32 sign defined flags differ");
+
+    constexpr std::array<std::uint8_t, 8> observed{
+        0x48, 0x81, 0xE1, 0x00, 0xC0, 0xFF, 0xFF, 0xC3};
+    const auto observedDecoded = decoder.decodeBlock(
+        observed, rosa::guest::GuestAddress{0x2C00});
+    const auto observedDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            observedDecoded[0].operands[0]);
+    const auto observedImmediate =
+        std::get<rosa::x86::ImmediateOperand>(
+            observedDecoded[0].operands[1]);
+    expect(observedDecoded[0].opcode == rosa::x86::Opcode::AndRegImm &&
+               observedDecoded[0].length == 7,
+           "AND r64, imm32 decode differs");
+    expect(observedDestination.reg == rosa::x86::Register::Rcx &&
+               observedDestination.width == 64,
+           "AND r64, imm32 destination differs");
+    expect(observedImmediate.width == 32 &&
+               observedImmediate.value == 0xFFFFFFFFFFFFC000ULL,
+           "AND r64, imm32 was not sign-extended");
+    expect(rosa::debug::dumpX86(observedDecoded).find(
+               "and rcx, 0xffffffffffffc000") != std::string::npos,
+           "AND r64, imm32 dump differs");
+    const auto observedBlock = translator.translate(
+        observed, rosa::guest::GuestAddress{0x2C00});
+    state.rcx = 0x123456789ABCDEF0ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(observedBlock.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x123456789ABCC000ULL},
+                "AND r64, imm32 result differs");
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{1U << 2U},
+                "AND r64, imm32 defined flags differ");
 
     bool rejected = false;
     try {
