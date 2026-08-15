@@ -1760,6 +1760,29 @@ void testOrShortImmediateGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x86}, "OR r64, imm8 flags differ");
 }
 
+void testOr32BitRegistersGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0x09, 0xC1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrRegReg,
+           "OR r32, r32 opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{32}, "OR r32, r32 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rcx = 0xAAAAAAAA000000F0ULL;
+    state.rax = 0xBBBBBBBB0000000FULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xFF},
+                "OR r32, r32 result or zero extension differs");
+    expectEqual(state.rax, std::uint64_t{0xBBBBBBBB0000000FULL},
+                "OR r32, r32 changed source");
+    expectEqual(state.rflags, std::uint64_t{0x6}, "OR r32, r32 flags differ");
+}
+
 void testXor32BitRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 6> code{0x31, 0xF6, 0x45, 0x31, 0xC0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2882,6 +2905,7 @@ int main() {
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"OR short immediate generated execution", testOrShortImmediateGeneratedExecution},
+        {"OR 32-bit registers generated execution", testOr32BitRegistersGeneratedExecution},
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
         {"XOR 32-bit register from guest memory",
          testXor32BitRegisterFromGuestMemory},

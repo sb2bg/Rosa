@@ -751,7 +751,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x8BU &&
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
-            code[cursor] != 0x21U &&
+            code[cursor] != 0x21U && code[cursor] != 0x09U &&
             code[cursor] != 0x3BU && code[cursor] != 0x80U &&
             code[cursor] != 0x81U && code[cursor] != 0xC1U && code[cursor] != 0xC6U) {
             throw DecodeError(address, remaining, "expected REX prefix");
@@ -771,6 +771,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const auto opcode = code[cursor++];
         if (!rexW && opcode != 0x88U && opcode != 0x89U && opcode != 0x8AU &&
             opcode != 0x8BU && opcode != 0x85U &&
+            opcode != 0x09U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
             opcode != 0x33U &&
@@ -880,9 +881,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto destination =
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
+            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
             instruction.opcode = Opcode::OrRegReg;
-            instruction.operands.push_back(RegisterOperand{destination, 64});
-            instruction.operands.push_back(RegisterOperand{source, 64});
+            instruction.operands.push_back(RegisterOperand{destination, width});
+            instruction.operands.push_back(RegisterOperand{source, width});
         } else if (opcode == 0x2BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated sub r64, [base+disp]");
