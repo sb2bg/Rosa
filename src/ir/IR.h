@@ -51,6 +51,7 @@ enum class Opcode {
     MoveXmmByteMask,
     ShuffleXmmDwords,
     BitScanForward,
+    BitScanReverse,
     Push,
     AddGuestMemory,
     IncrementGuestMemory,
@@ -152,6 +153,8 @@ class Builder {
                           x86::XmmRegister source, std::uint8_t control,
                           guest::GuestAddress rip);
     void bitScanForward(x86::Register destination, x86::Register source,
+                        Width width, guest::GuestAddress rip);
+    void bitScanReverse(x86::Register destination, x86::Register source,
                         Width width, guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void addGuestMemory(ValueId address, ValueId source, Width width,

@@ -1033,6 +1033,25 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("bsr64_nonzero", CaseId::bsr64_nonzero,
+                             differentialBytes_bsr64_nonzero);
+        testCase.request.state.rax = UINT64_MAX;
+        testCase.request.state.rdi = (std::uint64_t{1} << 40U) | 1U;
+        testCase.flagMask = zeroFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("bsr64_zero", CaseId::bsr64_zero,
+                             differentialBytes_bsr64_zero);
+        testCase.request.state.rax = 0x7F;
+        testCase.request.state.rdi = 0;
+        testCase.gprMask = static_cast<std::uint16_t>(
+            testCase.gprMask &
+            ~(1U << static_cast<unsigned>(rosa::x86::Register::Rax)));
+        testCase.flagMask = zeroFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("movzx8_register", CaseId::movzx8_register,
                              differentialBytes_movzx8_register);
         testCase.request.state.rcx = 0xAABBCCDDEEFF00A5ULL;
@@ -10746,6 +10765,55 @@ void testBitScanForward64() {
                 "BSF r64 zero-source ZF semantics differ");
 }
 
+void testBitScanReverse64() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x48, 0x0F, 0xBD, 0xC7, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF80005992DULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::BitScanReverseRegReg,
+           "BSR r64, r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "BSR r64, r64 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 64 &&
+               source.reg == rosa::x86::Register::Rdi && source.width == 64,
+           "BSR rax, rdi operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("bsr rax, rdi") !=
+               std::string::npos,
+           "BSR r64 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF80005992DULL});
+    rosa::x86::X86State nonzeroState;
+    nonzeroState.rax = UINT64_MAX;
+    nonzeroState.rdi = (std::uint64_t{1} << 40U) | 1U;
+    nonzeroState.rflags = 0x8D7;
+    static_cast<void>(block.execute(nonzeroState));
+    expectEqual(nonzeroState.rax, std::uint64_t{40},
+                "BSR r64 result differs");
+    expectEqual(nonzeroState.rdi, (std::uint64_t{1} << 40U) | 1U,
+                "BSR r64 changed its source");
+    expectEqual(nonzeroState.rflags & zeroFlag, std::uint64_t{0},
+                "BSR r64 nonzero ZF differs");
+
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0x7F;
+    zeroState.rdi = 0;
+    zeroState.rflags = 0x897;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rflags & zeroFlag, zeroFlag,
+                "BSR r64 zero-source ZF differs");
+    expectEqual(zeroState.rdi, std::uint64_t{0},
+                "BSR r64 zero-source changed its source");
+    // The destination is architecturally undefined for a zero source.
+}
+
 void testLegacyAnd32Immediate() {
     constexpr std::array<std::uint8_t, 4> code{0x83, 0xE1, 0x1F, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -12528,6 +12596,7 @@ int main() {
          testAnd8BitRegisterWithRipRelativeGuestMemory},
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},
+        {"BSR 64-bit registers", testBitScanReverse64},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
         {"AND 8-bit accumulator immediate", testAnd8BitAccumulatorImmediate},
         {"AND 8-bit register immediate", testAnd8BitRegisterImmediate},

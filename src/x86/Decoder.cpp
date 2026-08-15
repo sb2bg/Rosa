@@ -1913,10 +1913,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (secondOpcode != 0x42U && secondOpcode != 0x43U &&
                 secondOpcode != 0x44U && secondOpcode != 0x47U &&
                 secondOpcode != 0xACU &&
-                secondOpcode != 0xAFU && secondOpcode != 0xBCU) {
+                secondOpcode != 0xAFU && secondOpcode != 0xBCU &&
+                secondOpcode != 0xBDU) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMOVB/CMOVAE/CMOVE/CMOVA, IMUL, SHRD, and BSF register forms are supported from REX.W 0F");
+                    "only CMOVB/CMOVAE/CMOVE/CMOVA, IMUL, SHRD, BSF, and BSR register forms are supported from REX.W 0F");
             }
             if (cursor >= code.size() ||
                 (secondOpcode == 0xACU && code.size() - cursor < 2)) {
@@ -1924,6 +1925,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                   secondOpcode == 0xACU ? "truncated SHRD r64"
                                   : secondOpcode == 0xAFU ? "truncated IMUL r64"
                                   : secondOpcode == 0xBCU ? "truncated BSF r64"
+                                  : secondOpcode == 0xBDU ? "truncated BSR r64"
                                                           : "truncated CMOVB r64");
             }
             const auto modrm = code[cursor++];
@@ -1931,7 +1933,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (mode != 0x3U || rexX) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct CMOVB/CMOVAE/CMOVE/CMOVA/IMUL/SHRD/BSF is supported");
+                    "only register-direct CMOVB/CMOVAE/CMOVE/CMOVA/IMUL/SHRD/BSF/BSR is supported");
             }
             const auto encodedReg =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
@@ -1951,6 +1953,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(RegisterOperand{encodedRm, 64});
             } else if (secondOpcode == 0xBCU) {
                 instruction.opcode = Opcode::BitScanForwardRegReg;
+                instruction.operands.push_back(RegisterOperand{encodedReg, 64});
+                instruction.operands.push_back(RegisterOperand{encodedRm, 64});
+            } else if (secondOpcode == 0xBDU) {
+                instruction.opcode = Opcode::BitScanReverseRegReg;
                 instruction.operands.push_back(RegisterOperand{encodedReg, 64});
                 instruction.operands.push_back(RegisterOperand{encodedRm, 64});
             } else if (secondOpcode == 0xAFU) {

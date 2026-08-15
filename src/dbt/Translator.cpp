@@ -295,6 +295,37 @@ bitScanForward(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+bitScanReverse(x86::X86State *state, std::uint64_t destinationIndex,
+               std::uint64_t sourceIndex, std::uint64_t operandWidth) {
+    if (destinationIndex >= 16 || sourceIndex >= 16 ||
+        (operandWidth != 32 && operandWidth != 64)) {
+        return state;
+    }
+    std::uint64_t sourceValue = 0;
+    const auto source = static_cast<x86::Register>(sourceIndex);
+    std::memcpy(&sourceValue,
+                reinterpret_cast<const std::byte *>(state) +
+                    x86::registerOffset(source),
+                sizeof(sourceValue));
+    const auto value = operandWidth == 32
+                           ? static_cast<std::uint64_t>(
+                                 static_cast<std::uint32_t>(sourceValue))
+                           : sourceValue;
+    state->rflags = (state->rflags & ~flagZero) | flagReservedOne;
+    if (value == 0) {
+        state->rflags |= flagZero;
+        return state;
+    }
+    const auto result =
+        static_cast<std::uint64_t>(std::bit_width(value) - 1);
+    const auto destination = static_cast<x86::Register>(destinationIndex);
+    std::memcpy(reinterpret_cast<std::byte *>(state) +
+                    x86::registerOffset(destination),
+                &result, sizeof(result));
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 shuffleXmmDwords(x86::X86State *state, std::uint64_t destinationIndex,
                  std::uint64_t sourceIndex, std::uint64_t control) {
     if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size() ||
@@ -2498,6 +2529,21 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                    instruction.address);
             break;
         }
+        case x86::Opcode::BitScanReverseRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: bsr operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            builder.bitScanReverse(destination.reg, source.reg,
+                                   destination.width == 32 ? ir::Width::I32
+                                                           : ir::Width::I64,
+                                   instruction.address);
+            break;
+        }
         case x86::Opcode::XorpsRegReg:
         case x86::Opcode::PxorRegReg: {
             if (instruction.operands.size() != 2) {
@@ -3000,6 +3046,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::MoveXmmByteMask ||
                          operation.opcode == ir::Opcode::ShuffleXmmDwords ||
                          operation.opcode == ir::Opcode::BitScanForward ||
+                         operation.opcode == ir::Opcode::BitScanReverse ||
                          operation.opcode == ir::Opcode::LoadGuest ||
                          operation.opcode == ir::Opcode::ReadTimestampCounter;
         hasExecutionContextCall |= operation.opcode == ir::Opcode::Push ||
@@ -3553,6 +3600,15 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(
                 arm64::x3, static_cast<std::uint64_t>(operation.width));
             assembler.movImmediate(arm64::x16, pointerBits(&bitScanForward));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::BitScanReverse:
+            assembler.movImmediate(
+                arm64::x1, static_cast<std::uint64_t>(*operation.guestRegister));
+            assembler.movImmediate(arm64::x2, operation.immediate);
+            assembler.movImmediate(
+                arm64::x3, static_cast<std::uint64_t>(operation.width));
+            assembler.movImmediate(arm64::x16, pointerBits(&bitScanReverse));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::LoadGuest: {
