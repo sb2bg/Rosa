@@ -200,6 +200,25 @@ loadGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t 
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+loadGuest8(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated guest load has no address space");
+        }
+        context->loadedValue =
+            context->addressSpace->readBytes(guest::GuestAddress{address}, 1).front();
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint8_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 loadGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address) noexcept {
     try {
         if (context == nullptr || context->addressSpace == nullptr) {
@@ -998,11 +1017,12 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             const auto address =
                 builder.add(base, displacement, ir::Width::I64, instruction.address);
-            const auto lhs = builder.loadGuest(address, ir::Width::I32, instruction.address);
-            const auto rhs = builder.constant(immediate.value, ir::Width::I32,
+            const auto width = memory.width == 8 ? ir::Width::I8 : ir::Width::I32;
+            const auto lhs = builder.loadGuest(address, width, instruction.address);
+            const auto rhs = builder.constant(immediate.value, width,
                                               instruction.address);
-            const auto result = builder.sub(lhs, rhs, ir::Width::I32, instruction.address);
-            builder.updateSubFlags(lhs, rhs, result, ir::Width::I32, instruction.address);
+            const auto result = builder.sub(lhs, rhs, width, instruction.address);
+            builder.updateSubFlags(lhs, rhs, result, width, instruction.address);
             break;
         }
         case x86::Opcode::Push: {
@@ -1348,9 +1368,12 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x1, arm64::x4);
             assembler.mov(arm64::x2, hostRegister(*operation.lhs));
             assembler.mov(arm64::x0, arm64::x19);
-            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
-                                                   ? pointerBits(&loadGuest32)
-                                                   : pointerBits(&loadGuest64));
+            assembler.movImmediate(
+                arm64::x16,
+                operation.width == ir::Width::I8
+                    ? pointerBits(&loadGuest8)
+                    : operation.width == ir::Width::I32 ? pointerBits(&loadGuest32)
+                                                       : pointerBits(&loadGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(loaded);

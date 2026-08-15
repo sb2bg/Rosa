@@ -712,6 +712,51 @@ void testCompareGuestMemoryWith32BitImmediate() {
                 "failed memory-immediate CMP changed flags");
 }
 
+void testCompareGuestByteWithImmediate() {
+    constexpr std::array<std::uint8_t, 5> code{0x80, 0x7D, 0xD7, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "CMP byte [memory], imm8 opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expectEqual(memory.width, std::uint8_t{8}, "CMP byte memory width differs");
+    expectEqual(memory.displacement, std::int64_t{-0x29},
+                "CMP byte memory displacement differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> zero{0};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x80D7}, zero);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbp = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP byte [memory], imm8 equal flags differ");
+    expectEqual(addressSpace.readBytes(rosa::guest::GuestAddress{0x80D7}, 1).front(),
+                std::uint8_t{0}, "CMP byte [memory], imm8 changed memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rbp = 0x8100;
+    faultState.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "CMP byte from unmapped guest memory did not fail");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "failed CMP byte changed flags");
+}
+
 void testCompare32BitRegisterWithImmediate() {
     constexpr std::array<std::uint8_t, 7> code{
         0x81, 0xFA, 0xCF, 0xFA, 0xED, 0xFE, 0xC3,
@@ -2334,6 +2379,7 @@ int main() {
          testLegacyCompare32BitRegisterWithGuestMemory},
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
+        {"CMP guest byte with immediate", testCompareGuestByteWithImmediate},
         {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
         {"CMP 32-bit register with short immediate",
          testCompare32BitRegisterWithShortImmediate},
