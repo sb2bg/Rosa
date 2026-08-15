@@ -694,6 +694,46 @@ void testIncrement32BitRegister() {
                 "INC r32 zero flags differ or CF was not preserved");
 }
 
+void testDecrement32BitRegister() {
+    constexpr std::array<std::uint8_t, 3> code{0xFF, 0xCF, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::DecReg,
+           "DEC r32 opcode differs");
+    const auto operand =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(operand.reg == rosa::x86::Register::Rdi && operand.width == 32,
+           "DEC EDI operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("dec edi") != std::string::npos,
+           "DEC EDI dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = 6;
+    state.rflags = 1;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{5}, "DEC EDI result differs");
+    expectEqual(state.rflags, std::uint64_t{0x7},
+                "DEC EDI flags differ or CF was not preserved");
+
+    state.rdi = 0xAAAAAAAA00000001ULL;
+    state.rflags = 0;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0},
+                "DEC EDI zero result did not clear upper bits");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "DEC EDI zero flags differ");
+
+    state.rdi = 0xBBBBBBBB80000000ULL;
+    state.rflags = 1;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0x7FFFFFFF},
+                "DEC EDI overflow result differs");
+    expectEqual(state.rflags, std::uint64_t{0x817},
+                "DEC EDI overflow flags differ or CF was not preserved");
+}
+
 void testIncrement16BitGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{
         0x66, 0xFF, 0x40, 0x18, 0xC3};
@@ -4419,6 +4459,7 @@ int main() {
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
         {"INC 32-bit register", testIncrement32BitRegister},
+        {"DEC 32-bit register", testDecrement32BitRegister},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
         {"legacy CMP 32-bit register with guest memory",

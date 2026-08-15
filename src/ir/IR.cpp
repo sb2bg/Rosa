@@ -411,6 +411,17 @@ void Builder::updateIncFlags(ValueId original, ValueId result, Width width,
     });
 }
 
+void Builder::updateDecFlags(ValueId original, ValueId result, Width width,
+                             guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateDecFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = original,
+        .rhs = result,
+    });
+}
+
 void Builder::updateSubFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                              guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -711,6 +722,7 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.third, "result");
             break;
         case Opcode::UpdateIncFlags:
+        case Opcode::UpdateDecFlags:
             checkUse(operation.lhs, "original");
             checkUse(operation.rhs, "result");
             break;

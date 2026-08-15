@@ -2241,6 +2241,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(RegisterOperand{
                     decodeRegister(rmEncoding, rexB),
                     static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+            } else if (extension == 0x1U && mode == 0x3U && !rexR && !rexX) {
+                instruction.opcode = Opcode::DecReg;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, rexB),
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             } else if (extension == 0x4U && mode == 0x3U && !rexR && !rexX) {
                 instruction.opcode = Opcode::JmpReg;
                 instruction.operands.push_back(RegisterOperand{
@@ -2249,7 +2254,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                        (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register INC /0, CALL memory /2, and register JMP /4 are supported from opcode FF");
+                    "only register INC /0, DEC /1, CALL memory /2, and register JMP /4 are supported from opcode FF");
             } else {
                 auto baseEncoding = rmEncoding;
                 if (rmEncoding == 0x4U) {

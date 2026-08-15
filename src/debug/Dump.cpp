@@ -328,6 +328,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]));
             break;
+        case x86::Opcode::DecReg:
+            stream << "dec "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]));
+            break;
         case x86::Opcode::SubRegImm:
             stream << "sub "
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
@@ -897,6 +902,10 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::UpdateIncFlags:
             stream << "update_inc_flags." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", " << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::UpdateDecFlags:
+            stream << "update_dec_flags." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", " << valueName(*operation.rhs);
             break;
         case ir::Opcode::UpdateSubFlags:
