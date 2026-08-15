@@ -415,6 +415,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("sub32_extended_borrow",
+                             CaseId::sub32_extended_borrow,
+                             differentialBytes_sub32_extended_borrow);
+        testCase.request.state.r13 = 0xAAAAAAAA00000005ULL;
+        testCase.request.state.r12 = 0xBBBBBBBB00000007ULL;
+        run(testCase);
+    }
+    {
+        auto testCase = make("sub32_extended_overflow",
+                             CaseId::sub32_extended_overflow,
+                             differentialBytes_sub32_extended_overflow);
+        testCase.request.state.r13 = 0xAAAAAAAA80000000ULL;
+        testCase.request.state.r12 = 0xBBBBBBBB00000001ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("inc32_overflow", CaseId::inc32_overflow,
                              differentialBytes_inc32_overflow);
         testCase.request.state.r15 = 0xAAAAAAAA7FFFFFFFULL;
@@ -1897,6 +1913,50 @@ void testSubRegisterFromRegister() {
     expectEqual(state.rdi, std::uint64_t{0x28}, "SUB r64, r64 result differs");
     expectEqual(state.rdx, std::uint64_t{0x1000}, "SUB r64, r64 changed source");
     expectEqual(state.rflags, std::uint64_t{0x6}, "SUB r64, r64 flags differ");
+
+    constexpr std::array<std::uint8_t, 4> extendedCode{
+        0x45, 0x29, 0xE5, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::SubRegReg,
+           "SUB r32, r32 opcode differs");
+    expectEqual(extendedDecoded[0].length, std::uint8_t{3},
+                "SUB r32, r32 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R13 &&
+               destination.width == 32 &&
+               source.reg == rosa::x86::Register::R12 && source.width == 32,
+           "SUB extended r32 operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find("sub r13d, r12d") !=
+               std::string::npos,
+           "SUB extended r32 dump differs");
+
+    const auto extendedBlock = translator.translate(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State borrowState;
+    borrowState.r13 = 0xAAAAAAAA00000005ULL;
+    borrowState.r12 = 0xBBBBBBBB00000007ULL;
+    borrowState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(borrowState));
+    expectEqual(borrowState.r13, std::uint64_t{0xFFFFFFFE},
+                "SUB r32 did not zero-extend its destination");
+    expectEqual(borrowState.r12, std::uint64_t{0xBBBBBBBB00000007ULL},
+                "SUB r32 changed its source");
+    expectEqual(borrowState.rflags, std::uint64_t{0x93},
+                "SUB r32 borrow flags differ");
+
+    rosa::x86::X86State overflowState;
+    overflowState.r13 = 0xAAAAAAAA80000000ULL;
+    overflowState.r12 = 0xBBBBBBBB00000001ULL;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(overflowState));
+    expectEqual(overflowState.r13, std::uint64_t{0x7FFFFFFF},
+                "SUB r32 overflow result differs");
+    expectEqual(overflowState.rflags, std::uint64_t{0x816},
+                "SUB r32 overflow flags differ");
 }
 
 void testSubRegisterFromGuestMemory() {

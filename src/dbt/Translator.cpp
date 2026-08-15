@@ -2009,6 +2009,11 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto source =
                 std::get<x86::RegisterOperand>(instruction.operands[1]);
+            if (destination.width != source.width ||
+                (destination.width != 32 && destination.width != 64)) {
+                throw std::runtime_error(
+                    "only matching 32-bit and 64-bit register SUB are implemented");
+            }
             const auto width = destination.width == 32 ? ir::Width::I32
                                                        : ir::Width::I64;
             const auto lhs = builder.readGuestRegister(destination.reg, width,
