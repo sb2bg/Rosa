@@ -1637,7 +1637,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (extension == 0x7U && mode <= 0x2U && !rexW && !rexR && !rexX) {
+            if (extension == 0x7U && mode <= 0x2U && !rexR && !rexX) {
                 if (rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
                     throw DecodeError(
                         address, remaining,
@@ -1665,7 +1665,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto immediate = std::bit_cast<std::int8_t>(code[cursor++]);
                 instruction.opcode = Opcode::CmpMemImm;
                 instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(rmEncoding, rexB), displacement, 32});
+                    decodeRegister(rmEncoding, rexB), displacement,
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
                 instruction.operands.push_back(ImmediateOperand{
                     static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
             } else {

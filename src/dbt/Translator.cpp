@@ -1383,7 +1383,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             const auto address =
                 builder.add(base, displacement, ir::Width::I64, instruction.address);
-            const auto width = memory.width == 8 ? ir::Width::I8 : ir::Width::I32;
+            const auto width = memory.width == 8   ? ir::Width::I8
+                               : memory.width == 32 ? ir::Width::I32
+                                                    : ir::Width::I64;
             const auto lhs = builder.loadGuest(address, width, instruction.address);
             const auto rhs = builder.constant(immediate.value, width,
                                               instruction.address);
