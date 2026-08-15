@@ -758,6 +758,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "cmp64_extended_immediate_equal",
+            CaseId::cmp64_extended_immediate_equal,
+            differentialBytes_cmp64_extended_immediate_equal);
+        testCase.request.state.r15 = 0x1001;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "cmp64_extended_immediate_sign_extended",
+            CaseId::cmp64_extended_immediate_sign_extended,
+            differentialBytes_cmp64_extended_immediate_sign_extended);
+        testCase.request.state.r15 = 0;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp32_register_legacy",
                              CaseId::cmp32_register_legacy,
                              differentialBytes_cmp32_register_legacy);
@@ -4950,6 +4966,55 @@ void testCompare32BitRegisterWithImmediate() {
                 "CMP r32, imm32 changed its register");
     expectEqual(state.rflags, std::uint64_t{0x46},
                 "CMP r32, imm32 equal flags differ");
+
+    constexpr std::array<std::uint8_t, 8> observed{
+        0x49, 0x81, 0xFF, 0x01, 0x10, 0x00, 0x00, 0xC3,
+    };
+    const auto observedDecoded = decoder.decodeBlock(
+        observed, rosa::guest::GuestAddress{0x7FF80004D317ULL});
+    expect(observedDecoded[0].opcode == rosa::x86::Opcode::CmpRegImm,
+           "CMP r15, imm32 opcode differs");
+    expectEqual(observedDecoded[0].length, std::uint8_t{7},
+                "CMP r15, imm32 length differs");
+    const auto observedRegister =
+        std::get<rosa::x86::RegisterOperand>(observedDecoded[0].operands[0]);
+    const auto observedImmediate =
+        std::get<rosa::x86::ImmediateOperand>(observedDecoded[0].operands[1]);
+    expect(observedRegister.reg == rosa::x86::Register::R15 &&
+               observedRegister.width == 64,
+           "CMP r15, imm32 register differs");
+    expect(observedImmediate.value == 0x1001 && observedImmediate.width == 32,
+           "CMP r15, imm32 immediate differs");
+    expect(rosa::debug::dumpX86(observedDecoded).find("cmp r15, 0x1001") !=
+               std::string::npos,
+           "CMP r15, imm32 dump differs");
+
+    const auto observedBlock = translator.translate(
+        observed, rosa::guest::GuestAddress{0x7FF80004D317ULL});
+    state.r15 = 0x1001;
+    state.rflags = 0x8D7;
+    static_cast<void>(observedBlock.execute(state));
+    expectEqual(state.r15, std::uint64_t{0x1001},
+                "CMP r15, imm32 changed its register");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP r15, imm32 equal flags differ");
+
+    constexpr std::array<std::uint8_t, 8> negative{
+        0x49, 0x81, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3,
+    };
+    const auto negativeDecoded = decoder.decodeBlock(
+        negative, rosa::guest::GuestAddress{0x2000});
+    expectEqual(
+        std::get<rosa::x86::ImmediateOperand>(negativeDecoded[0].operands[1])
+            .value,
+        UINT64_MAX, "CMP r64, imm32 did not sign-extend its immediate");
+    const auto negativeBlock = translator.translate(
+        negative, rosa::guest::GuestAddress{0x2000});
+    state.r15 = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(negativeBlock.execute(state));
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP r64, negative imm32 flags differ");
 }
 
 void testCompareAccumulatorImmediate() {

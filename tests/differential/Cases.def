@@ -61,6 +61,10 @@ ROSA_DIFFERENTIAL_CASE(cmp64_accumulator_immediate, 0x48, 0x3D, 0x01, 0x00,
                        0x02, 0x00)
 ROSA_DIFFERENTIAL_CASE(cmp64_accumulator_sign_extended, 0x48, 0x3D, 0xFF,
                        0xFF, 0xFF, 0xFF)
+ROSA_DIFFERENTIAL_CASE(cmp64_extended_immediate_equal, 0x49, 0x81, 0xFF, 0x01,
+                       0x10, 0x00, 0x00)
+ROSA_DIFFERENTIAL_CASE(cmp64_extended_immediate_sign_extended, 0x49, 0x81, 0xFF,
+                       0xFF, 0xFF, 0xFF, 0xFF)
 ROSA_DIFFERENTIAL_CASE(cmp32_register_legacy, 0x39, 0xF2)
 ROSA_DIFFERENTIAL_CASE(cmp8_register_immediate, 0x80, 0xF9, 0x01)
 ROSA_DIFFERENTIAL_CASE(cmp8_accumulator_equal, 0x3C, 0x39)

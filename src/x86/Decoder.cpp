@@ -3611,18 +3611,23 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     rexW ? static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate))
                          : static_cast<std::uint32_t>(immediate),
                     32});
-            } else if (mode == 0x3U && extension == 0x7U && !rexW && !rexR &&
-                       !rexX) {
+            } else if (mode == 0x3U && extension == 0x7U && !rexR && !rexX) {
                 if (code.size() - cursor < 4) {
-                    throw DecodeError(address, remaining, "truncated cmp r32, imm32");
+                    throw DecodeError(address, remaining,
+                                      "truncated cmp register, imm32");
                 }
-                const auto immediate = static_cast<std::uint32_t>(
-                    readI32(code.subspan(cursor, 4)));
+                const auto immediate = readI32(code.subspan(cursor, 4));
                 cursor += 4;
                 instruction.opcode = Opcode::CmpRegImm;
                 instruction.operands.push_back(RegisterOperand{
-                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 32});
-                instruction.operands.push_back(ImmediateOperand{immediate, 32});
+                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                instruction.operands.push_back(ImmediateOperand{
+                    rexW ? static_cast<std::uint64_t>(
+                               static_cast<std::int64_t>(immediate))
+                         : static_cast<std::uint64_t>(
+                               static_cast<std::uint32_t>(immediate)),
+                    32});
             } else if (mode <= 0x2U && extension == 0x7U && !rexR && !rexX) {
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
                 if (rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
