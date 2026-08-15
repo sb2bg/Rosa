@@ -339,6 +339,29 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("add64_accumulator_immediate",
+                             CaseId::add64_accumulator_immediate,
+                             differentialBytes_add64_accumulator_immediate);
+        testCase.request.state.rax = 0x40;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "add64_accumulator_sign_extended",
+            CaseId::add64_accumulator_sign_extended,
+            differentialBytes_add64_accumulator_sign_extended);
+        testCase.request.state.rax = 0;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "add32_accumulator_zero_extend",
+            CaseId::add32_accumulator_zero_extend,
+            differentialBytes_add32_accumulator_zero_extend);
+        testCase.request.state.rax = UINT64_MAX;
+        run(testCase);
+    }
+    {
         auto testCase = make("add64_memory_destination",
                              CaseId::add64_memory_destination,
                              differentialBytes_add64_memory_destination);
@@ -8693,6 +8716,79 @@ void testAddRegisterImmediate32() {
                 "ADD r64, negative imm32 flags differ");
 }
 
+void testAddRaxAccumulatorImmediate() {
+    constexpr std::array<std::uint8_t, 7> observed{
+        0x48, 0x05, 0x5F, 0x40, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        observed, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddRegImm,
+           "ADD RAX accumulator immediate opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6},
+                "ADD RAX accumulator immediate length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 64,
+           "ADD RAX accumulator immediate destination differs");
+    expect(immediate.width == 32 && immediate.value == 0x405F,
+           "ADD RAX accumulator immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("add rax, 0x405f") !=
+               std::string::npos,
+           "ADD RAX accumulator immediate dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        observed, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x40;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x409F},
+                "ADD RAX accumulator immediate result differs");
+    expectEqual(state.rflags, std::uint64_t{0x6},
+                "ADD RAX accumulator immediate flags differ");
+
+    constexpr std::array<std::uint8_t, 7> negative{
+        0x48, 0x05, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3};
+    const auto negativeDecoded = decoder.decodeBlock(
+        negative, rosa::guest::GuestAddress{0x2000});
+    expectEqual(
+        std::get<rosa::x86::ImmediateOperand>(
+            negativeDecoded[0].operands[1]).value,
+        UINT64_MAX,
+        "ADD RAX accumulator imm32 was not sign-extended");
+    const auto negativeBlock = translator.translate(
+        negative, rosa::guest::GuestAddress{0x2000});
+    state.rax = 0;
+    state.rflags = 0;
+    static_cast<void>(negativeBlock.execute(state));
+    expectEqual(state.rax, UINT64_MAX,
+                "ADD RAX negative accumulator immediate result differs");
+    expectEqual(state.rflags, std::uint64_t{0x86},
+                "ADD RAX negative accumulator immediate flags differ");
+
+    constexpr std::array<std::uint8_t, 6> legacy{
+        0x05, 0x01, 0x00, 0x00, 0x00, 0xC3};
+    const auto legacyDecoded = decoder.decodeBlock(
+        legacy, rosa::guest::GuestAddress{0x3000});
+    expectEqual(
+        std::get<rosa::x86::RegisterOperand>(
+            legacyDecoded[0].operands[0]).width,
+        std::uint8_t{32}, "ADD EAX accumulator width differs");
+    const auto legacyBlock = translator.translate(
+        legacy, rosa::guest::GuestAddress{0x3000});
+    state.rax = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(legacyBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0},
+                "ADD EAX accumulator did not zero-extend its result");
+    expectEqual(state.rflags, std::uint64_t{0x57},
+                "ADD EAX accumulator flags differ");
+}
+
 void testAdd32BitRegisterShortImmediate() {
     constexpr std::array<std::uint8_t, 4> code{0x83, 0xC0, 0xFC, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -10431,6 +10527,7 @@ int main() {
         {"add carry/zero flags", testAddFlagsCarryAndZero},
         {"add signed-overflow flags", testAddFlagsSignedOverflow},
         {"add register imm32", testAddRegisterImmediate32},
+        {"add accumulator imm32", testAddRaxAccumulatorImmediate},
         {"add 32-bit register short immediate",
          testAdd32BitRegisterShortImmediate},
         {"and result/flags", testAndResultAndFlags},

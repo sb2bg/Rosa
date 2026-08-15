@@ -1624,7 +1624,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
         }
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
-        if (!hasRex && code[cursor] != 0x24U && code[cursor] != 0x34U &&
+        if (!hasRex && code[cursor] != 0x05U &&
+            code[cursor] != 0x24U && code[cursor] != 0x34U &&
             code[cursor] != 0x00U && code[cursor] != 0x02U &&
             code[cursor] != 0x88U &&
             code[cursor] != 0x89U &&
@@ -1664,7 +1665,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             throw DecodeError(address, remaining,
                               "GS segment override is only supported for MOV r32, r/m32");
         }
-        if (!rexW && opcode != 0x24U && opcode != 0x34U &&
+        if (!rexW && opcode != 0x05U && opcode != 0x24U && opcode != 0x34U &&
             opcode != 0x00U && opcode != 0x02U &&
             opcode != 0x88U && opcode != 0x89U &&
             opcode != 0x8AU &&
@@ -1699,6 +1700,24 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::XorRegImm;
             instruction.operands.push_back(RegisterOperand{Register::Rax, 8});
             instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
+        } else if (opcode == 0x05U) {
+            if (code.size() - cursor < sizeof(std::uint32_t)) {
+                throw DecodeError(address, remaining,
+                                  "truncated add rax, imm32");
+            }
+            const auto immediate =
+                readI32(code.subspan(cursor, sizeof(std::uint32_t)));
+            cursor += sizeof(std::uint32_t);
+            instruction.opcode = Opcode::AddRegImm;
+            instruction.operands.push_back(RegisterOperand{
+                Register::Rax,
+                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+            instruction.operands.push_back(ImmediateOperand{
+                rexW ? static_cast<std::uint64_t>(
+                           static_cast<std::int64_t>(immediate))
+                     : static_cast<std::uint64_t>(
+                           static_cast<std::uint32_t>(immediate)),
+                32});
         } else if (opcode == 0x98U && rexW) {
             instruction.opcode = Opcode::Cdqe;
         } else if (hasRex && opcode >= 0xB0U && opcode <= 0xB7U) {
