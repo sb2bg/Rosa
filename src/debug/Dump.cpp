@@ -244,6 +244,20 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
         }
+        case x86::Opcode::LockOrMemImm: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto immediate =
+                std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            stream << "lock or dword [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], 0x" << immediate.value;
+            break;
+        }
         case x86::Opcode::MovzxRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << "movzx "
@@ -1004,6 +1018,11 @@ std::string dumpIr(const ir::Block &block) {
             stream << "compare_exchange_guest_memory."
                    << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", "
+                   << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::LockedOrGuestMemory:
+            stream << "locked_or_guest_memory." << widthName(operation.width)
+                   << ' ' << valueName(*operation.lhs) << ", "
                    << valueName(*operation.rhs);
             break;
         case ir::Opcode::StoreGuest:

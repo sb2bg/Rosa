@@ -1,6 +1,7 @@
 #include "dbt/Translator.h"
 
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -785,6 +786,44 @@ extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags32(x86::X86S
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+lockedOrGuest32(GuestExecutionContext *context, x86::X86State *state,
+                std::uint64_t address, std::uint64_t immediateValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated LOCK OR has no guest address space");
+        }
+        constexpr auto width = sizeof(std::uint32_t);
+        context->addressSpace->validateAccess(
+            guest::GuestAddress{address}, width,
+            guest::Permission::Read | guest::Permission::Write);
+        const auto original =
+            context->addressSpace->readU32(guest::GuestAddress{address});
+        const auto result = static_cast<std::uint32_t>(
+            original | static_cast<std::uint32_t>(immediateValue));
+        const std::array bytes{
+            static_cast<std::uint8_t>(result),
+            static_cast<std::uint8_t>(result >> 8U),
+            static_cast<std::uint8_t>(result >> 16U),
+            static_cast<std::uint8_t>(result >> 24U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+        // LOCK OR is also used as a full fence. Guest execution is currently
+        // single-threaded, while this host fence preserves ordering at the
+        // generated helper boundary.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return updateLogicFlags32(state, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateLogicFlags16(x86::X86State *state, std::uint64_t result) {
     const auto result16 = static_cast<std::uint16_t>(result);
     auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
@@ -1541,6 +1580,35 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 source.reg, ir::Width::I32, instruction.address);
             builder.compareExchangeGuestMemory(
                 address, sourceValue, ir::Width::I32, instruction.address);
+            break;
+        }
+        case x86::Opcode::LockOrMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: LOCK OR operand count");
+            }
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto immediate =
+                std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (memory.width != 32 || immediate.width != 8) {
+                throw std::runtime_error(
+                    "only LOCK OR dword [base+disp], imm8 is implemented");
+            }
+            const auto base = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            auto address = base;
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(base, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto value = builder.constant(
+                immediate.value, ir::Width::I32, instruction.address);
+            builder.lockedOrGuestMemory(address, value, ir::Width::I32,
+                                        instruction.address);
             break;
         }
         case x86::Opcode::SubRegImm: {
@@ -2355,6 +2423,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::IncrementGuestMemory ||
                          operation.opcode == ir::Opcode::DecrementGuestMemory ||
                          operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
+                         operation.opcode == ir::Opcode::LockedOrGuestMemory ||
                          operation.opcode == ir::Opcode::StoreGuest ||
                          operation.opcode == ir::Opcode::StoreGuestXmm ||
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
@@ -2368,6 +2437,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    operation.opcode == ir::Opcode::IncrementGuestMemory ||
                                    operation.opcode == ir::Opcode::DecrementGuestMemory ||
                                    operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
+                                   operation.opcode == ir::Opcode::LockedOrGuestMemory ||
                                    operation.opcode == ir::Opcode::StoreGuest ||
                                    operation.opcode == ir::Opcode::StoreGuestXmm ||
                                    operation.opcode == ir::Opcode::LoadGuestXmm ||
@@ -2651,6 +2721,31 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(arm64::x0,
                                    static_cast<std::uint64_t>(
                                        BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::LockedOrGuestMemory: {
+            if (operation.width != ir::Width::I32) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 32-bit guest-memory LOCK OR");
+            }
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x4, arm64::x0);
+            assembler.mov(arm64::x1, arm64::x4);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x3, hostRegister(*operation.rhs));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&lockedOrGuest32));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(
+                arm64::x0,
+                static_cast<std::uint64_t>(BlockExit::MemoryFault));
             assembler.ret();
             assembler.bind(committed);
             break;
