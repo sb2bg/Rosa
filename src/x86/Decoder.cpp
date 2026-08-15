@@ -417,9 +417,6 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     index = decodeRegister(indexEncoding, rexX);
                     scale = static_cast<std::uint8_t>(1U << scaleBits);
                 }
-            } else if (rexX) {
-                throw DecodeError(address, remaining,
-                                  "REX.X requires a SIB operand for MOVZX");
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -1409,8 +1406,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             if (mode != 0x3U || rexX) {
-                throw DecodeError(address, remaining,
-                                  "only register-direct CMOVB/SHRD/BSF is supported");
+                throw DecodeError(
+                    address, remaining,
+                    "only register-direct CMOVB/IMUL/SHRD/BSF is supported");
             }
             const auto encodedReg =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
@@ -1851,9 +1849,6 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         index = decodeRegister(indexEncoding, rexX);
                         scale = static_cast<std::uint8_t>(1U << scaleBits);
                     }
-                } else if (rexX) {
-                    throw DecodeError(address, remaining,
-                                      "REX.X requires a SIB operand for MOV");
                 }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {

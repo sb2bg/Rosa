@@ -1557,6 +1557,15 @@ void testMovGuestMemoryToRegister() {
            "MOV r64, [base] base register differs");
     expectEqual(memory.displacement, std::int64_t{0},
                 "MOV r64, [base] displacement differs");
+    constexpr std::array<std::uint8_t, 4> ignoredRexXCode{
+        0x42, 0x8B, 0x03, 0xC3};
+    const auto ignoredRexX = decoder.decodeBlock(
+        ignoredRexXCode, rosa::guest::GuestAddress{0x2000});
+    const auto ignoredRexXMemory =
+        std::get<rosa::x86::MemoryOperand>(ignoredRexX[0].operands[1]);
+    expect(ignoredRexXMemory.base == rosa::x86::Register::Rbx &&
+               !ignoredRexXMemory.index,
+           "MOV treated REX.X as an index without a SIB");
 
     constexpr rosa::guest::GuestAddress memoryBase{0x8000};
     rosa::guest::AddressSpace addressSpace;
@@ -1831,6 +1840,15 @@ void testMovzxGuestWordTo32BitRegister() {
     expect(std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]).base ==
                rosa::x86::Register::R12,
            "MOVZX no-index SIB base differs");
+    constexpr std::array<std::uint8_t, 5> ignoredRexXCode{
+        0x42, 0x0F, 0xB7, 0x03, 0xC3};
+    const auto ignoredRexX = decoder.decodeBlock(
+        ignoredRexXCode, rosa::guest::GuestAddress{0x2000});
+    const auto ignoredRexXMemory =
+        std::get<rosa::x86::MemoryOperand>(ignoredRexX[0].operands[1]);
+    expect(ignoredRexXMemory.base == rosa::x86::Register::Rbx &&
+               !ignoredRexXMemory.index,
+           "MOVZX treated REX.X as an index without a SIB");
 
     rosa::guest::AddressSpace addressSpace;
     addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
