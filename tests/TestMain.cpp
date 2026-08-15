@@ -598,6 +598,17 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmp8_scaled_memory_immediate",
+                             CaseId::cmp8_scaled_memory_immediate,
+                             differentialBytes_cmp8_scaled_memory_immediate);
+        bindMemory(testCase, rosa::x86::Register::Rax, 0);
+        testCase.request.state.r12 = 0x20;
+        testCase.request.memory[0x20] = 0x80;
+        testCase.memoryCompareOffset = 0x20;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp32_rip_memory", CaseId::cmp32_rip_memory,
                              differentialBytes_cmp32_rip_memory);
         run(testCase);
@@ -3258,6 +3269,74 @@ void testCompareGuestByteWithImmediate() {
     expect(rejected, "CMP byte from unmapped guest memory did not fail");
     expectEqual(faultState.rflags, std::uint64_t{0x8D7},
                 "failed CMP byte changed flags");
+}
+
+void testCompareIndexedGuestByteWithImmediate() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x42, 0x80, 0x3C, 0x20, 0x3D, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "indexed CMP byte opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "indexed CMP byte length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rax && memory.index &&
+               *memory.index == rosa::x86::Register::R12 && memory.scale == 1 &&
+               memory.displacement == 0 && memory.width == 8 &&
+               !memory.ripRelative,
+           "indexed CMP byte memory operand differs");
+    expect(immediate.value == 0x3D && immediate.width == 8,
+           "indexed CMP byte immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "cmp byte [rax+r12*1], 0x3d") != std::string::npos,
+           "indexed CMP byte dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8020};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> equalValue{0x3D};
+    addressSpace.writeBytes(target, equalValue);
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = page.value;
+    state.r12 = 0x20;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, page.value, "indexed CMP byte changed RAX");
+    expectEqual(state.r12, std::uint64_t{0x20}, "indexed CMP byte changed R12");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "indexed CMP byte equal flags differ");
+    expectEqual(addressSpace.readBytes(target, 1).front(), std::uint8_t{0x3D},
+                "indexed CMP byte changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = page.value;
+    faultState.r12 = 0x20;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "indexed CMP byte from unmapped memory did not fault");
+    expectEqual(faultState.rax, page.value,
+                "failed indexed CMP byte changed RAX");
+    expectEqual(faultState.r12, std::uint64_t{0x20},
+                "failed indexed CMP byte changed R12");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed indexed CMP byte changed flags");
 }
 
 void testCompareRipRelativeGuestByteWithImmediate() {
@@ -9493,6 +9572,8 @@ int main() {
         {"CMP 16-bit register with short immediate",
          testCompare16BitRegisterWithShortImmediate},
         {"CMP guest byte with immediate", testCompareGuestByteWithImmediate},
+        {"CMP indexed guest byte with immediate",
+         testCompareIndexedGuestByteWithImmediate},
         {"CMP RIP-relative guest byte with immediate",
          testCompareRipRelativeGuestByteWithImmediate},
         {"CMP 8-bit register with immediate", testCompare8BitRegisterWithImmediate},
