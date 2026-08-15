@@ -67,4 +67,4 @@ There is still no x86 shared-cache image mapping or resolution, x86 system-libra
 
 ## Verification notes
 
-The debug and UndefinedBehaviorSanitizer presets pass the complete suite. On the current macOS 26.5.1 / Apple Clang 17 host, binaries built with AddressSanitizer hang in the sanitizer runtime during dynamic-shadow initialization before `main`; even `rosa` with no command reaches that hang before any JIT allocation. The `asan` preset is retained for toolchain/host retesting, but it is not counted as a passing verification run.
+The debug, release, and UndefinedBehaviorSanitizer presets pass the complete suite. On the current macOS 26.5.1 / Apple Clang 17 host, binaries built with AddressSanitizer hang in the sanitizer runtime during dynamic-shadow initialization before `main`; even `rosa` with no command reaches that hang before any JIT allocation. The `asan` preset is retained for toolchain/host retesting, but it is not counted as a passing verification run.

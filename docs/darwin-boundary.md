@@ -28,6 +28,6 @@ The Mach trap class currently implements these narrow semantic forms:
 
 Mach traps return Mach result values in guest `RAX`; they do not use the BSD carry-flag convention. These are guest-namespace ports and mappings, not host task/port identity passthrough.
 
-For dyld bring-up Rosa also maps a sparse, read-only x86 commpage at `0x7fffffe00000`. The implemented fields are the kdebug-enable word (zero because Rosa does not forward guest kdebug), a coherent nanotime tuple driven by Rosa's virtual 2 GHz `RDTSC`, and the continuous-time offset. This is a userspace ABI mapping, not a syscall passthrough.
+For dyld bring-up Rosa also maps a sparse, read-only x86 commpage at `0x7fffffe00000`. The implemented fields are the ABI version, guest page size, maximum user-page address, a minimal guest CPU-capability mask, the kdebug-enable word (zero because Rosa does not forward guest kdebug), a coherent nanotime tuple driven by Rosa's virtual 2 GHz `RDTSC`, and the continuous-time offset. This is a userspace ABI mapping, not a syscall passthrough.
 
 The current dyld trace has reached all operations listed above and has successfully created an anonymous mapping labeled `mach_vm_map anonymous` for dyld. The `shared_region_check_np` call is the first shared-cache-related interaction, but no x86 shared-cache image has been mapped or resolved. General file operations, Mach messages, signals, shared-cache provisioning, and most Darwin structures remain unsupported and fail diagnostically.
