@@ -1634,7 +1634,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x81U && code[cursor] != 0xC1U &&
             code[cursor] != 0xC6U && code[cursor] != 0xC7U &&
             code[cursor] != 0xD3U &&
-            code[cursor] != 0xFFU) {
+            code[cursor] != 0xFEU && code[cursor] != 0xFFU) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
@@ -1668,7 +1668,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x20U && opcode != 0x21U && opcode != 0x22U &&
             opcode != 0x81U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD3U &&
-            opcode != 0xFFU &&
+            opcode != 0xFEU && opcode != 0xFFU &&
             (opcode < 0xB8U || opcode > 0xBFU)) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
@@ -3018,6 +3018,24 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     address, remaining,
                     "only ADD /0, AND r32 /4, SUB /5, XOR /6, and CMP /7 forms from opcode 81 are supported");
             }
+        } else if (opcode == 0xFEU) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated inc r8");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode != 0x3U || extension != 0 ||
+                (!hasRex && rmEncoding >= 0x4U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only representable register-direct INC r8 is supported");
+            }
+            instruction.opcode = Opcode::IncReg;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(rmEncoding, rexB), 8});
         } else if (opcode == 0xFFU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated indirect call");

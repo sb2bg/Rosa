@@ -373,6 +373,13 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("inc8_overflow", CaseId::inc8_overflow,
+                             differentialBytes_inc8_overflow);
+        testCase.request.state.r8 = 0x112233445566777FULL;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("dec32_overflow", CaseId::dec32_overflow,
                              differentialBytes_dec32_overflow);
         testCase.request.state.rdi = 0xBBBBBBBB80000000ULL;
@@ -1878,6 +1885,55 @@ void testIncrement32BitRegister() {
     expectEqual(zeroState.r15, std::uint64_t{0}, "INC r32 wrapped result differs");
     expectEqual(zeroState.rflags, std::uint64_t{0x56},
                 "INC r32 zero flags differ or CF was not preserved");
+}
+
+void testIncrementLowByteRegister() {
+    constexpr std::array<std::uint8_t, 4> code{0x41, 0xFE, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::IncReg,
+           "INC r8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "INC r8 length differs");
+    const auto operand =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(operand.reg == rosa::x86::Register::R8 && operand.width == 8,
+           "INC r8 operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("inc r8b") !=
+               std::string::npos,
+           "INC r8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State overflowState;
+    overflowState.r8 = 0x112233445566777FULL;
+    overflowState.rflags = 0x203;
+    static_cast<void>(block.execute(overflowState));
+    expectEqual(overflowState.r8, std::uint64_t{0x1122334455667780ULL},
+                "INC r8 did not preserve upper register bits");
+    expectEqual(overflowState.rflags, std::uint64_t{0xA93},
+                "INC r8 overflow flags or preserved CF differ");
+
+    rosa::x86::X86State wrapState;
+    wrapState.r8 = 0x88776655443322FFULL;
+    wrapState.rflags = 0x202;
+    static_cast<void>(block.execute(wrapState));
+    expectEqual(wrapState.r8, std::uint64_t{0x8877665544332200ULL},
+                "INC r8 wrap result differs");
+    expectEqual(wrapState.rflags, std::uint64_t{0x256},
+                "INC r8 wrap flags or preserved CF differ");
+
+    constexpr std::array<std::uint8_t, 3> highByteCode{0xFE, 0xC4, 0xC3};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            highByteCode, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected, "INC silently represented legacy AH as SPL");
 }
 
 void testDecrement32BitRegister() {
@@ -8966,6 +9022,7 @@ int main() {
         {"ADD low-byte registers", testAddLowByteRegisters},
         {"ADD guest byte to low register", testAddGuestByteToLowRegister},
         {"INC 32-bit register", testIncrement32BitRegister},
+        {"INC low-byte register", testIncrementLowByteRegister},
         {"DEC 32-bit register", testDecrement32BitRegister},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},
         {"INC 64-bit guest memory", testIncrement64BitGuestMemory},
