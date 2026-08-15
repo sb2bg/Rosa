@@ -14,9 +14,15 @@ namespace rosa::darwin {
 namespace {
 
 constexpr std::uint64_t unixSyscallClass = 2U << 24U;
+constexpr std::uint64_t machdepSyscallClass = 3U << 24U;
+constexpr std::uint64_t syscallClassMask = 0xFF000000U;
+constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
 constexpr std::uint64_t syscallExit = unixSyscallClass | 1U;
 constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
+constexpr std::uint64_t machdepThreadFastSetCthreadSelf = 3U;
+constexpr std::uint64_t x86UserCthreadSelector = 0x0FU;
+constexpr std::uint64_t x86MaximumUserPageAddress = 0x00007FFFFFFFF000ULL;
 // Rosa currently executes exactly one guest thread. Keep its identity in the
 // guest namespace rather than exposing a host pthread or Mach identifier.
 constexpr std::uint64_t initialGuestThreadId = 1;
@@ -46,6 +52,16 @@ std::runtime_error unsupported(const x86::X86State &state, guest::GuestAddress r
     return std::runtime_error(stream.str());
 }
 
+std::runtime_error unsupportedMachdep(const x86::X86State &state,
+                                      guest::GuestAddress rip) {
+    std::ostringstream stream;
+    stream << "unsupported Darwin guest x86 machdep call\n"
+           << "  number: " << std::dec << (state.rax & syscallNumberMask) << '\n'
+           << "  RIP: 0x" << std::hex << rip.value << '\n'
+           << "  args: 0x" << state.rdi << " 0x" << state.rsi << " 0x" << state.rdx;
+    return std::runtime_error(stream.str());
+}
+
 } // namespace
 
 SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
@@ -53,6 +69,17 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
     const auto number = state.rax;
     if (MachDispatcher::isMachTrap(number)) {
         machDispatcher_.dispatch(state, syscallRip);
+        return {};
+    }
+    if ((number & syscallClassMask) == machdepSyscallClass) {
+        const auto call = number & syscallNumberMask;
+        if (call != machdepThreadFastSetCthreadSelf) {
+            throw unsupportedMachdep(state, syscallRip);
+        }
+        // XNU's 64-bit call stores a canonical user pointer as the thread's GS
+        // base, clears an invalid pointer to zero, and returns USER_CTHREAD.
+        state.gsBase = state.rdi < x86MaximumUserPageAddress ? state.rdi : 0;
+        state.rax = x86UserCthreadSelector;
         return {};
     }
     if (number == syscallExit) {

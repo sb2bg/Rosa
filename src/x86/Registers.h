@@ -89,6 +89,9 @@ struct alignas(16) X86State {
         std::uint64_t high{};
     };
     std::array<XmmValue, 16> xmm{};
+
+    // Architectural guest TLS state. This is never a host segment base.
+    std::uint64_t gsBase{};
 };
 
 static_assert(std::is_standard_layout_v<X86State>);

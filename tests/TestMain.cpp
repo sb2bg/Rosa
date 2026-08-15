@@ -4771,6 +4771,76 @@ void testGeneratedDarwinThreadSelfid() {
                 "generated thread_selfid did not clear the BSD error flag");
 }
 
+void testDarwinThreadFastSetCthreadSelf() {
+    constexpr auto callNumber = UINT64_C(0x03000003);
+    constexpr std::uint64_t guestTsdBase = 0x00007FF8000C8F20ULL;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = callNumber;
+    state.rdi = guestTsdBase;
+    state.rflags = 0x8D7;
+
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF800064E32ULL});
+    expect(!outcome.exited, "thread_fast_set_cthread_self terminated the guest");
+    expectEqual(state.gsBase, guestTsdBase,
+                "thread_fast_set_cthread_self stored the wrong guest GS base");
+    expectEqual(state.rax, std::uint64_t{0x0F},
+                "thread_fast_set_cthread_self returned the wrong selector");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "thread_fast_set_cthread_self applied BSD flag semantics");
+
+    state.rax = callNumber;
+    state.rdi = 0xFFFF800000000000ULL;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.gsBase, std::uint64_t{0},
+                "thread_fast_set_cthread_self retained a non-user GS base");
+    expectEqual(state.rax, std::uint64_t{0x0F},
+                "invalid thread_fast_set_cthread_self changed its selector return");
+}
+
+void testGeneratedDarwinThreadFastSetCthreadSelf() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0x03, 0x00, 0x00, 0x03, // mov eax, 0x3000003
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rdi = 0x00007FF8000C8F20ULL;
+    state.rflags = 0x8D7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited,
+           "generated thread_fast_set_cthread_self terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0x0F},
+                "generated thread_fast_set_cthread_self returned the wrong selector");
+    expectEqual(state.gsBase, std::uint64_t{0x00007FF8000C8F20ULL},
+                "generated thread_fast_set_cthread_self lost the guest GS base");
+    expectEqual(state.rcx, std::uint64_t{0x1007},
+                "generated machdep call did not preserve SYSCALL fallthrough");
+    expectEqual(state.r11, std::uint64_t{0x8D7},
+                "generated machdep call did not save input flags in R11");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "generated machdep call changed guest flags");
+}
+
 void testMachTaskSelfTrap() {
     rosa::guest::AddressSpace addressSpace;
     rosa::darwin::SyscallDispatcher dispatcher;
@@ -6190,6 +6260,10 @@ int main() {
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin thread_selfid", testDarwinThreadSelfid},
         {"generated Darwin thread_selfid", testGeneratedDarwinThreadSelfid},
+        {"Darwin thread_fast_set_cthread_self",
+         testDarwinThreadFastSetCthreadSelf},
+        {"generated Darwin thread_fast_set_cthread_self",
+         testGeneratedDarwinThreadFastSetCthreadSelf},
         {"Mach task-self trap", testMachTaskSelfTrap},
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},

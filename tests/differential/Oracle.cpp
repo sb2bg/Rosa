@@ -36,7 +36,7 @@ constexpr std::array oracleCases{
 static_assert(oracleCases.size() == static_cast<std::size_t>(CaseId::Count));
 static_assert(offsetof(rosa::x86::X86State, rflags) == 136);
 static_assert(offsetof(rosa::x86::X86State, xmm) == 144);
-static_assert(sizeof(rosa::x86::X86State) == 400);
+static_assert(sizeof(rosa::x86::X86State) == 416);
 
 bool readFully(int descriptor, std::span<std::byte> bytes) {
     while (!bytes.empty()) {
