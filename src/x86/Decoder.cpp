@@ -556,7 +556,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
-        if (!hasRex && code[cursor] != 0x89U && code[cursor] != 0x8BU &&
+        if (!hasRex && code[cursor] != 0x88U && code[cursor] != 0x89U &&
+            code[cursor] != 0x8BU &&
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
             code[cursor] != 0x3BU && code[cursor] != 0x80U &&
@@ -576,7 +577,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto opcode = code[cursor++];
-        if (!rexW && opcode != 0x89U && opcode != 0x8BU && opcode != 0x85U &&
+        if (!rexW && opcode != 0x88U && opcode != 0x89U && opcode != 0x8BU && opcode != 0x85U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
             opcode != 0x81U && opcode != 0xC1U &&
@@ -787,6 +788,38 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::CmpRegMem;
             instruction.operands.push_back(RegisterOperand{lhs, operandWidth});
             instruction.operands.push_back(MemoryOperand{base, displacement, operandWidth});
+        } else if (opcode == 0x88U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated mov byte [memory], register");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto regEncoding = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (hasRex || mode > 0x2U || regEncoding > 0x3U ||
+                rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only MOV byte [base+disp8/disp32], legacy-low-byte-register is supported");
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated byte MOV disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated byte MOV disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::MovMemReg;
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(rmEncoding, false), displacement, 8});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(regEncoding, false), 8});
         } else if (opcode == 0x89U || opcode == 0x8BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov r64, r64");

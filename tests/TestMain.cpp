@@ -1013,6 +1013,51 @@ void testMov32BitRegisterToGuestMemory() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOV [mem], r32 changed flags");
 }
 
+void testMovLowByteRegisterToGuestMemory() {
+    constexpr std::array<std::uint8_t, 4> code{0x88, 0x48, 0x18, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "MOV byte [memory], low register opcode differs");
+    expectEqual(std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{8}, "MOV byte store memory width differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]).reg ==
+               rosa::x86::Register::Rcx,
+           "MOV byte store source differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x8000;
+    state.rcx = 0xAABBCCDDEEFF00A5ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readBytes(rosa::guest::GuestAddress{0x8018}, 1).front(),
+                std::uint8_t{0xA5}, "MOV byte store value differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOV byte store changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x8000;
+    faultState.rcx = 0xA5;
+    faultState.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOV byte to unmapped guest memory did not fail");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "failed MOV byte store changed flags");
+}
+
 void testMovImmediateToGuestMemory() {
     constexpr std::array<std::uint8_t, 8> code{
         0x48, 0xC7, 0x03, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3,
@@ -2466,6 +2511,7 @@ int main() {
         {"CMP 32-bit registers", testCompare32BitRegisters},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
         {"MOV 32-bit register to guest memory", testMov32BitRegisterToGuestMemory},
+        {"MOV low-byte register to guest memory", testMovLowByteRegisterToGuestMemory},
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
         {"MOV byte immediate to guest memory", testMovByteImmediateToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
