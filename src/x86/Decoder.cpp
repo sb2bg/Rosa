@@ -516,7 +516,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         if (!hasRex && code[cursor] != 0x89U && code[cursor] != 0x8BU &&
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
-            code[cursor] != 0x81U && code[cursor] != 0xC1U) {
+            code[cursor] != 0x81U && code[cursor] != 0xC1U &&
+            code[cursor] != 0xC6U) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
@@ -534,7 +535,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const auto opcode = code[cursor++];
         if (!rexW && opcode != 0x89U && opcode != 0x8BU && opcode != 0x85U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
-            opcode != 0x31U && opcode != 0x81U && opcode != 0xC1U) {
+            opcode != 0x31U && opcode != 0x81U && opcode != 0xC1U &&
+            opcode != 0xC6U) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
         }
@@ -876,6 +878,42 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::MulReg;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
+        } else if (opcode == 0xC6U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated mov byte opcode C6");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode > 0x2U || extension != 0 || rexR || rexX ||
+                rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only MOV byte [base+disp8/disp32], imm8 from opcode C6 /0 is supported");
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOV byte memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOV byte memory disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining, "truncated MOV byte imm8");
+            }
+            instruction.opcode = Opcode::MovMemImm;
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(rmEncoding, rexB), displacement, 8});
+            instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
         } else if (opcode == 0xC7U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov opcode C7");

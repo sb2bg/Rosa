@@ -732,6 +732,43 @@ void testMovImmediateToGuestMemory() {
     expect(rejected, "MOV immediate to unmapped guest memory did not fail");
 }
 
+void testMovByteImmediateToGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{0xC6, 0x43, 0x18, 0xA5, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "MOV byte [mem], imm8 opcode differs");
+    expectEqual(std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{8}, "MOV byte [mem], imm8 width differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbx = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    const auto byte = addressSpace.readBytes(rosa::guest::GuestAddress{0x8118}, 1);
+    expectEqual(byte[0], std::uint8_t{0xA5}, "MOV byte [mem], imm8 stored value differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV byte [mem], imm8 changed flags");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                                      rosa::guest::Permission::Read);
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOV byte immediate to read-only guest memory did not fail");
+}
+
 void testMovGuestMemoryToRegister() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x8B, 0x03, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -1908,6 +1945,7 @@ int main() {
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
+        {"MOV byte immediate to guest memory", testMovByteImmediateToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"legacy MOV guest memory to 32-bit register",
