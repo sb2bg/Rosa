@@ -1074,7 +1074,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto regEncoding = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (hasRex || mode > 0x2U || regEncoding > 0x3U ||
+            if (rexW || rexR || rexX || mode > 0x2U || regEncoding > 0x3U ||
                 rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
@@ -1095,7 +1095,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             instruction.opcode = Opcode::MovMemReg;
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, false), displacement, 8});
+                decodeRegister(rmEncoding, rexB), displacement, 8});
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(regEncoding, false), 8});
         } else if (opcode == 0x8AU) {
