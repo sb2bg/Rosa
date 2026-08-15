@@ -571,7 +571,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
-            const auto width = destination.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto width = destination.width == 8   ? ir::Width::I8
+                               : destination.width == 32 ? ir::Width::I32
+                                                         : ir::Width::I64;
             const auto value = builder.readGuestRegister(source.reg, width, instruction.address);
             builder.writeGuestRegister(destination.reg, value, width, instruction.address);
             break;
@@ -610,7 +612,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             const auto address =
                 builder.add(base, displacement, ir::Width::I64, instruction.address);
-            const auto width = destination.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto width = destination.width == 8   ? ir::Width::I8
+                               : destination.width == 32 ? ir::Width::I32
+                                                         : ir::Width::I64;
             const auto value = builder.loadGuest(address, width, instruction.address);
             builder.writeGuestRegister(destination.reg, value, width,
                                        instruction.address);
@@ -1292,9 +1296,21 @@ arm64::Program compileToArm64(const ir::Block &block) {
                               *operation.guestXmmRegister, operation.immediate != 0)));
             break;
         case ir::Opcode::WriteGuestReg:
-            assembler.str(
-                hostRegister(*operation.lhs), arm64::x0,
-                static_cast<std::uint32_t>(x86::registerOffset(*operation.guestRegister)));
+            if (operation.width == ir::Width::I8) {
+                const auto offset = static_cast<std::uint32_t>(
+                    x86::registerOffset(*operation.guestRegister));
+                assembler.ldr(arm64::x16, arm64::x0, offset);
+                assembler.movImmediate(arm64::x17, ~std::uint64_t{0xFF});
+                assembler.bitAnd(arm64::x16, arm64::x16, arm64::x17);
+                assembler.bitOr(arm64::x16, arm64::x16,
+                                hostRegister(*operation.lhs));
+                assembler.str(arm64::x16, arm64::x0, offset);
+            } else {
+                assembler.str(
+                    hostRegister(*operation.lhs), arm64::x0,
+                    static_cast<std::uint32_t>(
+                        x86::registerOffset(*operation.guestRegister)));
+            }
             break;
         case ir::Opcode::WriteGuestXmmLane:
             assembler.str(hostRegister(*operation.lhs), arm64::x0,

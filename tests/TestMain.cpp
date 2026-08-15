@@ -1213,6 +1213,55 @@ void testMovGuestMemoryTo32BitRegister() {
                 "MOV r32, [base+disp8] changed flags");
 }
 
+void testMovGuestMemoryToByteRegister() {
+    constexpr std::array<std::uint8_t, 5> code{0x44, 0x8A, 0x70, 0x18, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegMem,
+           "MOV byte register, [memory] opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::R14,
+           "MOV byte load extended destination differs");
+    expectEqual(destination.width, std::uint8_t{8}, "MOV byte load width differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> value{0xA5};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8018}, value);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x8000;
+    state.r14 = 0x1122334455667788ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r14, std::uint64_t{0x11223344556677A5ULL},
+                "MOV byte load did not preserve upper destination bits");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOV byte load changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x8000;
+    faultState.r14 = 0x1122334455667788ULL;
+    faultState.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOV byte from unmapped guest memory did not fail");
+    expectEqual(faultState.r14, std::uint64_t{0x1122334455667788ULL},
+                "failed MOV byte load changed destination");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "failed MOV byte load changed flags");
+}
+
 void testMovGuestMemoryToLegacy32BitRegister() {
     constexpr std::array<std::uint8_t, 4> code{0x8B, 0x4E, 0x0C, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2516,6 +2565,7 @@ int main() {
         {"MOV byte immediate to guest memory", testMovByteImmediateToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
+        {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
         {"legacy MOV guest memory to 32-bit register",
          testMovGuestMemoryToLegacy32BitRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},
