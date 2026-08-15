@@ -276,6 +276,17 @@ void Builder::compareEqualGuestBytesXmm(ValueId address, x86::XmmRegister reg,
     });
 }
 
+void Builder::moveXmmByteMask(x86::Register destination, x86::XmmRegister source,
+                              guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::MoveXmmByteMask,
+        .width = Width::I32,
+        .guestRip = rip,
+        .guestRegister = destination,
+        .guestXmmRegister = source,
+    });
+}
+
 void Builder::push(ValueId newStackPointer, ValueId value, Width width,
                    guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -557,6 +568,11 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "guest address");
             if (!operation.guestXmmRegister) {
                 errors.emplace_back("compare_equal_guest_bytes_xmm has no register");
+            }
+            break;
+        case Opcode::MoveXmmByteMask:
+            if (!operation.guestRegister || !operation.guestXmmRegister) {
+                errors.emplace_back("move_xmm_byte_mask has incomplete registers");
             }
             break;
         case Opcode::LoadGuest:

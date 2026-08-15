@@ -43,6 +43,7 @@ enum class Opcode {
     XorpsRegReg,
     PxorRegReg,
     PcmpeqbRegMem,
+    PmovmskbRegXmm,
     MovapsMemReg,
     MovupsMemReg,
     MovdqaRegMem,

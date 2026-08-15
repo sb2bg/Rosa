@@ -221,6 +221,25 @@ compareEqualGuestBytesXmm128(GuestExecutionContext *context, x86::X86State *stat
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+moveXmmByteMask32(x86::X86State *state, std::uint64_t destinationIndex,
+                  std::uint64_t sourceIndex) {
+    if (destinationIndex >= 16 || sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    const auto value = state->xmm[sourceIndex];
+    std::uint64_t mask = 0;
+    for (std::size_t index = 0; index < 16; ++index) {
+        const auto lane = index < sizeof(std::uint64_t) ? value.low : value.high;
+        const auto laneIndex = index % sizeof(std::uint64_t);
+        mask |= ((lane >> (laneIndex * 8U + 7U)) & 1U) << index;
+    }
+    const auto destination = static_cast<x86::Register>(destinationIndex);
+    std::memcpy(reinterpret_cast<std::byte *>(state) + x86::registerOffset(destination),
+                &mask, sizeof(mask));
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 loadGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address) noexcept {
     try {
         if (context == nullptr || context->addressSpace == nullptr) {
@@ -1026,6 +1045,17 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                               instruction.address);
             break;
         }
+        case x86::Opcode::PmovmskbRegXmm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: pmovmskb operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            builder.moveXmmByteMask(destination, source, instruction.address);
+            break;
+        }
         case x86::Opcode::AndRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: and operand count");
@@ -1307,6 +1337,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::StoreGuestXmm ||
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
                          operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
+                         operation.opcode == ir::Opcode::MoveXmmByteMask ||
                          operation.opcode == ir::Opcode::LoadGuest ||
                          operation.opcode == ir::Opcode::ReadTimestampCounter;
         hasExecutionContextCall |= operation.opcode == ir::Opcode::Push ||
@@ -1537,6 +1568,14 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.bind(compared);
             break;
         }
+        case ir::Opcode::MoveXmmByteMask:
+            assembler.movImmediate(
+                arm64::x1, static_cast<std::uint64_t>(*operation.guestRegister));
+            assembler.movImmediate(
+                arm64::x2, static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(arm64::x16, pointerBits(&moveXmmByteMask32));
+            assembler.blr(arm64::x16);
+            break;
         case ir::Opcode::LoadGuest: {
             const auto fault = assembler.makeLabel();
             const auto loaded = assembler.makeLabel();

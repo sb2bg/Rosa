@@ -1795,6 +1795,31 @@ void testPcmpeqbGuestMemoryGeneratedExecution() {
                 "failed PCMPEQB changed high lane");
 }
 
+void testPmovmskbGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0xD7, 0xF0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PmovmskbRegXmm,
+           "PMOVMSKB r32, xmm opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rsi,
+           "PMOVMSKB destination differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsi = UINT64_MAX;
+    state.xmm[0] = {
+        .low = 0x8000000000000080ULL,
+        .high = 0x0000000000008000ULL,
+    };
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rsi, std::uint64_t{0x281},
+                "PMOVMSKB mask or 32-bit zero extension differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "PMOVMSKB changed flags");
+}
+
 void testMovapsRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 8> code{
         0x0F, 0x29, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, 0xC3,
@@ -2652,6 +2677,7 @@ int main() {
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PCMPEQB guest memory generated execution",
          testPcmpeqbGuestMemoryGeneratedExecution},
+        {"PMOVMSKB generated execution", testPmovmskbGeneratedExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
         {"MOVDQA guest memory to register", testMovdqaGuestMemoryToRegister},
