@@ -1436,6 +1436,18 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateSubFlags(lhs, rhs, result, width, instruction.address);
             break;
         }
+        case x86::Opcode::SetccReg: {
+            if (instruction.operands.size() != 1 || !instruction.condition) {
+                throw std::runtime_error("internal decoder error: setcc operand");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto value =
+                builder.evaluateCondition(*instruction.condition, instruction.address);
+            builder.writeGuestRegister(destination.reg, value, ir::Width::I8,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::Push: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: push operand count");
@@ -1716,6 +1728,22 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.signExtend32(hostRegister(*operation.result),
                                    hostRegister(*operation.lhs));
             break;
+        case ir::Opcode::EvaluateCondition: {
+            if (*operation.condition != x86::Condition::Equal) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements equality condition values");
+            }
+            constexpr std::uint8_t zeroFlagBit = 6;
+            const auto done = assembler.makeLabel();
+            const auto destination = hostRegister(*operation.result);
+            assembler.movImmediate(destination, 0);
+            assembler.ldr(arm64::x16, arm64::x0,
+                          static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
+            assembler.tbz(arm64::x16, zeroFlagBit, done);
+            assembler.movImmediate(destination, 1);
+            assembler.bind(done);
+            break;
+        }
         case ir::Opcode::Push: {
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();

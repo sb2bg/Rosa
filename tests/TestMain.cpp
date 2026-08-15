@@ -2972,6 +2972,50 @@ void testRegisterIndirectJump() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "JMP register changed flags");
 }
 
+void testSetEqualLowByteRegister() {
+    constexpr std::uint64_t zeroFlag = std::uint64_t{1} << 6U;
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x94, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccReg,
+           "SETE opcode differs");
+    expect(decoded[0].condition == rosa::x86::Condition::Equal,
+           "SETE condition differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 8,
+           "SETE AL destination differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667788ULL;
+    state.rflags = 0x897 | zeroFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667701ULL},
+                "taken SETE did not merge one into AL");
+    expectEqual(state.rflags, std::uint64_t{0x897 | zeroFlag},
+                "taken SETE changed flags");
+
+    state.rax = 0xFFEEDDCCBBAA9988ULL;
+    state.rflags = 0x891 & ~zeroFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xFFEEDDCCBBAA9900ULL},
+                "not-taken SETE did not merge zero into AL");
+    expectEqual(state.rflags, std::uint64_t{0x891 & ~zeroFlag},
+                "not-taken SETE changed flags");
+
+    constexpr std::array<std::uint8_t, 3> highByte{0x0F, 0x94, 0xE0};
+    bool rejectedHighByte = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(highByte,
+                                              rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejectedHighByte = true;
+    }
+    expect(rejectedHighByte, "SETE AH was not rejected explicitly");
+}
+
 void testUnsignedAboveConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x77, 0x02}; // ja 0x1004
     const rosa::x86::Decoder decoder;
@@ -3279,6 +3323,7 @@ int main() {
         {"indirect guest-memory call fault", testIndirectGuestMemoryCallFault},
         {"unsigned-below conditional", testUnsignedBelowConditional},
         {"register-indirect jump", testRegisterIndirectJump},
+        {"set equal low-byte register", testSetEqualLowByteRegister},
         {"unsigned-above conditional", testUnsignedAboveConditional},
         {"unsigned-above long conditional", testUnsignedAboveLongConditional},
         {"unsigned-below-or-equal conditional", testUnsignedBelowOrEqualConditional},

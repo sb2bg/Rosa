@@ -230,6 +230,19 @@ ValueId Builder::signExtend32(ValueId value, guest::GuestAddress rip) {
     return result;
 }
 
+ValueId Builder::evaluateCondition(x86::Condition condition,
+                                   guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::EvaluateCondition,
+        .width = Width::I8,
+        .guestRip = rip,
+        .result = result,
+        .condition = condition,
+    });
+    return result;
+}
+
 ValueId Builder::loadGuest(ValueId address, Width width, guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -579,6 +592,11 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::SignExtend32:
             checkUse(operation.lhs, "source");
+            break;
+        case Opcode::EvaluateCondition:
+            if (!operation.condition) {
+                errors.emplace_back("evaluate_condition has no condition");
+            }
             break;
         case Opcode::Push:
             checkUse(operation.lhs, "new stack pointer");

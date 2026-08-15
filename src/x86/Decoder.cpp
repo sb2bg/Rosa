@@ -285,6 +285,35 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code.size() - cursor >= 2 && code[cursor] == 0x0FU &&
+            code[cursor + 1] == 0x94U) {
+            if (code.size() - cursor < 3) {
+                throw DecodeError(address, remaining, "truncated sete r8");
+            }
+            const auto modrm = code[cursor + 2];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode != 0x3U || extension != 0 || rmEncoding >= 0x4U) {
+                throw DecodeError(
+                    address, remaining,
+                    "only register-direct SETE to AL/CL/DL/BL is supported");
+            }
+            instruction.opcode = Opcode::SetccReg;
+            instruction.condition = Condition::Equal;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(rmEncoding, false), 8});
+            instruction.length = 3;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), 3,
+                        instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            cursor += 3;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         const bool movzxHasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         const auto movzxOpcodeOffset = cursor + (movzxHasRex ? 1U : 0U);
         if (code.size() - movzxOpcodeOffset >= 2 &&

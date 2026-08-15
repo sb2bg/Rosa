@@ -456,7 +456,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         }
         case x86::Opcode::CmpMemImm: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "cmp " << (memory.width == 8 ? "byte" : "dword") << " ["
+            stream << "cmp "
+                   << (memory.width == 8 ? "byte" : memory.width == 32 ? "dword" : "qword")
+                   << " ["
                    << x86::registerName(memory.base);
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
@@ -467,6 +469,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
         }
+        case x86::Opcode::SetccReg:
+            stream << "set" << conditionName(*instruction.condition) << ' '
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]));
+            break;
         case x86::Opcode::XorpsRegReg:
             stream << "xorps "
                    << x86::xmmRegisterName(
@@ -698,6 +705,9 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::SignExtend32:
             stream << "sign_extend_32 " << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::EvaluateCondition:
+            stream << "condition." << conditionName(*operation.condition);
             break;
         case ir::Opcode::Push:
             stream << "push." << widthName(operation.width) << ' ' << valueName(*operation.rhs)

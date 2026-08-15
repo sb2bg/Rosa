@@ -40,6 +40,7 @@ enum class Opcode {
     Or,
     Xor,
     SignExtend32,
+    EvaluateCondition,
     LoadGuest,
     StoreGuest,
     StoreGuestXmm,
@@ -118,6 +119,7 @@ class Builder {
     ValueId bitOr(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId bitXor(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId signExtend32(ValueId value, guest::GuestAddress rip);
+    ValueId evaluateCondition(x86::Condition condition, guest::GuestAddress rip);
     ValueId loadGuest(ValueId address, Width width, guest::GuestAddress rip);
     void storeGuest(ValueId address, ValueId value, Width width, guest::GuestAddress rip);
     void storeGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
