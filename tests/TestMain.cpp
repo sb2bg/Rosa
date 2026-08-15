@@ -1267,6 +1267,17 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movaps_extended_base_store",
+                             CaseId::movaps_extended_base_store,
+                             differentialBytes_movaps_extended_base_store);
+        bindMemory(testCase, rosa::x86::Register::R15, 0);
+        testCase.request.state.xmm[0] = {
+            .low = 0x8877665544332211ULL,
+            .high = 0x1020304050607080ULL};
+        testCase.memoryCompareSize = 16;
+        run(testCase);
+    }
+    {
         auto testCase = make("movups_scaled_store",
                              CaseId::movups_scaled_store,
                              differentialBytes_movups_scaled_store);
@@ -7343,6 +7354,50 @@ void testMovapsRegisterToGuestMemory() {
                 state.xmm[0].high, "MOVAPS stored the wrong high lane");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVAPS changed flags");
 
+    constexpr std::array<std::uint8_t, 5> extendedBaseCode{
+        0x41, 0x0F, 0x29, 0x07, 0xC3};
+    const auto extendedBaseDecoded = decoder.decodeBlock(
+        extendedBaseCode, rosa::guest::GuestAddress{0x1800});
+    expect(extendedBaseDecoded[0].opcode ==
+               rosa::x86::Opcode::MovapsMemReg,
+           "REX MOVAPS store opcode differs");
+    expectEqual(extendedBaseDecoded[0].length, std::uint8_t{4},
+                "REX MOVAPS store length differs");
+    const auto extendedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            extendedBaseDecoded[0].operands[0]);
+    const auto extendedSource =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            extendedBaseDecoded[0].operands[1]);
+    expect(extendedMemory.base == rosa::x86::Register::R15 &&
+               extendedMemory.displacement == 0 &&
+               extendedMemory.width == 128 &&
+               !extendedMemory.ripRelative,
+           "REX MOVAPS store memory operand differs");
+    expect(extendedSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "REX MOVAPS store source differs");
+    expect(rosa::debug::dumpX86(extendedBaseDecoded).find(
+               "movaps [r15], xmm0") != std::string::npos,
+           "REX MOVAPS store dump differs");
+    const auto extendedBaseBlock = translator.translate(
+        extendedBaseCode, rosa::guest::GuestAddress{0x1800});
+    state.r15 = 0x8080;
+    state.xmm[0] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(extendedBaseBlock.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8080}),
+                state.xmm[0].low,
+                "REX MOVAPS stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8088}),
+                state.xmm[0].high,
+                "REX MOVAPS stored the wrong high lane");
+    expectEqual(state.r15, std::uint64_t{0x8080},
+                "REX MOVAPS changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "REX MOVAPS changed flags");
+
     rosa::x86::X86State unalignedState;
     unalignedState.rbp = 0x8108;
     unalignedState.xmm[0] = state.xmm[0];
@@ -7381,6 +7436,18 @@ void testMovapsRegisterToRipRelativeGuestMemory() {
     expect(rosa::debug::dumpX86(decoded).find("movaps [rip+0x6d627], xmm0") !=
                std::string::npos,
            "RIP-relative MOVAPS dump differs");
+
+    constexpr std::array<std::uint8_t, 9> rexBIgnoredCode{
+        0x41, 0x0F, 0x29, 0x05, 0xF8, 0x0F, 0x00, 0x00, 0xC3};
+    const auto rexBIgnoredDecoded = decoder.decodeBlock(
+        rexBIgnoredCode, rosa::guest::GuestAddress{0x1000});
+    const auto rexBIgnoredMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            rexBIgnoredDecoded[0].operands[0]);
+    expect(rexBIgnoredMemory.ripRelative && !rexBIgnoredMemory.hasBase &&
+               rexBIgnoredMemory.displacement == 0xFF8 &&
+               rexBIgnoredDecoded[0].length == 8,
+           "REX.B incorrectly changed MOVAPS mod=00 r/m=5 RIP-relative addressing");
 
     rosa::guest::AddressSpace addressSpace;
     addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,

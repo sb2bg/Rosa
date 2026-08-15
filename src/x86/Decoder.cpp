@@ -1051,12 +1051,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
-        if (code[cursor] == 0x0FU && code.size() - cursor >= 2 &&
-            code[cursor + 1] == 0x29U) {
-            if (code.size() - cursor < 3) {
+        const bool movapsStoreHasRex =
+            code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+        const auto movapsStoreOpcodeOffset =
+            cursor + (movapsStoreHasRex ? 1U : 0U);
+        if (code.size() - movapsStoreOpcodeOffset >= 2 &&
+            code[movapsStoreOpcodeOffset] == 0x0FU &&
+            code[movapsStoreOpcodeOffset + 1] == 0x29U) {
+            if (code.size() - movapsStoreOpcodeOffset < 3) {
                 throw DecodeError(address, remaining, "truncated movaps [base+disp], xmm");
             }
-            const auto modrm = code[cursor + 2];
+            const auto rex = movapsStoreHasRex ? code[cursor] : 0U;
+            const bool rexR = (rex & 0x4U) != 0;
+            const bool rexB = (rex & 0x1U) != 0;
+            const auto modrm = code[movapsStoreOpcodeOffset + 2];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
             const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
@@ -1065,7 +1073,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     address, remaining,
                     "only MOVAPS [base/RIP+disp8/disp32], xmm memory operands are supported");
             }
-            cursor += 3;
+            cursor = movapsStoreOpcodeOffset + 3;
             std::int64_t displacement = 0;
             if (ripRelative) {
                 if (code.size() - cursor < 4) {
@@ -1095,10 +1103,13 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 ripRelative
                     ? MemoryOperand{Register::Rax, displacement, 128,
                                     std::nullopt, 1, false, true}
-                    : MemoryOperand{decodeRegister(rmEncoding, false),
+                    : MemoryOperand{decodeRegister(rmEncoding, rexB),
                                     displacement, 128});
-            instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
-                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
+            instruction.operands.push_back(XmmRegisterOperand{
+                static_cast<XmmRegister>(
+                    static_cast<std::uint8_t>(
+                        ((modrm >> 3U) & 0x7U) |
+                        (rexR ? 0x8U : 0U)))});
 
             const auto length = cursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
