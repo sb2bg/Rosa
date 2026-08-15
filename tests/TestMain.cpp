@@ -2560,6 +2560,45 @@ void testAddFlagsSignedOverflow() {
     expectEqual(state.rflags, expectedFlags, "PF/AF/SF/OF flags differ");
 }
 
+void testAddRegisterImmediate32() {
+    constexpr std::array<std::uint8_t, 8> positive{
+        0x48, 0x81, 0xC4, 0xB0, 0x00, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(positive,
+                                             rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddRegImm,
+           "ADD r64, imm32 opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rsp,
+           "ADD r64, imm32 destination differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{0xB0}, "ADD r64, imm32 immediate differs");
+
+    const rosa::dbt::Translator translator;
+    const auto positiveBlock = translator.translate(
+        positive, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsp = 0x1000;
+    static_cast<void>(positiveBlock.execute(state));
+    expectEqual(state.rsp, std::uint64_t{0x10B0},
+                "ADD r64, positive imm32 result differs");
+
+    constexpr std::array<std::uint8_t, 8> negative{
+        0x48, 0x81, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3};
+    const auto negativeDecoded = decoder.decodeBlock(
+        negative, rosa::guest::GuestAddress{0x2000});
+    expectEqual(
+        std::get<rosa::x86::ImmediateOperand>(negativeDecoded[0].operands[1]).value,
+        UINT64_MAX, "ADD r64, imm32 did not sign-extend its immediate");
+    const auto negativeBlock = translator.translate(
+        negative, rosa::guest::GuestAddress{0x2000});
+    state.rax = 0;
+    static_cast<void>(negativeBlock.execute(state));
+    expectEqual(state.rax, UINT64_MAX, "ADD r64, negative imm32 result differs");
+    expectEqual(state.rflags, std::uint64_t{0x86},
+                "ADD r64, negative imm32 flags differ");
+}
+
 void testAndResultAndFlags() {
     constexpr std::array<std::uint8_t, 15> code{
         0x48, 0xB8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0x83, 0xE0, 0xF0, 0xC3,
@@ -3309,6 +3348,7 @@ int main() {
         {"R1 generated execution", testR1ExecutesGeneratedCode},
         {"add carry/zero flags", testAddFlagsCarryAndZero},
         {"add signed-overflow flags", testAddFlagsSignedOverflow},
+        {"add register imm32", testAddRegisterImmediate32},
         {"and result/flags", testAndResultAndFlags},
         {"AND 32-bit registers", testAnd32BitRegisters},
         {"BSF 32-bit registers", testBitScanForward32},
