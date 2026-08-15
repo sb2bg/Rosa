@@ -705,6 +705,19 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("mov8_register_memory",
+                             CaseId::mov8_register_memory,
+                             differentialBytes_mov8_register_memory);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.state.rax = 0x11223344556677A5ULL;
+        testCase.request.memory[0x17] = 0x11;
+        testCase.request.memory[0x18] = 0x00;
+        testCase.request.memory[0x19] = 0x22;
+        testCase.memoryCompareOffset = 0x17;
+        testCase.memoryCompareSize = 3;
+        run(testCase);
+    }
+    {
         auto testCase = make("mov32_immediate_memory",
                              CaseId::mov32_immediate_memory,
                              differentialBytes_mov32_immediate_memory);
@@ -2682,6 +2695,79 @@ void testMovLowByteRegisterToGuestMemory() {
     expect(rejected, "MOV byte to unmapped guest memory did not fail");
     expectEqual(faultState.rflags, std::uint64_t{0x8D7},
                 "failed MOV byte store changed flags");
+}
+
+void testMovLowByteRegisterToRipRelativeGuestMemory() {
+    constexpr rosa::guest::GuestAddress instructionAddress{0x7FF800058A51ULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF8000C8DAAULL};
+    constexpr rosa::guest::GuestAddress targetPage{0x7FF8000C8000ULL};
+    constexpr std::array<std::uint8_t, 7> code{
+        0x88, 0x05, 0x53, 0x03, 0x07, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "RIP-relative MOV byte register opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6},
+                "RIP-relative MOV byte register length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 8,
+           "RIP-relative MOV byte register addressing differs");
+    expectEqual(memory.displacement, std::int64_t{0x70353},
+                "RIP-relative MOV byte register displacement differs");
+    expect(source.reg == rosa::x86::Register::Rax && source.width == 8,
+           "RIP-relative MOV byte register source differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov [rip+0x70353], al ; 0x7ff8000c8daa") !=
+               std::string::npos,
+           "RIP-relative MOV byte register dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(rosa::guest::GuestAddress{target.value - 1},
+                            std::array<std::uint8_t, 3>{0x11, 0x00, 0x22});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.rax = 0x11223344556677A5ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    const auto stored =
+        addressSpace.readBytes(rosa::guest::GuestAddress{target.value - 1}, 3);
+    expect(stored == std::vector<std::uint8_t>({0x11, 0xA5, 0x22}),
+           "RIP-relative MOV byte register did not store exactly one byte");
+    expectEqual(state.rax, std::uint64_t{0x11223344556677A5ULL},
+                "RIP-relative MOV byte register changed RAX");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative MOV byte register changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[static_cast<std::size_t>(target.value - targetPage.value)] =
+        0x5A;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(targetPage, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes,
+                                    "read-only RIP-relative byte MOV target");
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative MOV byte register accepted read-only memory");
+    expectEqual(readOnlyAddressSpace.readBytes(target, 1).front(),
+                std::uint8_t{0x5A},
+                "failed RIP-relative MOV byte register changed memory");
+    expectEqual(state.rax, std::uint64_t{0x11223344556677A5ULL},
+                "failed RIP-relative MOV byte register changed RAX");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "failed RIP-relative MOV byte register changed flags");
 }
 
 void testMovLowByteRegisterToExtendedBase() {
@@ -7109,6 +7195,8 @@ int main() {
          testMovRipRelativeGuestDwordToRegister},
         {"MOV 32-bit register to guest memory", testMov32BitRegisterToGuestMemory},
         {"MOV low-byte register to guest memory", testMovLowByteRegisterToGuestMemory},
+        {"MOV low-byte register to RIP-relative guest memory",
+         testMovLowByteRegisterToRipRelativeGuestMemory},
         {"MOV low-byte register to extended base", testMovLowByteRegisterToExtendedBase},
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
         {"MOV immediate to RIP-relative guest memory",
