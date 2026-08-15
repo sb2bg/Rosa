@@ -887,6 +887,12 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("mov8_rip_memory", CaseId::mov8_rip_memory,
+                             differentialBytes_mov8_rip_memory);
+        testCase.request.state.rax = 0x1122334455667788ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("mov8_register_memory",
                              CaseId::mov8_register_memory,
                              differentialBytes_mov8_register_memory);
@@ -4136,6 +4142,65 @@ void testMovGuestMemoryToByteRegister() {
                 "failed MOV byte load changed destination");
     expectEqual(faultState.rflags, std::uint64_t{0x8D7},
                 "failed MOV byte load changed flags");
+}
+
+void testMovRipRelativeGuestByteToRegister() {
+    constexpr rosa::guest::GuestAddress instructionAddress{0x1000};
+    constexpr rosa::guest::GuestAddress target{0x2000};
+    constexpr std::array<std::uint8_t, 7> code{
+        0x8A, 0x05, 0xFA, 0x0F, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegMem,
+           "RIP-relative byte MOV load opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6},
+                "RIP-relative byte MOV load length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 8,
+           "RIP-relative byte MOV load destination differs");
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 8 &&
+               memory.displacement == 0xFFA,
+           "RIP-relative byte MOV load addressing differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov al, [rip+0xffa] ; 0x2000") != std::string::npos,
+           "RIP-relative byte MOV load dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(target, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> value{0xA5};
+    addressSpace.writeBytes(target, value);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667788ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0x11223344556677A5ULL},
+                "RIP-relative byte MOV load changed upper RAX bits");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative byte MOV load changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    state.rax = 0x8877665544332211ULL;
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative byte MOV load accepted unmapped memory");
+    expectEqual(state.rax, std::uint64_t{0x8877665544332211ULL},
+                "faulted RIP-relative byte MOV load changed RAX");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative byte MOV load changed flags");
 }
 
 void testMovGuestMemoryToByteRegisterWithScaledIndex() {
@@ -8718,6 +8783,8 @@ int main() {
          testMovGuestMemoryTo32BitRegisterWithScaledIndex},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
+        {"MOV RIP-relative guest byte to register",
+         testMovRipRelativeGuestByteToRegister},
         {"MOV guest memory to byte register with scaled index",
          testMovGuestMemoryToByteRegisterWithScaledIndex},
         {"MOVZX low-byte register to 32-bit register",

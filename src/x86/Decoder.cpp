@@ -2256,16 +2256,16 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
             if (mode > 0x2U || rexW ||
-                (!hasRex && regEncoding >= 0x4U) ||
-                (mode == 0 && rmEncoding == 0x5U)) {
+                (!hasRex && regEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
                     "only MOV byte register, [base+index*scale+disp8/disp32] is supported");
             }
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             auto base = decodeRegister(rmEncoding, rexB);
             std::optional<Register> index;
             std::uint8_t scale = 1;
-            if (rmEncoding == 0x4U) {
+            if (!ripRelative && rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining,
                                       "truncated MOV byte memory SIB");
@@ -2287,7 +2287,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
             }
             std::int64_t displacement = 0;
-            if (mode == 0x1U) {
+            if (ripRelative) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(
+                        address, remaining,
+                        "truncated RIP-relative byte MOV load disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            } else if (mode == 0x1U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated byte load disp8");
                 }
@@ -2299,12 +2307,19 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 displacement = readI32(code.subspan(cursor, 4));
                 cursor += 4;
             }
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+            }
             const auto destination =
                 decodeRegister(regEncoding, rexR);
             instruction.opcode = Opcode::MovRegMem;
             instruction.operands.push_back(RegisterOperand{destination, 8});
             instruction.operands.push_back(
-                MemoryOperand{base, displacement, 8, index, scale});
+                ripRelative
+                    ? MemoryOperand{Register::Rax, displacement, 8,
+                                    std::nullopt, 1, false, true}
+                    : MemoryOperand{base, displacement, 8, index, scale});
         } else if (opcode == 0x89U || opcode == 0x8BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov r64, r64");
