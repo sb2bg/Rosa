@@ -31,6 +31,7 @@ enum class Opcode {
     CmpRegImm,
     CmpRegMem,
     Push,
+    Pop,
     Lfence,
     Rdtsc,
     JmpRelative,

@@ -283,6 +283,63 @@ void testPushRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "register PUSH changed guest flags");
 }
 
+void testPopRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 2> popRbpCode{0x5D, 0xC3};
+    constexpr std::array<std::uint8_t, 2> popRspCode{0x5C, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(popRbpCode, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::Pop, "POP r64 opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rbp,
+           "POP rbp destination differs");
+
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{stackBase.value + 0x100},
+                          0x0123456789ABCDEFULL);
+    const rosa::dbt::Translator translator;
+    const auto popRbp = translator.translate(popRbpCode, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsp = stackBase.value + 0x100;
+    state.rbp = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(popRbp.execute(state, &addressSpace));
+    expectEqual(state.rbp, std::uint64_t{0x0123456789ABCDEFULL},
+                "POP rbp loaded the wrong value");
+    expectEqual(state.rsp, stackBase.value + 0x108, "POP rbp RSP update differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "POP rbp changed flags");
+
+    addressSpace.writeU64(rosa::guest::GuestAddress{stackBase.value + 0x200}, 0x1234);
+    const auto popRsp = translator.translate(popRspCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State rspState;
+    rspState.rsp = stackBase.value + 0x200;
+    static_cast<void>(popRsp.execute(rspState, &addressSpace));
+    expectEqual(rspState.rsp, std::uint64_t{0x1234},
+                "POP rsp did not apply the destination write last");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rsp = stackBase.value + 0x100;
+    faultState.rbp = 0x55;
+    faultState.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(popRbp.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "POP from unmapped guest stack did not fail");
+    expectEqual(faultState.rsp, stackBase.value + 0x100,
+                "failed POP changed RSP");
+    expectEqual(faultState.rbp, std::uint64_t{0x55},
+                "failed POP changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "failed POP changed flags");
+}
+
 void testSubRegImm32GeneratedExecution() {
     constexpr std::array<std::uint8_t, 8> positive{
         0x48, 0x81, 0xEC, 0x58, 0x06, 0x00, 0x00, 0xC3,
@@ -1367,6 +1424,7 @@ int main() {
         {"PUSH imm8 generated execution", testPushImm8GeneratedExecution},
         {"PUSH imm8 guest stack faults", testPushImm8GuestStackFaults},
         {"PUSH register generated execution", testPushRegisterGeneratedExecution},
+        {"POP register generated execution", testPopRegisterGeneratedExecution},
         {"SUB register imm32 generated execution", testSubRegImm32GeneratedExecution},
         {"SUB register imm8 generated execution", testSubRegImm8GeneratedExecution},
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},

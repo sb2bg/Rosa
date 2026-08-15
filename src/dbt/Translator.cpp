@@ -638,6 +638,31 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.push(newStackPointer, value, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::Pop: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: pop operand count");
+            }
+            const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto address = builder.readGuestRegister(x86::Register::Rsp,
+                                                           ir::Width::I64,
+                                                           instruction.address);
+            const auto value = builder.loadGuest(address, ir::Width::I64,
+                                                 instruction.address);
+            // Compute and commit the increment only after a successful guest load.
+            const auto stackPointer = builder.readGuestRegister(x86::Register::Rsp,
+                                                                ir::Width::I64,
+                                                                instruction.address);
+            const auto eight = builder.constant(sizeof(std::uint64_t), ir::Width::I64,
+                                                instruction.address);
+            const auto newStackPointer = builder.add(stackPointer, eight, ir::Width::I64,
+                                                     instruction.address);
+            builder.writeGuestRegister(x86::Register::Rsp, newStackPointer,
+                                       ir::Width::I64, instruction.address);
+            // Writing the destination last gives POP RSP its architectural result.
+            builder.writeGuestRegister(destination.reg, value, ir::Width::I64,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::Lfence:
             builder.loadFence(instruction.address);
             break;
