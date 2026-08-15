@@ -2564,7 +2564,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto rhsRegister =
                 std::get<x86::RegisterOperand>(instruction.operands[1]);
-            const auto width = lhsRegister.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            if (lhsRegister.width != rhsRegister.width ||
+                (lhsRegister.width != 8 && lhsRegister.width != 32 &&
+                 lhsRegister.width != 64)) {
+                throw std::runtime_error(
+                    "only matching 8-bit, 32-bit, and 64-bit register CMP are implemented");
+            }
+            const auto width = lhsRegister.width == 8    ? ir::Width::I8
+                               : lhsRegister.width == 32 ? ir::Width::I32
+                                                         : ir::Width::I64;
             const auto lhs = builder.readGuestRegister(lhsRegister.reg, width,
                                                        instruction.address);
             const auto rhs = builder.readGuestRegister(rhsRegister.reg, width,

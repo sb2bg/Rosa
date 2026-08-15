@@ -617,6 +617,23 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmp8_extended_registers",
+                             CaseId::cmp8_extended_registers,
+                             differentialBytes_cmp8_extended_registers);
+        testCase.request.state.rcx = 0x1122334455667700ULL;
+        testCase.request.state.r8 = 0x887766554433221FULL;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "cmp8_extended_registers_overflow",
+            CaseId::cmp8_extended_registers_overflow,
+            differentialBytes_cmp8_extended_registers_overflow);
+        testCase.request.state.rcx = 0x1122334455667780ULL;
+        testCase.request.state.r8 = 0x8877665544332201ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp64_register", CaseId::cmp64_register,
                              differentialBytes_cmp64_register);
         testCase.request.state.r14 = 5;
@@ -4287,6 +4304,66 @@ void testCompare32BitRegisterWithShortImmediate() {
                 "CMP r32, negative imm8 changed its register");
     expectEqual(negativeState.rflags, std::uint64_t{0x46},
                 "CMP r32, negative imm8 flags differ");
+}
+
+void testCompare8BitRegisters() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x44, 0x38, 0xC1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegReg,
+           "CMP r8, r8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "CMP r8, r8 length differs");
+    const auto lhs =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto rhs =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(lhs.reg == rosa::x86::Register::Rcx && lhs.width == 8 &&
+               rhs.reg == rosa::x86::Register::R8 && rhs.width == 8,
+           "CMP CL, R8B operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmp cl, r8b") !=
+               std::string::npos,
+           "CMP CL, R8B dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State borrowState;
+    borrowState.rcx = 0x1122334455667700ULL;
+    borrowState.r8 = 0x887766554433221FULL;
+    borrowState.rflags = 0x8D7;
+    static_cast<void>(block.execute(borrowState));
+    expectEqual(borrowState.rcx, std::uint64_t{0x1122334455667700ULL},
+                "CMP r8 changed its lhs");
+    expectEqual(borrowState.r8, std::uint64_t{0x887766554433221FULL},
+                "CMP r8 changed its rhs");
+    expectEqual(borrowState.rflags, std::uint64_t{0x97},
+                "CMP r8 borrow flags differ");
+
+    rosa::x86::X86State overflowState;
+    overflowState.rcx = 0x1122334455667780ULL;
+    overflowState.r8 = 0x8877665544332201ULL;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(block.execute(overflowState));
+    expectEqual(overflowState.rcx, std::uint64_t{0x1122334455667780ULL},
+                "overflowing CMP r8 changed its lhs");
+    expectEqual(overflowState.r8, std::uint64_t{0x8877665544332201ULL},
+                "overflowing CMP r8 changed its rhs");
+    expectEqual(overflowState.rflags, std::uint64_t{0x812},
+                "CMP r8 overflow flags differ");
+
+    constexpr std::array<std::uint8_t, 2> legacyHighByte{0x38, 0xE0};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            legacyHighByte, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected,
+           "CMP silently treated legacy AH as a representable low byte");
 }
 
 void testCompare64BitRegisters() {
@@ -11369,6 +11446,7 @@ int main() {
         {"CMP accumulator immediate", testCompareAccumulatorImmediate},
         {"CMP 32-bit register with short immediate",
          testCompare32BitRegisterWithShortImmediate},
+        {"CMP 8-bit registers", testCompare8BitRegisters},
         {"CMP 64-bit registers", testCompare64BitRegisters},
         {"CMP 32-bit registers", testCompare32BitRegisters},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
