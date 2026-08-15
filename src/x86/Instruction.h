@@ -106,9 +106,11 @@ struct MemoryOperand {
     MemoryOperand(Register baseValue, std::int64_t displacementValue,
                   std::uint8_t widthValue,
                   std::optional<Register> indexValue = std::nullopt,
-                  std::uint8_t scaleValue = 1, bool hasBaseValue = true)
+                  std::uint8_t scaleValue = 1, bool hasBaseValue = true,
+                  bool ripRelativeValue = false)
         : base(baseValue), displacement(displacementValue), width(widthValue),
-          index(indexValue), scale(scaleValue), hasBase(hasBaseValue) {}
+          index(indexValue), scale(scaleValue), hasBase(hasBaseValue),
+          ripRelative(ripRelativeValue) {}
 
     Register base{};
     std::int64_t displacement{};
@@ -116,6 +118,7 @@ struct MemoryOperand {
     std::optional<Register> index;
     std::uint8_t scale{1};
     bool hasBase{true};
+    bool ripRelative{};
 };
 
 struct XmmRegisterOperand {

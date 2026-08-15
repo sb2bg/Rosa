@@ -2045,6 +2045,78 @@ void testMovRegisterToGuestMemory() {
                 "failed guest-memory MOV changed the source register");
 }
 
+void testMovRegisterToRipRelativeGuestMemory() {
+    constexpr std::array<std::uint8_t, 8> observed{
+        0x4C, 0x89, 0x3D, 0x10, 0x33, 0x09, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF800011FF9ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observed, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "RIP-relative MOV store opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "RIP-relative MOV store length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.displacement == 0x93310 &&
+               memory.width == 64,
+           "RIP-relative MOV store memory operand differs");
+    expect(source.reg == rosa::x86::Register::R15 && source.width == 64,
+           "RIP-relative MOV store source differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov [rip+0x93310], r15 ; 0x7ff8000a5310") != std::string::npos,
+           "RIP-relative MOV store dump differs");
+
+    constexpr std::array<std::uint8_t, 8> code{
+        0x4C, 0x89, 0x3D, 0xF9, 0x0F, 0x00, 0x00, 0xC3};
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    constexpr rosa::guest::GuestAddress target{0x2000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(target, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.r15 = 0x0123456789ABCDEFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), state.r15,
+                "RIP-relative MOV stored at the wrong guest address");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative MOV changed flags");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(target, rosa::guest::guestPageSize,
+                                      rosa::guest::Permission::Read);
+    rosa::x86::X86State faultState;
+    faultState.r15 = UINT64_MAX;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative MOV to read-only guest memory did not fault");
+    expectEqual(readOnlyAddressSpace.readU64(target), std::uint64_t{0},
+                "failed RIP-relative MOV changed guest memory");
+    expectEqual(faultState.r15, UINT64_MAX,
+                "failed RIP-relative MOV changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed RIP-relative MOV changed flags");
+
+    bool truncatedRejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            std::span<const std::uint8_t>{observed}.first(6), observedRip));
+    } catch (const rosa::x86::DecodeError &) {
+        truncatedRejected = true;
+    }
+    expect(truncatedRejected, "truncated RIP-relative MOV was not rejected");
+}
+
 void testMov32BitRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x44, 0x89, 0x72, 0x28, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -5385,6 +5457,8 @@ int main() {
         {"CMP 64-bit registers", testCompare64BitRegisters},
         {"CMP 32-bit registers", testCompare32BitRegisters},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
+        {"MOV register to RIP-relative guest memory",
+         testMovRegisterToRipRelativeGuestMemory},
         {"MOV 32-bit register to guest memory", testMov32BitRegisterToGuestMemory},
         {"MOV low-byte register to guest memory", testMovLowByteRegisterToGuestMemory},
         {"MOV low-byte register to extended base", testMovLowByteRegisterToExtendedBase},

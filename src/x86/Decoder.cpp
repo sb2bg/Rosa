@@ -1836,14 +1836,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto reg = decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto rm = decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
             const auto operandWidth = static_cast<std::uint8_t>(rexW ? 64U : 32U);
-            if (mode == 0x3U && !rexX) {
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode == 0 && rmEncoding == 0x5U && opcode == 0x89U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated RIP-relative MOV store displacement");
+                }
+                const auto displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+                instruction.opcode = Opcode::MovMemReg;
+                instruction.operands.push_back(MemoryOperand{
+                    Register::Rax, displacement, operandWidth, std::nullopt, 1,
+                    false, true});
+                instruction.operands.push_back(RegisterOperand{reg, operandWidth});
+            } else if (mode == 0x3U && !rexX) {
                 instruction.opcode = Opcode::MovRegReg;
                 instruction.operands.push_back(
                     RegisterOperand{opcode == 0x89U ? rm : reg, operandWidth});
                 instruction.operands.push_back(
                     RegisterOperand{opcode == 0x89U ? reg : rm, operandWidth});
             } else {
-                const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
                 if (mode > 0x2U ||
                     (mode == 0 && rmEncoding == 0x5U)) {
                     throw DecodeError(

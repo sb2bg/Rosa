@@ -162,11 +162,16 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         case x86::Opcode::MovMemReg: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "mov [" << x86::registerName(memory.base);
+            stream << "mov [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
-                if (memory.hasBase || memory.index) {
+                if (memory.hasBase || memory.index || memory.ripRelative) {
                     stream << '+';
                 }
                 stream << "0x" << memory.displacement;
@@ -174,6 +179,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "], "
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
+            if (memory.ripRelative) {
+                const auto target = instruction.address.value + instruction.length +
+                                    static_cast<std::uint64_t>(memory.displacement);
+                stream << " ; 0x" << target;
+            }
             break;
         }
         case x86::Opcode::MovRegMem: {
