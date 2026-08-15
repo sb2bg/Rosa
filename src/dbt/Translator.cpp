@@ -240,6 +240,32 @@ moveXmmByteMask32(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+bitScanForward32(x86::X86State *state, std::uint64_t destinationIndex,
+                 std::uint64_t sourceIndex) {
+    if (destinationIndex >= 16 || sourceIndex >= 16) {
+        return state;
+    }
+    std::uint64_t sourceValue = 0;
+    const auto source = static_cast<x86::Register>(sourceIndex);
+    std::memcpy(&sourceValue,
+                reinterpret_cast<const std::byte *>(state) +
+                    x86::registerOffset(source),
+                sizeof(sourceValue));
+    const auto value = static_cast<std::uint32_t>(sourceValue);
+    state->rflags = (state->rflags & ~flagZero) | flagReservedOne;
+    if (value == 0) {
+        state->rflags |= flagZero;
+        return state;
+    }
+    const auto result = static_cast<std::uint64_t>(std::countr_zero(value));
+    const auto destination = static_cast<x86::Register>(destinationIndex);
+    std::memcpy(reinterpret_cast<std::byte *>(state) +
+                    x86::registerOffset(destination),
+                &result, sizeof(result));
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 loadGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address) noexcept {
     try {
         if (context == nullptr || context->addressSpace == nullptr) {
@@ -1042,6 +1068,18 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateLogicFlags(result, width, instruction.address);
             break;
         }
+        case x86::Opcode::BitScanForwardRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: bsf operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            builder.bitScanForward(destination.reg, source.reg, ir::Width::I32,
+                                   instruction.address);
+            break;
+        }
         case x86::Opcode::XorpsRegReg:
         case x86::Opcode::PxorRegReg: {
             if (instruction.operands.size() != 2) {
@@ -1376,6 +1414,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
                          operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
                          operation.opcode == ir::Opcode::MoveXmmByteMask ||
+                         operation.opcode == ir::Opcode::BitScanForward ||
                          operation.opcode == ir::Opcode::LoadGuest ||
                          operation.opcode == ir::Opcode::ReadTimestampCounter;
         hasExecutionContextCall |= operation.opcode == ir::Opcode::Push ||
@@ -1612,6 +1651,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(
                 arm64::x2, static_cast<std::uint64_t>(*operation.guestXmmRegister));
             assembler.movImmediate(arm64::x16, pointerBits(&moveXmmByteMask32));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::BitScanForward:
+            assembler.movImmediate(
+                arm64::x1, static_cast<std::uint64_t>(*operation.guestRegister));
+            assembler.movImmediate(arm64::x2, operation.immediate);
+            assembler.movImmediate(arm64::x16, pointerBits(&bitScanForward32));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::LoadGuest: {

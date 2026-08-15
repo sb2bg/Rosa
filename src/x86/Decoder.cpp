@@ -266,6 +266,33 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if (code[cursor] == 0x0FU && code.size() - cursor >= 2 &&
+            code[cursor + 1] == 0xBCU) {
+            if (code.size() - cursor < 3) {
+                throw DecodeError(address, remaining, "truncated bsf r32, r32");
+            }
+            const auto modrm = code[cursor + 2];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U) {
+                throw DecodeError(address, remaining,
+                                  "only register-direct 32-bit BSF is supported");
+            }
+            instruction.opcode = Opcode::BitScanForwardRegReg;
+            instruction.length = 3;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 3,
+                        instruction.bytes.begin());
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), false), 32});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), false), 32});
+            result.push_back(std::move(instruction));
+            cursor += 3;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
+        if (code[cursor] == 0x0FU && code.size() - cursor >= 2 &&
             code[cursor + 1] == 0x57U) {
             if (code.size() - cursor < 3) {
                 throw DecodeError(address, remaining, "truncated xorps xmm, xmm");

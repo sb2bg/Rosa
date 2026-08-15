@@ -287,6 +287,17 @@ void Builder::moveXmmByteMask(x86::Register destination, x86::XmmRegister source
     });
 }
 
+void Builder::bitScanForward(x86::Register destination, x86::Register source,
+                             Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::BitScanForward,
+        .width = width,
+        .guestRip = rip,
+        .guestRegister = destination,
+        .immediate = static_cast<std::uint64_t>(source),
+    });
+}
+
 void Builder::push(ValueId newStackPointer, ValueId value, Width width,
                    guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -573,6 +584,11 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::MoveXmmByteMask:
             if (!operation.guestRegister || !operation.guestXmmRegister) {
                 errors.emplace_back("move_xmm_byte_mask has incomplete registers");
+            }
+            break;
+        case Opcode::BitScanForward:
+            if (!operation.guestRegister) {
+                errors.emplace_back("bit_scan_forward has no destination register");
             }
             break;
         case Opcode::LoadGuest:

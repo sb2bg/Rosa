@@ -316,6 +316,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
+        case x86::Opcode::BitScanForwardRegReg:
+            stream << "bsf "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]));
+            break;
         case x86::Opcode::AndRegImm:
             stream << "and "
                    << registerOperandName(
@@ -636,6 +644,11 @@ std::string dumpIr(const ir::Block &block) {
             stream << "move_xmm_byte_mask "
                    << x86::registerName(*operation.guestRegister) << ", "
                    << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::BitScanForward:
+            stream << "bit_scan_forward." << widthName(operation.width) << ' '
+                   << x86::registerName(*operation.guestRegister) << ", "
+                   << x86::registerName(static_cast<x86::Register>(operation.immediate));
             break;
         case ir::Opcode::LoadGuest:
             stream << "load_guest." << widthName(operation.width) << ' '

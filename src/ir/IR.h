@@ -44,6 +44,7 @@ enum class Opcode {
     LoadGuestXmm,
     CompareEqualGuestBytesXmm,
     MoveXmmByteMask,
+    BitScanForward,
     Push,
     LoadFence,
     ReadTimestampCounter,
@@ -124,6 +125,8 @@ class Builder {
                                    guest::GuestAddress rip);
     void moveXmmByteMask(x86::Register destination, x86::XmmRegister source,
                          guest::GuestAddress rip);
+    void bitScanForward(x86::Register destination, x86::Register source,
+                        Width width, guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
     void readTimestampCounter(guest::GuestAddress rip);
