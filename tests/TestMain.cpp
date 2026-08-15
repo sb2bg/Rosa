@@ -634,6 +634,29 @@ void testCompareGuestMemoryWith32BitImmediate() {
                 "failed memory-immediate CMP changed flags");
 }
 
+void testCompare32BitRegisterWithImmediate() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x81, 0xFA, 0xCF, 0xFA, 0xED, 0xFE, 0xC3,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegImm,
+           "CMP r32, imm32 opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{32}, "CMP r32, imm32 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdx = 0xFFFFFFFFFEEDFACFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdx, std::uint64_t{0xFFFFFFFFFEEDFACFULL},
+                "CMP r32, imm32 changed its register");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP r32, imm32 equal flags differ");
+}
+
 void testMovRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 12> code{
         0x48, 0x89, 0xBD, 0x58, 0xFF, 0xFF, 0xFF,
@@ -1972,6 +1995,7 @@ int main() {
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
+        {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
         {"MOV 32-bit register to guest memory", testMov32BitRegisterToGuestMemory},
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
