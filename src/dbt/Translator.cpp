@@ -3752,17 +3752,26 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     assembler.tbz(arm64::x16, zeroFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::Sign) {
                     assembler.tbz(arm64::x16, signFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::Less) {
+                    // OF is bit 11, so shifting it down by four aligns it with SF.
+                    assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
+                    assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
+                    assembler.tbz(arm64::x17, signFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::Greater) {
                     assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
                     assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
                     assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
                     assembler.tbnz(arm64::x17, signFlagBit, notTaken);
-                } else {
+                } else if (*operation.condition ==
+                           x86::Condition::LessOrEqual) {
                     assembler.tbnz(arm64::x16, zeroFlagBit, taken);
                     // OF is bit 11, so shifting it down by four aligns it with SF.
                     assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
                     assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
                     assembler.tbz(arm64::x17, signFlagBit, notTaken);
+                } else {
+                    throw std::runtime_error(
+                        "ARM64 backend received unsupported branch condition");
                 }
                 assembler.bind(taken);
                 assembler.movImmediate(arm64::x16, operation.target->value);

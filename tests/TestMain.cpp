@@ -1229,6 +1229,19 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("branch_less_taken", CaseId::branch_less_taken,
+                             differentialBytes_branch_less_taken);
+        testCase.request.state.rflags = signFlag | 0x2;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_less_not_taken",
+                             CaseId::branch_less_not_taken,
+                             differentialBytes_branch_less_not_taken);
+        testCase.request.state.rflags = 0x2;
+        run(testCase);
+    }
+    {
         auto testCase = make("branch_less_equal_taken",
                              CaseId::branch_less_equal_taken,
                              differentialBytes_branch_less_equal_taken);
@@ -11813,6 +11826,56 @@ void testUnsignedBelowOrEqualLongConditional() {
                 "JBE rel32 changed flags");
 }
 
+void testSignedLessConditional() {
+    constexpr std::array<std::uint8_t, 2> code{0x7C, 0x28};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF80004F144ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::JccRelative &&
+               decoded[0].condition == rosa::x86::Condition::Less,
+           "JL rel8 condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{2},
+                "JL rel8 length differs");
+    expect(decoded[0].branchTarget &&
+               decoded[0].branchTarget->value == 0x7FF80004F16EULL,
+           "JL rel8 target differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "jl 0x7ff80004f16e") != std::string::npos,
+           "JL rel8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF80004F144ULL});
+
+    rosa::x86::X86State signOnly;
+    signOnly.rflags = 0x82;
+    static_cast<void>(block.execute(signOnly));
+    expectEqual(signOnly.rip, std::uint64_t{0x7FF80004F16EULL},
+                "JL did not take with SF set and OF clear");
+    expectEqual(signOnly.rflags, std::uint64_t{0x82},
+                "JL changed flags on a taken branch");
+
+    rosa::x86::X86State overflowOnly;
+    overflowOnly.rflags = 0x802;
+    static_cast<void>(block.execute(overflowOnly));
+    expectEqual(overflowOnly.rip, std::uint64_t{0x7FF80004F16EULL},
+                "JL did not take with SF clear and OF set");
+
+    rosa::x86::X86State equalBits;
+    equalBits.rflags = 0x882;
+    static_cast<void>(block.execute(equalBits));
+    expectEqual(equalBits.rip, std::uint64_t{0x7FF80004F146ULL},
+                "JL took with SF and OF both set");
+    expectEqual(equalBits.rflags, std::uint64_t{0x882},
+                "JL changed flags on a fallthrough branch");
+
+    rosa::x86::X86State clearBits;
+    clearBits.rflags = 0x2;
+    static_cast<void>(block.execute(clearBits));
+    expectEqual(clearBits.rip, std::uint64_t{0x7FF80004F146ULL},
+                "JL took with SF and OF both clear");
+}
+
 void testSignedLessOrEqualConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x7E, 0x02}; // jle 0x1004
     const rosa::x86::Decoder decoder;
@@ -12274,6 +12337,7 @@ int main() {
         {"unsigned-below-or-equal conditional", testUnsignedBelowOrEqualConditional},
         {"unsigned-below-or-equal long conditional",
          testUnsignedBelowOrEqualLongConditional},
+        {"signed-less conditional", testSignedLessConditional},
         {"signed-less-or-equal conditional", testSignedLessOrEqualConditional},
         {"sign long conditional", testSignLongConditional},
         {"sign short conditional", testSignShortConditional},
