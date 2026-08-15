@@ -1636,6 +1636,39 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (extension == 0x7U && mode <= 0x2U && !rexW && !rexR && !rexX) {
+                if (rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only CMP dword [base+disp8/disp32], imm8 is supported");
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated short memory CMP disp8");
+                    }
+                    displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated short memory CMP disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated short memory CMP immediate");
+                }
+                const auto immediate = std::bit_cast<std::int8_t>(code[cursor++]);
+                instruction.opcode = Opcode::CmpMemImm;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, rexB), displacement, 32});
+                instruction.operands.push_back(ImmediateOperand{
+                    static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
+            } else {
             if (!rexW && extension != 0x4U && extension != 0x7U) {
                 throw DecodeError(address, remaining,
                                   "only 32-bit AND /4 and CMP /7 are supported from legacy opcode 83");
@@ -1658,6 +1691,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             instruction.operands.push_back(ImmediateOperand{
                 static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
+            }
         } else {
             throw DecodeError(address, remaining, "opcode is not in the current Rosa subset");
         }

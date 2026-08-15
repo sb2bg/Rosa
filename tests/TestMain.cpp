@@ -784,6 +784,37 @@ void testCompareGuestMemoryWith32BitImmediate() {
                 "failed memory-immediate CMP changed flags");
 }
 
+void testCompareGuestMemoryWithShortImmediate() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x41, 0x83, 0x7E, 0x04, 0x10, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "CMP dword [memory], imm8 opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::R14,
+           "CMP dword short immediate extended base differs");
+    expectEqual(memory.displacement, std::int64_t{4},
+                "CMP dword short immediate displacement differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8004}, 0x10);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r14 = 0x8000;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r14, std::uint64_t{0x8000},
+                "CMP dword short immediate changed base");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP dword short immediate flags differ");
+}
+
 void testCompareGuestByteWithImmediate() {
     constexpr std::array<std::uint8_t, 5> code{0x80, 0x7D, 0xD7, 0x00, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3034,6 +3065,7 @@ int main() {
          testLegacyCompare32BitRegisterWithGuestMemory},
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
+        {"CMP guest memory with short immediate", testCompareGuestMemoryWithShortImmediate},
         {"CMP guest byte with immediate", testCompareGuestByteWithImmediate},
         {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
         {"CMP EAX accumulator immediate", testCompareEaxAccumulatorImmediate},
