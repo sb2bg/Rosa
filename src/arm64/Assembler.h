@@ -44,6 +44,7 @@ class Assembler {
     void add(XRegister destination, XRegister lhs, XRegister rhs);
     void sub(XRegister destination, XRegister lhs, XRegister rhs);
     void lslImmediate(XRegister destination, XRegister source, std::uint8_t shift);
+    void lslVariable(XRegister destination, XRegister source, XRegister shift);
     void bitAnd(XRegister destination, XRegister lhs, XRegister rhs);
     void bitOr(XRegister destination, XRegister lhs, XRegister rhs);
     void ldr(XRegister destination, XRegister base, std::uint32_t byteOffset);

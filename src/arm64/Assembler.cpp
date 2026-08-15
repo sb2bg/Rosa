@@ -100,6 +100,17 @@ void Assembler::lslImmediate(XRegister destination, XRegister source, std::uint8
                    std::to_string(shift));
 }
 
+void Assembler::lslVariable(XRegister destination, XRegister source, XRegister shift) {
+    requireRegister(destination);
+    requireRegister(source);
+    requireRegister(shift);
+    const auto word = 0x9AC02000U | (static_cast<std::uint32_t>(shift.encoding) << 16U) |
+                      (static_cast<std::uint32_t>(source.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "lsl " + regName(destination) + ", " + regName(source) + ", " +
+                   regName(shift));
+}
+
 void Assembler::bitAnd(XRegister destination, XRegister lhs, XRegister rhs) {
     requireRegister(destination);
     requireRegister(lhs);

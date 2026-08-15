@@ -21,6 +21,7 @@ enum class Opcode {
     SubRegImm,
     SubRegMem,
     ShlRegImm,
+    ShlRegCl,
     OrRegReg,
     AndRegImm,
     TestRegReg,

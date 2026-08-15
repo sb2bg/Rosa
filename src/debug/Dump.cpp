@@ -180,6 +180,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
                    << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::ShlRegCl:
+            stream << "shl "
+                   << x86::registerName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
+                   << ", cl";
+            break;
         case x86::Opcode::OrRegReg:
             stream << "or "
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)

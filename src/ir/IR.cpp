@@ -82,6 +82,20 @@ ValueId Builder::shiftLeft(ValueId value, std::uint8_t count, Width width,
     return result;
 }
 
+ValueId Builder::shiftLeft(ValueId value, ValueId count, Width width,
+                           guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShiftLeft,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = value,
+        .rhs = count,
+    });
+    return result;
+}
+
 ValueId Builder::bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -203,6 +217,18 @@ void Builder::updateShiftLeftFlags(ValueId lhs, ValueId result, std::uint8_t cou
     });
 }
 
+void Builder::updateShiftLeftFlags(ValueId lhs, ValueId result, ValueId count,
+                                   Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateShiftLeftFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = lhs,
+        .rhs = result,
+        .third = count,
+    });
+}
+
 void Builder::exitBlock(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::ExitBlock,
@@ -297,6 +323,9 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::ShiftLeft:
             checkUse(operation.lhs, "shifted");
+            if (operation.rhs) {
+                checkUse(operation.rhs, "shift count");
+            }
             break;
         case Opcode::Push:
             checkUse(operation.lhs, "new stack pointer");
@@ -324,6 +353,9 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::UpdateShiftLeftFlags:
             checkUse(operation.lhs, "original");
             checkUse(operation.rhs, "result");
+            if (operation.third) {
+                checkUse(operation.third, "shift count");
+            }
             break;
         case Opcode::ExitBlock:
             if (operation.exitKind != ExitKind::Return && !operation.target) {

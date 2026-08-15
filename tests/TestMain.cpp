@@ -49,6 +49,7 @@ void testAssemblerEncodings() {
     assembler.movImmediate(rosa::arm64::x0, 42);
     assembler.add(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.lslImmediate(rosa::arm64::x10, rosa::arm64::x9, 32);
+    assembler.lslVariable(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.bitAnd(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.bitOr(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.ldr(rosa::arm64::x9, rosa::arm64::x0, 0);
@@ -61,10 +62,10 @@ void testAssemblerEncodings() {
     assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 14> expected{
-        0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0x8A0B012AU, 0xAA0B012AU, 0xF9400009U,
-        0xB9400009U, 0xF9000009U, 0xD63F0200U, 0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU,
-        0xD5033FDFU, 0xD65F03C0U,
+    const std::array<std::uint32_t, 15> expected{
+        0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0x9ACB212AU, 0x8A0B012AU,
+        0xAA0B012AU, 0xF9400009U, 0xB9400009U, 0xF9000009U, 0xD63F0200U,
+        0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU, 0xD5033FDFU, 0xD65F03C0U,
     };
     expectEqual(assembler.words().size(), expected.size(), "assembler word count differs");
     for (std::size_t index = 0; index < expected.size(); ++index) {
@@ -699,6 +700,40 @@ void testShiftLeftImmediateGeneratedExecution() {
                 "SHL with a masked zero count changed flags");
 }
 
+void testShiftLeftClGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0xD3, 0xE0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShlRegCl,
+           "SHL r64, CL opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rax,
+           "SHL r64, CL destination differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x8000000000000001ULL;
+    state.rcx = 65;
+    state.rflags = 0x10;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{2},
+                "SHL r64, CL did not mask the count to six bits");
+    expectEqual(state.rcx, std::uint64_t{65}, "SHL r64, CL changed RCX");
+    expectEqual(state.rflags, std::uint64_t{0x813},
+                "SHL r64, CL flags differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0x55;
+    zeroState.rcx = 64;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0x55},
+                "SHL r64, CL with a masked zero count changed the value");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "SHL r64, CL with a masked zero count changed flags");
+}
+
 void testOrRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x09, 0xD0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -1173,6 +1208,7 @@ int main() {
         {"LFENCE generated execution", testLfenceGeneratedExecution},
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},
+        {"SHL CL generated execution", testShiftLeftClGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
