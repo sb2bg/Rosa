@@ -1008,6 +1008,13 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("mov8_extended_immediate",
+                             CaseId::mov8_extended_immediate,
+                             differentialBytes_mov8_extended_immediate);
+        testCase.request.state.r14 = 0x11223344556677A5ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("mov8_immediate_memory",
                              CaseId::mov8_immediate_memory,
                              differentialBytes_mov8_immediate_memory);
@@ -1408,6 +1415,53 @@ void testLegacyMovLowByteImmediateGeneratedExecution() {
     expectEqual(state.rcx, std::uint64_t{0xAABBCCDDEEFF0001ULL},
                 "MOV CL, imm8 did not preserve upper register bits");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOV CL, imm8 changed flags");
+}
+
+void testRexExtendedMovLowByteImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x41, 0xB6, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegImm,
+           "REX MOV r8, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "REX MOV r8, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R14,
+           "REX MOV r8, imm8 destination differs");
+    expectEqual(destination.width, std::uint8_t{8},
+                "REX MOV r8, imm8 destination width differs");
+    expectEqual(immediate.value, std::uint64_t{1},
+                "REX MOV r8, imm8 immediate differs");
+    expectEqual(immediate.width, std::uint8_t{8},
+                "REX MOV r8, imm8 immediate width differs");
+    expect(rosa::debug::dumpX86(decoded).find("mov r14b, 0x1") !=
+               std::string::npos,
+           "REX MOV r8, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r14 = 0x11223344556677A5ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r14, std::uint64_t{0x1122334455667701ULL},
+                "REX MOV r8, imm8 did not replace only the low byte");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "REX MOV r8, imm8 changed flags");
+
+    constexpr std::array<std::uint8_t, 3> highByteCode{0xB4, 0x01, 0xC3};
+    bool rejectedHighByte = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(highByteCode,
+                                              rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejectedHighByte = true;
+    }
+    expect(rejectedHighByte,
+           "legacy MOV AH, imm8 was silently decoded as a low-byte register");
 }
 
 void testRexExtendedMov32ImmediateGeneratedExecution() {
@@ -10067,6 +10121,8 @@ int main() {
         {"legacy MOV 32-bit immediate", testLegacyMov32ImmediateGeneratedExecution},
         {"legacy MOV low-byte immediate",
          testLegacyMovLowByteImmediateGeneratedExecution},
+        {"REX extended MOV low-byte immediate",
+         testRexExtendedMovLowByteImmediateGeneratedExecution},
         {"REX extended MOV 32-bit immediate", testRexExtendedMov32ImmediateGeneratedExecution},
         {"PUSH imm8 decoder", testDecoderPushImm8},
         {"PUSH imm8 generated execution", testPushImm8GeneratedExecution},

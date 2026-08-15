@@ -1680,6 +1680,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x81U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD3U &&
             opcode != 0xFEU && opcode != 0xFFU &&
+            (opcode < 0xB0U || opcode > 0xB7U) &&
             (opcode < 0xB8U || opcode > 0xBFU)) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
@@ -1700,6 +1701,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
         } else if (opcode == 0x98U && rexW) {
             instruction.opcode = Opcode::Cdqe;
+        } else if (hasRex && opcode >= 0xB0U && opcode <= 0xB7U) {
+            instruction.opcode = Opcode::MovRegImm;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(opcode - 0xB0U), rexB), 8});
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining,
+                                  "truncated mov low-byte register, imm8");
+            }
+            instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
         } else if (opcode >= 0xB8U && opcode <= 0xBFU) {
             const auto immediateSize = rexW ? sizeof(std::uint64_t) : sizeof(std::uint32_t);
             if (code.size() - cursor < immediateSize) {
