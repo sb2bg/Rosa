@@ -453,6 +453,13 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmp8_register_immediate",
+                             CaseId::cmp8_register_immediate,
+                             differentialBytes_cmp8_register_immediate);
+        testCase.request.state.rcx = 0x1122334455667700ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp64_memory_register",
                              CaseId::cmp64_memory_register,
                              differentialBytes_cmp64_memory_register);
@@ -2512,6 +2519,70 @@ void testCompareRipRelativeGuestByteWithImmediate() {
         truncatedRejected = true;
     }
     expect(truncatedRejected, "truncated RIP-relative CMP byte was not rejected");
+}
+
+void testCompare8BitRegisterWithImmediate() {
+    constexpr std::array<std::uint8_t, 4> code{0x80, 0xF9, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegImm,
+           "CMP CL, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "CMP CL, imm8 length differs");
+    const auto operand =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(operand.reg == rosa::x86::Register::Rcx && operand.width == 8,
+           "CMP CL, imm8 register differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{1}, "CMP CL, imm8 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("cmp cl, 0x1") != std::string::npos,
+           "CMP CL, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rcx = 0x1122334455667700ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x1122334455667700ULL},
+                "CMP CL, imm8 changed RCX");
+    expectEqual(state.rflags, std::uint64_t{0x97},
+                "CMP byte zero, one flags differ");
+
+    state.rcx = 0xFFEEDDCCBBAA5501ULL;
+    state.rflags = 0;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xFFEEDDCCBBAA5501ULL},
+                "equal CMP CL, imm8 changed RCX");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "equal CMP CL, imm8 flags differ");
+
+    state.rcx = 0x80;
+    state.rflags = 0;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rflags, std::uint64_t{0x812},
+                "overflow CMP CL, imm8 flags differ");
+
+    constexpr std::array<std::uint8_t, 4> highByteCode{0x80, 0xFC, 0x01, 0xC3};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            highByteCode, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected, "CMP AH, imm8 was silently treated as a low-byte register");
+
+    constexpr std::array<std::uint8_t, 5> rexBMemoryCode{
+        0x41, 0x80, 0x3D, 0x01, 0xC3};
+    const auto rexBMemoryDecoded = decoder.decodeBlock(
+        rexBMemoryCode, rosa::guest::GuestAddress{0x3000});
+    const auto rexBMemory =
+        std::get<rosa::x86::MemoryOperand>(rexBMemoryDecoded[0].operands[0]);
+    expect(rexBMemoryDecoded[0].opcode == rosa::x86::Opcode::CmpMemImm &&
+               rexBMemory.base == rosa::x86::Register::R13 &&
+               !rexBMemory.ripRelative && rexBMemory.displacement == 0,
+           "REX.B opcode-80 memory form was misdecoded as RIP-relative");
 }
 
 void testCompare32BitRegisterWithImmediate() {
@@ -7797,6 +7868,7 @@ int main() {
         {"CMP guest byte with immediate", testCompareGuestByteWithImmediate},
         {"CMP RIP-relative guest byte with immediate",
          testCompareRipRelativeGuestByteWithImmediate},
+        {"CMP 8-bit register with immediate", testCompare8BitRegisterWithImmediate},
         {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
         {"CMP EAX accumulator immediate", testCompareEaxAccumulatorImmediate},
         {"CMP 32-bit register with short immediate",

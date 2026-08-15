@@ -2531,12 +2531,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
-            if (extension != 0x7U || mode > 0x2U || rexW || rexR || rexX ||
-                rmEncoding == 0x4U) {
+            const bool ripRelative =
+                mode == 0 && rmEncoding == 0x5U && !rexB;
+            if (extension != 0x7U || rexW || rexR || rexX ||
+                (mode != 0x3U && rmEncoding == 0x4U) ||
+                (mode == 0x3U && !hasRex && rmEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMP byte [base/RIP+disp8/disp32], imm8 from opcode 80 /7 is supported");
+                    "only CMP representable-byte-register/[base/RIP+disp8/disp32], imm8 from opcode 80 /7 is supported");
             }
             std::int64_t displacement = 0;
             if (ripRelative) {
@@ -2567,12 +2569,18 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     address, cursor - instructionStart, displacement));
             }
             instruction.opcode = Opcode::CmpMemImm;
-            instruction.operands.push_back(
-                ripRelative
-                    ? MemoryOperand{Register::Rax, displacement, 8, std::nullopt,
-                                    1, false, true}
-                    : MemoryOperand{decodeRegister(rmEncoding, rexB),
-                                    displacement, 8});
+            if (mode == 0x3U) {
+                instruction.opcode = Opcode::CmpRegImm;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, rexB), 8});
+            } else {
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement, 8,
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{decodeRegister(rmEncoding, rexB),
+                                        displacement, 8});
+            }
             instruction.operands.push_back(ImmediateOperand{immediate, 8});
         } else if (opcode == 0x81U) {
             if (code.size() - cursor < 1) {
