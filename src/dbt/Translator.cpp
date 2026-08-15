@@ -2809,19 +2809,25 @@ arm64::Program compileToArm64(const ir::Block &block) {
             if (operation.width != ir::Width::I64 ||
                 (*operation.condition != x86::Condition::Below &&
                  *operation.condition != x86::Condition::AboveOrEqual &&
+                 *operation.condition != x86::Condition::Above &&
                  *operation.condition != x86::Condition::Equal)) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 64-bit register CMOVB/CMOVAE/CMOVE");
+                    "ARM64 backend only implements 64-bit register CMOVB/CMOVAE/CMOVE/CMOVA");
             }
-            const auto flagBit = static_cast<std::uint8_t>(
-                *operation.condition == x86::Condition::Equal ? 6U : 0U);
+            constexpr std::uint8_t carryFlagBit = 0;
+            constexpr std::uint8_t zeroFlagBit = 6;
             const auto notTaken = assembler.makeLabel();
             assembler.ldr(arm64::x16, arm64::x0,
                           static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
-            if (*operation.condition == x86::Condition::AboveOrEqual) {
-                assembler.tbnz(arm64::x16, flagBit, notTaken);
+            if (*operation.condition == x86::Condition::Below) {
+                assembler.tbz(arm64::x16, carryFlagBit, notTaken);
+            } else if (*operation.condition == x86::Condition::AboveOrEqual) {
+                assembler.tbnz(arm64::x16, carryFlagBit, notTaken);
+            } else if (*operation.condition == x86::Condition::Equal) {
+                assembler.tbz(arm64::x16, zeroFlagBit, notTaken);
             } else {
-                assembler.tbz(arm64::x16, flagBit, notTaken);
+                assembler.tbnz(arm64::x16, carryFlagBit, notTaken);
+                assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
             }
             assembler.ldr(
                 arm64::x17, arm64::x0,

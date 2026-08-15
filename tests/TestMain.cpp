@@ -863,6 +863,34 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmova64_taken", CaseId::cmova64_taken,
+                             differentialBytes_cmova64_taken);
+        testCase.request.state.rax = 0x0123456789ABCDEFULL;
+        testCase.request.state.rdx = UINT64_MAX;
+        testCase.request.state.rflags &= ~(carryFlag | zeroFlag);
+        run(testCase);
+    }
+    {
+        auto testCase = make("cmova64_carry_not_taken",
+                             CaseId::cmova64_carry_not_taken,
+                             differentialBytes_cmova64_carry_not_taken);
+        testCase.request.state.rax = UINT64_MAX;
+        testCase.request.state.rdx = 0xAABBCCDDEEFF0011ULL;
+        testCase.request.state.rflags =
+            (testCase.request.state.rflags | carryFlag) & ~zeroFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("cmova64_zero_not_taken",
+                             CaseId::cmova64_zero_not_taken,
+                             differentialBytes_cmova64_zero_not_taken);
+        testCase.request.state.rax = UINT64_MAX;
+        testCase.request.state.rdx = 0xAABBCCDDEEFF0011ULL;
+        testCase.request.state.rflags =
+            (testCase.request.state.rflags | zeroFlag) & ~carryFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("branch_equal_taken", CaseId::branch_equal_taken,
                              differentialBytes_branch_equal_taken);
         testCase.request.state.rax = 42;
@@ -9592,6 +9620,57 @@ void testConditionalMoveAboveOrEqual64() {
                 "untaken CMOVAE changed flags");
 }
 
+void testConditionalMoveAbove64() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x48, 0x0F, 0x47, 0xD0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg,
+           "CMOVA opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "CMOVA length differs");
+    expect(decoded[0].condition == rosa::x86::Condition::Above,
+           "CMOVA condition differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx &&
+               destination.width == 64,
+           "CMOVA destination differs");
+    expect(source.reg == rosa::x86::Register::Rax && source.width == 64,
+           "CMOVA source differs");
+    expect(rosa::debug::dumpX86(decoded).find("cmova rdx, rax") !=
+               std::string::npos,
+           "CMOVA dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State taken;
+    taken.rax = 0x0123456789ABCDEFULL;
+    taken.rdx = UINT64_MAX;
+    taken.rflags = 0x892; // CF=0, ZF=0; unrelated defined flags are set.
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rdx, std::uint64_t{0x0123456789ABCDEFULL},
+                "taken CMOVA result differs");
+    expectEqual(taken.rflags, std::uint64_t{0x892},
+                "taken CMOVA changed flags");
+
+    for (const auto flags : std::array<std::uint64_t, 3>{0x893, 0x8D2, 0x8D3}) {
+        rosa::x86::X86State notTaken;
+        notTaken.rax = UINT64_MAX;
+        notTaken.rdx = 0xAABBCCDDEEFF0011ULL;
+        notTaken.rflags = flags;
+        static_cast<void>(block.execute(notTaken));
+        expectEqual(notTaken.rdx, std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                    "untaken CMOVA changed destination");
+        expectEqual(notTaken.rax, UINT64_MAX,
+                    "untaken CMOVA changed source");
+        expectEqual(notTaken.rflags, flags, "untaken CMOVA changed flags");
+    }
+}
+
 void testConditionalMoveEqual64() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x0F, 0x44, 0xC8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -10208,6 +10287,7 @@ int main() {
         {"conditional move below 64-bit", testConditionalMoveBelow64},
         {"conditional move above-or-equal 64-bit",
          testConditionalMoveAboveOrEqual64},
+        {"conditional move above 64-bit", testConditionalMoveAbove64},
         {"conditional move equal 64-bit", testConditionalMoveEqual64},
         {"unsigned-above conditional", testUnsignedAboveConditional},
         {"unsigned-above long conditional", testUnsignedAboveLongConditional},
