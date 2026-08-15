@@ -1,7 +1,9 @@
 #include "darwin/Syscall.h"
 
+#include <sys/random.h>
 #include <unistd.h>
 
+#include <array>
 #include <bit>
 #include <cerrno>
 #include <cstddef>
@@ -20,6 +22,7 @@ constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
 constexpr std::uint64_t syscallExit = unixSyscallClass | 1U;
 constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
+constexpr std::uint64_t syscallGetentropy = unixSyscallClass | 500U;
 constexpr std::uint64_t machdepThreadFastSetCthreadSelf = 3U;
 constexpr std::uint64_t x86UserCthreadSelector = 0x0FU;
 constexpr std::uint64_t x86MaximumUserPageAddress = 0x00007FFFFFFFF000ULL;
@@ -93,10 +96,42 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         setSuccess(state, initialGuestThreadId);
         return {};
     }
+    if (number == syscallGetentropy) {
+        constexpr std::size_t maximumEntropySize = 256;
+        if (state.rsi > maximumEntropySize) {
+            // XNU randomdev.c rejects requests larger than its 256-byte
+            // kernel buffer before touching userspace.
+            setError(state, EINVAL);
+            return {};
+        }
+        const auto size = static_cast<std::size_t>(state.rsi);
+        try {
+            addressSpace.validateAccess(guest::GuestAddress{state.rdi}, size,
+                                        guest::Permission::Write);
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        std::array<std::uint8_t, maximumEntropySize> bytes{};
+        if (::getentropy(bytes.data(), size) != 0) {
+            setError(state, errno);
+            return {};
+        }
+        try {
+            addressSpace.writeBytes(
+                guest::GuestAddress{state.rdi},
+                std::span<const std::uint8_t>(bytes).first(size));
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        setSuccess(state, 0);
+        return {};
+    }
     if (number != syscallWrite) {
         throw unsupported(state, syscallRip,
-                          "only BSD write(2), exit(2), and thread_selfid(2) are "
-                          "implemented");
+                          "only BSD write(2), exit(2), thread_selfid(2), and "
+                          "getentropy(2) are implemented");
     }
     if (state.rdi != STDOUT_FILENO && state.rdi != STDERR_FILENO) {
         throw unsupported(state, syscallRip,

@@ -6511,6 +6511,156 @@ void testGeneratedDarwinThreadSelfid() {
                 "generated thread_selfid did not clear the BSD error flag");
 }
 
+void testDarwinGetentropy() {
+    constexpr auto callNumber = UINT64_C(0x020001F4);
+    constexpr rosa::guest::GuestAddress buffer{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    std::array<std::uint8_t, 144> sentinel{};
+    sentinel.fill(0xA5);
+    addressSpace.writeBytes(buffer, sentinel);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = callNumber;
+    state.rdi = buffer.value;
+    state.rsi = 128;
+    state.rflags = 0xAD7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF800064C50ULL});
+    expect(!outcome.exited, "getentropy terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "getentropy did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "getentropy did not apply BSD success flags");
+    const auto entropy = addressSpace.readBytes(buffer, 128);
+    expect(std::ranges::any_of(entropy,
+                               [](std::uint8_t byte) { return byte != 0xA5; }),
+           "getentropy left the entire guest buffer unchanged");
+    const auto tail = addressSpace.readBytes(
+        rosa::guest::GuestAddress{buffer.value + 128}, 16);
+    expect(std::ranges::all_of(tail,
+                               [](std::uint8_t byte) { return byte == 0xA5; }),
+           "getentropy wrote beyond the requested guest range");
+
+    const std::array marker{std::uint8_t{0x5A}};
+    constexpr rosa::guest::GuestAddress oversizedBuffer{0x8200};
+    addressSpace.writeBytes(oversizedBuffer, marker);
+    state.rax = callNumber;
+    state.rdi = oversizedBuffer.value;
+    state.rsi = 257;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "oversized getentropy returned the wrong guest errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "oversized getentropy did not set BSD carry");
+    expectEqual(addressSpace.readBytes(oversizedBuffer, 1).front(),
+                std::uint8_t{0x5A},
+                "oversized getentropy changed guest memory");
+
+    state.rax = callNumber;
+    state.rdi = 0x8300;
+    state.rsi = 256;
+    state.rflags = 0x3;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "maximum-sized getentropy request failed");
+    expectEqual(state.rflags, std::uint64_t{0x2},
+                "maximum-sized getentropy did not clear BSD carry");
+
+    constexpr rosa::guest::GuestAddress crossPageBuffer{0x8FF0};
+    std::array<std::uint8_t, 16> crossPageSentinel{};
+    crossPageSentinel.fill(0x3C);
+    addressSpace.writeBytes(crossPageBuffer, crossPageSentinel);
+    state.rax = callNumber;
+    state.rdi = crossPageBuffer.value;
+    state.rsi = 32;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "cross-page getentropy returned the wrong guest errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "cross-page getentropy did not set BSD carry");
+    expectEqual(addressSpace.readBytes(crossPageBuffer, 16),
+                std::vector<std::uint8_t>(16, 0x3C),
+                "cross-page getentropy partially changed guest memory");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{0x9000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read);
+    state.rax = callNumber;
+    state.rdi = 0x9000;
+    state.rsi = 16;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        readOnlyAddressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "getentropy read-only target returned the wrong guest errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "getentropy read-only target did not set BSD carry");
+
+    rosa::guest::AddressSpace emptyAddressSpace;
+    state.rax = callNumber;
+    state.rdi = UINT64_MAX;
+    state.rsi = 0;
+    state.rflags = 0x3;
+    static_cast<void>(dispatcher.dispatch(
+        emptyAddressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "zero-length getentropy rejected an unused guest pointer");
+    expectEqual(state.rflags, std::uint64_t{0x2},
+                "zero-length getentropy did not clear BSD carry");
+}
+
+void testGeneratedDarwinGetentropy() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress buffer{0x8000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0xF4, 0x01, 0x00, 0x02, // mov eax, 0x20001f4
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(buffer, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rdi = buffer.value;
+    state.rsi = 32;
+    state.rflags = 0x8D7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated getentropy terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "generated getentropy did not return success");
+    expectEqual(state.rcx, std::uint64_t{0x1007},
+                "generated getentropy lost SYSCALL fallthrough");
+    expectEqual(state.r11, std::uint64_t{0x8D7},
+                "generated getentropy did not save input flags");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "generated getentropy did not clear BSD carry");
+}
+
 void testDarwinThreadFastSetCthreadSelf() {
     constexpr auto callNumber = UINT64_C(0x03000003);
     constexpr std::uint64_t guestTsdBase = 0x00007FF8000C8F20ULL;
@@ -8517,6 +8667,8 @@ int main() {
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin thread_selfid", testDarwinThreadSelfid},
         {"generated Darwin thread_selfid", testGeneratedDarwinThreadSelfid},
+        {"Darwin getentropy", testDarwinGetentropy},
+        {"generated Darwin getentropy", testGeneratedDarwinGetentropy},
         {"Darwin thread_fast_set_cthread_self",
          testDarwinThreadFastSetCthreadSelf},
         {"generated Darwin thread_fast_set_cthread_self",
