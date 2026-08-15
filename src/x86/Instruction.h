@@ -34,6 +34,7 @@ enum class Opcode {
     OrRegReg,
     OrRegImm,
     XorRegReg,
+    XorRegMem,
     AndRegReg,
     AndRegImm,
     BitScanForwardRegReg,

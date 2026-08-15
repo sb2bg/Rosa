@@ -1740,6 +1740,53 @@ void testXor32BitRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x46}, "XOR r8d, r8d flags differ");
 }
 
+void testXor32BitRegisterFromGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{0x41, 0x33, 0x04, 0x24, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegMem,
+           "XOR r32, [memory] opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R12,
+           "XOR no-index SIB base differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8000}, 0x45545F5F);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0xAAAAAAAA45545F5FULL;
+    state.r12 = 0x8000;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0},
+                "XOR r32, [memory] result or zero extension differs");
+    expectEqual(state.r12, std::uint64_t{0x8000}, "XOR changed memory base");
+    expectEqual(state.rflags, std::uint64_t{0x46}, "XOR memory flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x45545F5F;
+    faultState.r12 = 0x8000;
+    faultState.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "XOR from unmapped guest memory did not fail");
+    expectEqual(faultState.rax, std::uint64_t{0x45545F5F},
+                "failed XOR memory changed destination");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "failed XOR memory changed flags");
+}
+
 void testXorpsRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x57, 0xC1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2768,6 +2815,8 @@ int main() {
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"OR short immediate generated execution", testOrShortImmediateGeneratedExecution},
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
+        {"XOR 32-bit register from guest memory",
+         testXor32BitRegisterFromGuestMemory},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PCMPEQB guest memory generated execution",

@@ -707,6 +707,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x8BU && opcode != 0x85U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
+            opcode != 0x33U &&
             opcode != 0x21U &&
             opcode != 0x81U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xFFU &&
@@ -902,6 +903,51 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::XorRegReg;
             instruction.operands.push_back(RegisterOperand{destination, width});
             instruction.operands.push_back(RegisterOperand{source, width});
+        } else if (opcode == 0x33U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated xor register, [memory]");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode > 0x2U || rexW || rexX || (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only XOR r32, [base+disp8/disp32] is supported");
+            }
+            auto baseEncoding = rmEncoding;
+            if (rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated XOR memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits = static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding = static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if (scaleBits != 0 || indexEncoding != 0x4U ||
+                    (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                    throw DecodeError(address, remaining,
+                                      "only no-index SIB addressing is supported for XOR");
+                }
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated XOR memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated XOR memory disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::XorRegMem;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR), 32});
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(baseEncoding, rexB), displacement, 32});
         } else if (opcode == 0x39U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated cmp r64, r64");
