@@ -92,6 +92,29 @@ storeGuest8(GuestExecutionContext *context, x86::X86State *state, std::uint64_t 
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+storeGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+             std::uint64_t value) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated 32-bit guest store has no address space");
+        }
+        std::array<std::uint8_t, sizeof(std::uint32_t)> bytes{};
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            bytes[index] = static_cast<std::uint8_t>(value >> (index * 8U));
+        }
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 storeGuestXmm128(GuestExecutionContext *context, x86::X86State *state,
                  std::uint64_t address, std::uint64_t registerIndex,
                  std::uint64_t alignmentRequired) noexcept {
@@ -485,6 +508,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto width = source.width == 32 ? ir::Width::I32 : ir::Width::I64;
             const auto base =
                 builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
             const auto displacement = builder.constant(
@@ -493,8 +517,8 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto address =
                 builder.add(base, displacement, ir::Width::I64, instruction.address);
             const auto value =
-                builder.readGuestRegister(source.reg, ir::Width::I64, instruction.address);
-            builder.storeGuest(address, value, ir::Width::I64, instruction.address);
+                builder.readGuestRegister(source.reg, width, instruction.address);
+            builder.storeGuest(address, value, width, instruction.address);
             break;
         }
         case x86::Opcode::MovRegMem: {
@@ -1178,9 +1202,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x2, hostRegister(*operation.lhs));
             assembler.mov(arm64::x3, hostRegister(*operation.rhs));
             assembler.mov(arm64::x0, arm64::x19);
-            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I8
-                                                   ? pointerBits(&storeGuest8)
-                                                   : pointerBits(&storeGuest64));
+            assembler.movImmediate(
+                arm64::x16,
+                operation.width == ir::Width::I8
+                    ? pointerBits(&storeGuest8)
+                    : operation.width == ir::Width::I32
+                          ? pointerBits(&storeGuest32)
+                          : pointerBits(&storeGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

@@ -135,8 +135,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 stream << "+0x" << memory.displacement;
             }
             stream << "], "
-                   << x86::registerName(
-                          std::get<x86::RegisterOperand>(instruction.operands[1]).reg);
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
         }
         case x86::Opcode::MovRegMem: {

@@ -719,10 +719,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             } else {
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
                 if (rexX || mode > 0x2U || rmEncoding == 0x4U ||
-                    (mode == 0 && rmEncoding == 0x5U) || (!rexW && opcode != 0x8BU)) {
+                    (mode == 0 && rmEncoding == 0x5U)) {
                     throw DecodeError(
                         address, remaining,
-                        "only MOV r64 to/from [base+disp8/disp32] memory operands are supported");
+                        "only MOV register to/from [base+disp8/disp32] memory operands are supported");
                 }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
