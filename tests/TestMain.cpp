@@ -176,6 +176,31 @@ void testLegacyMov32ImmediateGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "legacy MOV r32 changed flags");
 }
 
+void testRexExtendedMov32ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x41, 0xBD, 0x20, 0x00, 0x00, 0x00, 0xC3,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegImm,
+           "REX MOV r32, imm32 opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::R13,
+           "REX MOV r32 destination differs");
+    expectEqual(destination.width, std::uint8_t{32}, "REX MOV r32 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r13 = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r13, std::uint64_t{0x20},
+                "REX MOV r32 did not clear the upper half");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "REX MOV r32 changed flags");
+}
+
 void testDecoderPushImm8() {
     constexpr std::array<std::uint8_t, 3> positive{0x6A, 0x7F, 0xC3};
     constexpr std::array<std::uint8_t, 3> negative{0x6A, 0x80, 0xC3};
@@ -1983,6 +2008,7 @@ int main() {
         {"R1 decoder", testDecoderR1},
         {"extended register and signed immediate", testDecoderExtendedRegisterAndSignedImmediate},
         {"legacy MOV 32-bit immediate", testLegacyMov32ImmediateGeneratedExecution},
+        {"REX extended MOV 32-bit immediate", testRexExtendedMov32ImmediateGeneratedExecution},
         {"PUSH imm8 decoder", testDecoderPushImm8},
         {"PUSH imm8 generated execution", testPushImm8GeneratedExecution},
         {"PUSH imm8 guest stack faults", testPushImm8GuestStackFaults},

@@ -536,19 +536,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         if (!rexW && opcode != 0x89U && opcode != 0x8BU && opcode != 0x85U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
             opcode != 0x31U && opcode != 0x81U && opcode != 0xC1U &&
-            opcode != 0xC6U) {
+            opcode != 0xC6U && (opcode < 0xB8U || opcode > 0xBFU)) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
         }
         if (opcode >= 0xB8U && opcode <= 0xBFU) {
-            if (code.size() - cursor < sizeof(std::uint64_t)) {
-                throw DecodeError(address, remaining, "truncated mov r64, imm64");
+            const auto immediateSize = rexW ? sizeof(std::uint64_t) : sizeof(std::uint32_t);
+            if (code.size() - cursor < immediateSize) {
+                throw DecodeError(address, remaining, "truncated mov register, immediate");
             }
+            const auto immediate = rexW
+                                       ? readU64(code.subspan(cursor, immediateSize))
+                                       : static_cast<std::uint64_t>(static_cast<std::uint32_t>(
+                                             readI32(code.subspan(cursor, immediateSize))));
             instruction.opcode = Opcode::MovRegImm;
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(static_cast<std::uint8_t>(opcode - 0xB8U), rexB), 64});
-            instruction.operands.push_back(ImmediateOperand{readU64(code.subspan(cursor, 8)), 64});
-            cursor += sizeof(std::uint64_t);
+                decodeRegister(static_cast<std::uint8_t>(opcode - 0xB8U), rexB),
+                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+            instruction.operands.push_back(
+                ImmediateOperand{immediate, static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+            cursor += immediateSize;
         } else if (opcode == 0x0FU) {
             if (code.size() - cursor < 3 || code[cursor] != 0xACU) {
                 throw DecodeError(address, remaining,
