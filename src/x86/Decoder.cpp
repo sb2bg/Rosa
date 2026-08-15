@@ -750,7 +750,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         if (!hasRex && code[cursor] != 0x88U && code[cursor] != 0x89U &&
-            code[cursor] != 0x8BU &&
+            code[cursor] != 0x8BU && code[cursor] != 0x8DU &&
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
             code[cursor] != 0x21U && code[cursor] != 0x09U &&
@@ -773,6 +773,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const auto opcode = code[cursor++];
         if (!rexW && opcode != 0x88U && opcode != 0x89U && opcode != 0x8AU &&
             opcode != 0x8BU && opcode != 0x85U &&
+            opcode != 0x8DU &&
             opcode != 0x09U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
@@ -1254,7 +1255,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto target = relativeTarget(address, length, displacement);
                 instruction.opcode = Opcode::LeaRegRipRelative;
                 instruction.operands.push_back(
-                    RegisterOperand{decodeRegister(destination, rexR), 64});
+                    RegisterOperand{decodeRegister(destination, rexR),
+                                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
                 instruction.operands.push_back(ImmediateOperand{target.value, 64});
             } else {
                 if (mode > 0x2U || (mode == 0 && memoryRegister == 0x5U)) {
@@ -1301,7 +1303,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 instruction.opcode = Opcode::LeaRegMem;
                 instruction.operands.push_back(
-                    RegisterOperand{decodeRegister(destination, rexR), 64});
+                    RegisterOperand{decodeRegister(destination, rexR),
+                                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
                 instruction.operands.push_back(
                     MemoryOperand{base, displacement, 64, index, scale});
             }

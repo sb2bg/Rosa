@@ -2241,6 +2241,28 @@ void testLeaBaseDisplacementExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "LEA changed flags");
 }
 
+void testLea32BitBaseDisplacementExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x8D, 0x48, 0xE5, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::LeaRegMem,
+           "LEA r32, [base+disp8] opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{32}, "LEA r32 destination width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 25;
+    state.rcx = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xFFFFFFFE},
+                "LEA r32 result or zero extension differs");
+    expectEqual(state.rax, std::uint64_t{25}, "LEA r32 changed base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "LEA r32 changed flags");
+}
+
 void testLeaBaseIndexExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x4A, 0x8D, 0x14, 0x28, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3016,6 +3038,7 @@ int main() {
         {"MOVDQU register to guest memory", testMovdquRegisterToGuestMemory},
         {"register move execution", testRegisterMoveExecution},
         {"LEA base displacement execution", testLeaBaseDisplacementExecution},
+        {"LEA 32-bit base displacement execution", testLea32BitBaseDisplacementExecution},
         {"LEA base index execution", testLeaBaseIndexExecution},
         {"legacy 32-bit register move execution", testLegacyRegisterMove32Execution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},

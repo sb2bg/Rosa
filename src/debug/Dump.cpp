@@ -205,8 +205,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::LeaRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << "lea "
-                   << x86::registerName(
-                          std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", [" << x86::registerName(memory.base);
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index);

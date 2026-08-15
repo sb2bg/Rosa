@@ -809,8 +809,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto address = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            const auto value = builder.constant(address.value, ir::Width::I64, instruction.address);
-            builder.writeGuestRegister(reg.reg, value, ir::Width::I64, instruction.address);
+            const auto value = builder.constant(
+                reg.width == 32 ? static_cast<std::uint32_t>(address.value)
+                                : address.value,
+                reg.width == 32 ? ir::Width::I32 : ir::Width::I64,
+                instruction.address);
+            builder.writeGuestRegister(reg.reg, value,
+                                       reg.width == 32 ? ir::Width::I32 : ir::Width::I64,
+                                       instruction.address);
             break;
         }
         case x86::Opcode::LeaRegMem: {
@@ -835,7 +841,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 result = builder.add(result, index, ir::Width::I64,
                                      instruction.address);
             }
-            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+            if (destination.width == 32) {
+                const auto mask = builder.constant(UINT32_MAX, ir::Width::I64,
+                                                   instruction.address);
+                result = builder.bitAnd(result, mask, ir::Width::I64,
+                                        instruction.address);
+            }
+            builder.writeGuestRegister(destination.reg, result,
+                                       destination.width == 32 ? ir::Width::I32
+                                                               : ir::Width::I64,
                                        instruction.address);
             break;
         }
