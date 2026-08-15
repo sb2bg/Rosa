@@ -2187,9 +2187,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             if (mode != 0x3U || rexR || rexX ||
                 (extension != 0x4U && extension != 0x5U) ||
-                (extension == 0x4U && !rexW) || (extension == 0x5U && rexW)) {
+                (extension == 0x4U && !rexW)) {
                 throw DecodeError(address, remaining,
-                                  "only SHL r64 /4 and SHR r32 /5 from opcode C1 are supported");
+                                  "only SHL r64 /4 and SHR r32/r64 /5 from opcode C1 are supported");
             }
             instruction.opcode = extension == 0x4U ? Opcode::ShlRegImm : Opcode::ShrRegImm;
             instruction.operands.push_back(RegisterOperand{

@@ -449,6 +449,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("shr64_many", CaseId::shr64_many,
+                             differentialBytes_shr64_many);
+        testCase.request.state.rax = 0xE000000000000200ULL;
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shr64_masked_zero", CaseId::shr64_masked_zero,
+                             differentialBytes_shr64_masked_zero);
+        testCase.request.state.rax = 0xE000000000000200ULL;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
         auto testCase = make("shrd64_many", CaseId::shrd64_many,
                              differentialBytes_shrd64_many);
         testCase.request.state.rax = 0x0123456789ABCDEFULL;
@@ -3959,6 +3973,62 @@ void testShiftRight32ImmediateGeneratedExecution() {
                 "SHR masked-zero changed flags");
 }
 
+void testShiftRight64ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0xC1, 0xE8, 0x3E, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShrRegImm,
+           "SHR r64, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "SHR r64 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rax,
+           "SHR r64 destination differs");
+    expectEqual(destination.width, std::uint8_t{64}, "SHR r64 width differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{62}, "SHR r64 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("shr rax, 0x3e") != std::string::npos,
+           "SHR r64 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0xE000000000000200ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{3}, "SHR r64 count-62 result differs");
+    constexpr std::uint64_t definedManyFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U);
+    expectEqual(state.rflags & definedManyFlags,
+                std::uint64_t{(1U << 0U) | (1U << 2U)},
+                "SHR r64 count-62 defined flags differ");
+
+    constexpr std::array<std::uint8_t, 5> countOne{0x48, 0xC1, 0xE8, 0x01, 0xC3};
+    const auto oneBlock = translator.translate(countOne, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State oneState;
+    oneState.rax = 0x8000000000000001ULL;
+    oneState.rflags = 0x10;
+    static_cast<void>(oneBlock.execute(oneState));
+    expectEqual(oneState.rax, std::uint64_t{0x4000000000000000ULL},
+                "SHR r64 count-one result differs");
+    constexpr std::uint64_t definedOneFlags =
+        definedManyFlags | (std::uint64_t{1} << 11U);
+    expectEqual(oneState.rflags & definedOneFlags,
+                std::uint64_t{(1U << 0U) | (1U << 2U) | (1U << 11U)},
+                "SHR r64 count-one defined flags differ");
+
+    constexpr std::array<std::uint8_t, 5> zeroCount{0x48, 0xC1, 0xE8, 0x40, 0xC3};
+    const auto zeroBlock = translator.translate(zeroCount, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0xE000000000000200ULL;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(zeroBlock.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0xE000000000000200ULL},
+                "SHR r64 masked-zero changed RAX");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "SHR r64 masked-zero changed flags");
+}
+
 void testUnsignedMultiplyGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0xF7, 0xE1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -6607,6 +6677,7 @@ int main() {
         {"SHL CL generated execution", testShiftLeftClGeneratedExecution},
         {"SHL 32-bit CL generated execution", testShiftLeft32ClGeneratedExecution},
         {"SHR 32-bit immediate generated execution", testShiftRight32ImmediateGeneratedExecution},
+        {"SHR 64-bit immediate generated execution", testShiftRight64ImmediateGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
