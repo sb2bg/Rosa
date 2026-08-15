@@ -1634,6 +1634,51 @@ void testMovGuestMemoryToByteRegister() {
                 "failed MOV byte load changed flags");
 }
 
+void testMovzxLowByteRegisterTo32BitRegister() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x44, 0x0F, 0xB6, 0xE9, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovzxRegReg,
+           "MOVZX r32, r8 opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R13 &&
+               destination.width == 32,
+           "MOVZX r13d destination differs");
+    expect(source.reg == rosa::x86::Register::Rcx && source.width == 8,
+           "MOVZX CL source differs");
+    expect(rosa::debug::dumpX86(decoded).find("movzx r13d, cl") !=
+               std::string::npos,
+           "MOVZX r13d, cl dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r13 = UINT64_MAX;
+    state.rcx = 0x11223344556677ABULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r13, std::uint64_t{0xAB},
+                "MOVZX r32, r8 result did not zero-extend");
+    expectEqual(state.rcx, std::uint64_t{0x11223344556677ABULL},
+                "MOVZX r32, r8 changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVZX r32, r8 changed flags");
+
+    constexpr std::array<std::uint8_t, 3> highByteCode{0x0F, 0xB6, 0xE4};
+    bool rejectedHighByte = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            highByteCode, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejectedHighByte = true;
+    }
+    expect(rejectedHighByte, "MOVZX from AH was not rejected explicitly");
+}
+
 void testMovzxGuestWordTo32BitRegister() {
     constexpr std::array<std::uint8_t, 7> code{
         0x41, 0x0F, 0xB7, 0x4C, 0x24, 0x04, 0xC3};
@@ -4067,6 +4112,8 @@ int main() {
          testMovGuestMemoryToRegisterWithNoIndexSib},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
+        {"MOVZX low-byte register to 32-bit register",
+         testMovzxLowByteRegisterTo32BitRegister},
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},
         {"MOVSXD scaled guest dword", testMovsxdScaledGuestDword},
         {"legacy MOV guest memory to 32-bit register",

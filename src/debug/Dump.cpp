@@ -31,8 +31,13 @@ std::string valueName(ir::ValueId value) { return "%" + std::to_string(value.val
 
 std::string registerOperandName(x86::RegisterOperand operand) {
     if (operand.width == 8) {
-        constexpr std::array legacyByteNames{"al", "cl", "dl", "bl"};
-        return std::string(legacyByteNames.at(static_cast<std::size_t>(operand.reg)));
+        constexpr std::array byteNames{
+            "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil"};
+        const auto encoding = static_cast<std::size_t>(operand.reg);
+        if (encoding < byteNames.size()) {
+            return std::string(byteNames[encoding]);
+        }
+        return "r" + std::to_string(encoding) + "b";
     }
     if (operand.width == 16) {
         constexpr std::array legacyWordNames{
@@ -185,6 +190,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
+        case x86::Opcode::MovzxRegReg:
+            stream << "movzx "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]));
+            break;
         case x86::Opcode::MovzxRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << "movzx "

@@ -336,6 +336,45 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        const bool movzxByteHasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+        const auto movzxByteOpcodeOffset = cursor + (movzxByteHasRex ? 1U : 0U);
+        if (code.size() - movzxByteOpcodeOffset >= 2 &&
+            code[movzxByteOpcodeOffset] == 0x0FU &&
+            code[movzxByteOpcodeOffset + 1] == 0xB6U) {
+            if (code.size() - movzxByteOpcodeOffset < 3) {
+                throw DecodeError(address, remaining,
+                                  "truncated movzx r32, byte register");
+            }
+            const auto rex = movzxByteHasRex ? code[cursor] : 0U;
+            const bool rexW = (rex & 0x8U) != 0;
+            const bool rexR = (rex & 0x4U) != 0;
+            const bool rexB = (rex & 0x1U) != 0;
+            const auto modrm = code[movzxByteOpcodeOffset + 2];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (rexW || mode != 0x3U ||
+                (!movzxByteHasRex && rmEncoding >= 0x4U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only MOVZX r32, low-byte register is supported");
+            }
+            instruction.opcode = Opcode::MovzxRegReg;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR), 32});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(rmEncoding, rexB), 8});
+            const auto length = movzxByteOpcodeOffset + 3 - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            cursor = movzxByteOpcodeOffset + 3;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         const bool movzxHasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         const auto movzxOpcodeOffset = cursor + (movzxHasRex ? 1U : 0U);
         if (code.size() - movzxOpcodeOffset >= 2 &&
