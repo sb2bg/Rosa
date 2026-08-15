@@ -1127,16 +1127,24 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             cursor += 3;
             const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             auto baseEncoding = rmEncoding;
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
             if (!ripRelative && rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated MOVUPS SIB byte");
                 }
                 const auto sib = code[cursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
                 const auto indexEncoding = static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
                 baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-                if (indexEncoding != 0x4U || (mode == 0 && baseEncoding == 0x5U)) {
+                if (mode == 0 && baseEncoding == 0x5U) {
                     throw DecodeError(address, remaining,
-                                      "only no-index MOVUPS SIB addressing is supported");
+                                      "no-base MOVUPS SIB addressing is not supported");
+                }
+                if (indexEncoding != 0x4U) {
+                    index = decodeRegister(indexEncoding, false);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
                 }
             }
             std::int64_t displacement = 0;
@@ -1169,7 +1177,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     ? MemoryOperand{Register::Rax, displacement, 128,
                                     std::nullopt, 1, false, true}
                     : MemoryOperand{decodeRegister(baseEncoding, false),
-                                    displacement, 128});
+                                    displacement, 128, index, scale});
             instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
 

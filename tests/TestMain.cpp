@@ -1096,6 +1096,19 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movups_scaled_store",
+                             CaseId::movups_scaled_store,
+                             differentialBytes_movups_scaled_store);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rdx = 0x20;
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        testCase.memoryCompareOffset = 0x20;
+        testCase.memoryCompareSize = 16;
+        run(testCase);
+    }
+    {
         auto testCase = make("movups_load", CaseId::movups_load,
                              differentialBytes_movups_load);
         bindMemory(testCase, rosa::x86::Register::R15, 3);
@@ -6768,6 +6781,75 @@ void testMovupsRegisterToGuestMemoryWithSib() {
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x811B}),
                 state.xmm[0].high, "MOVUPS stored the wrong high lane");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVUPS changed flags");
+
+    constexpr std::array<std::uint8_t, 5> indexedCode{
+        0x0F, 0x11, 0x04, 0x17, 0xC3};
+    const auto indexedDecoded = decoder.decodeBlock(
+        indexedCode, rosa::guest::GuestAddress{0x2000});
+    expectEqual(indexedDecoded[0].length, std::uint8_t{4},
+                "indexed MOVUPS store length differs");
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(indexedDecoded[0].operands[0]);
+    expect(indexedMemory.base == rosa::x86::Register::Rdi &&
+               indexedMemory.index == rosa::x86::Register::Rdx &&
+               indexedMemory.scale == 1 &&
+               indexedMemory.displacement == 0 &&
+               indexedMemory.width == 128,
+           "indexed MOVUPS store effective address differs");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "movups [rdi+rdx*1], xmm0") != std::string::npos,
+           "indexed MOVUPS store dump differs");
+    const auto indexedBlock = translator.translate(
+        indexedCode, rosa::guest::GuestAddress{0x2000});
+    state.rdi = memoryBase.value;
+    state.rdx = 0x23;
+    state.xmm[0] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(indexedBlock.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8023}),
+                state.xmm[0].low,
+                "indexed MOVUPS stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x802B}),
+                state.xmm[0].high,
+                "indexed MOVUPS stored the wrong high lane");
+    expectEqual(state.rdi, memoryBase.value,
+                "indexed MOVUPS changed its base");
+    expectEqual(state.rdx, std::uint64_t{0x23},
+                "indexed MOVUPS changed its index");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "indexed MOVUPS changed flags");
+
+    constexpr rosa::guest::GuestAddress crossPageTarget{0x8FF8};
+    constexpr std::array<std::uint8_t, 8> sentinel{
+        1, 2, 3, 4, 5, 6, 7, 8};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        memoryBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    crossPageAddressSpace.writeBytes(crossPageTarget, sentinel);
+    state.rdi = memoryBase.value;
+    state.rdx = crossPageTarget.value - memoryBase.value;
+    state.rflags = 0xBD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(indexedBlock.execute(state,
+                                               &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page indexed MOVUPS did not fault");
+    expect(crossPageAddressSpace.readBytes(crossPageTarget, sentinel.size()) ==
+               std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+           "cross-page indexed MOVUPS partially changed memory");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x8877665544332211ULL},
+                "faulted indexed MOVUPS changed low XMM lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x1020304050607080ULL},
+                "faulted indexed MOVUPS changed high XMM lane");
+    expectEqual(state.rflags, std::uint64_t{0xBD7},
+                "faulted indexed MOVUPS changed flags");
 }
 
 void testMovupsRegisterToRipRelativeGuestMemory() {

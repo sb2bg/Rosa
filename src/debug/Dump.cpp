@@ -789,6 +789,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             } else {
                 stream << x86::registerName(memory.base);
             }
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
