@@ -507,6 +507,14 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmp32_register_legacy",
+                             CaseId::cmp32_register_legacy,
+                             differentialBytes_cmp32_register_legacy);
+        testCase.request.state.rdx = 0xAAAAAAAA80000000ULL;
+        testCase.request.state.rsi = 0xBBBBBBBB00000001ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp8_register_immediate",
                              CaseId::cmp8_register_immediate,
                              differentialBytes_cmp8_register_immediate);
@@ -3497,6 +3505,33 @@ void testCompare32BitRegisters() {
     expectEqual(state.rcx, std::uint64_t{0xBBBBBBBB00000013ULL},
                 "CMP r32, r32 changed rhs");
     expectEqual(state.rflags, std::uint64_t{0x46}, "CMP r32, r32 flags differ");
+
+    constexpr std::array<std::uint8_t, 3> legacyCode{0x39, 0xF2, 0xC3};
+    const auto legacyDecoded = decoder.decodeBlock(
+        legacyCode, rosa::guest::GuestAddress{0x2000});
+    expect(legacyDecoded[0].opcode == rosa::x86::Opcode::CmpRegReg,
+           "legacy CMP r32, r32 opcode differs");
+    const auto legacyLhs =
+        std::get<rosa::x86::RegisterOperand>(legacyDecoded[0].operands[0]);
+    const auto legacyRhs =
+        std::get<rosa::x86::RegisterOperand>(legacyDecoded[0].operands[1]);
+    expect(legacyLhs.reg == rosa::x86::Register::Rdx &&
+               legacyLhs.width == 32 &&
+               legacyRhs.reg == rosa::x86::Register::Rsi &&
+               legacyRhs.width == 32,
+           "legacy CMP EDX, ESI operands differ");
+    const auto legacyBlock = translator.translate(
+        legacyCode, rosa::guest::GuestAddress{0x2000});
+    state.rdx = 0xAAAAAAAA80000000ULL;
+    state.rsi = 0xBBBBBBBB00000001ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(legacyBlock.execute(state));
+    expectEqual(state.rdx, std::uint64_t{0xAAAAAAAA80000000ULL},
+                "legacy CMP changed EDX");
+    expectEqual(state.rsi, std::uint64_t{0xBBBBBBBB00000001ULL},
+                "legacy CMP changed ESI");
+    expectEqual(state.rflags, std::uint64_t{0x816},
+                "legacy CMP EDX, ESI flags differ");
 }
 
 void testMovRegisterToGuestMemory() {

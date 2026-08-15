@@ -1630,7 +1630,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x09U &&
             code[cursor] != 0x87U &&
             code[cursor] != 0x2BU && code[cursor] != 0x33U &&
-            code[cursor] != 0x3AU && code[cursor] != 0x3BU &&
+            code[cursor] != 0x39U && code[cursor] != 0x3AU &&
+            code[cursor] != 0x3BU &&
             code[cursor] != 0x80U &&
             code[cursor] != 0x81U && code[cursor] != 0xC1U &&
             code[cursor] != 0xC6U && code[cursor] != 0xC7U &&
