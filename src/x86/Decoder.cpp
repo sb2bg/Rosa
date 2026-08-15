@@ -3225,10 +3225,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(ImmediateOperand{
                     static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
             } else {
-            if (!rexW && extension != 0x1U && extension != 0x4U &&
+            if (!rexW && extension != 0x0U && extension != 0x1U &&
+                extension != 0x4U && extension != 0x5U &&
                 extension != 0x7U) {
                 throw DecodeError(address, remaining,
-                                  "only 32-bit OR /1, AND /4, and CMP /7 are supported from legacy opcode 83");
+                                  "only 32-bit ADD /0, OR /1, AND /4, SUB /5, and CMP /7 are supported from legacy opcode 83");
             }
             if (mode != 0x3U || rexR || rexX ||
                 (extension != 0x0U && extension != 0x1U && extension != 0x4U && extension != 0x5U &&

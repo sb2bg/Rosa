@@ -473,6 +473,36 @@ updateAddFlags8(x86::X86State *state, std::uint64_t lhsValue,
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *
+updateAddFlags32(x86::X86State *state, std::uint64_t lhsValue,
+                 std::uint64_t rhsValue, std::uint64_t resultValue) {
+    const auto lhs = static_cast<std::uint32_t>(lhsValue);
+    const auto rhs = static_cast<std::uint32_t>(rhsValue);
+    const auto result = static_cast<std::uint32_t>(resultValue);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (static_cast<std::uint64_t>(lhs) + static_cast<std::uint64_t>(rhs) >
+        UINT32_MAX) {
+        flags |= flagCarry;
+    }
+    if ((std::popcount(static_cast<unsigned>(result & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (((lhs ^ rhs ^ result) & 0x10U) != 0) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result & 0x80000000U) != 0) {
+        flags |= flagSign;
+    }
+    if (((~(lhs ^ rhs) & (lhs ^ result)) & 0x80000000U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 template <typename Value>
 x86::X86State *updateIncFlags(x86::X86State *state, std::uint64_t originalValue,
                               std::uint64_t resultValue) {
@@ -1488,12 +1518,13 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            if (reg.width != 8 && reg.width != 64) {
+            if (reg.width != 8 && reg.width != 32 && reg.width != 64) {
                 throw std::runtime_error(
-                    "only 8-bit and 64-bit immediate ADD are implemented");
+                    "only 8-bit, 32-bit, and 64-bit immediate ADD are implemented");
             }
-            const auto width = reg.width == 8 ? ir::Width::I8
-                                               : ir::Width::I64;
+            const auto width = reg.width == 8    ? ir::Width::I8
+                               : reg.width == 32 ? ir::Width::I32
+                                                 : ir::Width::I64;
             const auto lhs = builder.readGuestRegister(
                 reg.reg, width, instruction.address);
             const auto rhs = builder.constant(immediate.value, width,
@@ -3030,6 +3061,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     arm64::x16,
                     operation.width == ir::Width::I8
                         ? pointerBits(&updateAddFlags8)
+                    : operation.width == ir::Width::I32
+                        ? pointerBits(&updateAddFlags32)
                         : pointerBits(&updateAddFlags64));
             } else {
                 assembler.movImmediate(

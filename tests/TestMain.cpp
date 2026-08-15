@@ -365,6 +365,13 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("add32_sign_extended_immediate",
+                             CaseId::add32_sign_extended_immediate,
+                             differentialBytes_add32_sign_extended_immediate);
+        testCase.request.state.rax = 0xAAAAAAAA80000003ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("sub64_borrow", CaseId::sub64_borrow,
                              differentialBytes_sub64_borrow);
         testCase.request.state.rdi = 5;
@@ -7723,6 +7730,50 @@ void testAddRegisterImmediate32() {
                 "ADD r64, negative imm32 flags differ");
 }
 
+void testAdd32BitRegisterShortImmediate() {
+    constexpr std::array<std::uint8_t, 4> code{0x83, 0xC0, 0xFC, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddRegImm,
+           "ADD r32, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "ADD r32, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 32,
+           "ADD EAX, imm8 destination differs");
+    expect(immediate.width == 8 && immediate.value == UINT64_MAX - 3,
+           "ADD EAX, imm8 was not sign-extended");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "add eax, 0xfffffffffffffffc") != std::string::npos,
+           "ADD EAX, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State overflowState;
+    overflowState.rax = 0xAAAAAAAA80000003ULL;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(block.execute(overflowState));
+    expectEqual(overflowState.rax, std::uint64_t{0x7FFFFFFF},
+                "ADD EAX, imm8 did not zero-extend its result");
+    expectEqual(overflowState.rflags, std::uint64_t{0x807},
+                "ADD EAX, negative imm8 overflow flags differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0xBBBBBBBB00000004ULL;
+    zeroState.rflags = 0x8D7;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0},
+                "ADD EAX, negative imm8 zero result differs");
+    expectEqual(zeroState.rflags, std::uint64_t{0x57},
+                "ADD EAX, negative imm8 zero flags differ");
+}
+
 void testAndResultAndFlags() {
     constexpr std::array<std::uint8_t, 15> code{
         0x48, 0xB8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0x83, 0xE0, 0xF0, 0xC3,
@@ -9302,6 +9353,8 @@ int main() {
         {"add carry/zero flags", testAddFlagsCarryAndZero},
         {"add signed-overflow flags", testAddFlagsSignedOverflow},
         {"add register imm32", testAddRegisterImmediate32},
+        {"add 32-bit register short immediate",
+         testAdd32BitRegisterShortImmediate},
         {"and result/flags", testAndResultAndFlags},
         {"AND 32-bit registers", testAnd32BitRegisters},
         {"AND 8-bit registers", testAnd8BitRegisters},
