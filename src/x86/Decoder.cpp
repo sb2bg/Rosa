@@ -1549,6 +1549,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
             code[cursor] != 0x20U && code[cursor] != 0x21U &&
+            code[cursor] != 0x22U &&
             code[cursor] != 0x08U &&
             code[cursor] != 0x09U &&
             code[cursor] != 0x2BU && code[cursor] != 0x33U &&
@@ -1587,7 +1588,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x3AU &&
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
             opcode != 0x2BU && opcode != 0x33U &&
-            opcode != 0x20U && opcode != 0x21U &&
+            opcode != 0x20U && opcode != 0x21U && opcode != 0x22U &&
             opcode != 0x81U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD3U &&
             opcode != 0xFFU &&
@@ -2342,6 +2343,56 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                             hasGsOverride ? Segment::Gs : Segment::None});
                 }
             }
+        } else if (opcode == 0x22U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining,
+                                  "truncated and byte register, [memory]");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto regEncoding =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
+            if (mode == 0x3U || rmEncoding == 0x4U ||
+                (!hasRex && regEncoding >= 0x4U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only AND representable-byte-register, byte [base/RIP+disp8/disp32] is supported");
+            }
+            std::int64_t displacement = 0;
+            if (ripRelative) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated RIP-relative byte AND disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+            } else if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated byte AND disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated byte AND disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::AndRegMem;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(regEncoding, rexR), 8});
+            instruction.operands.push_back(
+                ripRelative
+                    ? MemoryOperand{Register::Rax, displacement, 8,
+                                    std::nullopt, 1, false, true}
+                    : MemoryOperand{decodeRegister(rmEncoding, rexB),
+                                    displacement, 8});
         } else if (opcode == 0x84U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated test r8, r8");

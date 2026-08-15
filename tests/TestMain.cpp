@@ -393,6 +393,13 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("and8_rip_memory", CaseId::and8_rip_memory,
+                             differentialBytes_and8_rip_memory);
+        testCase.request.state.r14 = 0x11223344556677F3ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("or64_register", CaseId::or64_register,
                              differentialBytes_or64_register);
         testCase.request.state.rax = 0x00000000ABCDEF01ULL;
@@ -7035,6 +7042,97 @@ void testAnd8BitRegisters() {
     expect(rejected, "AND AL, AH was silently treated as a low-byte register form");
 }
 
+void testAnd8BitRegisterWithRipRelativeGuestMemory() {
+    constexpr std::array<std::uint8_t, 8> observed{
+        0x44, 0x22, 0x35, 0xE0, 0x9E, 0x06, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF80005C225ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observed, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegMem,
+           "AND r8, byte [RIP] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "AND r8, byte [RIP] length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R14 &&
+               destination.width == 8,
+           "AND r8, byte [RIP] destination differs");
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 8 &&
+               memory.displacement == 0x69EE0,
+           "AND r8, byte [RIP] memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "and r14b, byte [rip+0x69ee0] ; 0x7ff8000c610c") !=
+               std::string::npos,
+           "AND r8, byte [RIP] dump differs");
+
+    constexpr std::array<std::uint8_t, 8> code{
+        0x44, 0x22, 0x35, 0xF9, 0x0F, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress sourceAddress{0x2000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(sourceAddress, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+
+    const std::array sourceParity{std::uint8_t{0x0F}};
+    addressSpace.writeBytes(sourceAddress, sourceParity);
+    rosa::x86::X86State state;
+    state.r14 = 0x11223344556677F3ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r14, std::uint64_t{0x1122334455667703ULL},
+                "AND byte memory did not preserve upper R14 bytes");
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 2U},
+                "AND byte memory parity flags differ");
+    expectEqual(addressSpace.readBytes(sourceAddress, 1).front(),
+                std::uint8_t{0x0F}, "AND byte memory changed its source");
+
+    const std::array sourceZero{std::uint8_t{0}};
+    addressSpace.writeBytes(sourceAddress, sourceZero);
+    state.r14 = UINT64_MAX;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r14, std::uint64_t{0xFFFFFFFFFFFFFF00ULL},
+                "zero AND byte memory result differs");
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "zero AND byte memory flags differ");
+
+    const std::array sourceSign{std::uint8_t{0x80}};
+    addressSpace.writeBytes(sourceAddress, sourceSign);
+    state.r14 = UINT64_MAX;
+    state.rflags = 0;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r14, std::uint64_t{0xFFFFFFFFFFFFFF80ULL},
+                "signed AND byte memory result differs");
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 7U},
+                "signed AND byte memory flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.r14 = 0xAAAAAAAA55555555ULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "AND byte from unmapped guest memory did not fault");
+    expectEqual(faultState.r14, std::uint64_t{0xAAAAAAAA55555555ULL},
+                "faulted AND byte memory changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted AND byte memory changed flags");
+}
+
 void testBitScanForward32() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0xBC, 0xC6, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -8437,6 +8535,8 @@ int main() {
         {"and result/flags", testAndResultAndFlags},
         {"AND 32-bit registers", testAnd32BitRegisters},
         {"AND 8-bit registers", testAnd8BitRegisters},
+        {"AND 8-bit register with RIP-relative guest memory",
+         testAnd8BitRegisterWithRipRelativeGuestMemory},
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
