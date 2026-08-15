@@ -1821,7 +1821,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x81U && code[cursor] != 0xC0U &&
             code[cursor] != 0xC1U &&
             code[cursor] != 0xC6U && code[cursor] != 0xC7U &&
-            code[cursor] != 0xD3U &&
+            code[cursor] != 0xD0U && code[cursor] != 0xD3U &&
             code[cursor] != 0xFEU && code[cursor] != 0xFFU) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
@@ -1859,7 +1859,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x20U && opcode != 0x21U && opcode != 0x22U &&
             opcode != 0x0FU &&
             opcode != 0x81U && opcode != 0xC0U && opcode != 0xC1U &&
-            opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD3U &&
+            opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD0U &&
+            opcode != 0xD3U &&
             opcode != 0xFEU && opcode != 0xFFU &&
             (opcode < 0xB0U || opcode > 0xB7U) &&
             (opcode < 0xB8U || opcode > 0xBFU)) {
@@ -3164,6 +3165,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
                 static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
+        } else if (opcode == 0xD0U) {
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining,
+                                  "truncated implicit-count byte shift");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode != 0x3U || extension != 0x5U ||
+                (!hasRex && rmEncoding >= 0x4U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only SHR representable-byte-register, 1 from opcode D0 /5 is supported");
+            }
+            instruction.opcode = Opcode::ShrRegImm;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(rmEncoding, rexB), 8});
+            instruction.operands.push_back(ImmediateOperand{1, 8});
         } else if (opcode == 0xD1U) {
             if (cursor >= code.size()) {
                 throw DecodeError(address, remaining,

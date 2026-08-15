@@ -1011,6 +1011,26 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "shr8_accumulator_implicit_one",
+            CaseId::shr8_accumulator_implicit_one,
+            differentialBytes_shr8_accumulator_implicit_one);
+        testCase.request.state.rax = 0xAABBCCDDEEFF0006ULL;
+        testCase.flagMask =
+            carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "shr8_accumulator_implicit_one_high_bit",
+            CaseId::shr8_accumulator_implicit_one_high_bit,
+            differentialBytes_shr8_accumulator_implicit_one_high_bit);
+        testCase.request.state.rax = 0xAABBCCDDEEFF0081ULL;
+        testCase.flagMask =
+            carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("shr64_many", CaseId::shr64_many,
                              differentialBytes_shr64_many);
         testCase.request.state.rax = 0xE000000000000200ULL;
@@ -7843,6 +7863,46 @@ void testShiftRight8ImmediateGeneratedExecution() {
     expectEqual(oneState.rflags & oneDefinedFlags,
                 std::uint64_t{(1U << 0U) | (1U << 11U)},
                 "SHR r8b count-1 flags differ");
+
+    constexpr std::array<std::uint8_t, 3> implicitOne{
+        0xD0, 0xE8, 0xC3};
+    const auto implicitDecoded = decoder.decodeBlock(
+        implicitOne, rosa::guest::GuestAddress{0x7FF80005998DULL});
+    expect(implicitDecoded[0].opcode == rosa::x86::Opcode::ShrRegImm,
+           "SHR AL, 1 opcode differs");
+    expectEqual(implicitDecoded[0].length, std::uint8_t{2},
+                "SHR AL, 1 length differs");
+    const auto implicitDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            implicitDecoded[0].operands[0]);
+    const auto implicitCount =
+        std::get<rosa::x86::ImmediateOperand>(
+            implicitDecoded[0].operands[1]);
+    expect(implicitDestination.reg == rosa::x86::Register::Rax &&
+               implicitDestination.width == 8 && implicitCount.value == 1,
+           "SHR AL, 1 operands differ");
+    expect(rosa::debug::dumpX86(implicitDecoded).find("shr al, 0x1") !=
+               std::string::npos,
+           "SHR AL, 1 dump differs");
+    const auto implicitBlock = translator.translate(
+        implicitOne, rosa::guest::GuestAddress{0x7FF80005998DULL});
+    rosa::x86::X86State implicitState;
+    implicitState.rax = 0xAABBCCDDEEFF0006ULL;
+    implicitState.rflags = 0x10;
+    static_cast<void>(implicitBlock.execute(implicitState));
+    expectEqual(implicitState.rax, std::uint64_t{0xAABBCCDDEEFF0003ULL},
+                "SHR AL, 1 did not preserve upper RAX bits");
+    expectEqual(implicitState.rflags & oneDefinedFlags, std::uint64_t{0x4},
+                "SHR AL, 1 normal defined flags differ");
+
+    implicitState.rax = 0xAABBCCDDEEFF0081ULL;
+    implicitState.rflags = 0x10;
+    static_cast<void>(implicitBlock.execute(implicitState));
+    expectEqual(implicitState.rax, std::uint64_t{0xAABBCCDDEEFF0040ULL},
+                "SHR AL, 1 high-bit result differs");
+    expectEqual(implicitState.rflags & oneDefinedFlags,
+                std::uint64_t{(1U << 0U) | (1U << 11U)},
+                "SHR AL, 1 high-bit defined flags differ");
 
     constexpr std::array<std::uint8_t, 3> legacyHighByte{
         0xC0, 0xEC, 0x01};
