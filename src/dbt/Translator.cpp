@@ -207,6 +207,36 @@ extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags32(x86::X86S
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *
+updateShiftLeftFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t result,
+                       std::uint64_t unmaskedCount) {
+    const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x3FU);
+    if (count == 0) {
+        return state;
+    }
+    auto replacedFlags = flagCarry | flagParity | flagZero | flagSign;
+    if (count == 1) {
+        replacedFlags |= flagOverflow;
+    }
+    auto flags = (state->rflags & ~replacedFlags) | flagReservedOne;
+    const auto carry = (lhs >> (64U - count)) & 1U;
+    flags |= carry;
+    if ((std::popcount(static_cast<unsigned>(result & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result >> 63U) != 0) {
+        flags |= flagSign;
+    }
+    if (count == 1 && (((result >> 63U) & 1U) ^ carry) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 template <typename Pointer> std::uint64_t pointerBits(Pointer pointer) {
     static_assert(std::is_pointer_v<Pointer>);
     static_assert(sizeof(pointer) == sizeof(std::uint64_t));
@@ -318,6 +348,22 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto result = builder.sub(lhs, rhs, ir::Width::I64, instruction.address);
             builder.writeGuestRegister(reg.reg, result, ir::Width::I64, instruction.address);
             builder.updateSubFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
+            break;
+        }
+        case x86::Opcode::ShlRegImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: shl operand count");
+            }
+            const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            const auto lhs =
+                builder.readGuestRegister(reg.reg, ir::Width::I64, instruction.address);
+            const auto count = static_cast<std::uint8_t>(immediate.value & 0x3FU);
+            const auto result =
+                builder.shiftLeft(lhs, count, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(reg.reg, result, ir::Width::I64, instruction.address);
+            builder.updateShiftLeftFlags(lhs, result, count, ir::Width::I64,
+                                         instruction.address);
             break;
         }
         case x86::Opcode::AndRegImm: {
@@ -451,6 +497,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
         hasHelperCall |= operation.opcode == ir::Opcode::UpdateAddFlags ||
                          operation.opcode == ir::Opcode::UpdateSubFlags ||
                          operation.opcode == ir::Opcode::UpdateLogicFlags ||
+                         operation.opcode == ir::Opcode::UpdateShiftLeftFlags ||
                          operation.opcode == ir::Opcode::Push ||
                          operation.opcode == ir::Opcode::StoreGuest ||
                          operation.opcode == ir::Opcode::LoadGuest ||
@@ -505,6 +552,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::Sub:
             assembler.sub(hostRegister(*operation.result), hostRegister(*operation.lhs),
                           hostRegister(*operation.rhs));
+            break;
+        case ir::Opcode::ShiftLeft:
+            assembler.lslImmediate(hostRegister(*operation.result),
+                                   hostRegister(*operation.lhs),
+                                   static_cast<std::uint8_t>(operation.immediate));
             break;
         case ir::Opcode::And:
             assembler.bitAnd(hostRegister(*operation.result), hostRegister(*operation.lhs),
@@ -611,6 +663,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
                                                    ? pointerBits(&updateLogicFlags32)
                                                    : pointerBits(&updateLogicFlags64));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::UpdateShiftLeftFlags:
+            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x2, hostRegister(*operation.rhs));
+            assembler.movImmediate(arm64::x3, operation.immediate);
+            assembler.movImmediate(arm64::x16, pointerBits(&updateShiftLeftFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::ExitBlock: {

@@ -27,6 +27,7 @@ enum class Opcode {
     WriteGuestReg,
     Add,
     Sub,
+    ShiftLeft,
     And,
     LoadGuest,
     StoreGuest,
@@ -36,6 +37,7 @@ enum class Opcode {
     UpdateAddFlags,
     UpdateSubFlags,
     UpdateLogicFlags,
+    UpdateShiftLeftFlags,
     ExitBlock,
 };
 
@@ -78,6 +80,8 @@ class Builder {
     void writeGuestRegister(x86::Register reg, ValueId value, Width width, guest::GuestAddress rip);
     ValueId add(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId sub(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
+    ValueId shiftLeft(ValueId value, std::uint8_t count, Width width,
+                      guest::GuestAddress rip);
     ValueId bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId loadGuest(ValueId address, Width width, guest::GuestAddress rip);
     void storeGuest(ValueId address, ValueId value, Width width, guest::GuestAddress rip);
@@ -89,6 +93,8 @@ class Builder {
     void updateSubFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                         guest::GuestAddress rip);
     void updateLogicFlags(ValueId result, Width width, guest::GuestAddress rip);
+    void updateShiftLeftFlags(ValueId lhs, ValueId result, std::uint8_t count, Width width,
+                              guest::GuestAddress rip);
     void exitBlock(guest::GuestAddress rip);
     void exitDirect(guest::GuestAddress target, guest::GuestAddress rip);
     void exitConditional(x86::Condition condition, guest::GuestAddress target,

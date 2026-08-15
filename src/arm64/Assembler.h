@@ -43,6 +43,7 @@ class Assembler {
     void movImmediate(XRegister destination, std::uint64_t value);
     void add(XRegister destination, XRegister lhs, XRegister rhs);
     void sub(XRegister destination, XRegister lhs, XRegister rhs);
+    void lslImmediate(XRegister destination, XRegister source, std::uint8_t shift);
     void bitAnd(XRegister destination, XRegister lhs, XRegister rhs);
     void ldr(XRegister destination, XRegister base, std::uint32_t byteOffset);
     void ldr32(XRegister destination, XRegister base, std::uint32_t byteOffset);

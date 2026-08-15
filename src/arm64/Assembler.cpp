@@ -81,6 +81,25 @@ void Assembler::sub(XRegister destination, XRegister lhs, XRegister rhs) {
     emit(word, "sub " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
 }
 
+void Assembler::lslImmediate(XRegister destination, XRegister source, std::uint8_t shift) {
+    requireRegister(destination);
+    requireRegister(source);
+    if (shift >= 64U) {
+        throw std::invalid_argument("64-bit LSL immediate must be less than 64");
+    }
+    if (shift == 0) {
+        mov(destination, source);
+        return;
+    }
+    const auto immr = static_cast<std::uint32_t>(64U - shift);
+    const auto imms = static_cast<std::uint32_t>(63U - shift);
+    const auto word = 0xD3400000U | (immr << 16U) | (imms << 10U) |
+                      (static_cast<std::uint32_t>(source.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "lsl " + regName(destination) + ", " + regName(source) + ", #" +
+                   std::to_string(shift));
+}
+
 void Assembler::bitAnd(XRegister destination, XRegister lhs, XRegister rhs) {
     requireRegister(destination);
     requireRegister(lhs);

@@ -161,6 +161,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
                    << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::ShlRegImm:
+            stream << "shl "
+                   << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
+                   << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
+            break;
         case x86::Opcode::AndRegImm:
             stream << "and "
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
@@ -247,6 +252,10 @@ std::string dumpIr(const ir::Block &block) {
             stream << "sub." << widthName(operation.width) << ' ' << valueName(*operation.lhs)
                    << ", " << valueName(*operation.rhs);
             break;
+        case ir::Opcode::ShiftLeft:
+            stream << "shift_left." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", " << std::dec << operation.immediate;
+            break;
         case ir::Opcode::And:
             stream << "and." << widthName(operation.width) << ' ' << valueName(*operation.lhs)
                    << ", " << valueName(*operation.rhs);
@@ -282,6 +291,11 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::UpdateLogicFlags:
             stream << "update_logic_flags." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::UpdateShiftLeftFlags:
+            stream << "update_shift_left_flags." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", " << valueName(*operation.rhs)
+                   << ", " << std::dec << operation.immediate;
             break;
         case ir::Opcode::ExitBlock:
             stream << "exit_block ";

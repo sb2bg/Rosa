@@ -68,6 +68,20 @@ ValueId Builder::sub(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress 
     return result;
 }
 
+ValueId Builder::shiftLeft(ValueId value, std::uint8_t count, Width width,
+                           guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShiftLeft,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = value,
+        .immediate = count,
+    });
+    return result;
+}
+
 ValueId Builder::bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -164,6 +178,18 @@ void Builder::updateLogicFlags(ValueId result, Width width, guest::GuestAddress 
     });
 }
 
+void Builder::updateShiftLeftFlags(ValueId lhs, ValueId result, std::uint8_t count,
+                                   Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateShiftLeftFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = lhs,
+        .rhs = result,
+        .immediate = count,
+    });
+}
+
 void Builder::exitBlock(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::ExitBlock,
@@ -255,6 +281,9 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "left");
             checkUse(operation.rhs, "right");
             break;
+        case Opcode::ShiftLeft:
+            checkUse(operation.lhs, "shifted");
+            break;
         case Opcode::Push:
             checkUse(operation.lhs, "new stack pointer");
             checkUse(operation.rhs, "pushed value");
@@ -277,6 +306,10 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::UpdateLogicFlags:
             checkUse(operation.lhs, "result");
+            break;
+        case Opcode::UpdateShiftLeftFlags:
+            checkUse(operation.lhs, "original");
+            checkUse(operation.rhs, "result");
             break;
         case Opcode::ExitBlock:
             if (operation.exitKind != ExitKind::Return && !operation.target) {
