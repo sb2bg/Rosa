@@ -117,6 +117,31 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if ((code[cursor] >= 0x50U && code[cursor] <= 0x57U) ||
+            (code[cursor] >= 0x40U && code[cursor] <= 0x4FU &&
+             code.size() - cursor >= 2 && code[cursor + 1] >= 0x50U &&
+             code[cursor + 1] <= 0x57U)) {
+            const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+            const auto rex = hasRex ? code[cursor] : 0U;
+            const auto opcode = code[cursor + (hasRex ? 1U : 0U)];
+            instruction.opcode = Opcode::Push;
+            instruction.length = static_cast<std::uint8_t>(hasRex ? 2U : 1U);
+            instruction.bytes[0] = code[cursor];
+            if (hasRex) {
+                instruction.bytes[1] = opcode;
+            }
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(opcode - 0x50U),
+                               (rex & 0x1U) != 0),
+                64});
+            result.push_back(std::move(instruction));
+            cursor += hasRex ? 2U : 1U;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x0FU && code.size() - cursor >= 2 && code[cursor + 1] == 0x05U) {
             instruction.opcode = Opcode::Syscall;
             instruction.length = 2;

@@ -208,7 +208,6 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: push operand count");
             }
-            const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[0]);
             const auto stackPointer =
                 builder.readGuestRegister(x86::Register::Rsp, ir::Width::I64,
                                           instruction.address);
@@ -216,8 +215,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                                 instruction.address);
             const auto newStackPointer =
                 builder.sub(stackPointer, eight, ir::Width::I64, instruction.address);
-            const auto value =
-                builder.constant(immediate.value, ir::Width::I64, instruction.address);
+            const auto value = std::holds_alternative<x86::ImmediateOperand>(
+                                   instruction.operands[0])
+                                   ? builder.constant(
+                                         std::get<x86::ImmediateOperand>(instruction.operands[0])
+                                             .value,
+                                         ir::Width::I64, instruction.address)
+                                   : builder.readGuestRegister(
+                                         std::get<x86::RegisterOperand>(instruction.operands[0]).reg,
+                                         ir::Width::I64, instruction.address);
             builder.push(newStackPointer, value, ir::Width::I64, instruction.address);
             break;
         }

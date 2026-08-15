@@ -69,8 +69,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
         case x86::Opcode::Push:
-            stream << "push 0x"
-                   << std::get<x86::ImmediateOperand>(instruction.operands[0]).value;
+            stream << "push ";
+            if (std::holds_alternative<x86::ImmediateOperand>(instruction.operands[0])) {
+                stream << "0x"
+                       << std::get<x86::ImmediateOperand>(instruction.operands[0]).value;
+            } else {
+                stream << x86::registerName(
+                    std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
+            }
             break;
         case x86::Opcode::JmpRelative:
             stream << "jmp 0x" << instruction.branchTarget->value;

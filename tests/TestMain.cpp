@@ -230,6 +230,43 @@ void testPushImm8GuestStackFaults() {
                 "failed read-only PUSH imm8 changed RSP");
 }
 
+void testPushRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x55, 0x41, 0x57, 0xC3};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr auto stackTop = stackBase.value + rosa::guest::guestPageSize;
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::Push, "PUSH rbp opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rbp,
+           "PUSH rbp register differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[1].operands[0]).reg ==
+               rosa::x86::Register::R15,
+           "REX PUSH r15 register differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto pushRbp = translator.translate(code, rosa::guest::GuestAddress{0x1000}, 1);
+    const auto pushR15 = translator.translate(std::span(code).subspan(1),
+                                              rosa::guest::GuestAddress{0x1001}, 1);
+    rosa::x86::X86State state;
+    state.rip = 0x1000;
+    state.rsp = stackTop;
+    state.rbp = 0x0123456789ABCDEFULL;
+    state.r15 = 0xFEDCBA9876543210ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(pushRbp.execute(state, &addressSpace));
+    static_cast<void>(pushR15.execute(state, &addressSpace));
+    expectEqual(state.rsp, stackTop - 16, "two register PUSHes did not update RSP");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{stackTop - 8}), state.rbp,
+                "PUSH rbp stored the wrong guest value");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{stackTop - 16}), state.r15,
+                "PUSH r15 stored the wrong guest value");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "register PUSH changed guest flags");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -540,6 +577,7 @@ int main() {
         {"PUSH imm8 decoder", testDecoderPushImm8},
         {"PUSH imm8 generated execution", testPushImm8GeneratedExecution},
         {"PUSH imm8 guest stack faults", testPushImm8GuestStackFaults},
+        {"PUSH register generated execution", testPushRegisterGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
