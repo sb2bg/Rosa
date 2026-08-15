@@ -3040,6 +3040,30 @@ void testUnsignedBelowConditional() {
                 "not-taken JB changed guest flags");
 }
 
+void testUnsignedBelowLongConditional() {
+    constexpr std::array<std::uint8_t, 6> code{0x0F, 0x82, 0x02, 0, 0, 0};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].condition == rosa::x86::Condition::Below,
+           "JB rel32 condition differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State taken;
+    taken.rflags = 0x3;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rip, std::uint64_t{0x1008},
+                "JB rel32 did not take with CF set");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rflags = 0x2;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rip, std::uint64_t{0x1006},
+                "JB rel32 took with CF clear");
+    expectEqual(notTaken.rflags, std::uint64_t{0x2},
+                "JB rel32 changed flags");
+}
+
 void testRegisterIndirectJump() {
     constexpr std::array<std::uint8_t, 2> code{0xFF, 0xE1};
     const rosa::x86::Decoder decoder;
@@ -3473,6 +3497,7 @@ int main() {
         {"indirect guest-memory call", testIndirectGuestMemoryCall},
         {"indirect guest-memory call fault", testIndirectGuestMemoryCallFault},
         {"unsigned-below conditional", testUnsignedBelowConditional},
+        {"unsigned-below long conditional", testUnsignedBelowLongConditional},
         {"register-indirect jump", testRegisterIndirectJump},
         {"set equal low-byte register", testSetEqualLowByteRegister},
         {"unsigned-above conditional", testUnsignedAboveConditional},
