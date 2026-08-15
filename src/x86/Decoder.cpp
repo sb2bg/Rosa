@@ -267,6 +267,21 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(MemoryOperand{rm, displacement, 64});
                 instruction.operands.push_back(RegisterOperand{reg, 64});
             }
+        } else if (opcode == 0x85U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated test r64, r64");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U || rexX) {
+                throw DecodeError(address, remaining,
+                                  "only register-direct TEST from opcode 85 is supported");
+            }
+            const auto reg = decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
+            const auto rm = decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
+            instruction.opcode = Opcode::TestRegReg;
+            instruction.operands.push_back(RegisterOperand{rm, 64});
+            instruction.operands.push_back(RegisterOperand{reg, 64});
         } else if (opcode == 0x8DU) {
             if (code.size() - cursor < 5) {
                 throw DecodeError(address, remaining, "truncated lea r64, [rip+disp32]");

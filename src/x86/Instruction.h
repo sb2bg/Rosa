@@ -19,6 +19,7 @@ enum class Opcode {
     AddRegImm,
     SubRegImm,
     AndRegImm,
+    TestRegReg,
     CmpRegImm,
     Push,
     JmpRelative,

@@ -367,6 +367,37 @@ void testMovRegisterToGuestMemory() {
                 "failed guest-memory MOV changed the source register");
 }
 
+void testTestRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0x85, 0xC9, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestRegReg,
+           "TEST r64, r64 opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rcx,
+           "TEST r64, r64 left operand differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State zeroState;
+    zeroState.rcx = 0;
+    zeroState.rflags = UINT64_MAX;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rcx, std::uint64_t{0}, "TEST changed its guest register operand");
+    constexpr auto expectedZeroFlags =
+        (UINT64_MAX & ~std::uint64_t{0x8D5}) | std::uint64_t{0x46};
+    expectEqual(zeroState.rflags, expectedZeroFlags,
+                "TEST zero-result flags differ");
+
+    rosa::x86::X86State signState;
+    signState.rcx = 0x8000000000000001ULL;
+    static_cast<void>(block.execute(signState));
+    expectEqual(signState.rcx, std::uint64_t{0x8000000000000001ULL},
+                "TEST changed a nonzero guest register operand");
+    expectEqual(signState.rflags, std::uint64_t{0x82},
+                "TEST sign-result flags differ");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -734,6 +765,7 @@ int main() {
         {"PUSH register generated execution", testPushRegisterGeneratedExecution},
         {"SUB register imm32 generated execution", testSubRegImm32GeneratedExecution},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
+        {"TEST register generated execution", testTestRegisterGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
