@@ -57,11 +57,13 @@ Dynamic-library commands are parsed but not acted upon.
 - universal Mach-O x86_64 slice selection works for a manually supplied dyld;
 - the controlled app and all six dyld segments map together at explicit guest addresses;
 - Rosa enters dyld's x86_64 `LC_UNIXTHREAD` entry with the initial stack;
-- diagnostic one-instruction translations have advanced through 3,413 executed blocks and 1,147 unique translations of the tested unmodified dyld;
+- diagnostic one-instruction translations have advanced through 179,745 executed blocks and 5,745 unique translations of the tested unmodified dyld;
 - dyld has parsed and repeatedly traversed application Mach-O structures, dispatched internal callbacks and jump tables, used vector string operations, consulted the x86 commpage, and entered deeper load-command/address-calculation paths;
-- the next loud failure is `and r15d, 0xfff` (`41 81 e7 ff 0f 00 00`) at guest RIP `0x7ff80004469e`.
+- the trace has reached BSD `thread_selfid`, `getentropy`, `fsgetpath`, and `shared_region_check_np`, x86 machdep thread-self setup, and Mach task-self, reply-port, VM-protect, and anonymous VM-map traps;
+- dyld successfully requested an anonymous `VM_MEMORY_DYLD` mapping, while the Intel shared-region check correctly reports that no compatible shared region is present;
+- the next loud failure is `test byte [r14+0x8], 1` (`41 f6 46 08 01`) at guest RIP `0x7ff8000598aa`.
 
-No guest Darwin syscall or Mach operation has been reached by dyld. There is no shared-cache mapping, x86 system-library resolution, `libSystem` initialization, or application transfer yet.
+There is still no x86 shared-cache image mapping or resolution, x86 system-library load, `libSystem` initialization, application initialization, or transfer to guest `main`.
 
 ## Verification notes
 

@@ -23,14 +23,14 @@ generated ARM64 and narrow semantic helpers mutate X86State
         ↓
 block cache + guest call/return stack handling
         ↓
-semantic Darwin write/exit boundary or next guest block
+semantic Darwin/Mach boundary or next guest block
 ```
 
 The CPU path is a real DBT path, not an interpreter: data operations, arithmetic, compare results, address construction, and conditional selection become AArch64 instructions in generated code mappings. Narrow C++ helpers calculate flags, perform permission-checked guest-memory accesses, and implement a few state operations that must commit atomically. The dispatcher handles cross-block guest control flow.
 
 ## State boundaries
 
-Guest architectural state is represented by `x86::X86State`, including all general-purpose registers, RIP, RFLAGS, and explicit 128-bit XMM values. Generated blocks take an `X86State*` in host register `x0`. The first-tier backend uses `x9`–`x15` as temporary value registers and writes guest values back explicitly. Guest register identities are translated through `registerOffset`; their enum encoding is never used as a host struct offset.
+Guest architectural state is represented by `x86::X86State`, including all general-purpose registers, RIP, RFLAGS, and explicit 128-bit XMM values. Generated blocks take an `X86State*` in host register `x0`. The first-tier backend uses `x8`–`x15` as temporary value registers and writes guest values back explicitly. Guest register identities are translated through `registerOffset`; their enum encoding is never used as a host struct offset.
 
 Every generated exit reconstructs guest state and writes the next guest RIP. Direct, conditional, and register-indirect branches select a guest RIP; they never branch to a guest address as a host pointer. The dispatcher handles guest `call` pushes and `ret` pops against the guest address space, so host return addresses never enter guest state.
 
@@ -50,11 +50,11 @@ The parser accepts little-endian, 64-bit x86 executables and dynamic linkers and
 
 The loader maps every nonempty segment at its guest virtual address plus an optional slide. File bytes are copied, the remaining virtual size is zero-filled, and `initprot` becomes guest permissions. No-access `__PAGEZERO` is represented sparsely. The startup builder creates a 16-byte-aligned stack containing `argc`, `argv`, `envp`, `apple[]`, their null terminators, and strings.
 
-Rosa currently relies on dyld guest code to interpret the application structures. Shared-cache mapping, code-signature services, shared-region behavior, and dyld's additional kernel contracts are not implemented.
+Rosa currently relies on dyld guest code to interpret the application structures. The dyld probe can request anonymous guest VM and change guest mapping permissions through narrow Mach trap semantics, but Intel shared-cache mapping, code-signature services, and most additional kernel contracts are not implemented.
 
 ## Darwin syscall boundary
 
-Generated code recognizes x86 `0F 05`, records `RCX`, `R11`, and the next guest RIP, and returns a distinct syscall exit reason. The semantic dispatcher decodes x86 Darwin registers (`RAX`; arguments in `RDI`, `RSI`, `RDX`, `R10`, `R8`, `R9`) and accepts only BSD-class `write` and `exit`. Guest buffers are copied through `AddressSpace`; no guest pointer is passed to the host kernel. Success/error translation maintains x86 `CF`. Unsupported numbers fail with the number, syscall RIP, and all six arguments.
+Generated code recognizes x86 `0F 05`, records `RCX`, `R11`, and the next guest RIP, and returns a distinct syscall exit reason. The semantic dispatcher decodes x86 Darwin registers (`RAX`; arguments in `RDI`, `RSI`, `RDX`, `R10`, `R8`, `R9`) and distinguishes BSD, Mach, and x86 machdep classes. Guest buffers and ABI values are translated through `AddressSpace`; no guest pointer is passed to the host kernel. Success/error translation follows the relevant guest convention. Unsupported calls fail with the number, syscall RIP, and arguments. The exact narrow call set is documented in `darwin-boundary.md`.
 
 ## Executable memory
 
@@ -63,12 +63,11 @@ Generated code recognizes x86 `0F 05`, records `RCX`, `R11`, and the next guest 
 ## Current constraints
 
 - arm64 macOS only;
-- seven temporary SSA values before the intentionally simple allocator rejects a block;
+- eight temporary SSA values before the intentionally simple allocator rejects a block;
 - one host thread and one guest thread;
-- no guest `mmap`/`mprotect`/`munmap` or direct host-pointer memory fast path;
-- only Darwin BSD `write` to stdout/stderr and `exit`;
-- no Mach syscall/trap boundary;
+- no general guest `mmap`/`munmap` or direct host-pointer memory fast path;
+- only the failure-driven BSD, Mach, and x86 machdep operations listed in `darwin-boundary.md`;
 - no dyld fixups or shared cache;
 - instruction encodings remain deliberately incomplete and are added only after an observed failure.
 
-The current dyld experiment reaches 3,413 executed blocks and 1,147 unique translations. The first failure is `and r15d, 0xfff` at `0x7ff80004469e`. The probe has consulted the x86 commpage and traversed application Mach-O/load-command data, but it has not reached a Darwin syscall, Mach operation, shared-cache mapping, system-library resolution, or `libSystem` initialization. The next slice is the observed 32-bit `AND r/m32, imm32` form; Darwin or shared-cache work should wait until the trace reaches that boundary.
+The current dyld experiment reaches 179,745 executed blocks and 5,745 unique translations. The first failure is `test byte [r14+0x8], 1` at `0x7ff8000598aa`. The probe has reached BSD syscalls, x86 machdep thread setup, Mach traps, a failed Intel shared-region check, and an anonymous `VM_MEMORY_DYLD` allocation. It has not mapped or resolved an x86 shared-cache image, loaded an x86 system library, or begun `libSystem` or application initialization. The next slice is the observed memory form of `TEST r/m8, imm8`.

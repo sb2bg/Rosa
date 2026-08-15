@@ -62,16 +62,20 @@ There is no output helper or interpreter fallback. macOS never launches the gues
 Coverage is encoding-specific and failure-driven. The generated ARM64 path currently supports the forms exercised by the controlled fixtures and dyld probe:
 
 - integer movement: selected 8/16/32/64-bit `mov`, `lea`, `push`, `pop`, `movzx`, and `movsxd` register, immediate, base/displacement, RIP-relative, and scaled-SIB forms;
-- integer/flags: selected 16/32/64-bit `add`, `sub`, `inc`, `dec`, `and`, `or`, `xor`, `test`, `cmp`, `shl`, `shr`, `shrd`, unsigned `mul`, signed two-register `imul`, and `bsf` forms;
-- control: relative `jmp`/`call`, register `jmp`, indirect guest-memory `call`, `ret`, `cmovb`, `sete`, `setne`, and the observed short/long unsigned, equality, sign, and signed-less-or-equal branches;
+- integer/flags: selected 8/16/32/64-bit `add`, `sub`, `inc`, `dec`, `not`, `neg`, `and`, `or`, `xor`, `test`, `cmp`, `shl`, `shr`, `shrd`, unsigned `mul`, signed two-register `imul`, `bsf`, and `bsr` forms;
+- control: relative `jmp`/`call`, register `jmp`, indirect guest-memory `call`, `ret`, selected register `cmovcc` and `setcc` forms, and the observed short/long unsigned and signed conditional branches;
 - SIMD used by dyld: register `xorps`/`pxor`, memory `pcmpeqb`, `pmovmskb`, `pshufd`, aligned/unaligned `movaps`/`movups`/`movdqa`/`movdqu`, and low-qword `movq` store;
-- ordering/time/system: `lfence`, `rdtsc`, and semantic x86_64 Darwin `syscall` exit.
+- ordering/time/system: `lfence`, `rdtsc`, and semantic x86_64 Darwin `syscall` exits to the compatibility dispatcher.
 
 Guest loads and stores are permission-checked at 8, 16, 32, 64, and 128 bits. Unsupported encodings still fail with the guest RIP, bytes, register state, nearby mappings, recent instruction history, and translation counters rather than falling back to interpretation.
 
+The semantic differential corpus currently runs 176 controlled instruction cases both through Rosa and through a standalone x86_64 oracle under Apple Rosetta, comparing only architecturally defined registers, flags, and memory. Rosetta is used only by that test oracle; it is never used to execute the dyld probe.
+
 Mach-O inspection accepts thin x86_64 files and selects x86_64 slices from universal binaries. Loading maps every segment with its initial permissions, copies the file-backed portion, zero-fills the virtual tail, and represents inaccessible segments such as `__PAGEZERO` without allocating their full size. Rosa does not yet apply rebases, bindings, chained fixups, or shared-cache mappings.
 
-The manual dyld experiment maps the app and all six x86_64 dyld segments, enters the slid `LC_UNIXTHREAD` RIP, and runs unmodified dyld in diagnostic one-instruction translations. The current probe reaches 3,413 executed blocks and 1,147 unique translations. Its first failure is `and r15d, 0xfff` (`41 81 e7 ff 0f 00 00`) at guest RIP `0x7ff80004469e`. No Darwin syscall, Mach operation, shared-cache mapping, system-library resolution, or `libSystem` initialization has been observed yet.
+The manual dyld experiment maps the app and all six x86_64 dyld segments, enters the slid `LC_UNIXTHREAD` RIP, and runs unmodified dyld in diagnostic one-instruction translations. The current probe reaches 179,745 executed blocks and 5,745 unique translations. Its first failure is `test byte [r14+0x8], 1` (`41 f6 46 08 01`) at guest RIP `0x7ff8000598aa`.
+
+The trace has crossed real environment boundaries: BSD `thread_selfid`, `getentropy`, the empty-tuple `fsgetpath` probe, and `shared_region_check_np`; the x86 machdep thread-self setup call; Mach task-self, reply-port, `mach_vm_protect`, and anonymous `mach_vm_map` traps; and an anonymous `VM_MEMORY_DYLD` allocation. `shared_region_check_np` currently reports `EINVAL` because Rosa has no provisioned Intel shared region. No x86 shared-cache image has been mapped or resolved, no x86 system library has loaded, and `libSystem`, application initialization, and guest `main` have not begun.
 
 The diagnostic mode changes translation granularity only; every supported guest instruction still executes as generated ARM64. Apple binaries are never modified or launched with `exec`, and there is no interpreter fallback.
 
