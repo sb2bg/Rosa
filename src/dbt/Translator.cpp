@@ -1136,6 +1136,38 @@ updateShiftLeftFlags32(x86::X86State *state, std::uint64_t lhsValue,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateShiftRightFlags8(x86::X86State *state, std::uint64_t lhsValue,
+                       std::uint64_t resultValue,
+                       std::uint64_t unmaskedCount) {
+    const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x1FU);
+    if (count == 0) {
+        return state;
+    }
+    const auto lhs = static_cast<std::uint8_t>(lhsValue);
+    const auto result = static_cast<std::uint8_t>(resultValue);
+    auto replacedFlags = flagCarry | flagParity | flagZero | flagSign;
+    if (count == 1) {
+        replacedFlags |= flagOverflow;
+    }
+    auto flags = (state->rflags & ~replacedFlags) | flagReservedOne;
+    flags |= (static_cast<unsigned>(lhs) >> (count - 1U)) & 1U;
+    if ((std::popcount(static_cast<unsigned>(result)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result >> 7U) != 0) {
+        flags |= flagSign;
+    }
+    if (count == 1 && (lhs >> 7U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateShiftRightFlags32(x86::X86State *state, std::uint64_t lhsValue,
                         std::uint64_t resultValue, std::uint64_t unmaskedCount) {
     const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x1FU);
@@ -2098,8 +2130,18 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            const auto width = reg.width == 64 ? ir::Width::I64 : ir::Width::I32;
-            const auto lhs = builder.readGuestRegister(reg.reg, width, instruction.address);
+            const auto width = reg.width == 8    ? ir::Width::I8
+                               : reg.width == 64 ? ir::Width::I64
+                                                 : ir::Width::I32;
+            auto lhs = builder.readGuestRegister(
+                reg.reg, reg.width == 8 ? ir::Width::I64 : width,
+                instruction.address);
+            if (reg.width == 8) {
+                const auto mask = builder.constant(
+                    0xFF, ir::Width::I64, instruction.address);
+                lhs = builder.bitAnd(lhs, mask, ir::Width::I64,
+                                     instruction.address);
+            }
             const auto count = static_cast<std::uint8_t>(
                 immediate.value & (reg.width == 64 ? 0x3FU : 0x1FU));
             const auto result =
@@ -3499,7 +3541,9 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(arm64::x3, operation.immediate);
             assembler.movImmediate(
                 arm64::x16,
-                operation.width == ir::Width::I32
+                operation.width == ir::Width::I8
+                    ? pointerBits(&updateShiftRightFlags8)
+                : operation.width == ir::Width::I32
                     ? pointerBits(&updateShiftRightFlags32)
                     : pointerBits(&updateShiftRightFlags64));
             assembler.blr(arm64::x16);

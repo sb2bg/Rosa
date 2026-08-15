@@ -1736,7 +1736,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x39U && code[cursor] != 0x3AU &&
             code[cursor] != 0x3BU &&
             code[cursor] != 0x80U &&
-            code[cursor] != 0x81U && code[cursor] != 0xC1U &&
+            code[cursor] != 0x81U && code[cursor] != 0xC0U &&
+            code[cursor] != 0xC1U &&
             code[cursor] != 0xC6U && code[cursor] != 0xC7U &&
             code[cursor] != 0xD3U &&
             code[cursor] != 0xFEU && code[cursor] != 0xFFU) {
@@ -1772,7 +1773,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
             opcode != 0x29U && opcode != 0x2BU && opcode != 0x33U &&
             opcode != 0x20U && opcode != 0x21U && opcode != 0x22U &&
-            opcode != 0x81U && opcode != 0xC1U &&
+            opcode != 0x81U && opcode != 0xC0U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD3U &&
             opcode != 0xFEU && opcode != 0xFFU &&
             (opcode < 0xB0U || opcode > 0xB7U) &&
@@ -2920,6 +2921,27 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(
                     MemoryOperand{base, displacement, 64, index, scale, hasBase});
             }
+        } else if (opcode == 0xC0U) {
+            if (code.size() - cursor < 2) {
+                throw DecodeError(address, remaining,
+                                  "truncated byte shift register, imm8");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (rexW || rexR || rexX || mode != 0x3U || extension != 0x5U ||
+                (!hasRex && rmEncoding >= 0x4U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only SHR representable-byte-register, imm8 from opcode C0 /5 is supported");
+            }
+            instruction.opcode = Opcode::ShrRegImm;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(rmEncoding, rexB), 8});
+            instruction.operands.push_back(
+                ImmediateOperand{code[cursor++], 8});
         } else if (opcode == 0xC1U) {
             if (code.size() - cursor < 2) {
                 throw DecodeError(address, remaining, "truncated shift register, imm8");

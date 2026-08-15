@@ -812,6 +812,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("shr8_extended_many",
+                             CaseId::shr8_extended_many,
+                             differentialBytes_shr8_extended_many);
+        testCase.request.state.r8 = 0x1122334455667780ULL;
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shr8_extended_one", CaseId::shr8_extended_one,
+                             differentialBytes_shr8_extended_one);
+        testCase.request.state.r8 = 0x1122334455667781ULL;
+        testCase.flagMask =
+            carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("shr64_many", CaseId::shr64_many,
                              differentialBytes_shr64_many);
         testCase.request.state.rax = 0xE000000000000200ULL;
@@ -6844,6 +6860,71 @@ void testShiftLeft32ClGeneratedExecution() {
                 "SHL EAX, CL count-31 defined flags differ");
 }
 
+void testShiftRight8ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x41, 0xC0, 0xE8, 0x03, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShrRegImm,
+           "SHR r8, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "SHR r8, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R8 &&
+               destination.width == 8 && immediate.width == 8 &&
+               immediate.value == 3,
+           "SHR r8b, 3 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("shr r8b, 0x3") !=
+               std::string::npos,
+           "SHR r8b, 3 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r8 = 0x1122334455667780ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r8, std::uint64_t{0x1122334455667710ULL},
+                "SHR r8b allowed upper register bits into the byte result");
+    constexpr std::uint64_t manyDefinedFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U);
+    expectEqual(state.rflags & manyDefinedFlags, std::uint64_t{0},
+                "SHR r8b count-3 defined flags differ");
+
+    constexpr std::array<std::uint8_t, 5> countOne{
+        0x41, 0xC0, 0xE8, 0x01, 0xC3};
+    const auto oneBlock = translator.translate(
+        countOne, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State oneState;
+    oneState.r8 = 0x1122334455667781ULL;
+    oneState.rflags = 0x10;
+    static_cast<void>(oneBlock.execute(oneState));
+    expectEqual(oneState.r8, std::uint64_t{0x1122334455667740ULL},
+                "SHR r8b count-1 result differs");
+    constexpr std::uint64_t oneDefinedFlags =
+        manyDefinedFlags | (1U << 11U);
+    expectEqual(oneState.rflags & oneDefinedFlags,
+                std::uint64_t{(1U << 0U) | (1U << 11U)},
+                "SHR r8b count-1 flags differ");
+
+    constexpr std::array<std::uint8_t, 3> legacyHighByte{
+        0xC0, 0xEC, 0x01};
+    bool highByteRejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            legacyHighByte, rosa::guest::GuestAddress{0x3000}));
+    } catch (const rosa::x86::DecodeError &) {
+        highByteRejected = true;
+    }
+    expect(highByteRejected,
+           "SHR silently treated legacy AH as a representable low byte");
+}
+
 void testShiftRight32ImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0xC1, 0xE8, 0x1F, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -11292,6 +11373,8 @@ int main() {
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},
         {"SHL CL generated execution", testShiftLeftClGeneratedExecution},
         {"SHL 32-bit CL generated execution", testShiftLeft32ClGeneratedExecution},
+        {"SHR low-byte immediate generated execution",
+         testShiftRight8ImmediateGeneratedExecution},
         {"SHR 32-bit immediate generated execution", testShiftRight32ImmediateGeneratedExecution},
         {"SHR 64-bit immediate generated execution", testShiftRight64ImmediateGeneratedExecution},
         {"NEG 64-bit generated execution", testNeg64GeneratedExecution},
