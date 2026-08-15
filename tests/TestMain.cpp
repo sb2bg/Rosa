@@ -2285,6 +2285,42 @@ void testXor32BitRegisterImmediate() {
                 "XOR EAX, imm32 flags differ");
 }
 
+void testXor64BitAccumulatorImmediate() {
+    constexpr std::array<std::uint8_t, 7> observedCode{
+        0x48, 0x35, 0x49, 0x54, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        observedCode, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegImm,
+           "XOR RAX, imm32 opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{64}, "XOR RAX, imm32 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto observedBlock = translator.translate(
+        observedCode, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x5449;
+    state.rflags = 0x8D7;
+    static_cast<void>(observedBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0},
+                "XOR RAX, positive imm32 result differs");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "XOR RAX, positive imm32 flags differ");
+
+    constexpr std::array<std::uint8_t, 7> negativeCode{
+        0x48, 0x35, 0x00, 0x00, 0x00, 0x80, 0xC3};
+    const auto negativeBlock = translator.translate(
+        negativeCode, rosa::guest::GuestAddress{0x2000});
+    state.rax = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(negativeBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xFFFFFFFF80000000ULL},
+                "XOR RAX, imm32 did not sign-extend its immediate");
+    expectEqual(state.rflags, std::uint64_t{0x86},
+                "XOR RAX, negative imm32 flags differ");
+}
+
 void testXorpsRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x57, 0xC1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3919,6 +3955,7 @@ int main() {
         {"XOR 64-bit register from guest memory",
          testXor64BitRegisterFromGuestMemory},
         {"XOR 32-bit register immediate", testXor32BitRegisterImmediate},
+        {"XOR 64-bit accumulator immediate", testXor64BitAccumulatorImmediate},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PCMPEQB guest memory generated execution",
