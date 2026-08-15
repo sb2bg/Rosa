@@ -981,8 +981,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             address = builder.add(address, displacement, ir::Width::I64,
                                   instruction.address);
-            const auto value = builder.loadGuest(address, ir::Width::I16,
-                                                 instruction.address);
+            const auto value = builder.loadGuest(
+                address, memory.width == 8 ? ir::Width::I8 : ir::Width::I16,
+                instruction.address);
             builder.writeGuestRegister(destination.reg, value, ir::Width::I32,
                                        instruction.address);
             break;

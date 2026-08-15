@@ -227,7 +227,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "movzx "
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
-                   << ", word [" << x86::registerName(memory.base);
+                   << ", " << (memory.width == 8 ? "byte" : "word") << " ["
+                   << x86::registerName(memory.base);
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);

@@ -348,27 +348,78 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto rex = movzxByteHasRex ? code[cursor] : 0U;
             const bool rexW = (rex & 0x8U) != 0;
             const bool rexR = (rex & 0x4U) != 0;
+            const bool rexX = (rex & 0x2U) != 0;
             const bool rexB = (rex & 0x1U) != 0;
-            const auto modrm = code[movzxByteOpcodeOffset + 2];
+            cursor = movzxByteOpcodeOffset + 2;
+            const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (rexW || mode != 0x3U ||
-                (!movzxByteHasRex && rmEncoding >= 0x4U)) {
+            if (rexW || (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only MOVZX r32, low-byte register is supported");
+                    "only MOVZX r32, low-byte register or byte [base+disp8/disp32] is supported");
             }
-            instruction.opcode = Opcode::MovzxRegReg;
-            instruction.operands.push_back(RegisterOperand{
-                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR), 32});
-            instruction.operands.push_back(RegisterOperand{
-                decodeRegister(rmEncoding, rexB), 8});
-            const auto length = movzxByteOpcodeOffset + 3 - instructionStart;
+            const auto destination = RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR), 32};
+            if (mode == 0x3U) {
+                if (!movzxByteHasRex && rmEncoding >= 0x4U) {
+                    throw DecodeError(address, remaining,
+                                      "legacy high-byte MOVZX registers are unsupported");
+                }
+                instruction.opcode = Opcode::MovzxRegReg;
+                instruction.operands.push_back(destination);
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, rexB), 8});
+            } else {
+                auto baseEncoding = rmEncoding;
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
+                if (rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated byte MOVZX memory SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    const bool hasIndex = indexEncoding != 0x4U || rexX;
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(address, remaining,
+                                          "byte MOVZX SIB requires a register base");
+                    }
+                    if (hasIndex) {
+                        index = decodeRegister(indexEncoding, rexX);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated byte MOVZX disp8");
+                    }
+                    displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated byte MOVZX disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                instruction.opcode = Opcode::MovzxRegMem;
+                instruction.operands.push_back(destination);
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(baseEncoding, rexB), displacement, 8, index, scale});
+            }
+            const auto length = cursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
                         length, instruction.bytes.begin());
             result.push_back(std::move(instruction));
-            cursor = movzxByteOpcodeOffset + 3;
             if (result.size() == maximumInstructions) {
                 return result;
             }

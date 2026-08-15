@@ -456,6 +456,16 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movzx8_memory", CaseId::movzx8_memory,
+                             differentialBytes_movzx8_memory);
+        bindMemory(testCase, rosa::x86::Register::Rax, 0);
+        testCase.request.state.rcx = UINT64_MAX;
+        testCase.request.memory[0x2F] = 0xA5;
+        testCase.memoryCompareOffset = 0x2F;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
         auto testCase = make("movzx16_register", CaseId::movzx16_register,
                              differentialBytes_movzx16_register);
         testCase.request.state.rdi = 0xAABBCCDDEEFF80A5ULL;
@@ -2807,6 +2817,78 @@ void testMovzxLowByteRegisterTo32BitRegister() {
         rejectedHighByte = true;
     }
     expect(rejectedHighByte, "MOVZX from AH was not rejected explicitly");
+}
+
+void testMovzxGuestByteTo32BitRegister() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x0F, 0xB6, 0x48, 0x2F, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovzxRegMem,
+           "MOVZX r32, byte [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "MOVZX r32, byte [memory] length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx && destination.width == 32,
+           "MOVZX byte destination differs");
+    expect(memory.base == rosa::x86::Register::Rax && memory.width == 8 &&
+               memory.displacement == 0x2F,
+           "MOVZX byte memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movzx ecx, byte [rax+0x2f]") != std::string::npos,
+           "MOVZX byte dump differs");
+
+    std::array<std::uint8_t, 0x40> data{};
+    data[0x2F] = 0xA5;
+    data[0x30] = 0xDE;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(rosa::guest::GuestAddress{0x8000},
+                            rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read, data);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x8000;
+    state.rcx = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rcx, std::uint64_t{0xA5},
+                "MOVZX byte result did not zero-extend");
+    expectEqual(state.rax, std::uint64_t{0x8000},
+                "MOVZX byte changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVZX byte changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x8000;
+    faultState.rcx = 0x0123456789ABCDEFULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOVZX byte from unmapped guest memory did not fault");
+    expectEqual(faultState.rcx, std::uint64_t{0x0123456789ABCDEFULL},
+                "failed MOVZX byte changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed MOVZX byte changed flags");
+
+    bool truncatedRejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            std::span<const std::uint8_t>{code}.first(3),
+            rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        truncatedRejected = true;
+    }
+    expect(truncatedRejected, "truncated MOVZX byte displacement was accepted");
 }
 
 void testMovzx16BitRegisterTo32BitRegister() {
@@ -5755,6 +5837,8 @@ int main() {
         {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
         {"MOVZX low-byte register to 32-bit register",
          testMovzxLowByteRegisterTo32BitRegister},
+        {"MOVZX guest byte to 32-bit register",
+         testMovzxGuestByteTo32BitRegister},
         {"MOVZX 16-bit register to 32-bit register",
          testMovzx16BitRegisterTo32BitRegister},
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},
