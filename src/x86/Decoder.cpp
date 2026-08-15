@@ -866,6 +866,24 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::AndRegReg;
             instruction.operands.push_back(RegisterOperand{destination, width});
             instruction.operands.push_back(RegisterOperand{source, width});
+        } else if (opcode == 0x29U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated sub register, register");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U || rexX) {
+                throw DecodeError(address, remaining,
+                                  "only register-direct SUB from opcode 29 is supported");
+            }
+            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+            const auto source =
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
+            const auto destination =
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
+            instruction.opcode = Opcode::SubRegReg;
+            instruction.operands.push_back(RegisterOperand{destination, width});
+            instruction.operands.push_back(RegisterOperand{source, width});
         } else if (opcode == 0x31U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated xor register, register");

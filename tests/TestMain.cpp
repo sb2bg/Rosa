@@ -467,6 +467,25 @@ void testSubRegImm8GeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x16}, "SUB rsp, imm8 flags differ");
 }
 
+void testSubRegisterFromRegister() {
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0x29, 0xD7, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SubRegReg,
+           "SUB r64, r64 opcode differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = 0x1028;
+    state.rdx = 0x1000;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0x28}, "SUB r64, r64 result differs");
+    expectEqual(state.rdx, std::uint64_t{0x1000}, "SUB r64, r64 changed source");
+    expectEqual(state.rflags, std::uint64_t{0x6}, "SUB r64, r64 flags differ");
+}
+
 void testSubRegisterFromGuestMemory() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x2B, 0x06, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2706,6 +2725,7 @@ int main() {
         {"POP register generated execution", testPopRegisterGeneratedExecution},
         {"SUB register imm32 generated execution", testSubRegImm32GeneratedExecution},
         {"SUB register imm8 generated execution", testSubRegImm8GeneratedExecution},
+        {"SUB register from register", testSubRegisterFromRegister},
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
