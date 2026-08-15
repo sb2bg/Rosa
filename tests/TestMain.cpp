@@ -1249,6 +1249,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("branch_greater_taken",
+                             CaseId::branch_greater_taken,
+                             differentialBytes_branch_greater_taken);
+        testCase.request.state.rflags = 0x2;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_greater_not_taken",
+                             CaseId::branch_greater_not_taken,
+                             differentialBytes_branch_greater_not_taken);
+        testCase.request.state.rflags = zeroFlag | 0x2;
+        run(testCase);
+    }
+    {
         auto testCase = make("relative_call_stack", CaseId::relative_call_stack,
                              differentialBytes_relative_call_stack);
         testCase.request.state.rcx = 41;
@@ -11876,6 +11890,54 @@ void testSignedLessConditional() {
                 "JL took with SF and OF both clear");
 }
 
+void testSignedGreaterConditional() {
+    constexpr std::array<std::uint8_t, 2> code{0x7F, 0x23};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF80004F157ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::JccRelative &&
+               decoded[0].condition == rosa::x86::Condition::Greater,
+           "JG rel8 condition differs");
+    expect(decoded[0].branchTarget &&
+               decoded[0].branchTarget->value == 0x7FF80004F17CULL,
+           "JG rel8 target differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "jg 0x7ff80004f17c") != std::string::npos,
+           "JG rel8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF80004F157ULL});
+
+    rosa::x86::X86State clear;
+    clear.rflags = 0x2;
+    static_cast<void>(block.execute(clear));
+    expectEqual(clear.rip, std::uint64_t{0x7FF80004F17CULL},
+                "JG did not take with ZF clear and SF equal to OF");
+
+    rosa::x86::X86State both;
+    both.rflags = 0x882;
+    static_cast<void>(block.execute(both));
+    expectEqual(both.rip, std::uint64_t{0x7FF80004F17CULL},
+                "JG did not take with SF and OF both set");
+
+    rosa::x86::X86State zero;
+    zero.rflags = 0x42;
+    static_cast<void>(block.execute(zero));
+    expectEqual(zero.rip, std::uint64_t{0x7FF80004F159ULL},
+                "JG took with ZF set");
+    expectEqual(zero.rflags, std::uint64_t{0x42},
+                "JG changed flags on fallthrough");
+
+    rosa::x86::X86State mismatch;
+    mismatch.rflags = 0x82;
+    static_cast<void>(block.execute(mismatch));
+    expectEqual(mismatch.rip, std::uint64_t{0x7FF80004F159ULL},
+                "JG took with SF different from OF");
+    expectEqual(mismatch.rflags, std::uint64_t{0x82},
+                "JG changed flags on signed fallthrough");
+}
+
 void testSignedLessOrEqualConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x7E, 0x02}; // jle 0x1004
     const rosa::x86::Decoder decoder;
@@ -12338,6 +12400,7 @@ int main() {
         {"unsigned-below-or-equal long conditional",
          testUnsignedBelowOrEqualLongConditional},
         {"signed-less conditional", testSignedLessConditional},
+        {"signed-greater conditional", testSignedGreaterConditional},
         {"signed-less-or-equal conditional", testSignedLessOrEqualConditional},
         {"sign long conditional", testSignLongConditional},
         {"sign short conditional", testSignShortConditional},
