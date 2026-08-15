@@ -359,6 +359,12 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("add8_immediate", CaseId::add8_immediate,
+                             differentialBytes_add8_immediate);
+        testCase.request.state.rdx = 0x112233445566777CULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("sub64_borrow", CaseId::sub64_borrow,
                              differentialBytes_sub64_borrow);
         testCase.request.state.rdi = 5;
@@ -1861,6 +1867,61 @@ void testAddGuestByteToLowRegister() {
                 "faulted ADD guest byte changed destination");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "faulted ADD guest byte changed flags");
+}
+
+void testAddImmediateToLowByte() {
+    constexpr std::array<std::uint8_t, 4> code{0x80, 0xC2, 0x04, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddRegImm,
+           "ADD r8, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "ADD r8, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx &&
+               destination.width == 8,
+           "ADD DL, imm8 destination differs");
+    expect(immediate.width == 8 && immediate.value == 4,
+           "ADD DL, imm8 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("add dl, 0x4") !=
+               std::string::npos,
+           "ADD DL, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State overflowState;
+    overflowState.rdx = 0x112233445566777CULL;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(block.execute(overflowState));
+    expectEqual(overflowState.rdx, std::uint64_t{0x1122334455667780ULL},
+                "ADD DL, imm8 did not preserve upper RDX bits");
+    expectEqual(overflowState.rflags, std::uint64_t{0x892},
+                "ADD DL, imm8 overflow flags differ");
+
+    rosa::x86::X86State carryState;
+    carryState.rdx = 0x88776655443322FDULL;
+    carryState.rflags = 0x8D7;
+    static_cast<void>(block.execute(carryState));
+    expectEqual(carryState.rdx, std::uint64_t{0x8877665544332201ULL},
+                "ADD DL, imm8 carry result differs");
+    expectEqual(carryState.rflags, std::uint64_t{0x13},
+                "ADD DL, imm8 carry flags differ");
+
+    constexpr std::array<std::uint8_t, 4> highByteCode{
+        0x80, 0xC4, 0x01, 0xC3};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            highByteCode, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected, "ADD silently represented legacy AH as SPL");
 }
 
 void testIncrement32BitRegister() {
@@ -9077,6 +9138,7 @@ int main() {
         {"ADD register to register", testAddRegisterToRegister},
         {"ADD low-byte registers", testAddLowByteRegisters},
         {"ADD guest byte to low register", testAddGuestByteToLowRegister},
+        {"ADD immediate to low byte", testAddImmediateToLowByte},
         {"INC 32-bit register", testIncrement32BitRegister},
         {"INC low-byte register", testIncrementLowByteRegister},
         {"DEC 32-bit register", testDecrement32BitRegister},

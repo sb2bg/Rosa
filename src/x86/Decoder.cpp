@@ -2867,6 +2867,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (extension == 0 && mode == 0x3U && !rexW && !rexR && !rexX &&
+                (hasRex || rmEncoding < 0x4U)) {
+                const auto immediate = code[cursor++];
+                instruction.opcode = Opcode::AddRegImm;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, rexB), 8});
+                instruction.operands.push_back(
+                    ImmediateOperand{immediate, 8});
+                const auto length = cursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(
+                    code.begin() +
+                        static_cast<std::ptrdiff_t>(instructionStart),
+                    length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
             // In 64-bit mode mod=00,r/m=101 remains RIP-relative even when
             // REX.B is present; REX.B does not turn this special encoding into
             // an R13 base.

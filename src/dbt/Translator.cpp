@@ -1488,12 +1488,22 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            const auto lhs =
-                builder.readGuestRegister(reg.reg, ir::Width::I64, instruction.address);
-            const auto rhs = builder.constant(immediate.value, ir::Width::I64, instruction.address);
-            const auto result = builder.add(lhs, rhs, ir::Width::I64, instruction.address);
-            builder.writeGuestRegister(reg.reg, result, ir::Width::I64, instruction.address);
-            builder.updateAddFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
+            if (reg.width != 8 && reg.width != 64) {
+                throw std::runtime_error(
+                    "only 8-bit and 64-bit immediate ADD are implemented");
+            }
+            const auto width = reg.width == 8 ? ir::Width::I8
+                                               : ir::Width::I64;
+            const auto lhs = builder.readGuestRegister(
+                reg.reg, width, instruction.address);
+            const auto rhs = builder.constant(immediate.value, width,
+                                              instruction.address);
+            const auto result = builder.add(lhs, rhs, width,
+                                            instruction.address);
+            builder.writeGuestRegister(reg.reg, result, width,
+                                       instruction.address);
+            builder.updateAddFlags(lhs, rhs, result, width,
+                                   instruction.address);
             break;
         }
         case x86::Opcode::AddRegReg: {
