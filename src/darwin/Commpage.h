@@ -10,6 +10,8 @@ namespace rosa::darwin {
 inline constexpr guest::GuestAddress x86CommpageBase{0x00007FFFFFE00000ULL};
 inline constexpr std::size_t x86CommpageVersionOffset = 0x1E;
 inline constexpr std::uint16_t x86CommpageVersion = 14;
+inline constexpr std::size_t x86CommpageKernelPageShiftOffset = 0x4D;
+inline constexpr std::uint8_t x86CommpageKernelPageShift = 12;
 inline constexpr std::size_t x86CommpageKdebugEnableOffset = 0x44;
 inline constexpr std::size_t x86CommpageContinuousTimebaseOffset = 0xC0;
 inline constexpr std::size_t x86CommpageNanotimeTscBaseOffset = 0x50;

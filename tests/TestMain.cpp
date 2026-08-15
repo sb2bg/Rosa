@@ -5045,6 +5045,14 @@ void testX86Commpage() {
                 std::vector<std::uint8_t>{
                     static_cast<std::uint8_t>(rosa::darwin::x86CommpageVersion), 0},
                 "x86 commpage version differs");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{
+                        rosa::darwin::x86CommpageBase.value +
+                        rosa::darwin::x86CommpageKernelPageShiftOffset},
+                    1)
+                    .front(),
+                rosa::darwin::x86CommpageKernelPageShift,
+                "x86 commpage kernel page shift differs");
     expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageKdebugEnableOffset}),
