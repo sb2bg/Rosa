@@ -638,6 +638,22 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateAddFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::AddRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: register add operand count");
+            }
+            const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto lhs = builder.readGuestRegister(destination.reg, ir::Width::I64,
+                                                       instruction.address);
+            const auto rhs = builder.readGuestRegister(source.reg, ir::Width::I64,
+                                                       instruction.address);
+            const auto result = builder.add(lhs, rhs, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+                                       instruction.address);
+            builder.updateAddFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::AddRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: add memory operand count");

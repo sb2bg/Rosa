@@ -199,6 +199,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
                    << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::AddRegReg:
+            stream << "add "
+                   << x86::registerName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
+                   << ", "
+                   << x86::registerName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]).reg);
+            break;
         case x86::Opcode::AddRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << "add "

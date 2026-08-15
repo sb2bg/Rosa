@@ -20,6 +20,7 @@ enum class Opcode {
     LeaRegRipRelative,
     LeaRegMem,
     AddRegImm,
+    AddRegReg,
     AddRegMem,
     SubRegImm,
     SubRegMem,

@@ -543,6 +543,31 @@ void testAddRegisterFromGuestMemory() {
                 "failed memory ADD changed flags");
 }
 
+void testAddRegisterToRegister() {
+    constexpr std::array<std::uint8_t, 4> code{0x49, 0x01, 0xDD, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddRegReg,
+           "ADD r64, r64 opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::R13,
+           "ADD r64, r64 extended destination differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]).reg ==
+               rosa::x86::Register::Rbx,
+           "ADD r64, r64 source differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r13 = UINT64_MAX;
+    state.rbx = 2;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r13, std::uint64_t{1}, "ADD r64, r64 result differs");
+    expectEqual(state.rbx, std::uint64_t{2}, "ADD r64, r64 changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x13}, "ADD r64, r64 flags differ");
+}
+
 void testCompare32BitRegisterWithGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x44, 0x3B, 0x46, 0x18, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2086,6 +2111,7 @@ int main() {
         {"SUB register imm8 generated execution", testSubRegImm8GeneratedExecution},
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
+        {"ADD register to register", testAddRegisterToRegister},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
