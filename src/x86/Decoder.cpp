@@ -1769,7 +1769,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x08U &&
             code[cursor] != 0x09U &&
             code[cursor] != 0x87U &&
-            code[cursor] != 0x29U && code[cursor] != 0x2BU &&
+            code[cursor] != 0x28U && code[cursor] != 0x29U &&
+            code[cursor] != 0x2BU &&
             code[cursor] != 0x33U &&
             code[cursor] != 0x38U && code[cursor] != 0x39U &&
             code[cursor] != 0x3AU &&
@@ -1811,7 +1812,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x3AU &&
             opcode != 0x31U && opcode != 0x38U && opcode != 0x39U &&
             opcode != 0x80U &&
-            opcode != 0x29U && opcode != 0x2BU && opcode != 0x33U &&
+            opcode != 0x28U && opcode != 0x29U && opcode != 0x2BU &&
+            opcode != 0x33U &&
             opcode != 0x20U && opcode != 0x21U && opcode != 0x22U &&
             opcode != 0x81U && opcode != 0xC0U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD3U &&
@@ -2242,6 +2244,29 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::AndRegReg;
             instruction.operands.push_back(RegisterOperand{destination, width});
             instruction.operands.push_back(RegisterOperand{source, width});
+        } else if (opcode == 0x28U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining,
+                                  "truncated sub byte register, register");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto sourceEncoding =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto destinationEncoding =
+                static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode != 0x3U ||
+                (!hasRex &&
+                 (sourceEncoding >= 0x4U || destinationEncoding >= 0x4U))) {
+                throw DecodeError(
+                    address, remaining,
+                    "only register-direct representable low-byte SUB from opcode 28 is supported");
+            }
+            instruction.opcode = Opcode::SubRegReg;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(destinationEncoding, rexB), 8});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(sourceEncoding, rexR), 8});
         } else if (opcode == 0x29U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated sub register, register");

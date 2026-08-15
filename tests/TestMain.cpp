@@ -446,6 +446,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("sub8_register_borrow",
+                             CaseId::sub8_register_borrow,
+                             differentialBytes_sub8_register_borrow);
+        testCase.request.state.rcx = 0x1122334455667700ULL;
+        testCase.request.state.rax = 0x8877665544332201ULL;
+        run(testCase);
+    }
+    {
+        auto testCase = make("sub8_register_overflow",
+                             CaseId::sub8_register_overflow,
+                             differentialBytes_sub8_register_overflow);
+        testCase.request.state.rcx = 0x1122334455667780ULL;
+        testCase.request.state.rax = 0x8877665544332201ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("inc32_overflow", CaseId::inc32_overflow,
                              differentialBytes_inc32_overflow);
         testCase.request.state.r15 = 0xAAAAAAAA7FFFFFFFULL;
@@ -2197,6 +2213,60 @@ void testSubRegisterFromRegister() {
     expectEqual(state.rdi, std::uint64_t{0x28}, "SUB r64, r64 result differs");
     expectEqual(state.rdx, std::uint64_t{0x1000}, "SUB r64, r64 changed source");
     expectEqual(state.rflags, std::uint64_t{0x6}, "SUB r64, r64 flags differ");
+
+    constexpr std::array<std::uint8_t, 3> byteCode{0x28, 0xC1, 0xC3};
+    const auto byteDecoded = decoder.decodeBlock(
+        byteCode, rosa::guest::GuestAddress{0x7FF800059936ULL});
+    expect(byteDecoded[0].opcode == rosa::x86::Opcode::SubRegReg,
+           "SUB r8, r8 opcode differs");
+    expectEqual(byteDecoded[0].length, std::uint8_t{2},
+                "SUB r8, r8 length differs");
+    const auto byteDestination =
+        std::get<rosa::x86::RegisterOperand>(byteDecoded[0].operands[0]);
+    const auto byteSource =
+        std::get<rosa::x86::RegisterOperand>(byteDecoded[0].operands[1]);
+    expect(byteDestination.reg == rosa::x86::Register::Rcx &&
+               byteDestination.width == 8 &&
+               byteSource.reg == rosa::x86::Register::Rax &&
+               byteSource.width == 8,
+           "SUB cl, al operands differ");
+    expect(rosa::debug::dumpX86(byteDecoded).find("sub cl, al") !=
+               std::string::npos,
+           "SUB cl, al dump differs");
+    const auto byteBlock = translator.translate(
+        byteCode, rosa::guest::GuestAddress{0x7FF800059936ULL});
+    rosa::x86::X86State byteBorrow;
+    byteBorrow.rcx = 0x1122334455667700ULL;
+    byteBorrow.rax = 0x8877665544332201ULL;
+    byteBorrow.rflags = 0x8D7;
+    static_cast<void>(byteBlock.execute(byteBorrow));
+    expectEqual(byteBorrow.rcx, std::uint64_t{0x11223344556677FFULL},
+                "SUB cl, al did not merge its low-byte result");
+    expectEqual(byteBorrow.rax, std::uint64_t{0x8877665544332201ULL},
+                "SUB cl, al changed its source");
+    expectEqual(byteBorrow.rflags, std::uint64_t{0x97},
+                "SUB cl, al borrow flags differ");
+
+    rosa::x86::X86State byteOverflow;
+    byteOverflow.rcx = 0x1122334455667780ULL;
+    byteOverflow.rax = 0x8877665544332201ULL;
+    byteOverflow.rflags = 0x8D7;
+    static_cast<void>(byteBlock.execute(byteOverflow));
+    expectEqual(byteOverflow.rcx, std::uint64_t{0x112233445566777FULL},
+                "SUB cl, al overflow result differs");
+    expectEqual(byteOverflow.rflags, std::uint64_t{0x812},
+                "SUB cl, al overflow flags differ");
+
+    bool rejectedHighByte = false;
+    try {
+        constexpr std::array<std::uint8_t, 2> highByte{0x28, 0xE1};
+        static_cast<void>(decoder.decodeBlock(
+            highByte, rosa::guest::GuestAddress{0x3000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejectedHighByte = true;
+    }
+    expect(rejectedHighByte,
+           "SUB cl, ah was silently treated as a low-byte register");
 
     constexpr std::array<std::uint8_t, 4> extendedCode{
         0x45, 0x29, 0xE5, 0xC3};
