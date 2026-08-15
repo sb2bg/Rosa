@@ -277,6 +277,18 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "], 0x" << immediate.value;
             break;
         }
+        case x86::Opcode::LockIncMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "lock inc dword [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::MovzxRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << "movzx "
@@ -1081,6 +1093,11 @@ std::string dumpIr(const ir::Block &block) {
             stream << "locked_or_guest_memory." << widthName(operation.width)
                    << ' ' << valueName(*operation.lhs) << ", "
                    << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::LockedIncrementGuestMemory:
+            stream << "locked_increment_guest_memory."
+                   << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs);
             break;
         case ir::Opcode::StoreGuest:
             stream << "store_guest." << widthName(operation.width) << ' '

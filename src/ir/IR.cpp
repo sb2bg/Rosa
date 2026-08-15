@@ -428,6 +428,16 @@ void Builder::exchangeGuestMemory(ValueId address, ValueId source,
     });
 }
 
+void Builder::lockedIncrementGuestMemory(ValueId address, Width width,
+                                         guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LockedIncrementGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+    });
+}
+
 void Builder::lockedOrGuestMemory(ValueId address, ValueId immediate,
                                   Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -766,6 +776,13 @@ std::vector<std::string> verify(const Block &block) {
                 operation.width != Width::I64) {
                 errors.emplace_back(
                     "exchange_guest_memory currently requires i32 or i64");
+            }
+            break;
+        case Opcode::LockedIncrementGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            if (operation.width != Width::I32) {
+                errors.emplace_back(
+                    "locked_increment_guest_memory currently requires i32");
             }
             break;
         case Opcode::LockedOrGuestMemory:
