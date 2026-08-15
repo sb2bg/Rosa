@@ -504,6 +504,45 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x66U && code.size() - cursor >= 2) {
+            const auto afterSizePrefix = cursor + 1;
+            const bool testHasRex = code[afterSizePrefix] >= 0x40U &&
+                                    code[afterSizePrefix] <= 0x4FU;
+            const auto testOpcodeOffset = afterSizePrefix + (testHasRex ? 1U : 0U);
+            if (testOpcodeOffset < code.size() && code[testOpcodeOffset] == 0x85U) {
+                if (code.size() - testOpcodeOffset < 2) {
+                    throw DecodeError(address, remaining,
+                                      "truncated test word register, register");
+                }
+                const auto rex = testHasRex ? code[afterSizePrefix] : 0U;
+                const bool rexW = (rex & 0x8U) != 0;
+                const bool rexR = (rex & 0x4U) != 0;
+                const bool rexB = (rex & 0x1U) != 0;
+                const auto modrm = code[testOpcodeOffset + 1];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                if (rexW || mode != 0x3U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only register-direct TEST r16, r16 is supported with operand-size override");
+                }
+                instruction.opcode = Opcode::TestRegReg;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 16});
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR), 16});
+                const auto length = testOpcodeOffset + 2 - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = testOpcodeOffset + 2;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
         if (code[cursor] == 0x66U && code.size() - cursor >= 2 &&
             code[cursor + 1] == 0x83U) {
             if (code.size() - cursor < 4) {

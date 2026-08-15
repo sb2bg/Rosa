@@ -625,6 +625,23 @@ extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags32(x86::X86S
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *
+updateLogicFlags16(x86::X86State *state, std::uint64_t result) {
+    const auto result16 = static_cast<std::uint16_t>(result);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if ((std::popcount(static_cast<unsigned>(result16 & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (result16 == 0) {
+        flags |= flagZero;
+    }
+    if ((result16 >> 15U) != 0) {
+        flags |= flagSign;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags8(x86::X86State *state,
                                                                       std::uint64_t result) {
     const auto result8 = static_cast<std::uint8_t>(result);
@@ -1532,7 +1549,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto lhsRegister = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto rhsRegister = std::get<x86::RegisterOperand>(instruction.operands[1]);
-            const auto width = lhsRegister.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto width = lhsRegister.width == 16 ? ir::Width::I16
+                               : lhsRegister.width == 32 ? ir::Width::I32
+                                                         : ir::Width::I64;
             const auto lhs =
                 builder.readGuestRegister(lhsRegister.reg, width, instruction.address);
             const auto rhs =
@@ -2258,6 +2277,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 arm64::x16,
                 operation.width == ir::Width::I8
                     ? pointerBits(&updateLogicFlags8)
+                    : operation.width == ir::Width::I16
+                          ? pointerBits(&updateLogicFlags16)
                     : operation.width == ir::Width::I32
                           ? pointerBits(&updateLogicFlags32)
                           : pointerBits(&updateLogicFlags64));

@@ -2019,6 +2019,42 @@ void testTestRegisterGeneratedExecution() {
                 "TEST sign-result flags differ");
 }
 
+void testTest16BitRegistersGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x45, 0x85, 0xF6, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestRegReg,
+           "TEST r16, r16 opcode differs");
+    const auto lhs = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto rhs = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(lhs.reg == rosa::x86::Register::R14 && lhs.width == 16 &&
+               rhs.reg == rosa::x86::Register::R14 && rhs.width == 16,
+           "TEST r14w operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("test r14w, r14w") !=
+               std::string::npos,
+           "TEST r14w dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r14 = 0xA5A5A5A500000000ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r14, std::uint64_t{0xA5A5A5A500000000ULL},
+                "TEST r16 changed its operand");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "TEST r16 zero flags differ");
+
+    state.r14 = 0x1122334455668000ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r14, std::uint64_t{0x1122334455668000ULL},
+                "TEST r16 sign case changed its operand");
+    expectEqual(state.rflags, std::uint64_t{0x86},
+                "TEST r16 sign flags differ");
+}
+
 void testTest32BitRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x45, 0x85, 0xC0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -4326,6 +4362,8 @@ int main() {
         {"legacy MOV guest memory to 32-bit register",
          testMovGuestMemoryToLegacy32BitRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},
+        {"TEST 16-bit registers generated execution",
+         testTest16BitRegistersGeneratedExecution},
         {"TEST 32-bit register generated execution", testTest32BitRegisterGeneratedExecution},
         {"legacy TEST 32-bit register generated execution",
          testLegacyTest32BitRegisterGeneratedExecution},
