@@ -1837,18 +1837,27 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto rm = decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
             const auto operandWidth = static_cast<std::uint8_t>(rexW ? 64U : 32U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode == 0 && rmEncoding == 0x5U && opcode == 0x89U) {
+            if (mode == 0 && rmEncoding == 0x5U) {
                 if (code.size() - cursor < 4) {
                     throw DecodeError(address, remaining,
-                                      "truncated RIP-relative MOV store displacement");
+                                      "truncated RIP-relative MOV displacement");
                 }
                 const auto displacement = readI32(code.subspan(cursor, 4));
                 cursor += 4;
-                instruction.opcode = Opcode::MovMemReg;
-                instruction.operands.push_back(MemoryOperand{
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+                const auto memory = MemoryOperand{
                     Register::Rax, displacement, operandWidth, std::nullopt, 1,
-                    false, true});
-                instruction.operands.push_back(RegisterOperand{reg, operandWidth});
+                    false, true};
+                if (opcode == 0x89U) {
+                    instruction.opcode = Opcode::MovMemReg;
+                    instruction.operands.push_back(memory);
+                    instruction.operands.push_back(RegisterOperand{reg, operandWidth});
+                } else {
+                    instruction.opcode = Opcode::MovRegMem;
+                    instruction.operands.push_back(RegisterOperand{reg, operandWidth});
+                    instruction.operands.push_back(memory);
+                }
             } else if (mode == 0x3U && !rexX) {
                 instruction.opcode = Opcode::MovRegReg;
                 instruction.operands.push_back(
@@ -2185,6 +2194,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (cursor >= code.size()) {
                 throw DecodeError(address, remaining, "truncated byte CMP immediate");
             }
+            const auto immediate = code[cursor++];
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+            }
             instruction.opcode = Opcode::CmpMemImm;
             instruction.operands.push_back(
                 ripRelative
@@ -2192,7 +2206,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                     1, false, true}
                     : MemoryOperand{decodeRegister(rmEncoding, rexB),
                                     displacement, 8});
-            instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
+            instruction.operands.push_back(ImmediateOperand{immediate, 8});
         } else if (opcode == 0x81U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated opcode 81");
