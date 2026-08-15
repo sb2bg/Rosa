@@ -1815,6 +1815,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x28U && opcode != 0x29U && opcode != 0x2BU &&
             opcode != 0x33U &&
             opcode != 0x20U && opcode != 0x21U && opcode != 0x22U &&
+            opcode != 0x0FU &&
             opcode != 0x81U && opcode != 0xC0U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD3U &&
             opcode != 0xFEU && opcode != 0xFFU &&
@@ -1909,7 +1910,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 32});
         } else if (opcode == 0x0FU) {
             if (cursor >= code.size()) {
-                throw DecodeError(address, remaining, "truncated REX.W 0F opcode");
+                throw DecodeError(address, remaining, "truncated 0F opcode");
             }
             const auto secondOpcode = code[cursor++];
             if (secondOpcode != 0x42U && secondOpcode != 0x43U &&
@@ -1919,7 +1920,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 secondOpcode != 0xBDU) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMOVB/CMOVAE/CMOVE/CMOVA, IMUL, SHRD, BSF, and BSR register forms are supported from REX.W 0F");
+                    "only CMOVB/CMOVAE/CMOVE/CMOVA, IMUL, SHRD, BSF, and BSR register forms are supported from 0F");
+            }
+            const bool isConditionalMove =
+                secondOpcode == 0x42U || secondOpcode == 0x43U ||
+                secondOpcode == 0x44U || secondOpcode == 0x47U;
+            if (!rexW && !isConditionalMove) {
+                throw DecodeError(
+                    address, remaining,
+                    "only 32-bit register CMOV is supported from non-W REX 0F");
             }
             if (cursor >= code.size() ||
                 (secondOpcode == 0xACU && code.size() - cursor < 2)) {
@@ -1941,8 +1950,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto encodedRm =
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
-            if (secondOpcode == 0x42U || secondOpcode == 0x43U ||
-                secondOpcode == 0x44U || secondOpcode == 0x47U) {
+            if (isConditionalMove) {
                 instruction.opcode = Opcode::CmovccReg;
                 instruction.condition = secondOpcode == 0x42U
                                             ? Condition::Below
@@ -1951,8 +1959,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                         : secondOpcode == 0x47U
                                             ? Condition::Above
                                             : Condition::Equal;
-                instruction.operands.push_back(RegisterOperand{encodedReg, 64});
-                instruction.operands.push_back(RegisterOperand{encodedRm, 64});
+                const auto width =
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U);
+                instruction.operands.push_back(
+                    RegisterOperand{encodedReg, width});
+                instruction.operands.push_back(
+                    RegisterOperand{encodedRm, width});
             } else if (secondOpcode == 0xBCU) {
                 instruction.opcode = Opcode::BitScanForwardRegReg;
                 instruction.operands.push_back(RegisterOperand{encodedReg, 64});

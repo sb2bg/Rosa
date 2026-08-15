@@ -1209,6 +1209,24 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmove32_extended_taken",
+                             CaseId::cmove32_extended_taken,
+                             differentialBytes_cmove32_extended_taken);
+        testCase.request.state.rax = UINT64_MAX;
+        testCase.request.state.r8 = 0xAABBCCDD01234567ULL;
+        testCase.request.state.rflags |= zeroFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("cmove32_extended_not_taken",
+                             CaseId::cmove32_extended_not_taken,
+                             differentialBytes_cmove32_extended_not_taken);
+        testCase.request.state.rax = 0xAABBCCDD55667788ULL;
+        testCase.request.state.r8 = UINT64_MAX;
+        testCase.request.state.rflags &= ~zeroFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmova64_taken", CaseId::cmova64_taken,
                              differentialBytes_cmova64_taken);
         testCase.request.state.rax = 0x0123456789ABCDEFULL;
@@ -11941,6 +11959,57 @@ void testConditionalMoveEqual64() {
                 "untaken CMOVE changed flags");
 }
 
+void testConditionalMoveEqual32Extended() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x41, 0x0F, 0x44, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF800059944ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               decoded[0].condition == rosa::x86::Condition::Equal,
+           "CMOVE extended r32 opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "CMOVE extended r32 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 32 &&
+               source.reg == rosa::x86::Register::R8 && source.width == 32,
+           "CMOVE eax, r8d operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmove eax, r8d") !=
+               std::string::npos,
+           "CMOVE extended r32 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF800059944ULL});
+    rosa::x86::X86State taken;
+    taken.rax = UINT64_MAX;
+    taken.r8 = 0xAABBCCDD11223344ULL;
+    taken.rflags = 0x8D7 | zeroFlag;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rax, std::uint64_t{0x11223344},
+                "taken CMOVE r32 did not zero-extend its destination");
+    expectEqual(taken.r8, std::uint64_t{0xAABBCCDD11223344ULL},
+                "CMOVE r32 changed its extended source");
+    expectEqual(taken.rflags, std::uint64_t{0x8D7 | zeroFlag},
+                "taken CMOVE r32 changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rax = 0xAABBCCDD55667788ULL;
+    notTaken.r8 = UINT64_MAX;
+    notTaken.rflags = 0x897 & ~zeroFlag;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rax, std::uint64_t{0x55667788},
+                "untaken CMOVE r32 did not clear destination upper bits");
+    expectEqual(notTaken.r8, UINT64_MAX,
+                "untaken CMOVE r32 changed its source");
+    expectEqual(notTaken.rflags, std::uint64_t{0x897 & ~zeroFlag},
+                "untaken CMOVE r32 changed flags");
+}
+
 void testUnsignedAboveConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x77, 0x02}; // ja 0x1004
     const rosa::x86::Decoder decoder;
@@ -12695,6 +12764,8 @@ int main() {
          testConditionalMoveAboveOrEqual32},
         {"conditional move above 64-bit", testConditionalMoveAbove64},
         {"conditional move equal 64-bit", testConditionalMoveEqual64},
+        {"conditional move equal extended 32-bit",
+         testConditionalMoveEqual32Extended},
         {"unsigned-above conditional", testUnsignedAboveConditional},
         {"unsigned-above long conditional", testUnsignedAboveLongConditional},
         {"unsigned-above-or-equal long conditional",
