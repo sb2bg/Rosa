@@ -514,6 +514,23 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("xor32_short_immediate",
+                             CaseId::xor32_short_immediate,
+                             differentialBytes_xor32_short_immediate);
+        testCase.request.state.rax = 0xAAAAAAAA00000007ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "xor32_negative_short_immediate",
+            CaseId::xor32_negative_short_immediate,
+            differentialBytes_xor32_negative_short_immediate);
+        testCase.request.state.rax = 0xAAAAAAAA12345678ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("xor8_accumulator", CaseId::xor8_accumulator,
                              differentialBytes_xor8_accumulator);
         testCase.request.state.rax = 0x1122334455667701ULL;
@@ -7020,6 +7037,49 @@ void testXor32BitRegisterImmediate() {
                 "XOR EAX, imm32 did not zero-extend result");
     expectEqual(state.rflags, std::uint64_t{0x46},
                 "XOR EAX, imm32 flags differ");
+
+    constexpr std::array<std::uint8_t, 4> shortCode{
+        0x83, 0xF0, 0x07, 0xC3};
+    const auto shortDecoded = decoder.decodeBlock(
+        shortCode, rosa::guest::GuestAddress{0x3000});
+    expect(shortDecoded[0].opcode == rosa::x86::Opcode::XorRegImm,
+           "XOR r32, imm8 opcode differs");
+    expectEqual(shortDecoded[0].length, std::uint8_t{3},
+                "XOR r32, imm8 length differs");
+    const auto shortDestination =
+        std::get<rosa::x86::RegisterOperand>(shortDecoded[0].operands[0]);
+    const auto shortImmediate =
+        std::get<rosa::x86::ImmediateOperand>(shortDecoded[0].operands[1]);
+    expect(shortDestination.reg == rosa::x86::Register::Rax &&
+               shortDestination.width == 32,
+           "XOR r32, imm8 destination differs");
+    expect(shortImmediate.width == 8 && shortImmediate.value == 7,
+           "XOR r32, imm8 immediate differs");
+    expect(rosa::debug::dumpX86(shortDecoded).find("xor eax, 0x7") !=
+               std::string::npos,
+           "XOR r32, imm8 dump differs");
+    const auto shortBlock = translator.translate(
+        shortCode, rosa::guest::GuestAddress{0x3000});
+    state.rax = 0xAAAAAAAA00000007ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(shortBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0},
+                "XOR r32, imm8 did not zero-extend its result");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "XOR r32, imm8 defined flags differ");
+
+    constexpr std::array<std::uint8_t, 4> negativeShortCode{
+        0x83, 0xF0, 0xFF, 0xC3};
+    const auto negativeShortDecoded = decoder.decodeBlock(
+        negativeShortCode, rosa::guest::GuestAddress{0x4000});
+    expectEqual(
+        std::get<rosa::x86::ImmediateOperand>(
+            negativeShortDecoded[0].operands[1]).value,
+        UINT64_MAX, "XOR r32, imm8 was not sign-extended");
 }
 
 void testXor64BitAccumulatorImmediate() {

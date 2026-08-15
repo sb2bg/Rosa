@@ -27,6 +27,8 @@ ROSA_DIFFERENTIAL_CASE(and8_rip_memory, 0x44, 0x22, 0x35, 0x02, 0x00, 0x00,
 ROSA_DIFFERENTIAL_CASE(or64_register, 0x48, 0x09, 0xD0)
 ROSA_DIFFERENTIAL_CASE(or8_register, 0x08, 0xC8)
 ROSA_DIFFERENTIAL_CASE(xor32_register, 0x31, 0xF6)
+ROSA_DIFFERENTIAL_CASE(xor32_short_immediate, 0x83, 0xF0, 0x07)
+ROSA_DIFFERENTIAL_CASE(xor32_negative_short_immediate, 0x83, 0xF0, 0xFF)
 ROSA_DIFFERENTIAL_CASE(xor8_accumulator, 0x34, 0x01)
 ROSA_DIFFERENTIAL_CASE(test16_register, 0x66, 0x45, 0x85, 0xF6)
 ROSA_DIFFERENTIAL_CASE(test8_register_immediate, 0xF6, 0xC2, 0x01)
