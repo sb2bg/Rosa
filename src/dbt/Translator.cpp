@@ -105,6 +105,40 @@ storeGuestXmm128(GuestExecutionContext *context, x86::X86State *state,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+loadGuestXmm128(GuestExecutionContext *context, x86::X86State *state,
+                std::uint64_t address, std::uint64_t registerIndex,
+                std::uint64_t alignmentRequired) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated XMM guest load has no address space");
+        }
+        if (registerIndex >= state->xmm.size()) {
+            throw std::runtime_error("generated XMM guest load has an invalid register");
+        }
+        if (alignmentRequired != 0 && (address & 0xFU) != 0) {
+            throw std::runtime_error("MOVDQA guest address is not 16-byte aligned");
+        }
+        const auto bytes = context->addressSpace->readBytes(guest::GuestAddress{address}, 16);
+        x86::X86State::XmmValue value;
+        for (std::size_t index = 0; index < sizeof(std::uint64_t); ++index) {
+            value.low |= static_cast<std::uint64_t>(bytes[index]) << (index * 8U);
+            value.high |= static_cast<std::uint64_t>(
+                              bytes[index + sizeof(std::uint64_t)])
+                          << (index * 8U);
+        }
+        state->xmm[registerIndex] = value;
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = 16;
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 loadGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address) noexcept {
     try {
         if (context == nullptr || context->addressSpace == nullptr) {
@@ -432,6 +466,23 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.storeGuestXmm(address, source,
                                   instruction.opcode == x86::Opcode::MovapsMemReg,
                                   instruction.address);
+            break;
+        }
+        case x86::Opcode::MovdqaRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: movdqa load operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            const auto base =
+                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                instruction.address);
+            const auto address =
+                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            builder.loadGuestXmm(address, destination, true, instruction.address);
             break;
         }
         case x86::Opcode::LeaRegRipRelative: {
@@ -812,11 +863,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::Push ||
                          operation.opcode == ir::Opcode::StoreGuest ||
                          operation.opcode == ir::Opcode::StoreGuestXmm ||
+                         operation.opcode == ir::Opcode::LoadGuestXmm ||
                          operation.opcode == ir::Opcode::LoadGuest ||
                          operation.opcode == ir::Opcode::ReadTimestampCounter;
         hasExecutionContextCall |= operation.opcode == ir::Opcode::Push ||
                                    operation.opcode == ir::Opcode::StoreGuest ||
                                    operation.opcode == ir::Opcode::StoreGuestXmm ||
+                                   operation.opcode == ir::Opcode::LoadGuestXmm ||
                                    operation.opcode == ir::Opcode::LoadGuest ||
                                    operation.opcode == ir::Opcode::ReadTimestampCounter;
     }
@@ -973,6 +1026,27 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    static_cast<std::uint64_t>(BlockExit::MemoryFault));
             assembler.ret();
             assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::LoadGuestXmm: {
+            const auto fault = assembler.makeLabel();
+            const auto loaded = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(
+                arm64::x3, static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(arm64::x4, operation.immediate);
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&loadGuestXmm128));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(loaded);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0,
+                                   static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(loaded);
             break;
         }
         case ir::Opcode::LoadGuest: {

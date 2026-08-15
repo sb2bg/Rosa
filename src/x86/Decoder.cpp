@@ -334,6 +334,51 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x66U && code.size() - cursor >= 3 &&
+            code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x6FU) {
+            if (code.size() - cursor < 4) {
+                throw DecodeError(address, remaining, "truncated movdqa xmm, [base+disp]");
+            }
+            const auto modrm = code[cursor + 3];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode > 0x2U || rmEncoding == 0x4U ||
+                (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only MOVDQA xmm, [base+disp8/disp32] memory operands are supported");
+            }
+            cursor += 4;
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated MOVDQA memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated MOVDQA memory disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::MovdqaRegMem;
+            instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(rmEncoding, false), displacement, 128});
+
+            const auto length = cursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,
+                        instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0xE8U || code[cursor] == 0xE9U) {
             if (code.size() - cursor < 5) {
                 throw DecodeError(address, remaining, "truncated rel32 control transfer");

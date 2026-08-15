@@ -1117,6 +1117,56 @@ void testMovupsRegisterToGuestMemoryWithSib() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVUPS changed flags");
 }
 
+void testMovdqaGuestMemoryToRegister() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x66, 0x0F, 0x6F, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, 0xC3,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovdqaRegMem,
+           "MOVDQA xmm, [mem] opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbp, "MOVDQA base differs");
+    expectEqual(memory.displacement, std::int64_t{-0x20},
+                "MOVDQA displacement differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x80E0}, 0x0123456789ABCDEFULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x80E8}, 0xFEDCBA9876543210ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbp = 0x8100;
+    state.xmm[0] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVDQA loaded the wrong low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVDQA loaded the wrong high lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVDQA changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rbp = 0x8100;
+    faultState.xmm[0] = {.low = 0x55, .high = 0xAA};
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOVDQA from unmapped guest memory did not fail");
+    expectEqual(faultState.xmm[0].low, std::uint64_t{0x55},
+                "failed MOVDQA changed the low lane");
+    expectEqual(faultState.xmm[0].high, std::uint64_t{0xAA},
+                "failed MOVDQA changed the high lane");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -1580,6 +1630,7 @@ int main() {
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
+        {"MOVDQA guest memory to register", testMovdqaGuestMemoryToRegister},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},

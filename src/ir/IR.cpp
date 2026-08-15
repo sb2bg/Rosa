@@ -239,6 +239,18 @@ void Builder::storeGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
     });
 }
 
+void Builder::loadGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
+                           guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LoadGuestXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = reg,
+        .immediate = aligned ? 1U : 0U,
+    });
+}
+
 void Builder::push(ValueId newStackPointer, ValueId value, Width width,
                    guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -470,6 +482,12 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "guest address");
             if (!operation.guestXmmRegister) {
                 errors.emplace_back("store_guest_xmm has no register");
+            }
+            break;
+        case Opcode::LoadGuestXmm:
+            checkUse(operation.lhs, "guest address");
+            if (!operation.guestXmmRegister) {
+                errors.emplace_back("load_guest_xmm has no register");
             }
             break;
         case Opcode::LoadGuest:

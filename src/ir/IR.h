@@ -39,6 +39,7 @@ enum class Opcode {
     LoadGuest,
     StoreGuest,
     StoreGuestXmm,
+    LoadGuestXmm,
     Push,
     LoadFence,
     ReadTimestampCounter,
@@ -109,6 +110,8 @@ class Builder {
     void storeGuest(ValueId address, ValueId value, Width width, guest::GuestAddress rip);
     void storeGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
                        guest::GuestAddress rip);
+    void loadGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
+                      guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
     void readTimestampCounter(guest::GuestAddress rip);

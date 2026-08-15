@@ -289,6 +289,20 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
         }
+        case x86::Opcode::MovdqaRegMem: {
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "movdqa "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg)
+                   << ", [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::Push:
             stream << "push ";
             if (std::holds_alternative<x86::ImmediateOperand>(instruction.operands[0])) {
@@ -418,6 +432,12 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::StoreGuestXmm:
             stream << "store_guest_xmm.i128 " << valueName(*operation.lhs) << ", "
                    << x86::xmmRegisterName(*operation.guestXmmRegister)
+                   << (operation.immediate != 0 ? ", aligned" : ", unaligned");
+            break;
+        case ir::Opcode::LoadGuestXmm:
+            stream << "load_guest_xmm.i128 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
+                   << valueName(*operation.lhs)
                    << (operation.immediate != 0 ? ", aligned" : ", unaligned");
             break;
         case ir::Opcode::LoadGuest:
