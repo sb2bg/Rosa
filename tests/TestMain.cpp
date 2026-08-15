@@ -473,6 +473,31 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("lock_cmpxchg32_equal",
+                             CaseId::lock_cmpxchg32_equal,
+                             differentialBytes_lock_cmpxchg32_equal);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0x40);
+        testCase.request.state.rax = 0xAAAAAAAA00000000ULL;
+        testCase.request.state.rcx = 0xBBBBBBBB12345678ULL;
+        testCase.memoryCompareOffset = 0x40;
+        testCase.memoryCompareSize = sizeof(std::uint32_t);
+        run(testCase);
+    }
+    {
+        auto testCase = make("lock_cmpxchg32_mismatch",
+                             CaseId::lock_cmpxchg32_mismatch,
+                             differentialBytes_lock_cmpxchg32_mismatch);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0x40);
+        testCase.request.state.rax = 0xAAAAAAAA00000000ULL;
+        testCase.request.state.rcx = 0xBBBBBBBB12345678ULL;
+        constexpr std::uint32_t memoryValue = 0x80000000U;
+        std::memcpy(testCase.request.memory.data() + 0x40, &memoryValue,
+                    sizeof(memoryValue));
+        testCase.memoryCompareOffset = 0x40;
+        testCase.memoryCompareSize = sizeof(memoryValue);
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp8_scaled_memory", CaseId::cmp8_scaled_memory,
                              differentialBytes_cmp8_scaled_memory);
         bindMemory(testCase, rosa::x86::Register::R14, 0);
@@ -2149,6 +2174,107 @@ void testCompareGuestMemoryWith64BitRegister() {
         registerCode, rosa::guest::GuestAddress{0x2000});
     expect(registerDecoded[0].opcode == rosa::x86::Opcode::CmpRegReg,
            "register-direct opcode 39 no longer decodes as CMP register");
+}
+
+void testLockedCompareExchangeGuestDword() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0xF0, 0x0F, 0xB1, 0x0F, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpxchgMemReg,
+           "LOCK CMPXCHG opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "LOCK CMPXCHG length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rdi && memory.width == 32 &&
+               memory.displacement == 0,
+           "LOCK CMPXCHG memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rcx && source.width == 32,
+           "LOCK CMPXCHG source differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "lock cmpxchg dword [rdi], ecx") != std::string::npos,
+           "LOCK CMPXCHG dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("compare_exchange_guest_memory.i32") !=
+               std::string::npos,
+           "LOCK CMPXCHG did not lower through guest-memory IR");
+
+    const std::array zeroBytes{
+        std::uint8_t{0}, std::uint8_t{0}, std::uint8_t{0}, std::uint8_t{0}};
+    addressSpace.writeBytes(memoryBase, zeroBytes);
+    rosa::x86::X86State equalState;
+    equalState.rdi = memoryBase.value;
+    equalState.rax = 0xAAAAAAAA00000000ULL;
+    equalState.rcx = 0xBBBBBBBB12345678ULL;
+    equalState.rflags = 0x8D7;
+    static_cast<void>(block.execute(equalState, &addressSpace));
+    expectEqual(addressSpace.readU32(memoryBase), std::uint32_t{0x12345678},
+                "successful LOCK CMPXCHG stored the wrong dword");
+    expectEqual(equalState.rax, std::uint64_t{0},
+                "successful LOCK CMPXCHG did not zero-extend EAX");
+    expectEqual(equalState.rcx, std::uint64_t{0xBBBBBBBB12345678ULL},
+                "successful LOCK CMPXCHG changed its source");
+    expectEqual(equalState.rdi, memoryBase.value,
+                "successful LOCK CMPXCHG changed its address base");
+    expectEqual(equalState.rflags, std::uint64_t{0x46},
+                "successful LOCK CMPXCHG flags differ");
+
+    constexpr std::array mismatchBytes{
+        std::uint8_t{0x00}, std::uint8_t{0x00}, std::uint8_t{0x00},
+        std::uint8_t{0x80}};
+    addressSpace.writeBytes(memoryBase, mismatchBytes);
+    rosa::x86::X86State mismatchState;
+    mismatchState.rdi = memoryBase.value;
+    mismatchState.rax = 0xAAAAAAAA00000000ULL;
+    mismatchState.rcx = 0xBBBBBBBB12345678ULL;
+    mismatchState.rflags = 0x8D7;
+    static_cast<void>(block.execute(mismatchState, &addressSpace));
+    expectEqual(addressSpace.readU32(memoryBase), std::uint32_t{0x80000000},
+                "failed comparison changed LOCK CMPXCHG memory");
+    expectEqual(mismatchState.rax, std::uint64_t{0x80000000},
+                "failed comparison did not zero-extend memory into EAX");
+    expectEqual(mismatchState.rcx, std::uint64_t{0xBBBBBBBB12345678ULL},
+                "failed comparison changed LOCK CMPXCHG source");
+    expectEqual(mismatchState.rflags, std::uint64_t{0x86},
+                "failed LOCK CMPXCHG flags differ");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                                      rosa::guest::Permission::Read);
+    rosa::x86::X86State faultState;
+    faultState.rdi = memoryBase.value;
+    faultState.rax = 1;
+    faultState.rcx = 2;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "LOCK CMPXCHG accepted a read-only guest destination");
+    expectEqual(readOnlyAddressSpace.readU32(memoryBase), std::uint32_t{0},
+                "faulted LOCK CMPXCHG changed guest memory");
+    expectEqual(faultState.rax, std::uint64_t{1},
+                "faulted LOCK CMPXCHG changed RAX");
+    expectEqual(faultState.rcx, std::uint64_t{2},
+                "faulted LOCK CMPXCHG changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted LOCK CMPXCHG changed flags");
 }
 
 void testCompareGuestMemoryWith32BitImmediate() {
@@ -8089,6 +8215,7 @@ int main() {
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"CMP guest memory with 64-bit register",
          testCompareGuestMemoryWith64BitRegister},
+        {"LOCK CMPXCHG guest dword", testLockedCompareExchangeGuestDword},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP guest memory with short immediate", testCompareGuestMemoryWithShortImmediate},
         {"CMP RIP-relative guest dword with short immediate",

@@ -54,6 +54,7 @@ enum class Opcode {
     Push,
     IncrementGuestMemory,
     DecrementGuestMemory,
+    CompareExchangeGuestMemory,
     LoadFence,
     ReadTimestampCounter,
     UpdateAddFlags,
@@ -153,6 +154,8 @@ class Builder {
                               guest::GuestAddress rip);
     void decrementGuestMemory(ValueId address, Width width,
                               guest::GuestAddress rip);
+    void compareExchangeGuestMemory(ValueId address, ValueId source,
+                                    Width width, guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
     void readTimestampCounter(guest::GuestAddress rip);
     void updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,

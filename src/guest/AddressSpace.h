@@ -53,6 +53,8 @@ class AddressSpace {
     [[nodiscard]] std::uint64_t readU64(GuestAddress address) const;
     [[nodiscard]] std::uint32_t readU32(GuestAddress address) const;
     [[nodiscard]] std::vector<std::uint8_t> readBytes(GuestAddress address, std::size_t size) const;
+    void validateAccess(GuestAddress address, std::size_t size,
+                        Permission required) const;
     void writeU64(GuestAddress address, std::uint64_t value);
     void writeBytes(GuestAddress address, std::span<const std::uint8_t> bytes);
 

@@ -706,6 +706,51 @@ updateSubFlags32(x86::X86State *state, std::uint64_t lhsValue, std::uint64_t rhs
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *
+compareExchangeGuest32(GuestExecutionContext *context, x86::X86State *state,
+                       std::uint64_t address, std::uint64_t sourceValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated CMPXCHG has no guest address space");
+        }
+        constexpr auto width = sizeof(std::uint32_t);
+        // LOCK requires a writable read-modify-write operand even when the
+        // comparison fails. The current single-guest-thread execution model
+        // makes this helper indivisible with respect to guest execution.
+        context->addressSpace->validateAccess(
+            guest::GuestAddress{address}, width,
+            guest::Permission::Read | guest::Permission::Write);
+        const auto memoryValue =
+            context->addressSpace->readU32(guest::GuestAddress{address});
+        const auto accumulator = static_cast<std::uint32_t>(state->rax);
+        const auto result = static_cast<std::uint32_t>(memoryValue - accumulator);
+        if (accumulator == memoryValue) {
+            const auto source = static_cast<std::uint32_t>(sourceValue);
+            const std::array bytes{
+                static_cast<std::uint8_t>(source),
+                static_cast<std::uint8_t>(source >> 8U),
+                static_cast<std::uint8_t>(source >> 16U),
+                static_cast<std::uint8_t>(source >> 24U),
+            };
+            context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+            // The implicit 32-bit accumulator is architecturally written even
+            // on the equal path, so its upper half is cleared in 64-bit mode.
+            state->rax = accumulator;
+        } else {
+            state->rax = memoryValue;
+        }
+        return updateSubFlags32(state, memoryValue, accumulator, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags64(x86::X86State *state,
                                                                        std::uint64_t result) {
     auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
@@ -1467,6 +1512,35 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                              instruction.address);
             builder.decrementGuestMemory(address, ir::Width::I64,
                                          instruction.address);
+            break;
+        }
+        case x86::Opcode::CmpxchgMemReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: cmpxchg memory operand count");
+            }
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            if (memory.width != 32 || source.width != 32) {
+                throw std::runtime_error(
+                    "only 32-bit guest-memory CMPXCHG is implemented");
+            }
+            const auto base = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            auto address = base;
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(base, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto sourceValue = builder.readGuestRegister(
+                source.reg, ir::Width::I32, instruction.address);
+            builder.compareExchangeGuestMemory(
+                address, sourceValue, ir::Width::I32, instruction.address);
             break;
         }
         case x86::Opcode::SubRegImm: {
@@ -2242,6 +2316,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::Push ||
                          operation.opcode == ir::Opcode::IncrementGuestMemory ||
                          operation.opcode == ir::Opcode::DecrementGuestMemory ||
+                         operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
                          operation.opcode == ir::Opcode::StoreGuest ||
                          operation.opcode == ir::Opcode::StoreGuestXmm ||
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
@@ -2254,6 +2329,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
         hasExecutionContextCall |= operation.opcode == ir::Opcode::Push ||
                                    operation.opcode == ir::Opcode::IncrementGuestMemory ||
                                    operation.opcode == ir::Opcode::DecrementGuestMemory ||
+                                   operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
                                    operation.opcode == ir::Opcode::StoreGuest ||
                                    operation.opcode == ir::Opcode::StoreGuestXmm ||
                                    operation.opcode == ir::Opcode::LoadGuestXmm ||
@@ -2503,6 +2579,32 @@ arm64::Program compileToArm64(const ir::Block &block) {
             emitEpilogue();
             assembler.movImmediate(arm64::x0,
                                    static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::CompareExchangeGuestMemory: {
+            if (operation.width != ir::Width::I32) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 32-bit guest-memory CMPXCHG");
+            }
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x4, arm64::x0);
+            assembler.mov(arm64::x1, arm64::x4);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x3, hostRegister(*operation.rhs));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&compareExchangeGuest32));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0,
+                                   static_cast<std::uint64_t>(
+                                       BlockExit::MemoryFault));
             assembler.ret();
             assembler.bind(committed);
             break;

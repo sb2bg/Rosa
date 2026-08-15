@@ -252,6 +252,19 @@ std::vector<std::uint8_t> AddressSpace::readBytes(GuestAddress address, std::siz
     return result;
 }
 
+void AddressSpace::validateAccess(GuestAddress address, std::size_t size,
+                                  Permission required) const {
+    std::size_t validated = 0;
+    auto cursor = address;
+    while (validated < size) {
+        const auto &mapping = find(cursor, 1, required);
+        const auto offset = static_cast<std::size_t>(cursor.value - mapping.base.value);
+        const auto chunk = std::min(size - validated, mapping.size - offset);
+        validated += chunk;
+        cursor.value += chunk;
+    }
+}
+
 void AddressSpace::writeU64(GuestAddress address, std::uint64_t value) {
     std::array<std::uint8_t, sizeof(value)> bytes{};
     for (std::size_t index = 0; index < sizeof(value); ++index) {

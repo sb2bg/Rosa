@@ -393,6 +393,17 @@ void Builder::decrementGuestMemory(ValueId address, Width width,
     });
 }
 
+void Builder::compareExchangeGuestMemory(ValueId address, ValueId source,
+                                         Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::CompareExchangeGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+        .rhs = source,
+    });
+}
+
 void Builder::loadFence(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::LoadFence,
@@ -693,6 +704,14 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::IncrementGuestMemory:
         case Opcode::DecrementGuestMemory:
             checkUse(operation.lhs, "guest address");
+            break;
+        case Opcode::CompareExchangeGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            checkUse(operation.rhs, "source");
+            if (operation.width != Width::I32) {
+                errors.emplace_back(
+                    "compare_exchange_guest_memory currently requires i32");
+            }
             break;
         case Opcode::StoreGuest:
             checkUse(operation.lhs, "guest address");
