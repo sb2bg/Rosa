@@ -373,6 +373,17 @@ void Builder::push(ValueId newStackPointer, ValueId value, Width width,
     });
 }
 
+void Builder::addGuestMemory(ValueId address, ValueId source, Width width,
+                             guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::AddGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+        .rhs = source,
+    });
+}
+
 void Builder::incrementGuestMemory(ValueId address, Width width,
                                    guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -724,6 +735,13 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::Push:
             checkUse(operation.lhs, "new stack pointer");
             checkUse(operation.rhs, "pushed value");
+            break;
+        case Opcode::AddGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            checkUse(operation.rhs, "source");
+            if (operation.width != Width::I64) {
+                errors.emplace_back("add_guest_memory currently requires i64");
+            }
             break;
         case Opcode::IncrementGuestMemory:
         case Opcode::DecrementGuestMemory:

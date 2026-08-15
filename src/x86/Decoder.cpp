@@ -1866,21 +1866,50 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 MemoryOperand{base, displacement, 8, index, scale});
         } else if (opcode == 0x01U) {
             if (code.size() - cursor < 1) {
-                throw DecodeError(address, remaining, "truncated add r64, r64");
+                throw DecodeError(address, remaining, "truncated add r/m64, r64");
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-            if (mode != 0x3U || rexX) {
-                throw DecodeError(address, remaining,
-                                  "only register-direct ADD from opcode 01 is supported");
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            const auto source = decodeRegister(
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
+            if (mode == 0x3U) {
+                if (!rexW || rexX) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only 64-bit register-direct ADD from opcode 01 is supported");
+                }
+                const auto destination = decodeRegister(rmEncoding, rexB);
+                instruction.opcode = Opcode::AddRegReg;
+                instruction.operands.push_back(RegisterOperand{destination, 64});
+                instruction.operands.push_back(RegisterOperand{source, 64});
+            } else {
+                if (!rexW || rexX || rmEncoding == 0x4U ||
+                    (mode == 0 && rmEncoding == 0x5U)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only ADD qword [base+disp8/disp32], r64 is supported from memory opcode 01");
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated ADD memory destination disp8");
+                    }
+                    displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated ADD memory destination disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                instruction.opcode = Opcode::AddMemReg;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, rexB), displacement, 64});
+                instruction.operands.push_back(RegisterOperand{source, 64});
             }
-            const auto source =
-                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
-            const auto destination =
-                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
-            instruction.opcode = Opcode::AddRegReg;
-            instruction.operands.push_back(RegisterOperand{destination, 64});
-            instruction.operands.push_back(RegisterOperand{source, 64});
         } else if (opcode == 0x03U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated add r64, [base+disp]");

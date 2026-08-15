@@ -52,6 +52,7 @@ enum class Opcode {
     ShuffleXmmDwords,
     BitScanForward,
     Push,
+    AddGuestMemory,
     IncrementGuestMemory,
     DecrementGuestMemory,
     CompareExchangeGuestMemory,
@@ -152,6 +153,8 @@ class Builder {
     void bitScanForward(x86::Register destination, x86::Register source,
                         Width width, guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
+    void addGuestMemory(ValueId address, ValueId source, Width width,
+                        guest::GuestAddress rip);
     void incrementGuestMemory(ValueId address, Width width,
                               guest::GuestAddress rip);
     void decrementGuestMemory(ValueId address, Width width,

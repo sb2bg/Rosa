@@ -339,6 +339,19 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("add64_memory_destination",
+                             CaseId::add64_memory_destination,
+                             differentialBytes_add64_memory_destination);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.state.r14 = 1;
+        const std::uint64_t value = UINT64_MAX;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("add8_register_overflow",
                              CaseId::add8_register_overflow,
                              differentialBytes_add8_register_overflow);
@@ -1798,6 +1811,79 @@ void testAddRegisterFromGuestMemory() {
                 "failed memory ADD changed its destination register");
     expectEqual(faultState.rflags, std::uint64_t{0x8D7},
                 "failed memory ADD changed flags");
+}
+
+void testAddRegisterToGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x4C, 0x01, 0x73, 0x10, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddMemReg,
+           "ADD qword [memory], r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "ADD qword [memory], r64 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbx &&
+               memory.displacement == 0x10 && memory.width == 64,
+           "ADD qword [memory], r64 memory operand differs");
+    expect(source.reg == rosa::x86::Register::R14 && source.width == 64,
+           "ADD qword [memory], r64 source differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "add qword [rbx+0x10], r14") != std::string::npos,
+           "ADD qword [memory], r64 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8110};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, UINT64_MAX);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbx = 0x8100;
+    state.r14 = 1;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0},
+                "ADD qword [memory], r64 result differs");
+    expectEqual(state.rbx, std::uint64_t{0x8100},
+                "ADD qword [memory], r64 changed its base");
+    expectEqual(state.r14, std::uint64_t{1},
+                "ADD qword [memory], r64 changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x57},
+                "ADD qword [memory], r64 flags differ");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    constexpr std::uint64_t sentinel = UINT64_MAX;
+    std::memcpy(readOnlyBytes.data() + 0x110, &sentinel, sizeof(sentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(page, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes, "read-only ADD target");
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "ADD qword accepted read-only guest memory");
+    expectEqual(readOnlyAddressSpace.readU64(target), sentinel,
+                "faulted ADD qword changed guest memory");
+    expectEqual(state.rbx, std::uint64_t{0x8100},
+                "faulted ADD qword changed its base");
+    expectEqual(state.r14, std::uint64_t{1},
+                "faulted ADD qword changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "faulted ADD qword changed flags");
 }
 
 void testAddRegisterToRegister() {
@@ -9817,6 +9903,7 @@ int main() {
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
         {"SUB 32-bit register from guest memory", testSub32BitRegisterFromGuestMemory},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
+        {"ADD register to guest memory", testAddRegisterToGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
         {"ADD low-byte registers", testAddLowByteRegisters},
         {"ADD guest byte to low register", testAddGuestByteToLowRegister},
