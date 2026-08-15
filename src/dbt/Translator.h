@@ -3,6 +3,7 @@
 #include "arm64/Assembler.h"
 #include "arm64/CodeBuffer.h"
 #include "guest/Address.h"
+#include "guest/AddressSpace.h"
 #include "ir/IR.h"
 #include "x86/Decoder.h"
 #include "x86/Registers.h"
@@ -20,6 +21,7 @@ enum class BlockExit : std::uint64_t {
     Call,
     Return,
     Syscall,
+    MemoryFault,
 };
 
 class TranslatedBlock {
@@ -27,7 +29,8 @@ class TranslatedBlock {
     TranslatedBlock(std::vector<x86::DecodedInstruction> decoded, ir::Block ir,
                     arm64::Program program);
 
-    [[nodiscard]] BlockExit execute(x86::X86State &state) const;
+    [[nodiscard]] BlockExit execute(x86::X86State &state,
+                                    guest::AddressSpace *addressSpace = nullptr) const;
 
     [[nodiscard]] const std::vector<x86::DecodedInstruction> &decoded() const noexcept {
         return decoded_;

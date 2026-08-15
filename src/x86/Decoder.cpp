@@ -99,7 +99,22 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if (code[cursor] == 0x6AU) {
-            throw DecodeError(address, remaining, "PUSH imm8 is not supported");
+            if (code.size() - cursor < 2) {
+                throw DecodeError(address, remaining, "truncated push imm8");
+            }
+            const auto immediate = std::bit_cast<std::int8_t>(code[cursor + 1]);
+            instruction.opcode = Opcode::Push;
+            instruction.length = 2;
+            instruction.bytes[0] = code[cursor];
+            instruction.bytes[1] = code[cursor + 1];
+            instruction.operands.push_back(ImmediateOperand{
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
+            result.push_back(std::move(instruction));
+            cursor += 2;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
         }
 
         if (code[cursor] == 0x0FU && code.size() - cursor >= 2 && code[cursor + 1] == 0x05U) {

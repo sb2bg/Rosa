@@ -16,6 +16,7 @@ inline constexpr XRegister x0{0};
 inline constexpr XRegister x1{1};
 inline constexpr XRegister x2{2};
 inline constexpr XRegister x3{3};
+inline constexpr XRegister x4{4};
 inline constexpr XRegister x9{9};
 inline constexpr XRegister x10{10};
 inline constexpr XRegister x11{11};
@@ -25,6 +26,7 @@ inline constexpr XRegister x14{14};
 inline constexpr XRegister x15{15};
 inline constexpr XRegister x16{16};
 inline constexpr XRegister x17{17};
+inline constexpr XRegister x19{19};
 
 struct Program {
     std::vector<std::uint8_t> bytes;
@@ -48,17 +50,20 @@ class Assembler {
     [[nodiscard]] Label makeLabel();
     void bind(Label label);
     void b(Label label);
+    void cbz(XRegister value, Label label);
     void tbz(XRegister value, std::uint8_t bit, Label label);
     void tbnz(XRegister value, std::uint8_t bit, Label label);
     void pushFrameRecord();
     void popFrameRecord();
+    void pushCalleeSaved19And20();
+    void popCalleeSaved19And20();
     void ret();
 
     [[nodiscard]] const std::vector<std::uint32_t> &words() const noexcept { return words_; }
     [[nodiscard]] Program finish() &&;
 
   private:
-    enum class FixupKind { Branch26, TestBranch14 };
+    enum class FixupKind { Branch26, CompareBranch19, TestBranch14 };
     struct Fixup {
         FixupKind kind{};
         std::size_t wordIndex{};

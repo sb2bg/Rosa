@@ -86,6 +86,19 @@ void testAssemblerLabels() {
                            (static_cast<std::uint32_t>(program.bytes[2]) << 16U) |
                            (static_cast<std::uint32_t>(program.bytes[3]) << 24U);
     expectEqual(firstWord, 0x14000002U, "forward ARM64 label fixup differs");
+
+    rosa::arm64::Assembler compareAssembler;
+    const auto compareTarget = compareAssembler.makeLabel();
+    compareAssembler.cbz(rosa::arm64::x0, compareTarget);
+    compareAssembler.movImmediate(rosa::arm64::x0, 1);
+    compareAssembler.bind(compareTarget);
+    compareAssembler.ret();
+    const auto compareProgram = std::move(compareAssembler).finish();
+    const auto compareWord = static_cast<std::uint32_t>(compareProgram.bytes[0]) |
+                             (static_cast<std::uint32_t>(compareProgram.bytes[1]) << 8U) |
+                             (static_cast<std::uint32_t>(compareProgram.bytes[2]) << 16U) |
+                             (static_cast<std::uint32_t>(compareProgram.bytes[3]) << 24U);
+    expectEqual(compareWord, 0xB4000040U, "forward ARM64 CBZ label fixup differs");
 }
 
 constexpr std::array<std::uint8_t, 15> r1Code{
@@ -120,6 +133,101 @@ void testDecoderExtendedRegisterAndSignedImmediate() {
            "REX.B mov register differs");
     expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[1].operands[1]).value, UINT64_MAX,
                 "imm8 was not sign-extended");
+}
+
+void testDecoderPushImm8() {
+    constexpr std::array<std::uint8_t, 3> positive{0x6A, 0x7F, 0xC3};
+    constexpr std::array<std::uint8_t, 3> negative{0x6A, 0x80, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto positiveDecoded =
+        decoder.decodeBlock(positive, rosa::guest::GuestAddress{0x1000});
+    const auto negativeDecoded =
+        decoder.decodeBlock(negative, rosa::guest::GuestAddress{0x2000});
+    expect(positiveDecoded[0].opcode == rosa::x86::Opcode::Push,
+           "positive PUSH imm8 opcode differs");
+    expectEqual(positiveDecoded[0].length, std::uint8_t{2}, "PUSH imm8 length differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(positiveDecoded[0].operands[0]).value,
+                std::uint64_t{0x7F}, "positive PUSH imm8 value differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(negativeDecoded[0].operands[0]).value,
+                std::uint64_t{0xFFFFFFFFFFFFFF80ULL},
+                "negative PUSH imm8 was not sign-extended to 64 bits");
+}
+
+std::pair<rosa::x86::X86State, std::uint64_t> executePushImm8(std::uint8_t immediate) {
+    const std::array<std::uint8_t, 3> code{0x6A, immediate, 0xC3};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr auto stackTop = stackBase.value + rosa::guest::guestPageSize;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rip = 0x1000;
+    state.rsp = stackTop;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    return {state, addressSpace.readU64(rosa::guest::GuestAddress{stackTop - 8})};
+}
+
+void testPushImm8GeneratedExecution() {
+    const auto [positiveState, positiveValue] = executePushImm8(0x7F);
+    expectEqual(positiveState.rsp, std::uint64_t{0x700000000FF8ULL},
+                "positive PUSH imm8 did not decrement RSP by 8");
+    expectEqual(positiveValue, std::uint64_t{0x7F},
+                "positive PUSH imm8 did not store a 64-bit guest value");
+    expectEqual(positiveState.rflags, std::uint64_t{0xAD7},
+                "positive PUSH imm8 changed guest flags");
+
+    const auto [negativeState, negativeValue] = executePushImm8(0x80);
+    expectEqual(negativeState.rsp, std::uint64_t{0x700000000FF8ULL},
+                "negative PUSH imm8 did not decrement RSP by 8");
+    expectEqual(negativeValue, std::uint64_t{0xFFFFFFFFFFFFFF80ULL},
+                "negative PUSH imm8 did not store the sign-extended 64-bit value");
+    expectEqual(negativeState.rflags, std::uint64_t{0xAD7},
+                "negative PUSH imm8 changed guest flags");
+}
+
+void testPushImm8GuestStackFaults() {
+    constexpr std::array<std::uint8_t, 3> code{0x6A, 0xFF, 0xC3};
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State unmappedState;
+    unmappedState.rip = 0x1000;
+    unmappedState.rsp = 0x9000;
+    unmappedState.rflags = 0x202;
+    bool unmappedRejected = false;
+    try {
+        static_cast<void>(block.execute(unmappedState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        unmappedRejected = std::string_view(error.what()).find("unmapped") !=
+                           std::string_view::npos;
+    }
+    expect(unmappedRejected, "PUSH imm8 to an unmapped guest stack did not fail");
+    expectEqual(unmappedState.rsp, std::uint64_t{0x9000},
+                "failed unmapped PUSH imm8 changed RSP");
+    expectEqual(unmappedState.rflags, std::uint64_t{0x202},
+                "failed unmapped PUSH imm8 changed flags");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                                      rosa::guest::guestPageSize,
+                                      rosa::guest::Permission::Read);
+    rosa::x86::X86State readOnlyState;
+    readOnlyState.rip = 0x1000;
+    readOnlyState.rsp = 0x9000;
+    bool readOnlyRejected = false;
+    try {
+        static_cast<void>(block.execute(readOnlyState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        readOnlyRejected = std::string_view(error.what()).find("permissions") !=
+                           std::string_view::npos;
+    }
+    expect(readOnlyRejected, "PUSH imm8 to a read-only guest stack did not fail");
+    expectEqual(readOnlyState.rsp, std::uint64_t{0x9000},
+                "failed read-only PUSH imm8 changed RSP");
 }
 
 void testRegisterMoveExecution() {
@@ -429,6 +537,9 @@ int main() {
         {"arm64 label fixups", testAssemblerLabels},
         {"R1 decoder", testDecoderR1},
         {"extended register and signed immediate", testDecoderExtendedRegisterAndSignedImmediate},
+        {"PUSH imm8 decoder", testDecoderPushImm8},
+        {"PUSH imm8 generated execution", testPushImm8GeneratedExecution},
+        {"PUSH imm8 guest stack faults", testPushImm8GuestStackFaults},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},

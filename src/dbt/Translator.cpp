@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -20,6 +21,33 @@ constexpr std::uint64_t flagSign = 1U << 7U;
 constexpr std::uint64_t flagOverflow = 1U << 11U;
 constexpr std::uint64_t arithmeticFlagMask =
     flagCarry | flagParity | flagAuxiliaryCarry | flagZero | flagSign | flagOverflow;
+
+struct GuestExecutionContext {
+    guest::AddressSpace *addressSpace{};
+    std::exception_ptr fault;
+    guest::GuestAddress faultAddress{};
+    std::size_t faultSize{};
+};
+
+extern "C" __attribute__((noinline)) x86::X86State *
+commitPush64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t newStackPointer,
+             std::uint64_t value) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated PUSH has no guest address space");
+        }
+        context->addressSpace->writeU64(guest::GuestAddress{newStackPointer}, value);
+        state->rsp = newStackPointer;
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{newStackPointer};
+            context->faultSize = sizeof(std::uint64_t);
+        }
+        return nullptr;
+    }
+}
 
 extern "C" __attribute__((noinline)) x86::X86State *
 updateAddFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std::uint64_t result) {
@@ -176,6 +204,23 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateSubFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::Push: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: push operand count");
+            }
+            const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[0]);
+            const auto stackPointer =
+                builder.readGuestRegister(x86::Register::Rsp, ir::Width::I64,
+                                          instruction.address);
+            const auto eight = builder.constant(sizeof(std::uint64_t), ir::Width::I64,
+                                                instruction.address);
+            const auto newStackPointer =
+                builder.sub(stackPointer, eight, ir::Width::I64, instruction.address);
+            const auto value =
+                builder.constant(immediate.value, ir::Width::I64, instruction.address);
+            builder.push(newStackPointer, value, ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::JmpRelative:
             builder.exitDirect(*instruction.branchTarget, instruction.address);
             break;
@@ -231,14 +276,30 @@ arm64::XRegister hostRegister(ir::ValueId value) {
 arm64::Program compileToArm64(const ir::Block &block) {
     arm64::Assembler assembler;
     bool hasHelperCall = false;
+    bool hasGuestMemoryCall = false;
     for (const auto &operation : block.operations) {
         hasHelperCall |= operation.opcode == ir::Opcode::UpdateAddFlags ||
                          operation.opcode == ir::Opcode::UpdateSubFlags ||
-                         operation.opcode == ir::Opcode::UpdateLogicFlags;
+                         operation.opcode == ir::Opcode::UpdateLogicFlags ||
+                         operation.opcode == ir::Opcode::Push;
+        hasGuestMemoryCall |= operation.opcode == ir::Opcode::Push;
     }
     if (hasHelperCall) {
         assembler.pushFrameRecord();
     }
+    if (hasGuestMemoryCall) {
+        assembler.pushCalleeSaved19And20();
+        assembler.mov(arm64::x19, arm64::x1);
+    }
+
+    const auto emitEpilogue = [&] {
+        if (hasGuestMemoryCall) {
+            assembler.popCalleeSaved19And20();
+        }
+        if (hasHelperCall) {
+            assembler.popFrameRecord();
+        }
+    };
 
     for (const auto &operation : block.operations) {
         switch (operation.opcode) {
@@ -267,6 +328,26 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.bitAnd(hostRegister(*operation.result), hostRegister(*operation.lhs),
                              hostRegister(*operation.rhs));
             break;
+        case ir::Opcode::Push: {
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x4, arm64::x0);
+            assembler.mov(arm64::x1, arm64::x4);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x3, hostRegister(*operation.rhs));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&commitPush64));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0,
+                                   static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
         case ir::Opcode::UpdateAddFlags:
         case ir::Opcode::UpdateSubFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
@@ -327,9 +408,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
             }
             assembler.str(arm64::x16, arm64::x0,
                           static_cast<std::uint32_t>(offsetof(x86::X86State, rip)));
-            if (hasHelperCall) {
-                assembler.popFrameRecord();
-            }
+            emitEpilogue();
             assembler.movImmediate(arm64::x0, static_cast<std::uint64_t>(exit));
             assembler.ret();
             break;
@@ -352,11 +431,19 @@ TranslatedBlock::TranslatedBlock(std::vector<x86::DecodedInstruction> decoded, i
     }
 }
 
-BlockExit TranslatedBlock::execute(x86::X86State &state) const {
-    using Entry = std::uint64_t (*)(x86::X86State *);
-    const auto rawExit = executable_.entry<Entry>()(&state);
-    if (rawExit > static_cast<std::uint64_t>(BlockExit::Syscall)) {
+BlockExit TranslatedBlock::execute(x86::X86State &state,
+                                   guest::AddressSpace *addressSpace) const {
+    GuestExecutionContext context{.addressSpace = addressSpace};
+    using Entry = std::uint64_t (*)(x86::X86State *, GuestExecutionContext *);
+    const auto rawExit = executable_.entry<Entry>()(&state, &context);
+    if (rawExit > static_cast<std::uint64_t>(BlockExit::MemoryFault)) {
         throw std::runtime_error("generated block returned an invalid exit reason");
+    }
+    if (rawExit == static_cast<std::uint64_t>(BlockExit::MemoryFault)) {
+        if (context.fault) {
+            std::rethrow_exception(context.fault);
+        }
+        throw std::runtime_error("generated block reported a guest-memory fault");
     }
     return static_cast<BlockExit>(rawExit);
 }

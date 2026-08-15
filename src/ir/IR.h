@@ -27,6 +27,7 @@ enum class Opcode {
     Add,
     Sub,
     And,
+    Push,
     UpdateAddFlags,
     UpdateSubFlags,
     UpdateLogicFlags,
@@ -73,6 +74,7 @@ class Builder {
     ValueId add(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId sub(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
+    void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                         guest::GuestAddress rip);
     void updateSubFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,

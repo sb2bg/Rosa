@@ -81,6 +81,17 @@ ValueId Builder::bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddre
     return result;
 }
 
+void Builder::push(ValueId newStackPointer, ValueId value, Width width,
+                   guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::Push,
+        .width = width,
+        .guestRip = rip,
+        .lhs = newStackPointer,
+        .rhs = value,
+    });
+}
+
 void Builder::updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                              guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -204,6 +215,10 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::And:
             checkUse(operation.lhs, "left");
             checkUse(operation.rhs, "right");
+            break;
+        case Opcode::Push:
+            checkUse(operation.lhs, "new stack pointer");
+            checkUse(operation.rhs, "pushed value");
             break;
         case Opcode::UpdateAddFlags:
         case Opcode::UpdateSubFlags:

@@ -150,6 +150,17 @@ void Assembler::b(Label label) {
     fixups_.push_back(Fixup{FixupKind::Branch26, index, label});
 }
 
+void Assembler::cbz(XRegister value, Label label) {
+    requireRegister(value);
+    if (label.id >= labelPositions_.size()) {
+        throw std::invalid_argument("cannot compare-branch to an unknown ARM64 label");
+    }
+    const auto index = words_.size();
+    const auto word = 0xB4000000U | static_cast<std::uint32_t>(value.encoding);
+    emit(word, "cbz " + regName(value) + ", L" + std::to_string(label.id));
+    fixups_.push_back(Fixup{FixupKind::CompareBranch19, index, label});
+}
+
 void Assembler::tbz(XRegister value, std::uint8_t bit, Label label) {
     requireRegister(value);
     if (bit >= 64U || label.id >= labelPositions_.size()) {
@@ -182,6 +193,14 @@ void Assembler::pushFrameRecord() { emit(0xA9BF7BFDU, "stp x29, x30, [sp, #-16]!
 
 void Assembler::popFrameRecord() { emit(0xA8C17BFDU, "ldp x29, x30, [sp], #16"); }
 
+void Assembler::pushCalleeSaved19And20() {
+    emit(0xA9BF53F3U, "stp x19, x20, [sp, #-16]!");
+}
+
+void Assembler::popCalleeSaved19And20() {
+    emit(0xA8C153F3U, "ldp x19, x20, [sp], #16");
+}
+
 void Assembler::ret() { emit(0xD65F03C0U, "ret"); }
 
 Program Assembler::finish() && {
@@ -199,6 +218,14 @@ Program Assembler::finish() && {
                 throw std::runtime_error("ARM64 B target is out of range");
             }
             words_[fixup.wordIndex] |= static_cast<std::uint32_t>(displacement) & 0x03FFFFFFU;
+        } else if (fixup.kind == FixupKind::CompareBranch19) {
+            constexpr auto minimum = -(std::int64_t{1} << 18U);
+            constexpr auto maximum = (std::int64_t{1} << 18U) - 1;
+            if (displacement < minimum || displacement > maximum) {
+                throw std::runtime_error("ARM64 compare-branch target is out of range");
+            }
+            words_[fixup.wordIndex] |=
+                (static_cast<std::uint32_t>(displacement) & 0x7FFFFU) << 5U;
         } else {
             constexpr auto minimum = -(std::int64_t{1} << 13U);
             constexpr auto maximum = (std::int64_t{1} << 13U) - 1;
