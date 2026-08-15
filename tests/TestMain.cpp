@@ -2507,6 +2507,49 @@ void testMovdquGuestMemoryToRegister() {
                 "failed MOVDQU load changed high lane");
 }
 
+void testMovqXmmToGuestMemory() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x66, 0x0F, 0xD6, 0x46, 0x20, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovqMemXmm,
+           "MOVQ [mem], xmm opcode differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsi = 0x8103;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL,
+    };
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8123}),
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVQ stored the wrong XMM lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVQ changed its XMM source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVQ changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOVQ to unmapped guest memory did not fault");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "failed MOVQ changed its XMM source");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -3707,6 +3750,7 @@ int main() {
         {"MOVDQA guest memory to register", testMovdqaGuestMemoryToRegister},
         {"MOVDQU register to guest memory", testMovdquRegisterToGuestMemory},
         {"MOVDQU guest memory to register", testMovdquGuestMemoryToRegister},
+        {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
         {"register move execution", testRegisterMoveExecution},
         {"LEA base displacement execution", testLeaBaseDisplacementExecution},
         {"LEA 32-bit base displacement execution", testLea32BitBaseDisplacementExecution},
