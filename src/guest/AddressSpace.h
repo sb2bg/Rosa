@@ -39,6 +39,7 @@ class AddressSpace {
                     std::span<const std::uint8_t> fileBytes, std::string_view label = {});
     void mapSparseReadOnly(GuestAddress base, std::size_t size, std::size_t dataOffset,
                            std::span<const std::uint8_t> data, std::string_view label);
+    void populateSparseReadOnly(GuestAddress address, std::span<const std::uint8_t> data);
 
     [[nodiscard]] std::uint64_t readU64(GuestAddress address) const;
     [[nodiscard]] std::uint32_t readU32(GuestAddress address) const;

@@ -54,6 +54,19 @@ void AddressSpace::mapSparseReadOnly(GuestAddress base, std::size_t size,
               mapping.bytes.begin() + static_cast<std::ptrdiff_t>(dataOffset));
 }
 
+void AddressSpace::populateSparseReadOnly(GuestAddress address,
+                                          std::span<const std::uint8_t> data) {
+    auto &mapping = find(address, data.size(), Permission::Read);
+    if (mapping.readableBytes.empty()) {
+        throw std::invalid_argument("guest mapping is not sparse read-only data");
+    }
+    const auto offset = static_cast<std::size_t>(address.value - mapping.base.value);
+    std::fill_n(mapping.readableBytes.begin() + static_cast<std::ptrdiff_t>(offset),
+                data.size(), std::uint8_t{1});
+    std::copy(data.begin(), data.end(),
+              mapping.bytes.begin() + static_cast<std::ptrdiff_t>(offset));
+}
+
 void AddressSpace::addMapping(GuestAddress base, std::size_t size, Permission permissions,
                               std::span<const std::uint8_t> initialBytes,
                               std::string_view label) {

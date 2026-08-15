@@ -17,6 +17,12 @@ void mapX86CommpageContinuousTimebase(guest::AddressSpace &addressSpace,
     addressSpace.mapSparseReadOnly(x86CommpageBase, guest::guestPageSize,
                                    x86CommpageContinuousTimebaseOffset, bytes,
                                    "Darwin x86_64 commpage");
+    constexpr std::array<std::uint8_t, sizeof(std::uint32_t)> generation{
+        1, 0, 0, 0,
+    };
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value + x86CommpageNanotimeGenerationOffset},
+        generation);
 }
 
 std::uint64_t sampleHostContinuousTimebase() {

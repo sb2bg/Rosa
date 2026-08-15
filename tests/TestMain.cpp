@@ -680,6 +680,10 @@ void testX86CommpageContinuousTimebase() {
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageContinuousTimebaseOffset}),
                 continuousTimebase, "x86 commpage continuous-time base differs");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageNanotimeGenerationOffset}),
+                std::uint32_t{1}, "x86 commpage nanotime generation differs");
 
     bool unsupportedReadRejected = false;
     try {
