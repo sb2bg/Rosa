@@ -396,6 +396,11 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmp32_rip_memory", CaseId::cmp32_rip_memory,
+                             differentialBytes_cmp32_rip_memory);
+        run(testCase);
+    }
+    {
         auto testCase = make("shl64_one", CaseId::shl64_one,
                              differentialBytes_shl64_one);
         testCase.request.state.rax = 0x8000000000000001ULL;
@@ -1674,6 +1679,79 @@ void testCompareGuestMemoryWithShortImmediate() {
                 "CMP dword short immediate changed base");
     expectEqual(state.rflags, std::uint64_t{0x46},
                 "CMP dword short immediate flags differ");
+}
+
+void testCompareRipRelativeGuestDwordWithShortImmediate() {
+    constexpr std::array<std::uint8_t, 8> observed{
+        0x83, 0x3D, 0x3D, 0x3F, 0x0C, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF800004EC8ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observed, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "RIP-relative CMP dword opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "RIP-relative CMP dword length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 32 &&
+               memory.displacement == 0xC3F3D,
+           "RIP-relative CMP dword memory operand differs");
+    expect(immediate.value == 0 && immediate.width == 8,
+           "RIP-relative CMP dword immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "cmp dword [rip+0xc3f3d], 0x0 ; 0x7ff8000c8e0c") !=
+               std::string::npos,
+           "RIP-relative CMP dword dump differs");
+
+    constexpr std::array<std::uint8_t, 8> code{
+        0x83, 0x3D, 0xF9, 0x0F, 0x00, 0x00, 0x00, 0xC3};
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    constexpr rosa::guest::GuestAddress target{0x2000};
+    constexpr std::array<std::uint8_t, 8> data{
+        0x00, 0x00, 0x00, 0x00, 0xEF, 0xBE, 0xAD, 0xDE};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(target, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read, data);
+    rosa::x86::X86State state;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "RIP-relative CMP dword equal flags differ");
+
+    constexpr std::array<std::uint8_t, 8> negativeCode{
+        0x83, 0x3D, 0xF9, 0x0F, 0x00, 0x00, 0xFF, 0xC3};
+    const auto negativeBlock =
+        translator.translate(negativeCode, rosa::guest::GuestAddress{0x1000});
+    state.rflags = 0x8D7;
+    static_cast<void>(negativeBlock.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0x13},
+                "RIP-relative CMP dword did not sign-extend imm8");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative CMP dword from unmapped memory did not fault");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed RIP-relative CMP dword changed flags");
+
+    bool truncatedRejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            std::span<const std::uint8_t>{observed}.first(6), observedRip));
+    } catch (const rosa::x86::DecodeError &) {
+        truncatedRejected = true;
+    }
+    expect(truncatedRejected, "truncated RIP-relative CMP dword was accepted");
 }
 
 void testCompareGuestQwordWithShortImmediate() {
@@ -5811,6 +5889,8 @@ int main() {
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP guest memory with short immediate", testCompareGuestMemoryWithShortImmediate},
+        {"CMP RIP-relative guest dword with short immediate",
+         testCompareRipRelativeGuestDwordWithShortImmediate},
         {"CMP guest qword with short immediate", testCompareGuestQwordWithShortImmediate},
         {"CMP guest word with short immediate", testCompareGuestWordWithShortImmediate},
         {"CMP 16-bit register with short immediate",

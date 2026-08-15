@@ -2432,13 +2432,21 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
             if (extension == 0x7U && mode <= 0x2U && !rexR && !rexX) {
-                if (rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
+                const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
+                if (rmEncoding == 0x4U) {
                     throw DecodeError(
                         address, remaining,
-                        "only CMP dword [base+disp8/disp32], imm8 is supported");
+                        "only CMP dword [base/RIP+disp8/disp32], imm8 is supported");
                 }
                 std::int64_t displacement = 0;
-                if (mode == 0x1U) {
+                if (ripRelative) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated RIP-relative short CMP disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                } else if (mode == 0x1U) {
                     if (cursor >= code.size()) {
                         throw DecodeError(address, remaining,
                                           "truncated short memory CMP disp8");
@@ -2457,10 +2465,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                       "truncated short memory CMP immediate");
                 }
                 const auto immediate = std::bit_cast<std::int8_t>(code[cursor++]);
+                if (ripRelative) {
+                    static_cast<void>(relativeTarget(
+                        address, cursor - instructionStart, displacement));
+                }
                 instruction.opcode = Opcode::CmpMemImm;
-                instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(rmEncoding, rexB), displacement,
-                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{
+                              Register::Rax, displacement,
+                              static_cast<std::uint8_t>(rexW ? 64U : 32U),
+                              std::nullopt, 1, false, true}
+                        : MemoryOperand{
+                              decodeRegister(rmEncoding, rexB), displacement,
+                              static_cast<std::uint8_t>(rexW ? 64U : 32U)});
                 instruction.operands.push_back(ImmediateOperand{
                     static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
             } else {
