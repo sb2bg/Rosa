@@ -408,6 +408,13 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("xor8_accumulator", CaseId::xor8_accumulator,
+                             differentialBytes_xor8_accumulator);
+        testCase.request.state.rax = 0x1122334455667701ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("test16_register", CaseId::test16_register,
                              differentialBytes_test16_register);
         testCase.request.state.r14 = 0xA5A5A5A500008000ULL;
@@ -5103,6 +5110,45 @@ void testXor64BitAccumulatorImmediate() {
                 "XOR RAX, negative imm32 flags differ");
 }
 
+void testXor8BitAccumulatorImmediate() {
+    constexpr std::array<std::uint8_t, 3> code{0x34, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegImm,
+           "XOR AL, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2},
+                "XOR AL, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 8,
+           "XOR AL, imm8 destination differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{1}, "XOR AL, imm8 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("xor al, 0x1") != std::string::npos,
+           "XOR AL, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667700ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667701ULL},
+                "XOR AL, imm8 did not preserve upper RAX bytes");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0},
+                "XOR AL, imm8 nonzero defined flags differ");
+
+    state.rax = 0xFFEEDDCCBBAA5581ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xFFEEDDCCBBAA5580ULL},
+                "XOR AL, imm8 sign result changed upper RAX bytes");
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 7U},
+                "XOR AL, imm8 sign defined flags differ");
+}
+
 void testXorpsRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x57, 0xC1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -7778,6 +7824,7 @@ int main() {
          testXor64BitRegisterFromGuestMemory},
         {"XOR 32-bit register immediate", testXor32BitRegisterImmediate},
         {"XOR 64-bit accumulator immediate", testXor64BitAccumulatorImmediate},
+        {"XOR 8-bit accumulator immediate", testXor8BitAccumulatorImmediate},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PCMPEQB guest memory generated execution",
