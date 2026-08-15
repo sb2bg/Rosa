@@ -397,13 +397,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (rexW || (mode == 0 && rmEncoding == 0x5U)) {
+            if (mode == 0 && rmEncoding == 0x5U) {
                 throw DecodeError(
                     address, remaining,
-                    "only MOVZX r32, low-byte register or byte [base+disp8/disp32] is supported");
+                    "only MOVZX r32/r64, low-byte register or byte [base+index*scale+disp8/disp32] is supported");
             }
             const auto destination = RegisterOperand{
-                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR), 32};
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR),
+                static_cast<std::uint8_t>(rexW ? 64U : 32U)};
             if (mode == 0x3U) {
                 if (!movzxByteHasRex && rmEncoding >= 0x4U) {
                     throw DecodeError(address, remaining,

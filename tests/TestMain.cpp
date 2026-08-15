@@ -616,6 +616,18 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movzx8_memory64_sib",
+                             CaseId::movzx8_memory64_sib,
+                             differentialBytes_movzx8_memory64_sib);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = UINT64_MAX;
+        testCase.request.state.rcx = 0x2F;
+        testCase.request.memory[0x2F] = 0xA5;
+        testCase.memoryCompareOffset = 0x2F;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
         auto testCase = make("movzx16_register", CaseId::movzx16_register,
                              differentialBytes_movzx16_register);
         testCase.request.state.rdi = 0xAABBCCDDEEFF80A5ULL;
@@ -3949,6 +3961,75 @@ void testMovzxGuestByteTo32BitRegister() {
         truncatedRejected = true;
     }
     expect(truncatedRejected, "truncated MOVZX byte displacement was accepted");
+}
+
+void testMovzxGuestByteWithSibTo64BitRegister() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x48, 0x0F, 0xB6, 0x04, 0x0F, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovzxRegMem,
+           "MOVZX r64, byte SIB opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "MOVZX r64, byte SIB length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 64,
+           "MOVZX byte SIB destination differs");
+    expect(memory.base == rosa::x86::Register::Rdi &&
+               memory.index == rosa::x86::Register::Rcx &&
+               memory.scale == 1 && memory.displacement == 0 &&
+               memory.width == 8,
+           "MOVZX byte SIB memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movzx rax, byte [rdi+rcx*1]") != std::string::npos,
+           "MOVZX byte SIB dump differs");
+
+    std::array<std::uint8_t, 0x40> data{};
+    data[0x2F] = 0xA5;
+    data[0x30] = 0xDE;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(rosa::guest::GuestAddress{0x8000},
+                            rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read, data);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = UINT64_MAX;
+    state.rdi = 0x8000;
+    state.rcx = 0x2F;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0xA5},
+                "MOVZX r64 byte SIB result did not zero-extend");
+    expectEqual(state.rdi, std::uint64_t{0x8000},
+                "MOVZX byte SIB changed its base");
+    expectEqual(state.rcx, std::uint64_t{0x2F},
+                "MOVZX byte SIB changed its index");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVZX byte SIB changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x0123456789ABCDEFULL;
+    faultState.rdi = 0x8000;
+    faultState.rcx = 0x2F;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOVZX r64 byte SIB from unmapped memory did not fault");
+    expectEqual(faultState.rax, std::uint64_t{0x0123456789ABCDEFULL},
+                "failed MOVZX r64 byte SIB changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed MOVZX r64 byte SIB changed flags");
 }
 
 void testMovzx16BitRegisterTo32BitRegister() {
@@ -7977,6 +8058,8 @@ int main() {
          testMovzxLowByteRegisterTo32BitRegister},
         {"MOVZX guest byte to 32-bit register",
          testMovzxGuestByteTo32BitRegister},
+        {"MOVZX guest byte with SIB to 64-bit register",
+         testMovzxGuestByteWithSibTo64BitRegister},
         {"MOVZX 16-bit register to 32-bit register",
          testMovzx16BitRegisterTo32BitRegister},
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},

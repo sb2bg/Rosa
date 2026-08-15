@@ -1088,7 +1088,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                                instruction.address);
             const auto byte = builder.bitAnd(value, mask, ir::Width::I64,
                                              instruction.address);
-            builder.writeGuestRegister(destination.reg, byte, ir::Width::I32,
+            builder.writeGuestRegister(destination.reg, byte,
+                                       destination.width == 64 ? ir::Width::I64
+                                                               : ir::Width::I32,
                                        instruction.address);
             break;
         }
@@ -1120,7 +1122,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto value = builder.loadGuest(
                 address, memory.width == 8 ? ir::Width::I8 : ir::Width::I16,
                 instruction.address);
-            builder.writeGuestRegister(destination.reg, value, ir::Width::I32,
+            builder.writeGuestRegister(destination.reg, value,
+                                       destination.width == 64 ? ir::Width::I64
+                                                               : ir::Width::I32,
                                        instruction.address);
             break;
         }
