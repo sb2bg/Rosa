@@ -391,13 +391,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (rexW || rexX || mode > 0x2U ||
+            if (rexW || mode > 0x2U ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
                     "only MOVZX r32, word [base+disp8/disp32] is supported");
             }
             auto baseEncoding = rmEncoding;
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
             if (rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated MOVZX memory SIB");
@@ -406,11 +408,18 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto scaleBits = static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
                 const auto indexEncoding = static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
                 baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-                if (scaleBits != 0 || indexEncoding != 0x4U ||
-                    (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                const bool hasIndex = indexEncoding != 0x4U || rexX;
+                if (mode == 0 && baseEncoding == 0x5U) {
                     throw DecodeError(address, remaining,
-                                      "only no-index SIB addressing is supported for MOVZX");
+                                      "MOVZX SIB requires a register base");
                 }
+                if (hasIndex) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            } else if (rexX) {
+                throw DecodeError(address, remaining,
+                                  "REX.X requires a SIB operand for MOVZX");
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -429,7 +438,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR), 32});
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(baseEncoding, rexB), displacement, 16});
+                decodeRegister(baseEncoding, rexB), displacement, 16, index, scale});
             const auto length = cursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,

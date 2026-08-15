@@ -1866,6 +1866,70 @@ void testMovzxGuestWordTo32BitRegister() {
                 "failed MOVZX changed destination");
 }
 
+void testMovzxGuestWordWithScaledIndex() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x46, 0x0F, 0xB7, 0x74, 0x6B, 0x16, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovzxRegMem,
+           "indexed MOVZX opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R14 &&
+               destination.width == 32,
+           "indexed MOVZX destination differs");
+    expect(memory.base == rosa::x86::Register::Rbx &&
+               memory.index == rosa::x86::Register::R13 &&
+               memory.scale == 2 && memory.displacement == 0x16 &&
+               memory.width == 16,
+           "indexed MOVZX memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("[rbx+r13*2+0x16]") !=
+               std::string::npos,
+           "indexed MOVZX dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 4> sourceWithUpperSentinel{
+        0xEF, 0xBE, 0xAD, 0xDE};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x811C},
+                            sourceWithUpperSentinel);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbx = 0x8100;
+    state.r13 = 3;
+    state.r14 = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r14, std::uint64_t{0xBEEF},
+                "indexed MOVZX result or zero extension differs");
+    expectEqual(state.rbx, std::uint64_t{0x8100},
+                "indexed MOVZX changed its base");
+    expectEqual(state.r13, std::uint64_t{3},
+                "indexed MOVZX changed its index");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "indexed MOVZX changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    state.r14 = UINT64_MAX;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "indexed MOVZX from unmapped guest memory did not fault");
+    expectEqual(state.r14, UINT64_MAX,
+                "failed indexed MOVZX changed its destination");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "failed indexed MOVZX changed flags");
+}
+
 void testMovsxdScaledGuestDword() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x63, 0x0C, 0x88, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -4257,6 +4321,7 @@ int main() {
         {"MOVZX low-byte register to 32-bit register",
          testMovzxLowByteRegisterTo32BitRegister},
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},
+        {"MOVZX guest word with scaled index", testMovzxGuestWordWithScaledIndex},
         {"MOVSXD scaled guest dword", testMovsxdScaledGuestDword},
         {"legacy MOV guest memory to 32-bit register",
          testMovGuestMemoryToLegacy32BitRegister},
