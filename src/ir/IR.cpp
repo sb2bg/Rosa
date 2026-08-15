@@ -326,6 +326,20 @@ void Builder::moveXmmByteMask(x86::Register destination, x86::XmmRegister source
     });
 }
 
+void Builder::shuffleXmmDwords(x86::XmmRegister destination,
+                               x86::XmmRegister source,
+                               std::uint8_t control,
+                               guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShuffleXmmDwords,
+        .width = Width::I32,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+        .immediate = control,
+    });
+}
+
 void Builder::bitScanForward(x86::Register destination, x86::Register source,
                              Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -647,6 +661,12 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::MoveXmmByteMask:
             if (!operation.guestRegister || !operation.guestXmmRegister) {
                 errors.emplace_back("move_xmm_byte_mask has incomplete registers");
+            }
+            break;
+        case Opcode::ShuffleXmmDwords:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister || operation.immediate > 0xFFU) {
+                errors.emplace_back("shuffle_xmm_dwords is incomplete");
             }
             break;
         case Opcode::BitScanForward:

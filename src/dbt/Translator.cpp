@@ -293,6 +293,35 @@ bitScanForward(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+shuffleXmmDwords(x86::X86State *state, std::uint64_t destinationIndex,
+                 std::uint64_t sourceIndex, std::uint64_t control) {
+    if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size() ||
+        control > 0xFFU) {
+        return state;
+    }
+    const auto source = state->xmm[sourceIndex];
+    const std::array<std::uint32_t, 4> sourceDwords{
+        static_cast<std::uint32_t>(source.low),
+        static_cast<std::uint32_t>(source.low >> 32U),
+        static_cast<std::uint32_t>(source.high),
+        static_cast<std::uint32_t>(source.high >> 32U),
+    };
+    std::array<std::uint32_t, 4> result{};
+    for (std::size_t index = 0; index < result.size(); ++index) {
+        const auto selection = static_cast<std::size_t>(
+            (control >> (index * 2U)) & 0x3U);
+        result[index] = sourceDwords[selection];
+    }
+    state->xmm[destinationIndex] = {
+        .low = static_cast<std::uint64_t>(result[0]) |
+               (static_cast<std::uint64_t>(result[1]) << 32U),
+        .high = static_cast<std::uint64_t>(result[2]) |
+                (static_cast<std::uint64_t>(result[3]) << 32U),
+    };
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 loadGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address) noexcept {
     try {
         if (context == nullptr || context->addressSpace == nullptr) {
@@ -1330,6 +1359,18 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.moveXmmByteMask(destination, source, instruction.address);
             break;
         }
+        case x86::Opcode::PshufdRegRegImm: {
+            if (instruction.operands.size() != 3) {
+                throw std::runtime_error("internal decoder error: pshufd operand count");
+            }
+            builder.shuffleXmmDwords(
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg,
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg,
+                static_cast<std::uint8_t>(
+                    std::get<x86::ImmediateOperand>(instruction.operands[2]).value),
+                instruction.address);
+            break;
+        }
         case x86::Opcode::AndRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: and operand count");
@@ -1650,6 +1691,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
                          operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
                          operation.opcode == ir::Opcode::MoveXmmByteMask ||
+                         operation.opcode == ir::Opcode::ShuffleXmmDwords ||
                          operation.opcode == ir::Opcode::BitScanForward ||
                          operation.opcode == ir::Opcode::LoadGuest ||
                          operation.opcode == ir::Opcode::ReadTimestampCounter;
@@ -1930,6 +1972,17 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(
                 arm64::x2, static_cast<std::uint64_t>(*operation.guestXmmRegister));
             assembler.movImmediate(arm64::x16, pointerBits(&moveXmmByteMask32));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::ShuffleXmmDwords:
+            assembler.movImmediate(
+                arm64::x1,
+                static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(
+                arm64::x2,
+                static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x3, operation.immediate);
+            assembler.movImmediate(arm64::x16, pointerBits(&shuffleXmmDwords));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::BitScanForward:

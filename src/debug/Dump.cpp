@@ -526,6 +526,16 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
+        case x86::Opcode::PshufdRegRegImm:
+            stream << "pshufd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg)
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(instruction.operands[2]).value;
+            break;
         case x86::Opcode::MovapsMemReg: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << "movaps [" << x86::registerName(memory.base);
@@ -786,6 +796,12 @@ std::string dumpIr(const ir::Block &block) {
             stream << "move_xmm_byte_mask "
                    << x86::registerName(*operation.guestRegister) << ", "
                    << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::ShuffleXmmDwords:
+            stream << "shuffle_xmm_dwords "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
+                   << x86::xmmRegisterName(*operation.sourceGuestXmmRegister)
+                   << ", 0x" << std::hex << operation.immediate;
             break;
         case ir::Opcode::BitScanForward:
             stream << "bit_scan_forward." << widthName(operation.width) << ' '

@@ -2226,6 +2226,32 @@ void testPmovmskbGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "PMOVMSKB changed flags");
 }
 
+void testPshufdRegisterExecution() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x66, 0x0F, 0x70, 0xC0, 0xE8, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PshufdRegRegImm,
+           "PSHUFD opcode differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]).value,
+                std::uint64_t{0xE8}, "PSHUFD control differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.xmm[0] = {
+        .low = 0x2222222211111111ULL,
+        .high = 0x4444444433333333ULL,
+    };
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x3333333311111111ULL},
+                "in-place PSHUFD low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x4444444433333333ULL},
+                "in-place PSHUFD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "PSHUFD changed flags");
+}
+
 void testMovapsRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 8> code{
         0x0F, 0x29, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, 0xC3,
@@ -3674,6 +3700,7 @@ int main() {
         {"PCMPEQB guest memory generated execution",
          testPcmpeqbGuestMemoryGeneratedExecution},
         {"PMOVMSKB generated execution", testPmovmskbGeneratedExecution},
+        {"PSHUFD register execution", testPshufdRegisterExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
         {"MOVUPS guest memory to register", testMovupsGuestMemoryToRegister},

@@ -48,6 +48,7 @@ enum class Opcode {
     LoadGuestXmm,
     CompareEqualGuestBytesXmm,
     MoveXmmByteMask,
+    ShuffleXmmDwords,
     BitScanForward,
     Push,
     LoadFence,
@@ -81,6 +82,7 @@ struct Operation {
     std::optional<ValueId> third;
     std::optional<x86::Register> guestRegister;
     std::optional<x86::XmmRegister> guestXmmRegister;
+    std::optional<x86::XmmRegister> sourceGuestXmmRegister;
     std::optional<guest::GuestAddress> target;
     std::optional<guest::GuestAddress> fallthrough;
     std::optional<x86::Condition> condition;
@@ -135,6 +137,9 @@ class Builder {
                                    guest::GuestAddress rip);
     void moveXmmByteMask(x86::Register destination, x86::XmmRegister source,
                          guest::GuestAddress rip);
+    void shuffleXmmDwords(x86::XmmRegister destination,
+                          x86::XmmRegister source, std::uint8_t control,
+                          guest::GuestAddress rip);
     void bitScanForward(x86::Register destination, x86::Register source,
                         Width width, guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
