@@ -454,6 +454,24 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movzx16_register", CaseId::movzx16_register,
+                             differentialBytes_movzx16_register);
+        testCase.request.state.rdi = 0xAABBCCDDEEFF80A5ULL;
+        testCase.request.state.rax = UINT64_MAX;
+        run(testCase);
+    }
+    {
+        auto testCase = make("movsxd_scaled_memory", CaseId::movsxd_scaled_memory,
+                             differentialBytes_movsxd_scaled_memory);
+        bindMemory(testCase, rosa::x86::Register::Rax, 16);
+        testCase.request.state.rcx = 3;
+        const std::int32_t value = -2;
+        std::memcpy(testCase.request.memory.data() + 28, &value, sizeof(value));
+        testCase.memoryCompareOffset = 28;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("lea_scaled", CaseId::lea_scaled,
                              differentialBytes_lea_scaled);
         testCase.request.state.rax = 0x1000;
@@ -479,6 +497,51 @@ void testRosettaDifferentialSemantics() {
         auto testCase = make("branch_equal_taken", CaseId::branch_equal_taken,
                              differentialBytes_branch_equal_taken);
         testCase.request.state.rax = 42;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_not_equal_taken", CaseId::branch_not_equal_taken,
+                             differentialBytes_branch_not_equal_taken);
+        testCase.request.state.rax = 41;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_below_taken", CaseId::branch_below_taken,
+                             differentialBytes_branch_below_taken);
+        testCase.request.state.rflags = carryFlag | 0x2;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_above_equal_taken",
+                             CaseId::branch_above_equal_taken,
+                             differentialBytes_branch_above_equal_taken);
+        testCase.request.state.rflags = 0x2;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_above_not_taken", CaseId::branch_above_not_taken,
+                             differentialBytes_branch_above_not_taken);
+        testCase.request.state.rflags = zeroFlag | 0x2;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_below_equal_taken",
+                             CaseId::branch_below_equal_taken,
+                             differentialBytes_branch_below_equal_taken);
+        testCase.request.state.rflags = zeroFlag | 0x2;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_sign_taken", CaseId::branch_sign_taken,
+                             differentialBytes_branch_sign_taken);
+        testCase.request.state.rflags = signFlag | 0x2;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_less_equal_taken",
+                             CaseId::branch_less_equal_taken,
+                             differentialBytes_branch_less_equal_taken);
+        testCase.request.state.rflags = zeroFlag | 0x2;
         run(testCase);
     }
     {
@@ -548,6 +611,49 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("add64_memory", CaseId::add64_memory,
+                             differentialBytes_add64_memory);
+        bindMemory(testCase, rosa::x86::Register::Rsi, 0);
+        testCase.request.state.rax = UINT64_MAX - 2;
+        const std::uint64_t value = 7;
+        std::memcpy(testCase.request.memory.data() + 16, &value, sizeof(value));
+        testCase.memoryCompareOffset = 16;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("inc16_memory", CaseId::inc16_memory,
+                             differentialBytes_inc16_memory);
+        bindMemory(testCase, rosa::x86::Register::Rax, 0);
+        testCase.request.state.rflags |= carryFlag;
+        const std::uint16_t value = 0x7FFF;
+        std::memcpy(testCase.request.memory.data() + 24, &value, sizeof(value));
+        testCase.memoryCompareOffset = 24;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("xor64_memory", CaseId::xor64_memory,
+                             differentialBytes_xor64_memory);
+        bindMemory(testCase, rosa::x86::Register::Rax, 0);
+        testCase.request.state.rcx = 0x44454B4E494C5F5FULL;
+        const std::uint64_t value = 0x44454B4E494C5F5FULL;
+        std::memcpy(testCase.request.memory.data(), &value, sizeof(value));
+        testCase.flagMask = logicDefinedFlags;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("hot_pointer_transform", CaseId::hot_pointer_transform,
+                             differentialBytes_hot_pointer_transform);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        const std::uint64_t value = 0x123456789ABCDEF0ULL;
+        std::memcpy(testCase.request.memory.data(), &value, sizeof(value));
+        testCase.flagMask = logicDefinedFlags;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("movaps_load", CaseId::movaps_load,
                              differentialBytes_movaps_load);
         bindMemory(testCase, rosa::x86::Register::Rbp, 32);
@@ -558,6 +664,15 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movaps_store", CaseId::movaps_store,
+                             differentialBytes_movaps_store);
+        bindMemory(testCase, rosa::x86::Register::Rbp, 32);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+        testCase.memoryCompareSize = 16;
+        run(testCase);
+    }
+    {
         auto testCase = make("movups_load", CaseId::movups_load,
                              differentialBytes_movups_load);
         bindMemory(testCase, rosa::x86::Register::R15, 3);
@@ -565,6 +680,37 @@ void testRosettaDifferentialSemantics() {
             0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL};
         std::memcpy(testCase.request.memory.data() + 27, value.data(), sizeof(value));
         testCase.memoryCompareOffset = 27;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("pcmpeqb_memory", CaseId::pcmpeqb_memory,
+                             differentialBytes_pcmpeqb_memory);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        constexpr std::array<std::uint8_t, 16> value{
+            1, 0, 2, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+        std::ranges::copy(value, testCase.request.memory.begin());
+        testCase.memoryCompareSize = value.size();
+        run(testCase);
+    }
+    {
+        auto testCase = make("movdqa_load", CaseId::movdqa_load,
+                             differentialBytes_movdqa_load);
+        bindMemory(testCase, rosa::x86::Register::Rbp, 32);
+        const std::array<std::uint64_t, 2> value{
+            0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL};
+        std::memcpy(testCase.request.memory.data(), value.data(), sizeof(value));
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("movdqu_load", CaseId::movdqu_load,
+                             differentialBytes_movdqu_load);
+        bindMemory(testCase, rosa::x86::Register::R15, 3);
+        const std::array<std::uint64_t, 2> value{
+            0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL};
+        std::memcpy(testCase.request.memory.data() + 43, value.data(), sizeof(value));
+        testCase.memoryCompareOffset = 43;
         testCase.memoryCompareSize = sizeof(value);
         run(testCase);
     }
