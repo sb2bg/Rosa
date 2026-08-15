@@ -34,6 +34,15 @@ std::string registerOperandName(x86::RegisterOperand operand) {
         constexpr std::array legacyByteNames{"al", "cl", "dl", "bl"};
         return std::string(legacyByteNames.at(static_cast<std::size_t>(operand.reg)));
     }
+    if (operand.width == 16) {
+        constexpr std::array legacyWordNames{
+            "ax", "cx", "dx", "bx", "sp", "bp", "si", "di"};
+        const auto encoding = static_cast<std::size_t>(operand.reg);
+        if (encoding < legacyWordNames.size()) {
+            return legacyWordNames[encoding];
+        }
+        return "r" + std::to_string(encoding) + "w";
+    }
     if (operand.width != 32) {
         return std::string(x86::registerName(operand.reg));
     }

@@ -1314,6 +1314,39 @@ void testMovWordImmediateToGuestMemory() {
                 "failed MOV word guest store changed flags");
 }
 
+void testMovWordRegisterToGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x89, 0x46, 0x2C, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "MOV word [mem], register opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]).width,
+                std::uint8_t{16}, "MOV word source width differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x812C},
+                          0x1122334455667788ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsi = 0x8100;
+    state.rax = 0xAABBCCDDEEFFBEEFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x812C}),
+                std::uint64_t{0x112233445566BEEFULL},
+                "MOV word register store changed adjacent bytes");
+    expectEqual(state.rax, std::uint64_t{0xAABBCCDDEEFFBEEFULL},
+                "MOV word register store changed source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV word register store changed flags");
+}
+
 void testMovGuestMemoryToRegister() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x8B, 0x03, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3708,6 +3741,7 @@ int main() {
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
         {"MOV byte immediate to guest memory", testMovByteImmediateToGuestMemory},
         {"MOV word immediate to guest memory", testMovWordImmediateToGuestMemory},
+        {"MOV word register to guest memory", testMovWordRegisterToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest memory to register with no-index SIB",
          testMovGuestMemoryToRegisterWithNoIndexSib},
