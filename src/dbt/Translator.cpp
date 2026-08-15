@@ -352,6 +352,37 @@ updateShiftLeftFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t re
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateShiftRightFlags32(x86::X86State *state, std::uint64_t lhsValue,
+                        std::uint64_t resultValue, std::uint64_t unmaskedCount) {
+    const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x1FU);
+    if (count == 0) {
+        return state;
+    }
+    const auto lhs = static_cast<std::uint32_t>(lhsValue);
+    const auto result = static_cast<std::uint32_t>(resultValue);
+    auto replacedFlags = flagCarry | flagParity | flagZero | flagSign;
+    if (count == 1) {
+        replacedFlags |= flagOverflow;
+    }
+    auto flags = (state->rflags & ~replacedFlags) | flagReservedOne;
+    flags |= (lhs >> (count - 1U)) & 1U;
+    if ((std::popcount(static_cast<unsigned>(result & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result >> 31U) != 0) {
+        flags |= flagSign;
+    }
+    if (count == 1 && (lhs >> 31U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateMultiplyFlags64(x86::X86State *state, std::uint64_t high) {
     auto flags = (state->rflags & ~(flagCarry | flagOverflow)) | flagReservedOne;
     if (high != 0) {
@@ -617,6 +648,22 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.writeGuestRegister(reg.reg, result, ir::Width::I64, instruction.address);
             builder.updateShiftLeftFlags(lhs, result, count, ir::Width::I64,
                                          instruction.address);
+            break;
+        }
+        case x86::Opcode::ShrRegImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: shr operand count");
+            }
+            const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            const auto lhs =
+                builder.readGuestRegister(reg.reg, ir::Width::I32, instruction.address);
+            const auto count = static_cast<std::uint8_t>(immediate.value & 0x1FU);
+            const auto result = builder.shiftRightLogical(lhs, count, ir::Width::I32,
+                                                          instruction.address);
+            builder.writeGuestRegister(reg.reg, result, ir::Width::I32, instruction.address);
+            builder.updateShiftRightFlags(lhs, result, count, ir::Width::I32,
+                                          instruction.address);
             break;
         }
         case x86::Opcode::MulReg: {
@@ -912,6 +959,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::UpdateSubFlags ||
                          operation.opcode == ir::Opcode::UpdateLogicFlags ||
                          operation.opcode == ir::Opcode::UpdateShiftLeftFlags ||
+                         operation.opcode == ir::Opcode::UpdateShiftRightFlags ||
                          operation.opcode == ir::Opcode::UpdateMultiplyFlags ||
                          operation.opcode == ir::Opcode::UpdateShiftRightDoubleFlags ||
                          operation.opcode == ir::Opcode::Push ||
@@ -993,6 +1041,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                        hostRegister(*operation.lhs),
                                        static_cast<std::uint8_t>(operation.immediate));
             }
+            break;
+        case ir::Opcode::ShiftRightLogical:
+            assembler.lsrImmediate(hostRegister(*operation.result),
+                                   hostRegister(*operation.lhs),
+                                   static_cast<std::uint8_t>(operation.immediate));
             break;
         case ir::Opcode::MultiplyLow:
             assembler.multiplyLow(hostRegister(*operation.result),
@@ -1183,6 +1236,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 assembler.movImmediate(arm64::x3, operation.immediate);
             }
             assembler.movImmediate(arm64::x16, pointerBits(&updateShiftLeftFlags64));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::UpdateShiftRightFlags:
+            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x2, hostRegister(*operation.rhs));
+            assembler.movImmediate(arm64::x3, operation.immediate);
+            assembler.movImmediate(arm64::x16, pointerBits(&updateShiftRightFlags32));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateMultiplyFlags:

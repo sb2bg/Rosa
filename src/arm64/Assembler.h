@@ -44,6 +44,7 @@ class Assembler {
     void add(XRegister destination, XRegister lhs, XRegister rhs);
     void sub(XRegister destination, XRegister lhs, XRegister rhs);
     void lslImmediate(XRegister destination, XRegister source, std::uint8_t shift);
+    void lsrImmediate(XRegister destination, XRegister source, std::uint8_t shift);
     void lslVariable(XRegister destination, XRegister source, XRegister shift);
     void multiplyLow(XRegister destination, XRegister lhs, XRegister rhs);
     void multiplyHighUnsigned(XRegister destination, XRegister lhs, XRegister rhs);

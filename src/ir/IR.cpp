@@ -122,6 +122,20 @@ ValueId Builder::shiftLeft(ValueId value, ValueId count, Width width,
     return result;
 }
 
+ValueId Builder::shiftRightLogical(ValueId value, std::uint8_t count, Width width,
+                                   guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShiftRightLogical,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = value,
+        .immediate = count,
+    });
+    return result;
+}
+
 ValueId Builder::multiplyLow(ValueId lhs, ValueId rhs, Width width,
                              guest::GuestAddress rip) {
     const auto result = nextValue();
@@ -335,6 +349,18 @@ void Builder::updateShiftLeftFlags(ValueId lhs, ValueId result, ValueId count,
     });
 }
 
+void Builder::updateShiftRightFlags(ValueId lhs, ValueId result, std::uint8_t count,
+                                    Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateShiftRightFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = lhs,
+        .rhs = result,
+        .immediate = count,
+    });
+}
+
 void Builder::updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::UpdateMultiplyFlags,
@@ -470,6 +496,9 @@ std::vector<std::string> verify(const Block &block) {
                 checkUse(operation.rhs, "shift count");
             }
             break;
+        case Opcode::ShiftRightLogical:
+            checkUse(operation.lhs, "shifted");
+            break;
         case Opcode::Push:
             checkUse(operation.lhs, "new stack pointer");
             checkUse(operation.rhs, "pushed value");
@@ -518,6 +547,10 @@ std::vector<std::string> verify(const Block &block) {
             if (operation.third) {
                 checkUse(operation.third, "shift count");
             }
+            break;
+        case Opcode::UpdateShiftRightFlags:
+            checkUse(operation.lhs, "original");
+            checkUse(operation.rhs, "result");
             break;
         case Opcode::ExitBlock:
             if (operation.exitKind != ExitKind::Return && !operation.target) {

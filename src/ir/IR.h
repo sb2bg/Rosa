@@ -31,6 +31,7 @@ enum class Opcode {
     Add,
     Sub,
     ShiftLeft,
+    ShiftRightLogical,
     MultiplyLow,
     MultiplyHighUnsigned,
     ShiftRightDouble,
@@ -48,6 +49,7 @@ enum class Opcode {
     UpdateSubFlags,
     UpdateLogicFlags,
     UpdateShiftLeftFlags,
+    UpdateShiftRightFlags,
     UpdateMultiplyFlags,
     UpdateShiftRightDoubleFlags,
     ExitBlock,
@@ -99,6 +101,8 @@ class Builder {
     ValueId shiftLeft(ValueId value, std::uint8_t count, Width width,
                       guest::GuestAddress rip);
     ValueId shiftLeft(ValueId value, ValueId count, Width width, guest::GuestAddress rip);
+    ValueId shiftRightLogical(ValueId value, std::uint8_t count, Width width,
+                              guest::GuestAddress rip);
     ValueId multiplyLow(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId multiplyHighUnsigned(ValueId lhs, ValueId rhs, Width width,
                                  guest::GuestAddress rip);
@@ -125,6 +129,8 @@ class Builder {
                               guest::GuestAddress rip);
     void updateShiftLeftFlags(ValueId lhs, ValueId result, ValueId count, Width width,
                               guest::GuestAddress rip);
+    void updateShiftRightFlags(ValueId lhs, ValueId result, std::uint8_t count, Width width,
+                               guest::GuestAddress rip);
     void updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip);
     void updateShiftRightDoubleFlags(ValueId original, ValueId result, std::uint8_t count,
                                      Width width, guest::GuestAddress rip);

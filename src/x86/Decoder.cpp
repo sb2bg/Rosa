@@ -515,7 +515,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         if (!hasRex && code[cursor] != 0x89U && code[cursor] != 0x8BU &&
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
-            code[cursor] != 0x84U && code[cursor] != 0x31U) {
+            code[cursor] != 0x84U && code[cursor] != 0x31U &&
+            code[cursor] != 0xC1U) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
@@ -533,7 +534,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const auto opcode = code[cursor++];
         if (!rexW && opcode != 0x89U && opcode != 0x8BU && opcode != 0x85U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
-            opcode != 0x31U) {
+            opcode != 0x31U && opcode != 0xC1U) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
         }
@@ -803,18 +804,21 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.operands.push_back(ImmediateOperand{target.value, 64});
         } else if (opcode == 0xC1U) {
             if (code.size() - cursor < 2) {
-                throw DecodeError(address, remaining, "truncated shl r64, imm8");
+                throw DecodeError(address, remaining, "truncated shift register, imm8");
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            if (mode != 0x3U || extension != 0x4U || rexR || rexX) {
+            if (mode != 0x3U || rexR || rexX ||
+                (extension != 0x4U && extension != 0x5U) ||
+                (extension == 0x4U && !rexW) || (extension == 0x5U && rexW)) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct SHL /4 from opcode C1 is supported");
+                                  "only SHL r64 /4 and SHR r32 /5 from opcode C1 are supported");
             }
-            instruction.opcode = Opcode::ShlRegImm;
+            instruction.opcode = extension == 0x4U ? Opcode::ShlRegImm : Opcode::ShrRegImm;
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
         } else if (opcode == 0xD3U) {
             if (code.size() - cursor < 1) {

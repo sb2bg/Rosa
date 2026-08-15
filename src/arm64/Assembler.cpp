@@ -100,6 +100,23 @@ void Assembler::lslImmediate(XRegister destination, XRegister source, std::uint8
                    std::to_string(shift));
 }
 
+void Assembler::lsrImmediate(XRegister destination, XRegister source, std::uint8_t shift) {
+    requireRegister(destination);
+    requireRegister(source);
+    if (shift >= 64U) {
+        throw std::invalid_argument("64-bit LSR immediate must be less than 64");
+    }
+    if (shift == 0) {
+        mov(destination, source);
+        return;
+    }
+    const auto word = 0xD340FC00U | (static_cast<std::uint32_t>(shift) << 16U) |
+                      (static_cast<std::uint32_t>(source.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "lsr " + regName(destination) + ", " + regName(source) + ", #" +
+                   std::to_string(shift));
+}
+
 void Assembler::lslVariable(XRegister destination, XRegister source, XRegister shift) {
     requireRegister(destination);
     requireRegister(source);

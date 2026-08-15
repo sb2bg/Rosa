@@ -49,6 +49,7 @@ void testAssemblerEncodings() {
     assembler.movImmediate(rosa::arm64::x0, 42);
     assembler.add(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.lslImmediate(rosa::arm64::x10, rosa::arm64::x9, 32);
+    assembler.lsrImmediate(rosa::arm64::x10, rosa::arm64::x9, 31);
     assembler.lslVariable(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.multiplyLow(rosa::arm64::x11, rosa::arm64::x9, rosa::arm64::x10);
     assembler.multiplyHighUnsigned(rosa::arm64::x12, rosa::arm64::x9,
@@ -67,11 +68,11 @@ void testAssemblerEncodings() {
     assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 19> expected{
-        0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0x9ACB212AU, 0x9B0A7D2BU,
-        0x9BCA7D2CU, 0x93C9814BU, 0x8A0B012AU, 0xAA0B012AU, 0xCA0B012AU,
-        0xF9400009U, 0xB9400009U, 0xF9000009U, 0xD63F0200U, 0xA9BF7BFDU,
-        0xA8C17BFDU, 0xD5033BBFU, 0xD5033FDFU, 0xD65F03C0U,
+    const std::array<std::uint32_t, 20> expected{
+        0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0xD35FFD2AU, 0x9ACB212AU,
+        0x9B0A7D2BU, 0x9BCA7D2CU, 0x93C9814BU, 0x8A0B012AU, 0xAA0B012AU,
+        0xCA0B012AU, 0xF9400009U, 0xB9400009U, 0xF9000009U, 0xD63F0200U,
+        0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU, 0xD5033FDFU, 0xD65F03C0U,
     };
     expectEqual(assembler.words().size(), expected.size(), "assembler word count differs");
     for (std::size_t index = 0; index < expected.size(); ++index) {
@@ -986,6 +987,45 @@ void testShiftLeftClGeneratedExecution() {
                 "SHL r64, CL with a masked zero count changed flags");
 }
 
+void testShiftRight32ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0xC1, 0xE8, 0x1F, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShrRegImm,
+           "SHR r32, imm8 opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{32}, "SHR r32 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0xFFFFFFFF80000001ULL;
+    state.rflags = 0x812;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{1},
+                "SHR eax, 31 result or zero-extension differs");
+    expectEqual(state.rflags, std::uint64_t{0x812}, "SHR eax, 31 flags differ");
+
+    constexpr std::array<std::uint8_t, 4> countOne{0xC1, 0xE8, 0x01, 0xC3};
+    const auto oneBlock = translator.translate(countOne, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State oneState;
+    oneState.rax = 0x80000001;
+    oneState.rflags = 0x10;
+    static_cast<void>(oneBlock.execute(oneState));
+    expectEqual(oneState.rax, std::uint64_t{0x40000000}, "SHR eax, 1 result differs");
+    expectEqual(oneState.rflags, std::uint64_t{0x817}, "SHR eax, 1 flags differ");
+
+    constexpr std::array<std::uint8_t, 4> zeroCount{0xC1, 0xE8, 0x20, 0xC3};
+    const auto zeroBlock = translator.translate(zeroCount, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0x55;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(zeroBlock.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0x55}, "SHR masked-zero changed EAX");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "SHR masked-zero changed flags");
+}
+
 void testUnsignedMultiplyGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0xF7, 0xE1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -1779,6 +1819,7 @@ int main() {
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},
         {"SHL CL generated execution", testShiftLeftClGeneratedExecution},
+        {"SHR 32-bit immediate generated execution", testShiftRight32ImmediateGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
