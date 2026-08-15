@@ -96,6 +96,34 @@ ValueId Builder::shiftLeft(ValueId value, ValueId count, Width width,
     return result;
 }
 
+ValueId Builder::multiplyLow(ValueId lhs, ValueId rhs, Width width,
+                             guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::MultiplyLow,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = lhs,
+        .rhs = rhs,
+    });
+    return result;
+}
+
+ValueId Builder::multiplyHighUnsigned(ValueId lhs, ValueId rhs, Width width,
+                                      guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::MultiplyHighUnsigned,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = lhs,
+        .rhs = rhs,
+    });
+    return result;
+}
+
 ValueId Builder::bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -229,6 +257,15 @@ void Builder::updateShiftLeftFlags(ValueId lhs, ValueId result, ValueId count,
     });
 }
 
+void Builder::updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateMultiplyFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = high,
+    });
+}
+
 void Builder::exitBlock(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::ExitBlock,
@@ -318,6 +355,8 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::Sub:
         case Opcode::And:
         case Opcode::Or:
+        case Opcode::MultiplyLow:
+        case Opcode::MultiplyHighUnsigned:
             checkUse(operation.lhs, "left");
             checkUse(operation.rhs, "right");
             break;
@@ -349,6 +388,9 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::UpdateLogicFlags:
             checkUse(operation.lhs, "result");
+            break;
+        case Opcode::UpdateMultiplyFlags:
+            checkUse(operation.lhs, "high result");
             break;
         case Opcode::UpdateShiftLeftFlags:
             checkUse(operation.lhs, "original");

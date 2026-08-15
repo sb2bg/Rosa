@@ -237,6 +237,16 @@ updateShiftLeftFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t re
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *
+updateMultiplyFlags64(x86::X86State *state, std::uint64_t high) {
+    auto flags = (state->rflags & ~(flagCarry | flagOverflow)) | flagReservedOne;
+    if (high != 0) {
+        flags |= flagCarry | flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 template <typename Pointer> std::uint64_t pointerBits(Pointer pointer) {
     static_assert(std::is_pointer_v<Pointer>);
     static_assert(sizeof(pointer) == sizeof(std::uint64_t));
@@ -406,6 +416,26 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                          instruction.address);
             break;
         }
+        case x86::Opcode::MulReg: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: mul operand count");
+            }
+            const auto source = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto lhs = builder.readGuestRegister(x86::Register::Rax, ir::Width::I64,
+                                                       instruction.address);
+            const auto rhs = builder.readGuestRegister(source.reg, ir::Width::I64,
+                                                       instruction.address);
+            const auto low =
+                builder.multiplyLow(lhs, rhs, ir::Width::I64, instruction.address);
+            const auto high = builder.multiplyHighUnsigned(lhs, rhs, ir::Width::I64,
+                                                           instruction.address);
+            builder.writeGuestRegister(x86::Register::Rax, low, ir::Width::I64,
+                                       instruction.address);
+            builder.writeGuestRegister(x86::Register::Rdx, high, ir::Width::I64,
+                                       instruction.address);
+            builder.updateMultiplyFlags(high, ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::OrRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: or operand count");
@@ -554,6 +584,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::UpdateSubFlags ||
                          operation.opcode == ir::Opcode::UpdateLogicFlags ||
                          operation.opcode == ir::Opcode::UpdateShiftLeftFlags ||
+                         operation.opcode == ir::Opcode::UpdateMultiplyFlags ||
                          operation.opcode == ir::Opcode::Push ||
                          operation.opcode == ir::Opcode::StoreGuest ||
                          operation.opcode == ir::Opcode::LoadGuest ||
@@ -619,6 +650,16 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                        hostRegister(*operation.lhs),
                                        static_cast<std::uint8_t>(operation.immediate));
             }
+            break;
+        case ir::Opcode::MultiplyLow:
+            assembler.multiplyLow(hostRegister(*operation.result),
+                                  hostRegister(*operation.lhs),
+                                  hostRegister(*operation.rhs));
+            break;
+        case ir::Opcode::MultiplyHighUnsigned:
+            assembler.multiplyHighUnsigned(hostRegister(*operation.result),
+                                           hostRegister(*operation.lhs),
+                                           hostRegister(*operation.rhs));
             break;
         case ir::Opcode::And:
             assembler.bitAnd(hostRegister(*operation.result), hostRegister(*operation.lhs),
@@ -740,6 +781,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 assembler.movImmediate(arm64::x3, operation.immediate);
             }
             assembler.movImmediate(arm64::x16, pointerBits(&updateShiftLeftFlags64));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::UpdateMultiplyFlags:
+            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x16, pointerBits(&updateMultiplyFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::ExitBlock: {

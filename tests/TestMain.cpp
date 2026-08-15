@@ -50,6 +50,9 @@ void testAssemblerEncodings() {
     assembler.add(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.lslImmediate(rosa::arm64::x10, rosa::arm64::x9, 32);
     assembler.lslVariable(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
+    assembler.multiplyLow(rosa::arm64::x11, rosa::arm64::x9, rosa::arm64::x10);
+    assembler.multiplyHighUnsigned(rosa::arm64::x12, rosa::arm64::x9,
+                                   rosa::arm64::x10);
     assembler.bitAnd(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.bitOr(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.ldr(rosa::arm64::x9, rosa::arm64::x0, 0);
@@ -62,10 +65,11 @@ void testAssemblerEncodings() {
     assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 15> expected{
-        0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0x9ACB212AU, 0x8A0B012AU,
-        0xAA0B012AU, 0xF9400009U, 0xB9400009U, 0xF9000009U, 0xD63F0200U,
-        0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU, 0xD5033FDFU, 0xD65F03C0U,
+    const std::array<std::uint32_t, 17> expected{
+        0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0x9ACB212AU, 0x9B0A7D2BU,
+        0x9BCA7D2CU, 0x8A0B012AU, 0xAA0B012AU, 0xF9400009U, 0xB9400009U,
+        0xF9000009U, 0xD63F0200U, 0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU,
+        0xD5033FDFU, 0xD65F03C0U,
     };
     expectEqual(assembler.words().size(), expected.size(), "assembler word count differs");
     for (std::size_t index = 0; index < expected.size(); ++index) {
@@ -734,6 +738,41 @@ void testShiftLeftClGeneratedExecution() {
                 "SHL r64, CL with a masked zero count changed flags");
 }
 
+void testUnsignedMultiplyGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0xF7, 0xE1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MulReg, "MUL r64 opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rcx,
+           "MUL r64 source differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State smallState;
+    smallState.rax = 3;
+    smallState.rcx = 4;
+    smallState.rdx = UINT64_MAX;
+    smallState.rflags = 0x8D7;
+    static_cast<void>(block.execute(smallState));
+    expectEqual(smallState.rax, std::uint64_t{12}, "MUL low result differs");
+    expectEqual(smallState.rdx, std::uint64_t{0}, "MUL high result differs");
+    expectEqual(smallState.rcx, std::uint64_t{4}, "MUL changed its source register");
+    expectEqual(smallState.rflags, std::uint64_t{0xD6},
+                "MUL zero-high defined flags differ");
+
+    rosa::x86::X86State wideState;
+    wideState.rax = UINT64_MAX;
+    wideState.rcx = 2;
+    wideState.rflags = 0x2;
+    static_cast<void>(block.execute(wideState));
+    expectEqual(wideState.rax, std::uint64_t{UINT64_MAX - 1},
+                "MUL wide low result differs");
+    expectEqual(wideState.rdx, std::uint64_t{1}, "MUL wide high result differs");
+    expectEqual(wideState.rflags, std::uint64_t{0x803},
+                "MUL nonzero-high defined flags differ");
+}
+
 void testOrRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x09, 0xD0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -1209,6 +1248,7 @@ int main() {
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},
         {"SHL CL generated execution", testShiftLeftClGeneratedExecution},
+        {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},

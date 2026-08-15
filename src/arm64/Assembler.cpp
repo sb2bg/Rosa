@@ -111,6 +111,27 @@ void Assembler::lslVariable(XRegister destination, XRegister source, XRegister s
                    regName(shift));
 }
 
+void Assembler::multiplyLow(XRegister destination, XRegister lhs, XRegister rhs) {
+    requireRegister(destination);
+    requireRegister(lhs);
+    requireRegister(rhs);
+    const auto word = 0x9B007C00U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
+                      (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "mul " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
+}
+
+void Assembler::multiplyHighUnsigned(XRegister destination, XRegister lhs, XRegister rhs) {
+    requireRegister(destination);
+    requireRegister(lhs);
+    requireRegister(rhs);
+    const auto word = 0x9BC07C00U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
+                      (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "umulh " + regName(destination) + ", " + regName(lhs) + ", " +
+                   regName(rhs));
+}
+
 void Assembler::bitAnd(XRegister destination, XRegister lhs, XRegister rhs) {
     requireRegister(destination);
     requireRegister(lhs);
