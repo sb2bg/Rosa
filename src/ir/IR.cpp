@@ -265,6 +265,17 @@ void Builder::loadGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
     });
 }
 
+void Builder::compareEqualGuestBytesXmm(ValueId address, x86::XmmRegister reg,
+                                        guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::CompareEqualGuestBytesXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = reg,
+    });
+}
+
 void Builder::push(ValueId newStackPointer, ValueId value, Width width,
                    guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -540,6 +551,12 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "guest address");
             if (!operation.guestXmmRegister) {
                 errors.emplace_back("load_guest_xmm has no register");
+            }
+            break;
+        case Opcode::CompareEqualGuestBytesXmm:
+            checkUse(operation.lhs, "guest address");
+            if (!operation.guestXmmRegister) {
+                errors.emplace_back("compare_equal_guest_bytes_xmm has no register");
             }
             break;
         case Opcode::LoadGuest:

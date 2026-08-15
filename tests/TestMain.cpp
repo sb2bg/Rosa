@@ -1749,6 +1749,52 @@ void testPxorRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "PXOR changed flags");
 }
 
+void testPcmpeqbGuestMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x74, 0x07, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PcmpeqbRegMem,
+           "PCMPEQB xmm, [memory] opcode differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 16> bytes{
+        1, 0, 2, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8000}, bytes);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = 0x8000;
+    state.xmm[0] = {};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x00000000FF00FF00ULL},
+                "PCMPEQB low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0},
+                "PCMPEQB high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "PCMPEQB changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rdi = 0x8000;
+    faultState.xmm[0] = {.low = 1, .high = 2};
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "PCMPEQB from unmapped guest memory did not fail");
+    expectEqual(faultState.xmm[0].low, std::uint64_t{1},
+                "failed PCMPEQB changed low lane");
+    expectEqual(faultState.xmm[0].high, std::uint64_t{2},
+                "failed PCMPEQB changed high lane");
+}
+
 void testMovapsRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 8> code{
         0x0F, 0x29, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, 0xC3,
@@ -2604,6 +2650,8 @@ int main() {
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
+        {"PCMPEQB guest memory generated execution",
+         testPcmpeqbGuestMemoryGeneratedExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
         {"MOVDQA guest memory to register", testMovdqaGuestMemoryToRegister},
