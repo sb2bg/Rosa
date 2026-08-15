@@ -22,6 +22,7 @@ constexpr std::uint64_t syscallClassMask = 0xFF000000U;
 constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
 constexpr std::uint64_t syscallExit = unixSyscallClass | 1U;
 constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
+constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
 constexpr std::uint64_t syscallFsgetpath = unixSyscallClass | 427U;
 constexpr std::uint64_t syscallGetentropy = unixSyscallClass | 500U;
@@ -105,6 +106,13 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         setSuccess(state, initialGuestThreadId);
         return {};
     }
+    if (number == syscallSharedRegionCheck) {
+        // Rosa has not provisioned or mapped an Intel shared region. XNU's
+        // shared_region_check_np returns EINVAL in this state without reading
+        // or writing the start-address pointer.
+        setError(state, EINVAL);
+        return {};
+    }
     if (number == syscallGetentropy) {
         constexpr std::size_t maximumEntropySize = 256;
         if (state.rsi > maximumEntropySize) {
@@ -165,8 +173,9 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
     }
     if (number != syscallWrite) {
         throw unsupported(state, syscallRip,
-                          "only BSD write(2), exit(2), thread_selfid(2), "
-                          "fsgetpath(2), and getentropy(2) are implemented");
+                          "only BSD write(2), exit(2), shared_region_check_np(2), "
+                          "thread_selfid(2), fsgetpath(2), and getentropy(2) are "
+                          "implemented");
     }
     if (state.rdi != STDOUT_FILENO && state.rdi != STDERR_FILENO) {
         throw unsupported(state, syscallRip,

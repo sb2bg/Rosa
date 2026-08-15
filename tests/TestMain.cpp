@@ -7758,6 +7758,44 @@ void testDarwinFsgetpath() {
            "nonempty fsgetpath identity did not stop at the guest VFS boundary");
 }
 
+void testDarwinSharedRegionCheck() {
+    constexpr auto callNumber = UINT64_C(0x02000126);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress output{0x8100};
+    constexpr std::uint64_t sentinel = 0x0123456789ABCDEFULL;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(output, sentinel);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = callNumber;
+    state.rdi = output.value;
+    state.rflags = 0xAD6;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF800064A40ULL});
+    expect(!outcome.exited, "shared-region check terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "missing shared region returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "missing shared region did not set BSD carry");
+    expectEqual(addressSpace.readU64(output), sentinel,
+                "missing shared region changed its output pointer");
+
+    rosa::guest::AddressSpace emptyAddressSpace;
+    state.rax = callNumber;
+    state.rdi = UINT64_MAX - 8;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        emptyAddressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "missing shared region inspected an invalid guest pointer");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "invalid-pointer shared-region check did not set BSD carry");
+}
+
 void testGeneratedDarwinGetentropy() {
     constexpr rosa::guest::GuestAddress codeBase{0x1000};
     constexpr rosa::guest::GuestAddress buffer{0x8000};
@@ -9867,6 +9905,7 @@ int main() {
         {"generated Darwin thread_selfid", testGeneratedDarwinThreadSelfid},
         {"Darwin getentropy", testDarwinGetentropy},
         {"Darwin fsgetpath", testDarwinFsgetpath},
+        {"Darwin shared-region check", testDarwinSharedRegionCheck},
         {"generated Darwin getentropy", testGeneratedDarwinGetentropy},
         {"Darwin thread_fast_set_cthread_self",
          testDarwinThreadFastSetCthreadSelf},
