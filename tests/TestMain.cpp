@@ -852,6 +852,31 @@ void testCompare32BitRegisterWithImmediate() {
                 "CMP r32, imm32 equal flags differ");
 }
 
+void testCompareEaxAccumulatorImmediate() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x3D, 0x22, 0x00, 0x00, 0x80, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegImm,
+           "CMP EAX, imm32 opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rax,
+           "CMP accumulator destination differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{0x80000022}, "CMP accumulator immediate differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0xAAAAAAAA80000022ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xAAAAAAAA80000022ULL},
+                "CMP EAX, imm32 changed RAX");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP EAX, imm32 equal flags differ");
+}
+
 void testCompare32BitRegisterWithShortImmediate() {
     constexpr std::array<std::uint8_t, 7> code{
         0x83, 0xFA, 0x0D, // cmp edx, 13
@@ -3011,6 +3036,7 @@ int main() {
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP guest byte with immediate", testCompareGuestByteWithImmediate},
         {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
+        {"CMP EAX accumulator immediate", testCompareEaxAccumulatorImmediate},
         {"CMP 32-bit register with short immediate",
          testCompare32BitRegisterWithShortImmediate},
         {"CMP 64-bit registers", testCompare64BitRegisters},

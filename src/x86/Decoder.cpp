@@ -135,6 +135,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x3DU) {
+            if (code.size() - cursor < 5) {
+                throw DecodeError(address, remaining, "truncated cmp eax, imm32");
+            }
+            const auto immediate = static_cast<std::uint32_t>(
+                readI32(code.subspan(cursor + 1, sizeof(std::uint32_t))));
+            instruction.opcode = Opcode::CmpRegImm;
+            instruction.length = 5;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 5,
+                        instruction.bytes.begin());
+            instruction.operands.push_back(RegisterOperand{Register::Rax, 32});
+            instruction.operands.push_back(ImmediateOperand{immediate, 32});
+            result.push_back(std::move(instruction));
+            cursor += 5;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] >= 0xB0U && code[cursor] <= 0xB3U) {
             if (code.size() - cursor < 2) {
                 throw DecodeError(address, remaining, "truncated mov low-byte register, imm8");
