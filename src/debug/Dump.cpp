@@ -4,6 +4,7 @@
 #include "x86/Registers.h"
 
 #include <algorithm>
+#include <array>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -23,6 +24,18 @@ const char *widthName(ir::Width width) {
 }
 
 std::string valueName(ir::ValueId value) { return "%" + std::to_string(value.value); }
+
+std::string registerOperandName(x86::RegisterOperand operand) {
+    if (operand.width != 32) {
+        return std::string(x86::registerName(operand.reg));
+    }
+    constexpr std::array legacyNames{"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"};
+    const auto encoding = static_cast<std::size_t>(operand.reg);
+    if (encoding < legacyNames.size()) {
+        return legacyNames[encoding];
+    }
+    return "r" + std::to_string(encoding) + "d";
+}
 
 const char *conditionName(x86::Condition condition) {
     return condition == x86::Condition::Equal ? "e" : "ne";
@@ -121,8 +134,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::MovRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << "mov "
-                   << x86::registerName(
-                          std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", [" << x86::registerName(memory.base);
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
@@ -155,10 +168,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         case x86::Opcode::TestRegReg:
             stream << "test "
-                   << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", "
-                   << x86::registerName(
-                          std::get<x86::RegisterOperand>(instruction.operands[1]).reg);
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
         case x86::Opcode::CmpRegImm:
             stream << "cmp "

@@ -500,6 +500,30 @@ void testTestRegisterGeneratedExecution() {
                 "TEST sign-result flags differ");
 }
 
+void testTest32BitRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x45, 0x85, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestRegReg,
+           "TEST r32, r32 opcode differs");
+    const auto operand = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(operand.reg == rosa::x86::Register::R8,
+           "TEST r32, r32 extended register differs");
+    expectEqual(operand.width, std::uint8_t{32}, "TEST r32, r32 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r8 = 0xFFFFFFFF80000000ULL;
+    state.rflags = UINT64_MAX;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r8, std::uint64_t{0xFFFFFFFF80000000ULL},
+                "TEST r32, r32 changed its guest operand");
+    constexpr auto expectedFlags =
+        (UINT64_MAX & ~std::uint64_t{0x8D5}) | std::uint64_t{0x86};
+    expectEqual(state.rflags, expectedFlags, "TEST r32, r32 flags differ");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -907,6 +931,7 @@ int main() {
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},
+        {"TEST 32-bit register generated execution", testTest32BitRegisterGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},

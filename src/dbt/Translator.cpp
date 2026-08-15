@@ -171,6 +171,23 @@ extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags64(x86::X86S
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags32(x86::X86State *state,
+                                                                       std::uint64_t result) {
+    const auto result32 = static_cast<std::uint32_t>(result);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if ((std::popcount(static_cast<unsigned>(result32 & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (result32 == 0) {
+        flags |= flagZero;
+    }
+    if ((result32 >> 31U) != 0) {
+        flags |= flagSign;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 template <typename Pointer> std::uint64_t pointerBits(Pointer pointer) {
     static_assert(std::is_pointer_v<Pointer>);
     static_assert(sizeof(pointer) == sizeof(std::uint64_t));
@@ -304,12 +321,13 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto lhsRegister = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto rhsRegister = std::get<x86::RegisterOperand>(instruction.operands[1]);
-            const auto lhs = builder.readGuestRegister(lhsRegister.reg, ir::Width::I64,
-                                                       instruction.address);
-            const auto rhs = builder.readGuestRegister(rhsRegister.reg, ir::Width::I64,
-                                                       instruction.address);
-            const auto result = builder.bitAnd(lhs, rhs, ir::Width::I64, instruction.address);
-            builder.updateLogicFlags(result, ir::Width::I64, instruction.address);
+            const auto width = lhsRegister.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto lhs =
+                builder.readGuestRegister(lhsRegister.reg, width, instruction.address);
+            const auto rhs =
+                builder.readGuestRegister(rhsRegister.reg, width, instruction.address);
+            const auto result = builder.bitAnd(lhs, rhs, width, instruction.address);
+            builder.updateLogicFlags(result, width, instruction.address);
             break;
         }
         case x86::Opcode::CmpRegImm: {
@@ -541,7 +559,9 @@ arm64::Program compileToArm64(const ir::Block &block) {
             break;
         case ir::Opcode::UpdateLogicFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
-            assembler.movImmediate(arm64::x16, pointerBits(&updateLogicFlags64));
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
+                                                   ? pointerBits(&updateLogicFlags32)
+                                                   : pointerBits(&updateLogicFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::ExitBlock: {

@@ -220,7 +220,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto opcode = code[cursor++];
-        if (!rexW && opcode != 0x8BU) {
+        if (!rexW && opcode != 0x8BU && opcode != 0x85U) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
         }
@@ -293,9 +293,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto reg = decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto rm = decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
+            const auto operandWidth = static_cast<std::uint8_t>(rexW ? 64U : 32U);
             instruction.opcode = Opcode::TestRegReg;
-            instruction.operands.push_back(RegisterOperand{rm, 64});
-            instruction.operands.push_back(RegisterOperand{reg, 64});
+            instruction.operands.push_back(RegisterOperand{rm, operandWidth});
+            instruction.operands.push_back(RegisterOperand{reg, operandWidth});
         } else if (opcode == 0x8DU) {
             if (code.size() - cursor < 5) {
                 throw DecodeError(address, remaining, "truncated lea r64, [rip+disp32]");
