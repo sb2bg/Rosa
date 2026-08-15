@@ -2636,16 +2636,18 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto regEncoding = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (hasRex || mode != 0x3U || regEncoding > 0x3U || rmEncoding > 0x3U) {
+            if (mode != 0x3U ||
+                (!hasRex &&
+                 (regEncoding >= 0x4U || rmEncoding >= 0x4U))) {
                 throw DecodeError(
                     address, remaining,
-                    "only legacy low-byte AL/CL/DL/BL register TEST is supported");
+                    "only representable low-byte register TEST is supported");
             }
             instruction.opcode = Opcode::TestReg8Reg8;
             instruction.operands.push_back(
-                RegisterOperand{decodeRegister(rmEncoding, false), 8});
+                RegisterOperand{decodeRegister(rmEncoding, rexB), 8});
             instruction.operands.push_back(
-                RegisterOperand{decodeRegister(regEncoding, false), 8});
+                RegisterOperand{decodeRegister(regEncoding, rexR), 8});
         } else if (opcode == 0x85U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated test r64, r64");

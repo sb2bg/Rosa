@@ -500,6 +500,14 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("test8_extended_registers",
+                             CaseId::test8_extended_registers,
+                             differentialBytes_test8_extended_registers);
+        testCase.request.state.r14 = 0x1122334455667780ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp64_register", CaseId::cmp64_register,
                              differentialBytes_cmp64_register);
         testCase.request.state.r14 = 5;
@@ -5414,6 +5422,35 @@ void testLegacyTestLowByteGeneratedExecution() {
     static_cast<void>(block.execute(signState));
     expectEqual(signState.rflags, std::uint64_t{0x82},
                 "TEST signed AL flags differ");
+
+    constexpr std::array<std::uint8_t, 4> extendedCode{
+        0x45, 0x84, 0xF6, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    const auto extendedLhs =
+        std::get<rosa::x86::RegisterOperand>(
+            extendedDecoded[0].operands[0]);
+    const auto extendedRhs =
+        std::get<rosa::x86::RegisterOperand>(
+            extendedDecoded[0].operands[1]);
+    expect(extendedLhs.reg == rosa::x86::Register::R14 &&
+               extendedLhs.width == 8 &&
+               extendedRhs.reg == rosa::x86::Register::R14 &&
+               extendedRhs.width == 8,
+           "TEST R14B, R14B operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find(
+               "test r14b, r14b") != std::string::npos,
+           "TEST R14B dump differs");
+    const auto extendedBlock = translator.translate(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State extendedState;
+    extendedState.r14 = 0x1122334455667780ULL;
+    extendedState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.r14, std::uint64_t{0x1122334455667780ULL},
+                "TEST R14B changed R14");
+    expectEqual(extendedState.rflags, std::uint64_t{0x82},
+                "TEST R14B flags differ");
 }
 
 void testTestAccumulatorImmediateGeneratedExecution() {
