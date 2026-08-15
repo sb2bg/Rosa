@@ -478,6 +478,18 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("neg64_zero", CaseId::neg64_zero,
+                             differentialBytes_neg64_zero);
+        testCase.request.state.r13 = 0;
+        run(testCase);
+    }
+    {
+        auto testCase = make("neg64_overflow", CaseId::neg64_overflow,
+                             differentialBytes_neg64_overflow);
+        testCase.request.state.r13 = std::uint64_t{1} << 63U;
+        run(testCase);
+    }
+    {
         auto testCase = make("shrd64_many", CaseId::shrd64_many,
                              differentialBytes_shrd64_many);
         testCase.request.state.rax = 0x0123456789ABCDEFULL;
@@ -4308,6 +4320,47 @@ void testShiftRight64ImmediateGeneratedExecution() {
                 "SHR r64 masked-zero changed flags");
 }
 
+void testNeg64GeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x49, 0xF7, 0xDD, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::NegReg,
+           "NEG r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "NEG r64 length differs");
+    const auto operand =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(operand.reg == rosa::x86::Register::R13 && operand.width == 64,
+           "NEG r13 operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("neg r13") != std::string::npos,
+           "NEG r13 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+
+    rosa::x86::X86State zero;
+    zero.r13 = 0;
+    zero.rflags = 0x8D7;
+    static_cast<void>(block.execute(zero));
+    expectEqual(zero.r13, std::uint64_t{0}, "NEG zero result differs");
+    expectEqual(zero.rflags, std::uint64_t{0x46}, "NEG zero flags differ");
+
+    rosa::x86::X86State one;
+    one.r13 = 1;
+    one.rflags = 0;
+    static_cast<void>(block.execute(one));
+    expectEqual(one.r13, UINT64_MAX, "NEG one result differs");
+    expectEqual(one.rflags, std::uint64_t{0x97}, "NEG one flags differ");
+
+    rosa::x86::X86State overflow;
+    overflow.r13 = std::uint64_t{1} << 63U;
+    overflow.rflags = 0;
+    static_cast<void>(block.execute(overflow));
+    expectEqual(overflow.r13, std::uint64_t{1} << 63U,
+                "NEG minimum result differs");
+    expectEqual(overflow.rflags, std::uint64_t{0x887},
+                "NEG minimum flags differ");
+}
+
 void testUnsignedMultiplyGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0xF7, 0xE1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -7299,6 +7352,7 @@ int main() {
         {"SHL 32-bit CL generated execution", testShiftLeft32ClGeneratedExecution},
         {"SHR 32-bit immediate generated execution", testShiftRight32ImmediateGeneratedExecution},
         {"SHR 64-bit immediate generated execution", testShiftRight64ImmediateGeneratedExecution},
+        {"NEG 64-bit generated execution", testNeg64GeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},

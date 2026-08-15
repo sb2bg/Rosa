@@ -35,6 +35,7 @@ enum class Opcode {
     ShlRegImm,
     ShlRegCl,
     ShrRegImm,
+    NegReg,
     MulReg,
     ImulRegReg,
     ShrdRegRegImm,

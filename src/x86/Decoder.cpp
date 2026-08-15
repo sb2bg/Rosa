@@ -2278,16 +2278,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<std::uint8_t>(rexW ? 64U : 32U)});
         } else if (opcode == 0xF7U) {
             if (code.size() - cursor < 1) {
-                throw DecodeError(address, remaining, "truncated mul r64");
+                throw DecodeError(address, remaining, "truncated F7 register operation");
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            if (mode != 0x3U || extension != 0x4U || rexR || rexX) {
+            if (mode != 0x3U || (extension != 0x3U && extension != 0x4U) ||
+                !rexW || rexR || rexX) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct MUL /4 from opcode F7 is supported");
+                                  "only register-direct NEG /3 and MUL /4 r64 from opcode F7 are supported");
             }
-            instruction.opcode = Opcode::MulReg;
+            instruction.opcode = extension == 0x3U ? Opcode::NegReg : Opcode::MulReg;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
         } else if (opcode == 0xC6U) {

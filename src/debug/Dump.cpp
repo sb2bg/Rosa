@@ -410,6 +410,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::NegReg:
+            stream << "neg "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]));
+            break;
         case x86::Opcode::MulReg:
             stream << "mul "
                    << x86::registerName(

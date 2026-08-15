@@ -1524,6 +1524,22 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                           instruction.address);
             break;
         }
+        case x86::Opcode::NegReg: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: neg operand count");
+            }
+            const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto zero = builder.constant(0, ir::Width::I64, instruction.address);
+            const auto original = builder.readGuestRegister(
+                reg.reg, ir::Width::I64, instruction.address);
+            const auto result = builder.sub(zero, original, ir::Width::I64,
+                                            instruction.address);
+            builder.writeGuestRegister(reg.reg, result, ir::Width::I64,
+                                       instruction.address);
+            builder.updateSubFlags(zero, original, result, ir::Width::I64,
+                                   instruction.address);
+            break;
+        }
         case x86::Opcode::MulReg: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: mul operand count");
