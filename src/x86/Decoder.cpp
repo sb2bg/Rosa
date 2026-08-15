@@ -514,7 +514,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         if (!hasRex && code[cursor] != 0x89U && code[cursor] != 0x8BU &&
-            code[cursor] != 0x83U && code[cursor] != 0x31U) {
+            code[cursor] != 0x85U && code[cursor] != 0x83U &&
+            code[cursor] != 0x31U) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
