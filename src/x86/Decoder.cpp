@@ -398,11 +398,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (rexW || rexX || mode > 0x2U || rmEncoding == 0x4U ||
+            if (rexX || mode > 0x2U || rmEncoding == 0x4U ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMP r32, [base+disp8/disp32] memory operands are supported");
+                    "only CMP register, [base+disp8/disp32] memory operands are supported");
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -420,9 +420,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto lhs =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto base = decodeRegister(rmEncoding, rexB);
+            const auto operandWidth = static_cast<std::uint8_t>(rexW ? 64U : 32U);
             instruction.opcode = Opcode::CmpRegMem;
-            instruction.operands.push_back(RegisterOperand{lhs, 32});
-            instruction.operands.push_back(MemoryOperand{base, displacement, 32});
+            instruction.operands.push_back(RegisterOperand{lhs, operandWidth});
+            instruction.operands.push_back(MemoryOperand{base, displacement, operandWidth});
         } else if (opcode == 0x89U || opcode == 0x8BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov r64, r64");

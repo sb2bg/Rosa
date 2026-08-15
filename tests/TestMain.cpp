@@ -537,6 +537,34 @@ void testCompare32BitRegisterWithGuestMemory() {
                 "failed memory CMP changed flags");
 }
 
+void testCompare64BitRegisterWithGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0x3B, 0x45, 0xE0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegMem,
+           "CMP r64, [base+disp8] opcode differs");
+    const auto lhs = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expectEqual(lhs.width, std::uint8_t{64}, "CMP r64 width differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expectEqual(memory.displacement, std::int64_t{-0x20},
+                "CMP r64 displacement differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x80E0}, 7);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 5;
+    state.rbp = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{5}, "CMP r64 changed its register operand");
+    expectEqual(state.rflags, std::uint64_t{0x93}, "CMP r64 flags differ");
+}
+
 void testMovRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 12> code{
         0x48, 0x89, 0xBD, 0x58, 0xFF, 0xFF, 0xFF,
@@ -1430,6 +1458,7 @@ int main() {
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
+        {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
