@@ -748,6 +748,31 @@ void testCompare32BitRegisterWithShortImmediate() {
                 "CMP r32, negative imm8 flags differ");
 }
 
+void testCompare64BitRegisters() {
+    constexpr std::array<std::uint8_t, 4> code{0x4D, 0x39, 0xEE, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegReg,
+           "CMP r64, r64 opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::R14,
+           "CMP r64, r64 extended lhs differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]).reg ==
+               rosa::x86::Register::R13,
+           "CMP r64, r64 extended rhs differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r14 = 5;
+    state.r13 = 7;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r14, std::uint64_t{5}, "CMP r64, r64 changed lhs");
+    expectEqual(state.r13, std::uint64_t{7}, "CMP r64, r64 changed rhs");
+    expectEqual(state.rflags, std::uint64_t{0x93}, "CMP r64, r64 flags differ");
+}
+
 void testMovRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 12> code{
         0x48, 0x89, 0xBD, 0x58, 0xFF, 0xFF, 0xFF,
@@ -2222,6 +2247,7 @@ int main() {
         {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
         {"CMP 32-bit register with short immediate",
          testCompare32BitRegisterWithShortImmediate},
+        {"CMP 64-bit registers", testCompare64BitRegisters},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
         {"MOV 32-bit register to guest memory", testMov32BitRegisterToGuestMemory},
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},

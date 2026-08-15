@@ -715,6 +715,22 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::XorRegReg;
             instruction.operands.push_back(RegisterOperand{destination, width});
             instruction.operands.push_back(RegisterOperand{source, width});
+        } else if (opcode == 0x39U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated cmp r64, r64");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U || rexX) {
+                throw DecodeError(address, remaining,
+                                  "only register-direct CMP from opcode 39 is supported");
+            }
+            const auto rhs =
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
+            const auto lhs = decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
+            instruction.opcode = Opcode::CmpRegReg;
+            instruction.operands.push_back(RegisterOperand{lhs, 64});
+            instruction.operands.push_back(RegisterOperand{rhs, 64});
         } else if (opcode == 0x3BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated cmp r32, [base+disp]");

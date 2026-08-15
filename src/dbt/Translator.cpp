@@ -946,6 +946,24 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateSubFlags(lhs, rhs, result, width, instruction.address);
             break;
         }
+        case x86::Opcode::CmpRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: register cmp operand count");
+            }
+            const auto lhsRegister =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto rhsRegister =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto lhs = builder.readGuestRegister(lhsRegister.reg, ir::Width::I64,
+                                                       instruction.address);
+            const auto rhs = builder.readGuestRegister(rhsRegister.reg, ir::Width::I64,
+                                                       instruction.address);
+            const auto result = builder.sub(lhs, rhs, ir::Width::I64,
+                                            instruction.address);
+            builder.updateSubFlags(lhs, rhs, result, ir::Width::I64,
+                                   instruction.address);
+            break;
+        }
         case x86::Opcode::CmpRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: cmp memory operand count");
