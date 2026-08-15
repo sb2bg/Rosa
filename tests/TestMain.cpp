@@ -501,6 +501,21 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("shl32_immediate", CaseId::shl32_immediate,
+                             differentialBytes_shl32_immediate);
+        testCase.request.state.rdx = 0xAAAAAAAA08000001ULL;
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shl32_immediate_masked_zero",
+                             CaseId::shl32_immediate_masked_zero,
+                             differentialBytes_shl32_immediate_masked_zero);
+        testCase.request.state.rdx = 0xAAAAAAAA12345678ULL;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
         auto testCase = make("shl32_cl_one", CaseId::shl32_cl_one,
                              differentialBytes_shl32_cl_one);
         testCase.request.state.rax = 0xFFFFFFFF80000001ULL;
@@ -4504,6 +4519,60 @@ void testShiftLeftImmediateGeneratedExecution() {
                 "SHL with a masked zero count changed the value");
     expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
                 "SHL with a masked zero count changed flags");
+
+    constexpr std::array<std::uint8_t, 4> code32{0xC1, 0xE2, 0x04, 0xC3};
+    const auto decoded32 = decoder.decodeBlock(
+        code32, rosa::guest::GuestAddress{0x3000});
+    expect(decoded32[0].opcode == rosa::x86::Opcode::ShlRegImm,
+           "SHL r32, imm8 opcode differs");
+    const auto destination32 =
+        std::get<rosa::x86::RegisterOperand>(decoded32[0].operands[0]);
+    expect(destination32.reg == rosa::x86::Register::Rdx &&
+               destination32.width == 32,
+           "SHL EDX, imm8 destination differs");
+    expectEqual(decoded32[0].length, std::uint8_t{3},
+                "SHL EDX, imm8 length differs");
+    expect(rosa::debug::dumpX86(decoded32).find("shl edx, 0x4") !=
+               std::string::npos,
+           "SHL EDX, imm8 dump differs");
+    const auto block32 = translator.translate(
+        code32, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State state32;
+    state32.rdx = 0xAAAAAAAA08000001ULL;
+    state32.rflags = 0x8D7;
+    static_cast<void>(block32.execute(state32));
+    expectEqual(state32.rdx, std::uint64_t{0x80000010},
+                "SHL EDX, 4 result did not zero-extend");
+    constexpr std::uint64_t definedManyFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U);
+    expectEqual(state32.rflags & definedManyFlags,
+                std::uint64_t{1U << 7U},
+                "SHL EDX, 4 defined flags differ");
+
+    constexpr std::array<std::uint8_t, 4> one32{0xC1, 0xE2, 0x01, 0xC3};
+    const auto one32Block = translator.translate(
+        one32, rosa::guest::GuestAddress{0x4000});
+    state32.rdx = 0xFFFFFFFF40000000ULL;
+    state32.rflags = 0;
+    static_cast<void>(one32Block.execute(state32));
+    expectEqual(state32.rdx, std::uint64_t{0x80000000},
+                "SHL EDX, 1 result differs");
+    constexpr std::uint64_t definedOneFlags =
+        definedManyFlags | (std::uint64_t{1} << 11U);
+    expectEqual(state32.rflags & definedOneFlags,
+                std::uint64_t{(1U << 2U) | (1U << 7U) | (1U << 11U)},
+                "SHL EDX, 1 defined flags differ");
+
+    constexpr std::array<std::uint8_t, 4> zero32{0xC1, 0xE2, 0x20, 0xC3};
+    const auto zero32Block = translator.translate(
+        zero32, rosa::guest::GuestAddress{0x5000});
+    state32.rdx = 0xAAAAAAAA12345678ULL;
+    state32.rflags = 0xAD7;
+    static_cast<void>(zero32Block.execute(state32));
+    expectEqual(state32.rdx, std::uint64_t{0x12345678},
+                "SHL EDX masked-zero result did not zero-extend");
+    expectEqual(state32.rflags, std::uint64_t{0xAD7},
+                "SHL EDX masked-zero count changed flags");
 }
 
 void testShiftLeftClGeneratedExecution() {

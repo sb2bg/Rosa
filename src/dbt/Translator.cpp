@@ -1516,13 +1516,16 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            const auto width = reg.width == 32 ? ir::Width::I32
+                                               : ir::Width::I64;
             const auto lhs =
-                builder.readGuestRegister(reg.reg, ir::Width::I64, instruction.address);
-            const auto count = static_cast<std::uint8_t>(immediate.value & 0x3FU);
+                builder.readGuestRegister(reg.reg, width, instruction.address);
+            const auto count = static_cast<std::uint8_t>(
+                immediate.value & (reg.width == 32 ? 0x1FU : 0x3FU));
             const auto result =
-                builder.shiftLeft(lhs, count, ir::Width::I64, instruction.address);
-            builder.writeGuestRegister(reg.reg, result, ir::Width::I64, instruction.address);
-            builder.updateShiftLeftFlags(lhs, result, count, ir::Width::I64,
+                builder.shiftLeft(lhs, count, width, instruction.address);
+            builder.writeGuestRegister(reg.reg, result, width, instruction.address);
+            builder.updateShiftLeftFlags(lhs, result, count, width,
                                          instruction.address);
             break;
         }
