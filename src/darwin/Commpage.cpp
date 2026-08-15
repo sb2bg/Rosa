@@ -64,6 +64,12 @@ void mapX86Commpage(guest::AddressSpace &addressSpace,
         guest::GuestAddress{x86CommpageBase.value +
                             x86CommpageKernelPageShiftOffset},
         kernelPageShift);
+    constexpr std::array<std::uint8_t, 1> userPageShift{
+        x86CommpageUserPageShift};
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value +
+                            x86CommpageUserPageShiftOffset},
+        userPageShift);
     // Rosa does not forward guest kdebug tracing. XNU specifies that this field
     // is zero whenever global tracing is disabled.
     constexpr std::array<std::uint8_t, sizeof(std::uint32_t)> kdebugDisabled{};

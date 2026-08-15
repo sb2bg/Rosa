@@ -5131,6 +5131,14 @@ void testX86Commpage() {
                     .front(),
                 rosa::darwin::x86CommpageKernelPageShift,
                 "x86 commpage kernel page shift differs");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{
+                        rosa::darwin::x86CommpageBase.value +
+                        rosa::darwin::x86CommpageUserPageShiftOffset},
+                    1)
+                    .front(),
+                rosa::darwin::x86CommpageUserPageShift,
+                "x86 commpage user page shift differs");
     expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageKdebugEnableOffset}),
