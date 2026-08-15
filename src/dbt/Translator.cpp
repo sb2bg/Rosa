@@ -3757,6 +3757,12 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
                     assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
                     assembler.tbz(arm64::x17, signFlagBit, notTaken);
+                } else if (*operation.condition ==
+                           x86::Condition::GreaterOrEqual) {
+                    // OF is bit 11, so shifting it down by four aligns it with SF.
+                    assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
+                    assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
+                    assembler.tbnz(arm64::x17, signFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::Greater) {
                     assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
                     assembler.lsrImmediate(arm64::x17, arm64::x16, 4);

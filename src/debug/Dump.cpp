@@ -77,6 +77,8 @@ const char *conditionName(x86::Condition condition) {
         return "s";
     case x86::Condition::Less:
         return "l";
+    case x86::Condition::GreaterOrEqual:
+        return "ge";
     case x86::Condition::LessOrEqual:
         return "le";
     case x86::Condition::Greater:
