@@ -1278,6 +1278,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("branch_greater_long_taken",
+                             CaseId::branch_greater_long_taken,
+                             differentialBytes_branch_greater_long_taken);
+        testCase.request.state.rflags = 0x2;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_greater_long_not_taken",
+                             CaseId::branch_greater_long_not_taken,
+                             differentialBytes_branch_greater_long_not_taken);
+        testCase.request.state.rflags = zeroFlag | 0x2;
+        run(testCase);
+    }
+    {
         auto testCase = make("relative_call_stack", CaseId::relative_call_stack,
                              differentialBytes_relative_call_stack);
         testCase.request.state.rcx = 41;
@@ -11951,6 +11965,24 @@ void testSignedGreaterConditional() {
                 "JG took with SF different from OF");
     expectEqual(mismatch.rflags, std::uint64_t{0x82},
                 "JG changed flags on signed fallthrough");
+
+    constexpr std::array<std::uint8_t, 6> nearCode{
+        0x0F, 0x8F, 0xBF, 0x01, 0x00, 0x00};
+    const auto nearDecoded = decoder.decodeBlock(
+        nearCode, rosa::guest::GuestAddress{0x7FF80004F593ULL});
+    expect(nearDecoded[0].condition == rosa::x86::Condition::Greater &&
+               nearDecoded[0].branchTarget &&
+               nearDecoded[0].branchTarget->value == 0x7FF80004F758ULL &&
+               nearDecoded[0].fallthrough &&
+               nearDecoded[0].fallthrough->value == 0x7FF80004F599ULL,
+           "JG rel32 target or fallthrough differs");
+    const auto nearBlock = translator.translate(
+        nearCode, rosa::guest::GuestAddress{0x7FF80004F593ULL});
+    rosa::x86::X86State observedNotTaken;
+    observedNotTaken.rflags = 0x46;
+    static_cast<void>(nearBlock.execute(observedNotTaken));
+    expectEqual(observedNotTaken.rip, std::uint64_t{0x7FF80004F599ULL},
+                "JG rel32 took with ZF set");
 }
 
 void testSignedGreaterOrEqualConditional() {

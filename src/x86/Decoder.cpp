@@ -1690,9 +1690,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 (code[cursor + 1] != 0x82U && code[cursor + 1] != 0x83U &&
                  code[cursor + 1] != 0x84U &&
                  code[cursor + 1] != 0x85U && code[cursor + 1] != 0x86U &&
-                 code[cursor + 1] != 0x87U && code[cursor + 1] != 0x88U)) {
+                 code[cursor + 1] != 0x87U && code[cursor + 1] != 0x88U &&
+                 code[cursor + 1] != 0x8FU)) {
                 throw DecodeError(address, remaining,
-                                  "only JB/JAE/JE/JNE/JBE/JA/JS rel32 from opcode 0F is supported");
+                                  "only JB/JAE/JE/JNE/JBE/JA/JS/JG rel32 from opcode 0F is supported");
             }
             const auto secondOpcode = code[cursor + 1];
             const auto displacement = readI32(code.subspan(cursor + 2, 4));
@@ -1703,7 +1704,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                     : secondOpcode == 0x85U ? Condition::NotEqual
                                     : secondOpcode == 0x86U ? Condition::BelowOrEqual
                                     : secondOpcode == 0x87U ? Condition::Above
-                                                            : Condition::Sign;
+                                    : secondOpcode == 0x88U ? Condition::Sign
+                                                            : Condition::Greater;
             instruction.length = 6;
             std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 6,
                         instruction.bytes.begin());
