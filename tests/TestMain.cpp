@@ -305,6 +305,68 @@ void testSubRegImm32GeneratedExecution() {
                 "SUB r8, negative imm32 flags differ");
 }
 
+void testMovRegisterToGuestMemory() {
+    constexpr std::array<std::uint8_t, 12> code{
+        0x48, 0x89, 0xBD, 0x58, 0xFF, 0xFF, 0xFF,
+        0x48, 0x89, 0x4D, 0xC0,
+        0xC3,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "MOV [base+disp32], r64 opcode differs");
+    const auto firstMemory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(firstMemory.base == rosa::x86::Register::Rbp,
+           "MOV [base+disp32], r64 base differs");
+    expectEqual(firstMemory.displacement, std::int64_t{-0xA8},
+                "MOV [base+disp32], r64 displacement differs");
+    const auto secondMemory = std::get<rosa::x86::MemoryOperand>(decoded[1].operands[0]);
+    expectEqual(secondMemory.displacement, std::int64_t{-0x40},
+                "MOV [base+disp8], r64 displacement differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto firstStore = translator.translate(code, rosa::guest::GuestAddress{0x1000}, 1);
+    const auto secondStore = translator.translate(std::span(code).subspan(7),
+                                                  rosa::guest::GuestAddress{0x1007}, 1);
+    rosa::x86::X86State state;
+    state.rip = 0x1000;
+    state.rbp = 0x8800;
+    state.rdi = 0x0123456789ABCDEFULL;
+    state.rcx = 0xFEDCBA9876543210ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(firstStore.execute(state, &addressSpace));
+    static_cast<void>(secondStore.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8758}), state.rdi,
+                "MOV [base+disp32], r64 stored the wrong value");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x87C0}), state.rcx,
+                "MOV [base+disp8], r64 stored the wrong value");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV register to guest memory changed flags");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                                      rosa::guest::Permission::Read);
+    rosa::x86::X86State faultState;
+    faultState.rbp = 0x8800;
+    faultState.rdi = state.rdi;
+    bool rejected = false;
+    try {
+        static_cast<void>(firstStore.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOV to read-only guest memory did not fail");
+    expectEqual(faultState.rbp, std::uint64_t{0x8800},
+                "failed guest-memory MOV changed the base register");
+    expectEqual(faultState.rdi, state.rdi,
+                "failed guest-memory MOV changed the source register");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -671,6 +733,7 @@ int main() {
         {"PUSH imm8 guest stack faults", testPushImm8GuestStackFaults},
         {"PUSH register generated execution", testPushRegisterGeneratedExecution},
         {"SUB register imm32 generated execution", testSubRegImm32GeneratedExecution},
+        {"MOV register to guest memory", testMovRegisterToGuestMemory},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},

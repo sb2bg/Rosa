@@ -14,6 +14,7 @@ namespace rosa::x86 {
 enum class Opcode {
     MovRegImm,
     MovRegReg,
+    MovMemReg,
     LeaRegRipRelative,
     AddRegImm,
     SubRegImm,
@@ -42,7 +43,13 @@ struct ImmediateOperand {
     std::uint8_t width{};
 };
 
-using Operand = std::variant<RegisterOperand, ImmediateOperand>;
+struct MemoryOperand {
+    Register base{};
+    std::int64_t displacement{};
+    std::uint8_t width{};
+};
+
+using Operand = std::variant<RegisterOperand, ImmediateOperand, MemoryOperand>;
 
 struct DecodedInstruction {
     guest::GuestAddress address{};

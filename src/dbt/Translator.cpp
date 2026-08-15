@@ -50,6 +50,25 @@ commitPush64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+storeGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+             std::uint64_t value) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated guest store has no address space");
+        }
+        context->addressSpace->writeU64(guest::GuestAddress{address}, value);
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint64_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateAddFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std::uint64_t result) {
     auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
     if (result < lhs) {
@@ -151,6 +170,24 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto value =
                 builder.readGuestRegister(source.reg, ir::Width::I64, instruction.address);
             builder.writeGuestRegister(destination.reg, value, ir::Width::I64, instruction.address);
+            break;
+        }
+        case x86::Opcode::MovMemReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: mov store operand count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto base =
+                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                instruction.address);
+            const auto address =
+                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            const auto value =
+                builder.readGuestRegister(source.reg, ir::Width::I64, instruction.address);
+            builder.storeGuest(address, value, ir::Width::I64, instruction.address);
             break;
         }
         case x86::Opcode::LeaRegRipRelative: {
@@ -301,8 +338,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
         hasHelperCall |= operation.opcode == ir::Opcode::UpdateAddFlags ||
                          operation.opcode == ir::Opcode::UpdateSubFlags ||
                          operation.opcode == ir::Opcode::UpdateLogicFlags ||
-                         operation.opcode == ir::Opcode::Push;
-        hasGuestMemoryCall |= operation.opcode == ir::Opcode::Push;
+                         operation.opcode == ir::Opcode::Push ||
+                         operation.opcode == ir::Opcode::StoreGuest;
+        hasGuestMemoryCall |= operation.opcode == ir::Opcode::Push ||
+                              operation.opcode == ir::Opcode::StoreGuest;
     }
     if (hasHelperCall) {
         assembler.pushFrameRecord();
@@ -357,6 +396,26 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x3, hostRegister(*operation.rhs));
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(arm64::x16, pointerBits(&commitPush64));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0,
+                                   static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::StoreGuest: {
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x4, arm64::x0);
+            assembler.mov(arm64::x1, arm64::x4);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x3, hostRegister(*operation.rhs));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&storeGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);
