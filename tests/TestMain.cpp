@@ -1280,6 +1280,18 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movups_extended_base_store",
+                             CaseId::movups_extended_base_store,
+                             differentialBytes_movups_extended_base_store);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.state.xmm[0] = {
+            .low = 0x8877665544332211ULL,
+            .high = 0x1020304050607080ULL};
+        testCase.memoryCompareOffset = 0x50;
+        testCase.memoryCompareSize = 16;
+        run(testCase);
+    }
+    {
         auto testCase = make("movups_load", CaseId::movups_load,
                              differentialBytes_movups_load);
         bindMemory(testCase, rosa::x86::Register::R15, 3);
@@ -7507,6 +7519,50 @@ void testMovupsRegisterToGuestMemoryWithSib() {
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x811B}),
                 state.xmm[0].high, "MOVUPS stored the wrong high lane");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVUPS changed flags");
+
+    constexpr std::array<std::uint8_t, 6> extendedBaseCode{
+        0x41, 0x0F, 0x11, 0x46, 0x50, 0xC3};
+    const auto extendedBaseDecoded = decoder.decodeBlock(
+        extendedBaseCode, rosa::guest::GuestAddress{0x1800});
+    expect(extendedBaseDecoded[0].opcode ==
+               rosa::x86::Opcode::MovupsMemReg,
+           "REX MOVUPS store opcode differs");
+    expectEqual(extendedBaseDecoded[0].length, std::uint8_t{5},
+                "REX MOVUPS store length differs");
+    const auto extendedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            extendedBaseDecoded[0].operands[0]);
+    const auto extendedSource =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            extendedBaseDecoded[0].operands[1]);
+    expect(extendedMemory.base == rosa::x86::Register::R14 &&
+               extendedMemory.displacement == 0x50 &&
+               extendedMemory.width == 128 &&
+               !extendedMemory.ripRelative,
+           "REX MOVUPS store memory operand differs");
+    expect(extendedSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "REX MOVUPS store source differs");
+    expect(rosa::debug::dumpX86(extendedBaseDecoded).find(
+               "movups [r14+0x50], xmm0") != std::string::npos,
+           "REX MOVUPS store dump differs");
+    const auto extendedBaseBlock = translator.translate(
+        extendedBaseCode, rosa::guest::GuestAddress{0x1800});
+    state.r14 = 0x8083;
+    state.xmm[0] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(extendedBaseBlock.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x80D3}),
+                state.xmm[0].low,
+                "REX MOVUPS stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x80DB}),
+                state.xmm[0].high,
+                "REX MOVUPS stored the wrong high lane");
+    expectEqual(state.r14, std::uint64_t{0x8083},
+                "REX MOVUPS changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "REX MOVUPS changed flags");
 
     constexpr std::array<std::uint8_t, 5> indexedCode{
         0x0F, 0x11, 0x04, 0x17, 0xC3};

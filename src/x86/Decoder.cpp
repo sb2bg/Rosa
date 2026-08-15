@@ -1111,12 +1111,21 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
-        if (code[cursor] == 0x0FU && code.size() - cursor >= 2 &&
-            code[cursor + 1] == 0x11U) {
-            if (code.size() - cursor < 3) {
+        const bool movupsStoreHasRex =
+            code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+        const auto movupsStoreOpcodeOffset =
+            cursor + (movupsStoreHasRex ? 1U : 0U);
+        if (code.size() - movupsStoreOpcodeOffset >= 2 &&
+            code[movupsStoreOpcodeOffset] == 0x0FU &&
+            code[movupsStoreOpcodeOffset + 1] == 0x11U) {
+            if (code.size() - movupsStoreOpcodeOffset < 3) {
                 throw DecodeError(address, remaining, "truncated movups [base+disp], xmm");
             }
-            const auto modrm = code[cursor + 2];
+            const auto rex = movupsStoreHasRex ? code[cursor] : 0U;
+            const bool rexR = (rex & 0x4U) != 0;
+            const bool rexX = (rex & 0x2U) != 0;
+            const bool rexB = (rex & 0x1U) != 0;
+            const auto modrm = code[movupsStoreOpcodeOffset + 2];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
             if (mode > 0x2U) {
@@ -1124,7 +1133,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     address, remaining,
                     "only MOVUPS [base+disp8/disp32], xmm memory operands are supported");
             }
-            cursor += 3;
+            cursor = movupsStoreOpcodeOffset + 3;
             const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             auto baseEncoding = rmEncoding;
             std::optional<Register> index;
@@ -1142,8 +1151,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     throw DecodeError(address, remaining,
                                       "no-base MOVUPS SIB addressing is not supported");
                 }
-                if (indexEncoding != 0x4U) {
-                    index = decodeRegister(indexEncoding, false);
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
                     scale = static_cast<std::uint8_t>(1U << scaleBits);
                 }
             }
@@ -1176,10 +1185,13 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 ripRelative
                     ? MemoryOperand{Register::Rax, displacement, 128,
                                     std::nullopt, 1, false, true}
-                    : MemoryOperand{decodeRegister(baseEncoding, false),
+                    : MemoryOperand{decodeRegister(baseEncoding, rexB),
                                     displacement, 128, index, scale});
-            instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
-                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
+            instruction.operands.push_back(XmmRegisterOperand{
+                static_cast<XmmRegister>(
+                    static_cast<std::uint8_t>(
+                        ((modrm >> 3U) & 0x7U) |
+                        (rexR ? 0x8U : 0U)))});
 
             const auto length = cursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
