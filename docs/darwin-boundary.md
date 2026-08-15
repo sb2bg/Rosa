@@ -11,4 +11,6 @@ The x86 `syscall` instruction exits generated ARM64 to `darwin::SyscallDispatche
 
 The controlled implementation accepts stdout and stderr and rejects writes over 16 MiB. Every unsupported number reports its guest RIP and six ABI arguments. There is no generic syscall-number passthrough and no assumption that arm64 host numbers or structures match x86 Darwin.
 
-Mach traps, file operations, memory syscalls, process/thread calls, signals, and structure translations are not implemented.
+For dyld bring-up Rosa also maps a sparse, read-only x86 commpage at `0x7fffffe00000`. The implemented fields are the kdebug-enable word (zero because Rosa does not forward guest kdebug), a coherent nanotime tuple driven by Rosa's virtual 2 GHz `RDTSC`, and the continuous-time offset. This is a userspace ABI mapping, not a syscall passthrough.
+
+Mach traps, file operations, memory syscalls, process/thread calls, signals, shared-region operations, and structure translations are not implemented. The current dyld trace has not reached a Darwin syscall or Mach trap.

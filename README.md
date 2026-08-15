@@ -59,23 +59,20 @@ There is no output helper or interpreter fallback. macOS never launches the gues
 
 ## Current instruction subset
 
-- `REX.W + B8+rd`: `mov r64, imm64`, including `r8`–`r15`
-- register-direct `REX.W 89/8B`: `mov r64, r64`
-- register-direct `REX.W C7 /0`: `mov r64, sign_extended_imm32`
-- RIP-relative `lea r64, [rip+disp32]`
-- `REX.W + 83 /0` with `mod=3`: `add r64, sign_extended_imm8`
-- `REX.W + 83 /4` with `mod=3`: `and r64, sign_extended_imm8`
-- `REX.W + 83 /7` with `mod=3`: `cmp r64, sign_extended_imm8`
-- `EB` / `E9`: `jmp rel8` / `jmp rel32`
-- `74` / `75` and `0F 84` / `0F 85`: `je` / `jne`
-- `E8`: `call rel32`
-- `C3`: `ret`, with return-address stack semantics in the dispatcher
-- `0F 05`: semantic x86_64 Darwin `syscall` exit
+Coverage is encoding-specific and failure-driven. The generated ARM64 path currently supports the forms exercised by the controlled fixtures and dyld probe:
 
-All other encodings are rejected with the guest RIP and nearby bytes. This is intentionally narrower than the eventual instruction set.
+- integer movement: selected 8/16/32/64-bit `mov`, `lea`, `push`, `pop`, `movzx`, and `movsxd` register, immediate, base/displacement, RIP-relative, and scaled-SIB forms;
+- integer/flags: selected 16/32/64-bit `add`, `sub`, `inc`, `dec`, `and`, `or`, `xor`, `test`, `cmp`, `shl`, `shr`, `shrd`, unsigned `mul`, signed two-register `imul`, and `bsf` forms;
+- control: relative `jmp`/`call`, register `jmp`, indirect guest-memory `call`, `ret`, `cmovb`, `sete`, `setne`, and the observed short/long unsigned, equality, sign, and signed-less-or-equal branches;
+- SIMD used by dyld: register `xorps`/`pxor`, memory `pcmpeqb`, `pmovmskb`, `pshufd`, aligned/unaligned `movaps`/`movups`/`movdqa`/`movdqu`, and low-qword `movq` store;
+- ordering/time/system: `lfence`, `rdtsc`, and semantic x86_64 Darwin `syscall` exit.
+
+Guest loads and stores are permission-checked at 8, 16, 32, 64, and 128 bits. Unsupported encodings still fail with the guest RIP, bytes, register state, nearby mappings, recent instruction history, and translation counters rather than falling back to interpretation.
 
 Mach-O inspection accepts thin x86_64 files and selects x86_64 slices from universal binaries. Loading maps every segment with its initial permissions, copies the file-backed portion, zero-fills the virtual tail, and represents inaccessible segments such as `__PAGEZERO` without allocating their full size. Rosa does not yet apply rebases, bindings, chained fixups, or shared-cache mappings.
 
-The manual dyld experiment currently maps the app and all six x86_64 dyld segments, enters the slid `LC_UNIXTHREAD` RIP, and executes three generated single-instruction blocks (`mov`, `and`, `mov`). It then fails loudly on `push imm8` at dyld guest RIP `0x7ff800004e5e`. The one-instruction mode is a diagnostic DBT mode; each supported instruction still executes as generated ARM64.
+The manual dyld experiment maps the app and all six x86_64 dyld segments, enters the slid `LC_UNIXTHREAD` RIP, and runs unmodified dyld in diagnostic one-instruction translations. The current probe reaches 3,413 executed blocks and 1,147 unique translations. Its first failure is `and r15d, 0xfff` (`41 81 e7 ff 0f 00 00`) at guest RIP `0x7ff80004469e`. No Darwin syscall, Mach operation, shared-cache mapping, system-library resolution, or `libSystem` initialization has been observed yet.
+
+The diagnostic mode changes translation granularity only; every supported guest instruction still executes as generated ARM64. Apple binaries are never modified or launched with `exec`, and there is no interpreter fallback.
 
 See [docs/architecture.md](docs/architecture.md), [docs/guest-memory.md](docs/guest-memory.md), [docs/darwin-boundary.md](docs/darwin-boundary.md), and [docs/milestones.md](docs/milestones.md) for the implemented architecture and exact milestone status.

@@ -2,10 +2,10 @@
 
 This document describes code that exists now. Longer-term direction belongs in milestone planning until a vertical slice validates it.
 
-## Implemented pipeline through controlled R4
+## Implemented pipeline through controlled R4 and the R5 probe
 
 ```text
-built-in bytes or controlled/universal x86_64 Mach-O
+built-in bytes, controlled x86_64 Mach-O, or x86_64 dyld slice
         ↓
 bounded parsing + complete segment mapping + initial stack
         ↓
@@ -19,30 +19,30 @@ custom AArch64 encoder
         ↓
 MAP_JIT code buffer
         ↓
-generated ARM64 mutates X86State and exits to dispatcher
+generated ARM64 and narrow semantic helpers mutate X86State
         ↓
 block cache + guest call/return stack handling
         ↓
-semantic Darwin write/exit boundary for x86 syscall
+semantic Darwin write/exit boundary or next guest block
 ```
 
-The CPU path is a real DBT path, not an interpreter: data operations, arithmetic, compare results, and conditional selection become AArch64 instructions in generated code mappings. C++ helpers currently calculate x86 arithmetic flags, and the dispatcher handles cross-block `call`/`ret` effects.
+The CPU path is a real DBT path, not an interpreter: data operations, arithmetic, compare results, address construction, and conditional selection become AArch64 instructions in generated code mappings. Narrow C++ helpers calculate flags, perform permission-checked guest-memory accesses, and implement a few state operations that must commit atomically. The dispatcher handles cross-block guest control flow.
 
 ## State boundaries
 
-Guest architectural state is represented by `x86::X86State`. Generated blocks take an `X86State*` in host register `x0`. The R1 backend uses `x9`–`x15` as temporary value registers and writes guest values back explicitly. Guest register identities are translated through `registerOffset`; their enum encoding is never used as a host struct offset.
+Guest architectural state is represented by `x86::X86State`, including all general-purpose registers, RIP, RFLAGS, and explicit 128-bit XMM values. Generated blocks take an `X86State*` in host register `x0`. The first-tier backend uses `x9`–`x15` as temporary value registers and writes guest values back explicitly. Guest register identities are translated through `registerOffset`; their enum encoding is never used as a host struct offset.
 
-Every generated exit writes the next guest RIP or the address of a terminating guest `ret`. Direct and conditional branches select the next RIP in generated ARM64. The dispatcher handles `call` pushes and `ret` pops against the guest address space, so host return addresses never enter guest state.
+Every generated exit reconstructs guest state and writes the next guest RIP. Direct, conditional, and register-indirect branches select a guest RIP; they never branch to a guest address as a host pointer. The dispatcher handles guest `call` pushes and `ret` pops against the guest address space, so host return addresses never enter guest state.
 
-Guest addresses use the `GuestAddress` strong type. The address space provides permission-checked anonymous and Mach-O segment mappings with a 4 KiB guest-page contract, byte copies, and explicit little-endian 64-bit accesses. Instruction fetches and syscall buffers come from those mappings; generated code does not treat guest virtual addresses as host pointers.
+Guest addresses use the `GuestAddress` strong type. The address space provides permission-checked anonymous, sparse, commpage, and Mach-O segment mappings with a 4 KiB guest-page contract. Generated helpers cover guarded 8/16/32/64-bit integer and 128-bit XMM accesses. Instruction fetches and syscall buffers come from those mappings; generated code does not treat guest virtual addresses as host pointers.
 
 ## Flags
 
-`add r64, imm8` and `cmp r64, imm8` eagerly compute `CF`, `PF`, `AF`, `ZF`, `SF`, and `OF`. `and` clears `CF`/`OF` and computes `PF`/`ZF`/`SF` (Rosa deterministically clears the architecturally undefined `AF`). Results are generated ARM64. Narrow C++ helpers compute flags from inputs and results; generated blocks call them using the host ABI.
+Observed 8/16/32/64-bit arithmetic and comparison forms eagerly compute `CF`, `PF`, `AF`, `ZF`, `SF`, and `OF` at the guest width. Logic forms clear `CF`/`OF` and compute `PF`/`ZF`/`SF`; Rosa deterministically clears undefined `AF`. `inc`/`dec` preserve `CF`. Signed `imul` replaces only its defined `CF`/`OF` and preserves other undefined flag bits. Narrow C++ helpers receive generated values through the host ABI.
 
 ## Control flow and cache
 
-The decoder ends blocks at `jmp`, `je`/`jne`, `call`, `ret`, or `syscall`. A cache owns one `MAP_JIT` translation per guest start RIP. Generated conditional exits test the stored x86 `ZF` with AArch64 test branches. The dispatcher has an explicit block limit and fetches only from executable guest mappings. The dyld experiment can deliberately cap translations at one guest instruction so a supported prefix executes before the next missing instruction is reported; this remains generated code, not interpretation.
+The decoder ends blocks at direct/indirect transfers, conditional branches, calls, returns, or syscalls. A cache owns one `MAP_JIT` translation per guest start RIP. Generated conditional exits test the relevant stored x86 flag bits with AArch64 test branches. The dispatcher has an explicit block limit and fetches only from executable guest mappings. The dyld experiment deliberately caps translations at one guest instruction so the first missing semantic is isolated; this remains generated code, not interpretation.
 
 ## Mach-O boundary
 
@@ -50,7 +50,7 @@ The parser accepts little-endian, 64-bit x86 executables and dynamic linkers and
 
 The loader maps every nonempty segment at its guest virtual address plus an optional slide. File bytes are copied, the remaining virtual size is zero-filled, and `initprot` becomes guest permissions. No-access `__PAGEZERO` is represented sparsely. The startup builder creates a 16-byte-aligned stack containing `argc`, `argv`, `envp`, `apple[]`, their null terminators, and strings.
 
-Rebasing, binding, chained fixups, shared-cache mapping, code signatures, and dyld's additional kernel contracts are not implemented.
+Rosa currently relies on dyld guest code to interpret the application structures. Shared-cache mapping, code-signature services, shared-region behavior, and dyld's additional kernel contracts are not implemented.
 
 ## Darwin syscall boundary
 
@@ -65,10 +65,10 @@ Generated code recognizes x86 `0F 05`, records `RCX`, `R11`, and the next guest 
 - arm64 macOS only;
 - seven temporary SSA values before the intentionally simple allocator rejects a block;
 - one host thread and one guest thread;
-- no guest `mmap`/`mprotect`/`munmap` or generated data-load/store fast path;
+- no guest `mmap`/`mprotect`/`munmap` or direct host-pointer memory fast path;
 - only Darwin BSD `write` to stdout/stderr and `exit`;
 - no Mach syscall/trap boundary;
 - no dyld fixups or shared cache;
-- only the encodings listed in the README are accepted.
+- instruction encodings remain deliberately incomplete and are added only after an observed failure.
 
-The current dyld experiment reaches `push imm8` at its entry stub after executing three translated instructions. The next slice should implement guest stack stores for `push` without conflating guest addresses with host pointers, then continue one failure at a time. Mach traps and shared-cache work should wait until an actual trace requires them.
+The current dyld experiment reaches 3,413 executed blocks and 1,147 unique translations. The first failure is `and r15d, 0xfff` at `0x7ff80004469e`. The probe has consulted the x86 commpage and traversed application Mach-O/load-command data, but it has not reached a Darwin syscall, Mach operation, shared-cache mapping, system-library resolution, or `libSystem` initialization. The next slice is the observed 32-bit `AND r/m32, imm32` form; Darwin or shared-cache work should wait until the trace reaches that boundary.
