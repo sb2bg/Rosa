@@ -1731,6 +1731,24 @@ void testXorpsRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "XORPS changed flags");
 }
 
+void testPxorRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0xEF, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PxorRegReg,
+           "PXOR xmm, xmm opcode differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = UINT64_MAX, .high = 0x0123456789ABCDEFULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0}, "PXOR low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0}, "PXOR high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "PXOR changed flags");
+}
+
 void testMovapsRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 8> code{
         0x0F, 0x29, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, 0xC3,
@@ -2585,6 +2603,7 @@ int main() {
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
+        {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
         {"MOVDQA guest memory to register", testMovdqaGuestMemoryToRegister},
