@@ -2,6 +2,7 @@
 #include "arm64/CodeBuffer.h"
 #include "dbt/Dispatcher.h"
 #include "dbt/Translator.h"
+#include "darwin/Commpage.h"
 #include "debug/Dump.h"
 #include "guest/Address.h"
 #include "guest/AddressSpace.h"
@@ -311,6 +312,8 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
     const auto executable =
         loader.mapImage(executableFile, addressSpace, 0, executableString);
     const auto dyld = loader.mapImage(dyldFile, addressSpace, dyldSlide, dyldString);
+    rosa::darwin::mapX86CommpageContinuousTimebase(
+        addressSpace, rosa::darwin::sampleHostContinuousTimebase());
     const std::vector<std::string> arguments{executableString};
     const std::vector<std::string> environment;
     const std::vector<std::string> apple{

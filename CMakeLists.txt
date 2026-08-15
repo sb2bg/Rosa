@@ -23,6 +23,7 @@ add_library(rosa_core
     src/dbt/BlockCache.cpp
     src/dbt/Dispatcher.cpp
     src/debug/Dump.cpp
+    src/darwin/Commpage.cpp
     src/darwin/Syscall.cpp
     src/ir/IR.cpp
     src/guest/AddressSpace.cpp

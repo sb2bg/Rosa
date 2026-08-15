@@ -37,6 +37,8 @@ class AddressSpace {
                       std::string_view label = {});
     void mapSegment(GuestAddress base, std::size_t size, Permission permissions,
                     std::span<const std::uint8_t> fileBytes, std::string_view label = {});
+    void mapSparseReadOnly(GuestAddress base, std::size_t size, std::size_t dataOffset,
+                           std::span<const std::uint8_t> data, std::string_view label);
 
     [[nodiscard]] std::uint64_t readU64(GuestAddress address) const;
     [[nodiscard]] std::vector<std::uint8_t> readBytes(GuestAddress address, std::size_t size) const;
@@ -53,6 +55,7 @@ class AddressSpace {
         std::size_t size{};
         Permission permissions{Permission::None};
         std::vector<std::uint8_t> bytes;
+        std::vector<std::uint8_t> readableBytes;
         std::string label;
     };
 

@@ -2,6 +2,7 @@
 #include "arm64/CodeBuffer.h"
 #include "dbt/Dispatcher.h"
 #include "dbt/Translator.h"
+#include "darwin/Commpage.h"
 #include "debug/Dump.h"
 #include "guest/Address.h"
 #include "guest/AddressSpace.h"
@@ -637,6 +638,38 @@ void testGuestFailureReport() {
            "guest failure report omitted execution counters");
 }
 
+void testX86CommpageContinuousTimebase() {
+    rosa::guest::AddressSpace addressSpace;
+    constexpr std::uint64_t continuousTimebase = 0x0123456789ABCDEFULL;
+    rosa::darwin::mapX86CommpageContinuousTimebase(addressSpace, continuousTimebase);
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageContinuousTimebaseOffset}),
+                continuousTimebase, "x86 commpage continuous-time base differs");
+
+    bool unsupportedReadRejected = false;
+    try {
+        static_cast<void>(addressSpace.readU64(rosa::darwin::x86CommpageBase));
+    } catch (const std::runtime_error &error) {
+        unsupportedReadRejected = std::string_view(error.what()).find("unsupported sparse") !=
+                                  std::string_view::npos;
+    }
+    expect(unsupportedReadRejected,
+           "unsupported x86 commpage data did not fail loudly");
+
+    bool writeRejected = false;
+    try {
+        addressSpace.writeU64(
+            rosa::guest::GuestAddress{rosa::darwin::x86CommpageBase.value +
+                                      rosa::darwin::x86CommpageContinuousTimebaseOffset},
+            0);
+    } catch (const std::runtime_error &error) {
+        writeRejected = std::string_view(error.what()).find("permissions") !=
+                        std::string_view::npos;
+    }
+    expect(writeRejected, "x86 commpage mapping was not read-only");
+}
+
 std::string readGuestString(const rosa::guest::AddressSpace &addressSpace,
                             rosa::guest::GuestAddress address) {
     std::string result;
@@ -845,6 +878,7 @@ int main() {
         {"and result/flags", testAndResultAndFlags},
         {"guest address space", testGuestAddressSpace},
         {"guest failure report", testGuestFailureReport},
+        {"x86 commpage continuous timebase", testX86CommpageContinuousTimebase},
         {"initial Darwin stack", testInitialDarwinStack},
         {"R2 multi-block control flow", testR2MultiBlockControlFlow},
         {"R2 taken conditional", testR2TakenConditional},

@@ -38,6 +38,22 @@ void AddressSpace::mapSegment(GuestAddress base, std::size_t size, Permission pe
     addMapping(base, size, permissions, fileBytes, label);
 }
 
+void AddressSpace::mapSparseReadOnly(GuestAddress base, std::size_t size,
+                                     std::size_t dataOffset,
+                                     std::span<const std::uint8_t> data,
+                                     std::string_view label) {
+    if (dataOffset > size || data.size() > size - dataOffset) {
+        throw std::invalid_argument("sparse guest data lies outside its mapping");
+    }
+    addMapping(base, size, Permission::Read, {}, label);
+    auto &mapping = mappings_.back();
+    mapping.readableBytes.resize(size);
+    std::fill_n(mapping.readableBytes.begin() + static_cast<std::ptrdiff_t>(dataOffset),
+                data.size(), std::uint8_t{1});
+    std::copy(data.begin(), data.end(),
+              mapping.bytes.begin() + static_cast<std::ptrdiff_t>(dataOffset));
+}
+
 void AddressSpace::addMapping(GuestAddress base, std::size_t size, Permission permissions,
                               std::span<const std::uint8_t> initialBytes,
                               std::string_view label) {
@@ -117,6 +133,15 @@ std::vector<std::uint8_t> AddressSpace::readBytes(GuestAddress address, std::siz
         const auto &mapping = find(cursor, 1, Permission::Read);
         const auto offset = static_cast<std::size_t>(cursor.value - mapping.base.value);
         const auto chunk = std::min(size - result.size(), mapping.size - offset);
+        if (!mapping.readableBytes.empty() &&
+            std::find(mapping.readableBytes.begin() + static_cast<std::ptrdiff_t>(offset),
+                      mapping.readableBytes.begin() +
+                          static_cast<std::ptrdiff_t>(offset + chunk),
+                      std::uint8_t{0}) !=
+                mapping.readableBytes.begin() +
+                    static_cast<std::ptrdiff_t>(offset + chunk)) {
+            throw std::runtime_error("guest read targets unsupported sparse mapping data");
+        }
         result.insert(result.end(), mapping.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
                       mapping.bytes.begin() + static_cast<std::ptrdiff_t>(offset + chunk));
         cursor.value += chunk;
