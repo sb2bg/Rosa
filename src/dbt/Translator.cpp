@@ -263,9 +263,10 @@ moveXmmByteMask32(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
-bitScanForward32(x86::X86State *state, std::uint64_t destinationIndex,
-                 std::uint64_t sourceIndex) {
-    if (destinationIndex >= 16 || sourceIndex >= 16) {
+bitScanForward(x86::X86State *state, std::uint64_t destinationIndex,
+               std::uint64_t sourceIndex, std::uint64_t operandWidth) {
+    if (destinationIndex >= 16 || sourceIndex >= 16 ||
+        (operandWidth != 32 && operandWidth != 64)) {
         return state;
     }
     std::uint64_t sourceValue = 0;
@@ -274,7 +275,10 @@ bitScanForward32(x86::X86State *state, std::uint64_t destinationIndex,
                 reinterpret_cast<const std::byte *>(state) +
                     x86::registerOffset(source),
                 sizeof(sourceValue));
-    const auto value = static_cast<std::uint32_t>(sourceValue);
+    const auto value = operandWidth == 32
+                           ? static_cast<std::uint64_t>(
+                                 static_cast<std::uint32_t>(sourceValue))
+                           : sourceValue;
     state->rflags = (state->rflags & ~flagZero) | flagReservedOne;
     if (value == 0) {
         state->rflags |= flagZero;
@@ -1264,7 +1268,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto source =
                 std::get<x86::RegisterOperand>(instruction.operands[1]);
-            builder.bitScanForward(destination.reg, source.reg, ir::Width::I32,
+            builder.bitScanForward(destination.reg, source.reg,
+                                   destination.width == 32 ? ir::Width::I32
+                                                           : ir::Width::I64,
                                    instruction.address);
             break;
         }
@@ -1891,7 +1897,9 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(
                 arm64::x1, static_cast<std::uint64_t>(*operation.guestRegister));
             assembler.movImmediate(arm64::x2, operation.immediate);
-            assembler.movImmediate(arm64::x16, pointerBits(&bitScanForward32));
+            assembler.movImmediate(
+                arm64::x3, static_cast<std::uint64_t>(operation.width));
+            assembler.movImmediate(arm64::x16, pointerBits(&bitScanForward));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::LoadGuest: {

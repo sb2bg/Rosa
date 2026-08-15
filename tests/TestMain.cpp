@@ -2715,6 +2715,45 @@ void testBitScanForward32() {
                 "BSF zero-source ZF semantics differ");
 }
 
+void testBitScanForward64() {
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0x0F, 0xBC, 0xD1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::BitScanForwardRegReg,
+           "BSF r64, r64 opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx && destination.width == 64,
+           "BSF r64 destination differs");
+    expect(source.reg == rosa::x86::Register::Rcx && source.width == 64,
+           "BSF r64 source differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State nonzeroState;
+    nonzeroState.rdx = UINT64_MAX;
+    nonzeroState.rcx = std::uint64_t{1} << 40U;
+    nonzeroState.rflags = 0x8D7;
+    static_cast<void>(block.execute(nonzeroState));
+    expectEqual(nonzeroState.rdx, std::uint64_t{40}, "BSF r64 result differs");
+    expectEqual(nonzeroState.rcx, std::uint64_t{1} << 40U,
+                "BSF r64 changed source");
+    expectEqual(nonzeroState.rflags, std::uint64_t{0x897},
+                "BSF r64 nonzero ZF semantics differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.rdx = 0x123456789ABCDEF0ULL;
+    zeroState.rcx = 0;
+    zeroState.rflags = 0x897;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rdx, std::uint64_t{0x123456789ABCDEF0ULL},
+                "BSF r64 zero-source destination policy differs");
+    expectEqual(zeroState.rflags, std::uint64_t{0x8D7},
+                "BSF r64 zero-source ZF semantics differ");
+}
+
 void testLegacyAnd32Immediate() {
     constexpr std::array<std::uint8_t, 4> code{0x83, 0xE1, 0x1F, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3510,6 +3549,7 @@ int main() {
         {"and result/flags", testAndResultAndFlags},
         {"AND 32-bit registers", testAnd32BitRegisters},
         {"BSF 32-bit registers", testBitScanForward32},
+        {"BSF 64-bit registers", testBitScanForward64},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
         {"guest address space", testGuestAddressSpace},
         {"guest failure report", testGuestFailureReport},

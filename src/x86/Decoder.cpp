@@ -916,25 +916,41 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 ImmediateOperand{immediate, static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             cursor += immediateSize;
         } else if (opcode == 0x0FU) {
-            if (code.size() - cursor < 3 || code[cursor] != 0xACU) {
-                throw DecodeError(address, remaining,
-                                  "only SHRD r64, r64, imm8 is supported from REX.W 0F");
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining, "truncated REX.W 0F opcode");
             }
-            ++cursor;
+            const auto secondOpcode = code[cursor++];
+            if (secondOpcode != 0xACU && secondOpcode != 0xBCU) {
+                throw DecodeError(
+                    address, remaining,
+                    "only SHRD r64, r64, imm8 and BSF r64, r64 are supported from REX.W 0F");
+            }
+            if (cursor >= code.size() ||
+                (secondOpcode == 0xACU && code.size() - cursor < 2)) {
+                throw DecodeError(address, remaining,
+                                  secondOpcode == 0xACU ? "truncated SHRD r64"
+                                                        : "truncated BSF r64");
+            }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             if (mode != 0x3U || rexX) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct SHRD is supported");
+                                  "only register-direct SHRD/BSF is supported");
             }
-            const auto source =
+            const auto encodedReg =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
-            const auto destination =
+            const auto encodedRm =
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
-            instruction.opcode = Opcode::ShrdRegRegImm;
-            instruction.operands.push_back(RegisterOperand{destination, 64});
-            instruction.operands.push_back(RegisterOperand{source, 64});
-            instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
+            if (secondOpcode == 0xBCU) {
+                instruction.opcode = Opcode::BitScanForwardRegReg;
+                instruction.operands.push_back(RegisterOperand{encodedReg, 64});
+                instruction.operands.push_back(RegisterOperand{encodedRm, 64});
+            } else {
+                instruction.opcode = Opcode::ShrdRegRegImm;
+                instruction.operands.push_back(RegisterOperand{encodedRm, 64});
+                instruction.operands.push_back(RegisterOperand{encodedReg, 64});
+                instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
+            }
         } else if (opcode == 0x01U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated add r64, r64");
