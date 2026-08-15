@@ -658,6 +658,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x8BU &&
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
+            code[cursor] != 0x21U &&
             code[cursor] != 0x3BU && code[cursor] != 0x80U &&
             code[cursor] != 0x81U && code[cursor] != 0xC1U && code[cursor] != 0xC6U) {
             throw DecodeError(address, remaining, "expected REX prefix");
@@ -679,6 +680,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x8BU && opcode != 0x85U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
+            opcode != 0x21U &&
             opcode != 0x81U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xFFU &&
             (opcode < 0xB8U || opcode > 0xBFU)) {
@@ -819,6 +821,24 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::SubRegMem;
             instruction.operands.push_back(RegisterOperand{destination, 64});
             instruction.operands.push_back(MemoryOperand{base, displacement, 64});
+        } else if (opcode == 0x21U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated and register, register");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U || rexX) {
+                throw DecodeError(address, remaining,
+                                  "only register-direct AND from opcode 21 is supported");
+            }
+            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+            const auto source =
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
+            const auto destination =
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
+            instruction.opcode = Opcode::AndRegReg;
+            instruction.operands.push_back(RegisterOperand{destination, width});
+            instruction.operands.push_back(RegisterOperand{source, width});
         } else if (opcode == 0x31U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated xor register, register");

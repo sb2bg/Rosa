@@ -1023,6 +1023,25 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateLogicFlags(result, width, instruction.address);
             break;
         }
+        case x86::Opcode::AndRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: register and operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto width = destination.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto lhs = builder.readGuestRegister(destination.reg, width,
+                                                       instruction.address);
+            const auto rhs = builder.readGuestRegister(source.reg, width,
+                                                       instruction.address);
+            const auto result = builder.bitAnd(lhs, rhs, width, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, width,
+                                       instruction.address);
+            builder.updateLogicFlags(result, width, instruction.address);
+            break;
+        }
         case x86::Opcode::XorpsRegReg:
         case x86::Opcode::PxorRegReg: {
             if (instruction.operands.size() != 2) {

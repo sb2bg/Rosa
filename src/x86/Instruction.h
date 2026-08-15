@@ -33,6 +33,7 @@ enum class Opcode {
     OrRegReg,
     OrRegImm,
     XorRegReg,
+    AndRegReg,
     AndRegImm,
     TestRegReg,
     TestReg8Reg8,

@@ -2160,6 +2160,29 @@ void testAndResultAndFlags() {
     expectEqual(state.rflags, std::uint64_t{0x86}, "AND PF/SF flags differ");
 }
 
+void testAnd32BitRegisters() {
+    constexpr std::array<std::uint8_t, 3> code{0x21, 0xC6, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegReg,
+           "AND r32, r32 opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{32}, "AND r32, r32 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsi = 0xAAAAAAAA0000C0CEULL;
+    state.rax = 0xBBBBBBBBFFFFFF00ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rsi, std::uint64_t{0xC000},
+                "AND r32, r32 result or zero extension differs");
+    expectEqual(state.rax, std::uint64_t{0xBBBBBBBBFFFFFF00ULL},
+                "AND r32, r32 changed source");
+    expectEqual(state.rflags, std::uint64_t{0x6}, "AND r32, r32 flags differ");
+}
+
 void testLegacyAnd32Immediate() {
     constexpr std::array<std::uint8_t, 4> code{0x83, 0xE1, 0x1F, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2713,6 +2736,7 @@ int main() {
         {"add carry/zero flags", testAddFlagsCarryAndZero},
         {"add signed-overflow flags", testAddFlagsSignedOverflow},
         {"and result/flags", testAndResultAndFlags},
+        {"AND 32-bit registers", testAnd32BitRegisters},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
         {"guest address space", testGuestAddressSpace},
         {"guest failure report", testGuestFailureReport},
