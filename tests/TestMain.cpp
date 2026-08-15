@@ -2809,6 +2809,29 @@ void testUnsignedAboveConditional() {
     expectEqual(zeroSet.rip, std::uint64_t{0x1002}, "JA took with ZF set");
 }
 
+void testUnsignedAboveLongConditional() {
+    constexpr std::array<std::uint8_t, 6> code{0x0F, 0x87, 0x02, 0, 0, 0};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].condition == rosa::x86::Condition::Above,
+           "JA rel32 condition differs");
+    expectEqual(decoded[0].branchTarget->value, std::uint64_t{0x1008},
+                "JA rel32 target differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State taken;
+    taken.rflags = 0x2;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rip, std::uint64_t{0x1008}, "JA rel32 did not take");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rflags = 0x3;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rip, std::uint64_t{0x1006},
+                "JA rel32 took with CF set");
+}
+
 void testUnsignedBelowOrEqualConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x76, 0x02}; // jbe 0x1004
     const rosa::x86::Decoder decoder;
@@ -3061,6 +3084,7 @@ int main() {
         {"indirect guest-memory call fault", testIndirectGuestMemoryCallFault},
         {"unsigned-below conditional", testUnsignedBelowConditional},
         {"unsigned-above conditional", testUnsignedAboveConditional},
+        {"unsigned-above long conditional", testUnsignedAboveLongConditional},
         {"unsigned-below-or-equal conditional", testUnsignedBelowOrEqualConditional},
         {"signed-less-or-equal conditional", testSignedLessOrEqualConditional},
         {"controlled Mach-O parsing", testControlledMachOParsing},
