@@ -2311,14 +2311,22 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
             if (extension != 0 || rexR || rexX ||
                 (mode != 0x3U && (rmEncoding == 0x4U ||
-                                  (mode == 0 && rmEncoding == 0x5U)))) {
+                                  (mode == 0 && rmEncoding == 0x5U && !ripRelative)))) {
                 throw DecodeError(address, remaining,
                                   "only register or [base+disp] MOV from opcode C7 /0 is supported");
             }
             std::int64_t displacement = 0;
-            if (mode == 0x1U) {
+            if (ripRelative) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated RIP-relative MOV memory disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            } else if (mode == 0x1U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated MOV memory disp8");
                 }
@@ -2335,6 +2343,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto immediate = readI32(code.subspan(cursor, 4));
             cursor += 4;
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+            }
             instruction.opcode = mode == 0x3U ? Opcode::MovRegImm : Opcode::MovMemImm;
             const auto operandWidth =
                 static_cast<std::uint8_t>(rexW ? 64U : 32U);
@@ -2342,8 +2354,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(
                     RegisterOperand{decodeRegister(rmEncoding, rexB), operandWidth});
             } else {
-                instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(rmEncoding, rexB), displacement, operandWidth});
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement, operandWidth,
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{decodeRegister(rmEncoding, rexB),
+                                        displacement, operandWidth});
             }
             instruction.operands.push_back(ImmediateOperand{
                 rexW ? static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate))

@@ -719,6 +719,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("mov64_immediate_memory",
+                             CaseId::mov64_immediate_memory,
+                             differentialBytes_mov64_immediate_memory);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        const std::array sentinel{
+            std::uint8_t{0x88}, std::uint8_t{0x77}, std::uint8_t{0x66},
+            std::uint8_t{0x55}, std::uint8_t{0x44}, std::uint8_t{0x33},
+            std::uint8_t{0x22}, std::uint8_t{0x11}};
+        std::ranges::copy(sentinel, testCase.request.memory.begin() + 0x18);
+        testCase.memoryCompareOffset = 0x18;
+        testCase.memoryCompareSize = sentinel.size();
+        run(testCase);
+    }
+    {
         auto testCase = make("add64_memory", CaseId::add64_memory,
                              differentialBytes_add64_memory);
         bindMemory(testCase, rosa::x86::Register::Rsi, 0);
@@ -2733,6 +2747,87 @@ void testMovImmediateToGuestMemory() {
                    std::string_view::npos;
     }
     expect(rejected, "MOV immediate to unmapped guest memory did not fail");
+}
+
+void testMovImmediateToRipRelativeGuestMemory() {
+    constexpr rosa::guest::GuestAddress instructionAddress{0x7FF800058A1AULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF8000C8DD0ULL};
+    constexpr rosa::guest::GuestAddress targetPage{0x7FF8000C8000ULL};
+    constexpr std::array<std::uint8_t, 12> code{
+        0x48, 0xC7, 0x05, 0xAB, 0x03, 0x07, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "RIP-relative MOV qword immediate opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{11},
+                "RIP-relative MOV qword immediate length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 64,
+           "RIP-relative MOV qword immediate addressing differs");
+    expectEqual(memory.displacement, std::int64_t{0x703AB},
+                "RIP-relative MOV qword immediate displacement differs");
+    expectEqual(immediate.value, std::uint64_t{0},
+                "RIP-relative MOV qword immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov qword [rip+0x703ab], 0x0 ; 0x7ff8000c8dd0") !=
+               std::string::npos,
+           "RIP-relative MOV qword immediate dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::uint64_t before = 0x1122334455667788ULL;
+    constexpr std::uint64_t initial = 0xA5A5A5A5A5A5A5A5ULL;
+    constexpr std::uint64_t after = 0x8877665544332211ULL;
+    addressSpace.writeU64(rosa::guest::GuestAddress{target.value - 8}, before);
+    addressSpace.writeU64(target, initial);
+    addressSpace.writeU64(rosa::guest::GuestAddress{target.value + 8}, after);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.rax = 0xDEADBEEFCAFEBABEULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0},
+                "RIP-relative MOV qword immediate stored the wrong value");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{target.value - 8}),
+                before,
+                "RIP-relative MOV qword immediate changed preceding bytes");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{target.value + 8}),
+                after,
+                "RIP-relative MOV qword immediate changed following bytes");
+    expectEqual(state.rax, std::uint64_t{0xDEADBEEFCAFEBABEULL},
+                "RIP-relative MOV qword immediate used a dummy base register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative MOV qword immediate changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    const auto targetOffset =
+        static_cast<std::size_t>(target.value - targetPage.value);
+    std::memcpy(readOnlyBytes.data() + targetOffset, &initial, sizeof(initial));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(targetPage, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes,
+                                    "read-only RIP-relative MOV target");
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected,
+           "RIP-relative MOV qword immediate accepted a read-only target");
+    expectEqual(readOnlyAddressSpace.readU64(target), initial,
+                "failed RIP-relative MOV qword immediate changed guest memory");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "failed RIP-relative MOV qword immediate changed flags");
 }
 
 void testMov32BitImmediateToGuestMemory() {
@@ -7016,6 +7111,8 @@ int main() {
         {"MOV low-byte register to guest memory", testMovLowByteRegisterToGuestMemory},
         {"MOV low-byte register to extended base", testMovLowByteRegisterToExtendedBase},
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
+        {"MOV immediate to RIP-relative guest memory",
+         testMovImmediateToRipRelativeGuestMemory},
         {"MOV 32-bit immediate to guest memory",
          testMov32BitImmediateToGuestMemory},
         {"MOV byte immediate to guest memory", testMovByteImmediateToGuestMemory},
