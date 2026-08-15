@@ -831,18 +831,30 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
-        if (code[cursor] == 0x66U && code.size() - cursor >= 2 &&
-            code[cursor + 1] == 0xC7U) {
-            if (code.size() - cursor < 5) {
+        const bool wordImmediateHasRex =
+            code[cursor] == 0x66U && code.size() - cursor >= 2 &&
+            code[cursor + 1] >= 0x40U && code[cursor + 1] <= 0x4FU;
+        const auto wordImmediateOpcodeOffset =
+            cursor + 1U + (wordImmediateHasRex ? 1U : 0U);
+        if (code[cursor] == 0x66U &&
+            wordImmediateOpcodeOffset < code.size() &&
+            code[wordImmediateOpcodeOffset] == 0xC7U) {
+            if (code.size() - wordImmediateOpcodeOffset < 4) {
                 throw DecodeError(address, remaining,
                                   "truncated mov word [memory], imm16");
             }
-            const auto modrm = code[cursor + 2];
+            const auto rex = wordImmediateHasRex ? code[cursor + 1] : 0U;
+            const bool rexW = (rex & 0x8U) != 0;
+            const bool rexR = (rex & 0x4U) != 0;
+            const bool rexX = (rex & 0x2U) != 0;
+            const bool rexB = (rex & 0x1U) != 0;
+            const auto modrm = code[wordImmediateOpcodeOffset + 1];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            auto operandCursor = cursor + 3;
-            if (mode > 0x2U || extension != 0 || rmEncoding == 0x4U ||
+            auto operandCursor = wordImmediateOpcodeOffset + 2;
+            if (rexW || rexR || rexX || mode > 0x2U || extension != 0 ||
+                rmEncoding == 0x4U ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
@@ -872,7 +884,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             operandCursor += 2;
             instruction.opcode = Opcode::MovMemImm;
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, false), displacement, 16});
+                decodeRegister(rmEncoding, rexB), displacement, 16});
             instruction.operands.push_back(ImmediateOperand{immediate, 16});
             const auto length = operandCursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);

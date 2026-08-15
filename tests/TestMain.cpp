@@ -1206,6 +1206,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("mov16_immediate_extended_base",
+                             CaseId::mov16_immediate_extended_base,
+                             differentialBytes_mov16_immediate_extended_base);
+        bindMemory(testCase, rosa::x86::Register::R15, 0);
+        const std::array sentinel{
+            std::uint8_t{0x88}, std::uint8_t{0x77}, std::uint8_t{0x66},
+            std::uint8_t{0x55}, std::uint8_t{0x44}, std::uint8_t{0x33},
+            std::uint8_t{0x22}, std::uint8_t{0x11}};
+        std::ranges::copy(sentinel, testCase.request.memory.begin() + 0x50);
+        testCase.memoryCompareOffset = 0x50;
+        testCase.memoryCompareSize = sentinel.size();
+        run(testCase);
+    }
+    {
         auto testCase = make("mov64_immediate_memory",
                              CaseId::mov64_immediate_memory,
                              differentialBytes_mov64_immediate_memory);
@@ -5240,6 +5254,72 @@ void testMovWordImmediateToGuestMemory() {
                 "failed MOV word guest store partially changed memory");
     expectEqual(state.rflags, std::uint64_t{0xAD7},
                 "failed MOV word guest store changed flags");
+
+    constexpr std::array<std::uint8_t, 8> extendedCode{
+        0x66, 0x41, 0xC7, 0x47, 0x50, 0x00, 0x00, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "REX MOV word [mem], imm16 opcode differs");
+    expectEqual(extendedDecoded[0].length, std::uint8_t{7},
+                "REX MOV word [mem], imm16 length differs");
+    const auto extendedMemory =
+        std::get<rosa::x86::MemoryOperand>(extendedDecoded[0].operands[0]);
+    const auto extendedImmediate =
+        std::get<rosa::x86::ImmediateOperand>(extendedDecoded[0].operands[1]);
+    expect(extendedMemory.base == rosa::x86::Register::R15 &&
+               extendedMemory.displacement == 0x50 &&
+               extendedMemory.width == 16 && !extendedMemory.ripRelative,
+           "REX MOV word [r15+disp8], imm16 memory operand differs");
+    expect(extendedImmediate.width == 16 && extendedImmediate.value == 0,
+           "REX MOV word [mem], imm16 immediate differs");
+    expect(rosa::debug::dumpX86(extendedDecoded).find(
+               "mov word [r15+0x50], 0x0") != std::string::npos,
+           "REX MOV word [mem], imm16 dump differs");
+
+    constexpr rosa::guest::GuestAddress extendedTarget{0x8150};
+    addressSpace.writeU64(extendedTarget, 0x1122334455667788ULL);
+    const auto extendedBlock = translator.translate(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State extendedState;
+    extendedState.r15 = extendedTarget.value - 0x50;
+    extendedState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(extendedState, &addressSpace));
+    expectEqual(addressSpace.readU64(extendedTarget),
+                std::uint64_t{0x1122334455660000ULL},
+                "REX MOV word immediate changed bytes outside the word");
+    expectEqual(extendedState.r15, extendedTarget.value - 0x50,
+                "REX MOV word immediate changed its extended base");
+    expectEqual(extendedState.rflags, std::uint64_t{0x8D7},
+                "REX MOV word immediate changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[0x150] = 0xA5;
+    readOnlyBytes[0x151] = 0x5A;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        memoryBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read, readOnlyBytes,
+        "read-only REX MOV word immediate memory");
+    rosa::x86::X86State extendedFaultState;
+    extendedFaultState.r15 = extendedTarget.value - 0x50;
+    extendedFaultState.rflags = 0xBD7;
+    rejected = false;
+    try {
+        static_cast<void>(
+            extendedBlock.execute(extendedFaultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "REX MOV word immediate accepted read-only memory");
+    expectEqual(readOnlyAddressSpace.readBytes(extendedTarget, 2),
+                std::vector<std::uint8_t>({0xA5, 0x5A}),
+                "faulted REX MOV word immediate changed memory");
+    expectEqual(extendedFaultState.r15, extendedTarget.value - 0x50,
+                "faulted REX MOV word immediate changed its base");
+    expectEqual(extendedFaultState.rflags, std::uint64_t{0xBD7},
+                "faulted REX MOV word immediate changed flags");
 }
 
 void testMovWordRegisterToGuestMemory() {
