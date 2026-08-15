@@ -77,6 +77,7 @@ enum class Condition {
     AboveOrEqual,
     Above,
     BelowOrEqual,
+    Sign,
     LessOrEqual,
 };
 

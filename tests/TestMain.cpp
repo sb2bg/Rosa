@@ -3294,6 +3294,29 @@ void testSignedLessOrEqualConditional() {
     expectEqual(greater.rflags, std::uint64_t{0x2}, "JLE changed flags");
 }
 
+void testSignLongConditional() {
+    constexpr std::array<std::uint8_t, 6> code{0x0F, 0x88, 0x02, 0, 0, 0};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].condition == rosa::x86::Condition::Sign,
+           "JS rel32 condition differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State taken;
+    taken.rflags = 0x82;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rip, std::uint64_t{0x1008},
+                "JS did not take with SF set");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rflags = 0x2;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rip, std::uint64_t{0x1006},
+                "JS took with SF clear");
+    expectEqual(notTaken.rflags, std::uint64_t{0x2}, "JS changed flags");
+}
+
 void testControlledMachOParsing() {
     const auto file = rosa::macho::MachOFile::open(ROSA_TEST_MACHO_PATH);
     expectEqual(file.cpuType(), std::uint32_t{0x01000007U}, "Mach-O CPU type differs");
@@ -3508,6 +3531,7 @@ int main() {
         {"unsigned-below-or-equal long conditional",
          testUnsignedBelowOrEqualLongConditional},
         {"signed-less-or-equal conditional", testSignedLessOrEqualConditional},
+        {"sign long conditional", testSignLongConditional},
         {"controlled Mach-O parsing", testControlledMachOParsing},
         {"universal Mach-O x86 selection", testUniversalMachOX86Selection},
         {"malformed Mach-O rejection", testMalformedMachORejection},

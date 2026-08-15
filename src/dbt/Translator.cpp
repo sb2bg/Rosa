@@ -2064,6 +2064,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 } else if (*operation.condition == x86::Condition::BelowOrEqual) {
                     assembler.tbnz(arm64::x16, carryFlagBit, taken);
                     assembler.tbz(arm64::x16, zeroFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::Sign) {
+                    assembler.tbz(arm64::x16, signFlagBit, notTaken);
                 } else {
                     assembler.tbnz(arm64::x16, zeroFlagBit, taken);
                     // OF is bit 11, so shifting it down by four aligns it with SF.
