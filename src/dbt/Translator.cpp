@@ -1423,8 +1423,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     assembler.tbz(arm64::x16, zeroFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::NotEqual) {
                     assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
-                } else {
+                } else if (*operation.condition == x86::Condition::Below) {
                     assembler.tbz(arm64::x16, carryFlagBit, notTaken);
+                } else {
+                    assembler.tbnz(arm64::x16, carryFlagBit, notTaken);
+                    assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
                 }
                 assembler.movImmediate(arm64::x16, operation.target->value);
                 assembler.b(selected);

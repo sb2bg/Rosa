@@ -2027,6 +2027,33 @@ void testUnsignedBelowConditional() {
                 "not-taken JB changed guest flags");
 }
 
+void testUnsignedAboveConditional() {
+    constexpr std::array<std::uint8_t, 2> code{0x77, 0x02}; // ja 0x1004
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].condition == rosa::x86::Condition::Above,
+           "JA rel8 condition differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State taken;
+    taken.rflags = 0x2;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rip, std::uint64_t{0x1004},
+                "JA did not take with CF and ZF clear");
+    expectEqual(taken.rflags, std::uint64_t{0x2}, "JA changed guest flags");
+
+    rosa::x86::X86State carrySet;
+    carrySet.rflags = 0x3;
+    static_cast<void>(block.execute(carrySet));
+    expectEqual(carrySet.rip, std::uint64_t{0x1002}, "JA took with CF set");
+
+    rosa::x86::X86State zeroSet;
+    zeroSet.rflags = 0x42;
+    static_cast<void>(block.execute(zeroSet));
+    expectEqual(zeroSet.rip, std::uint64_t{0x1002}, "JA took with ZF set");
+}
+
 void testControlledMachOParsing() {
     const auto file = rosa::macho::MachOFile::open(ROSA_TEST_MACHO_PATH);
     expectEqual(file.cpuType(), std::uint32_t{0x01000007U}, "Mach-O CPU type differs");
@@ -2192,6 +2219,7 @@ int main() {
         {"R2 multi-block control flow", testR2MultiBlockControlFlow},
         {"R2 taken conditional", testR2TakenConditional},
         {"unsigned-below conditional", testUnsignedBelowConditional},
+        {"unsigned-above conditional", testUnsignedAboveConditional},
         {"controlled Mach-O parsing", testControlledMachOParsing},
         {"universal Mach-O x86 selection", testUniversalMachOX86Selection},
         {"malformed Mach-O rejection", testMalformedMachORejection},
