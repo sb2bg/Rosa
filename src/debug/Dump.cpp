@@ -276,6 +276,19 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
         }
+        case x86::Opcode::MovupsMemReg: {
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "movups [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
+            break;
+        }
         case x86::Opcode::Push:
             stream << "push ";
             if (std::holds_alternative<x86::ImmediateOperand>(instruction.operands[0])) {

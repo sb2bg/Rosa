@@ -1088,6 +1088,35 @@ void testMovapsRegisterToGuestMemory() {
                 "failed MOVAPS changed its base register");
 }
 
+void testMovupsRegisterToGuestMemoryWithSib() {
+    constexpr std::array<std::uint8_t, 6> code{0x0F, 0x11, 0x44, 0x24, 0x10, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovupsMemReg,
+           "MOVUPS [mem], xmm opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rsp, "MOVUPS SIB base differs");
+    expectEqual(memory.displacement, std::int64_t{0x10},
+                "MOVUPS SIB displacement differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsp = 0x8103;
+    state.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8113}),
+                state.xmm[0].low, "MOVUPS stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x811B}),
+                state.xmm[0].high, "MOVUPS stored the wrong high lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVUPS changed flags");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -1550,6 +1579,7 @@ int main() {
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
+        {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
