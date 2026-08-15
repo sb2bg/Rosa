@@ -2629,10 +2629,30 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto rhsRegister =
                 std::get<x86::RegisterOperand>(instruction.operands[1]);
-            const auto width = memory.width == 32 ? ir::Width::I32
-                                                  : ir::Width::I64;
+            if (memory.width != rhsRegister.width ||
+                (memory.width != 8 && memory.width != 32 &&
+                 memory.width != 64)) {
+                throw std::runtime_error(
+                    "only matching 8-bit, 32-bit, and 64-bit memory-register CMP are implemented");
+            }
+            const auto width = memory.width == 8    ? ir::Width::I8
+                               : memory.width == 32 ? ir::Width::I32
+                                                    : ir::Width::I64;
             auto address = builder.readGuestRegister(
                 memory.base, ir::Width::I64, instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(
+                            std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64,
+                                      instruction.address);
+            }
             if (memory.displacement != 0) {
                 const auto displacement = builder.constant(
                     static_cast<std::uint64_t>(memory.displacement),
@@ -2840,12 +2860,12 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
 }
 
 arm64::XRegister hostRegister(ir::ValueId value) {
-    constexpr std::uint32_t first = 9;
+    constexpr std::uint32_t first = 8;
     constexpr std::uint32_t last = 15;
     const auto encoding = first + value.value;
     if (encoding > last) {
         throw std::runtime_error(
-            "R1 local register allocator exhausted x9...x15; split or shorten the block");
+            "R1 local register allocator exhausted x8...x15; split or shorten the block");
     }
     return arm64::XRegister{static_cast<std::uint8_t>(encoding)};
 }

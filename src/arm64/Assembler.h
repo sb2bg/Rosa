@@ -17,6 +17,7 @@ inline constexpr XRegister x1{1};
 inline constexpr XRegister x2{2};
 inline constexpr XRegister x3{3};
 inline constexpr XRegister x4{4};
+inline constexpr XRegister x8{8};
 inline constexpr XRegister x9{9};
 inline constexpr XRegister x10{10};
 inline constexpr XRegister x11{11};

@@ -664,7 +664,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         }
         case x86::Opcode::CmpMemReg: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "cmp [" << x86::registerName(memory.base);
+            stream << "cmp " << (memory.width == 8 ? "byte " : "") << '['
+                   << x86::registerName(memory.base);
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
