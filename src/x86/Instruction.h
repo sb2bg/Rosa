@@ -29,6 +29,7 @@ enum class Opcode {
     AndRegImm,
     TestRegReg,
     CmpRegImm,
+    CmpRegMem,
     Push,
     Lfence,
     Rdtsc,

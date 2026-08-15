@@ -174,6 +174,35 @@ updateSubFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *
+updateSubFlags32(x86::X86State *state, std::uint64_t lhsValue, std::uint64_t rhsValue,
+                 std::uint64_t resultValue) {
+    const auto lhs = static_cast<std::uint32_t>(lhsValue);
+    const auto rhs = static_cast<std::uint32_t>(rhsValue);
+    const auto result = static_cast<std::uint32_t>(resultValue);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (lhs < rhs) {
+        flags |= flagCarry;
+    }
+    if ((std::popcount(static_cast<unsigned>(result & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (((lhs ^ rhs ^ result) & 0x10U) != 0) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result >> 31U) != 0) {
+        flags |= flagSign;
+    }
+    if ((((lhs ^ rhs) & (lhs ^ result)) >> 31U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags64(x86::X86State *state,
                                                                        std::uint64_t result) {
     auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
@@ -566,6 +595,26 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateSubFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::CmpRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: cmp memory operand count");
+            }
+            const auto lhsRegister = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            const auto base =
+                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                instruction.address);
+            const auto address =
+                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            const auto rhs = builder.loadGuest(address, ir::Width::I32, instruction.address);
+            const auto lhs = builder.readGuestRegister(lhsRegister.reg, ir::Width::I32,
+                                                       instruction.address);
+            const auto result = builder.sub(lhs, rhs, ir::Width::I32, instruction.address);
+            builder.updateSubFlags(lhs, rhs, result, ir::Width::I32, instruction.address);
+            break;
+        }
         case x86::Opcode::Push: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: push operand count");
@@ -838,9 +887,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
             assembler.mov(arm64::x3, hostRegister(*operation.third));
-            assembler.movImmediate(arm64::x16, operation.opcode == ir::Opcode::UpdateAddFlags
-                                                   ? pointerBits(&updateAddFlags64)
-                                                   : pointerBits(&updateSubFlags64));
+            if (operation.opcode == ir::Opcode::UpdateAddFlags) {
+                assembler.movImmediate(arm64::x16, pointerBits(&updateAddFlags64));
+            } else {
+                assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
+                                                       ? pointerBits(&updateSubFlags32)
+                                                       : pointerBits(&updateSubFlags64));
+            }
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateLogicFlags:
