@@ -3555,6 +3555,36 @@ void testSetEqualLowByteRegister() {
     expect(rejectedHighByte, "SETE AH was not rejected explicitly");
 }
 
+void testSetNotEqualLowByteRegister() {
+    constexpr std::uint64_t zeroFlag = std::uint64_t{1} << 6U;
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x95, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccReg,
+           "SETNE opcode differs");
+    expect(decoded[0].condition == rosa::x86::Condition::NotEqual,
+           "SETNE condition differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667788ULL;
+    state.rflags = 0x897 & ~zeroFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667701ULL},
+                "taken SETNE did not merge one into AL");
+    expectEqual(state.rflags, std::uint64_t{0x897 & ~zeroFlag},
+                "taken SETNE changed flags");
+
+    state.rax = 0xFFEEDDCCBBAA9988ULL;
+    state.rflags = 0x891 | zeroFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xFFEEDDCCBBAA9900ULL},
+                "not-taken SETNE did not merge zero into AL");
+    expectEqual(state.rflags, std::uint64_t{0x891 | zeroFlag},
+                "not-taken SETNE changed flags");
+}
+
 void testConditionalMoveBelow64() {
     constexpr std::array<std::uint8_t, 5> code{0x4C, 0x0F, 0x42, 0xE8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3999,6 +4029,7 @@ int main() {
         {"unsigned-below long conditional", testUnsignedBelowLongConditional},
         {"register-indirect jump", testRegisterIndirectJump},
         {"set equal low-byte register", testSetEqualLowByteRegister},
+        {"set not-equal low-byte register", testSetNotEqualLowByteRegister},
         {"conditional move below 64-bit", testConditionalMoveBelow64},
         {"unsigned-above conditional", testUnsignedAboveConditional},
         {"unsigned-above long conditional", testUnsignedAboveLongConditional},

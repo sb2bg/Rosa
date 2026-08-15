@@ -1909,7 +1909,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    hostRegister(*operation.lhs));
             break;
         case ir::Opcode::EvaluateCondition: {
-            if (*operation.condition != x86::Condition::Equal) {
+            if (*operation.condition != x86::Condition::Equal &&
+                *operation.condition != x86::Condition::NotEqual) {
                 throw std::runtime_error(
                     "ARM64 backend only implements equality condition values");
             }
@@ -1919,7 +1920,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(destination, 0);
             assembler.ldr(arm64::x16, arm64::x0,
                           static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
-            assembler.tbz(arm64::x16, zeroFlagBit, done);
+            if (*operation.condition == x86::Condition::Equal) {
+                assembler.tbz(arm64::x16, zeroFlagBit, done);
+            } else {
+                assembler.tbnz(arm64::x16, zeroFlagBit, done);
+            }
             assembler.movImmediate(destination, 1);
             assembler.bind(done);
             break;

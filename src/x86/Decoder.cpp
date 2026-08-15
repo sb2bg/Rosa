@@ -306,10 +306,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if (code.size() - cursor >= 2 && code[cursor] == 0x0FU &&
-            code[cursor + 1] == 0x94U) {
+            (code[cursor + 1] == 0x94U || code[cursor + 1] == 0x95U)) {
             if (code.size() - cursor < 3) {
-                throw DecodeError(address, remaining, "truncated sete r8");
+                throw DecodeError(address, remaining, "truncated setcc r8");
             }
+            const auto conditionOpcode = code[cursor + 1];
             const auto modrm = code[cursor + 2];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
@@ -317,10 +318,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (mode != 0x3U || extension != 0 || rmEncoding >= 0x4U) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct SETE to AL/CL/DL/BL is supported");
+                    "only register-direct SETE/SETNE to AL/CL/DL/BL is supported");
             }
             instruction.opcode = Opcode::SetccReg;
-            instruction.condition = Condition::Equal;
+            instruction.condition = conditionOpcode == 0x94U ? Condition::Equal
+                                                              : Condition::NotEqual;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(rmEncoding, false), 8});
             instruction.length = 3;
@@ -1229,7 +1231,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.operands.push_back(
                 ImmediateOperand{immediate, static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             cursor += immediateSize;
-        } else if (opcode == 0x35U && rexW && !rexB && !rexX && !rexR) {
+        } else if (opcode == 0x35U && rexW) {
             if (code.size() - cursor < sizeof(std::uint32_t)) {
                 throw DecodeError(address, remaining, "truncated xor rax, imm32");
             }
