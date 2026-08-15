@@ -2823,8 +2823,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto source =
                 std::get<x86::RegisterOperand>(instruction.operands[1]);
+            if (destination.width != source.width ||
+                (destination.width != 32 && destination.width != 64)) {
+                throw std::runtime_error(
+                    "only matching 32-bit and 64-bit register CMOV are implemented");
+            }
             builder.conditionalMoveGuestRegister(
-                destination.reg, source.reg, *instruction.condition, ir::Width::I64,
+                destination.reg, source.reg, *instruction.condition,
+                destination.width == 32 ? ir::Width::I32 : ir::Width::I64,
                 instruction.address);
             break;
         }
@@ -3083,13 +3089,14 @@ arm64::Program compileToArm64(const ir::Block &block) {
             }
             break;
         case ir::Opcode::ConditionalMoveGuestReg: {
-            if (operation.width != ir::Width::I64 ||
+            if ((operation.width != ir::Width::I32 &&
+                 operation.width != ir::Width::I64) ||
                 (*operation.condition != x86::Condition::Below &&
                  *operation.condition != x86::Condition::AboveOrEqual &&
                  *operation.condition != x86::Condition::Above &&
                  *operation.condition != x86::Condition::Equal)) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 64-bit register CMOVB/CMOVAE/CMOVE/CMOVA");
+                    "ARM64 backend only implements 32- and 64-bit register CMOVB/CMOVAE/CMOVE/CMOVA");
             }
             constexpr std::uint8_t carryFlagBit = 0;
             constexpr std::uint8_t zeroFlagBit = 6;
@@ -3110,11 +3117,25 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 arm64::x17, arm64::x0,
                 static_cast<std::uint32_t>(x86::registerOffset(
                     static_cast<x86::Register>(operation.immediate))));
+            if (operation.width == ir::Width::I32) {
+                assembler.movImmediate(arm64::x16, UINT32_MAX);
+                assembler.bitAnd(arm64::x17, arm64::x17, arm64::x16);
+            }
             assembler.str(
                 arm64::x17, arm64::x0,
                 static_cast<std::uint32_t>(
                     x86::registerOffset(*operation.guestRegister)));
             assembler.bind(notTaken);
+            if (operation.width == ir::Width::I32) {
+                // CMOV r32 performs a 32-bit architectural destination write
+                // even when the condition is false, clearing the upper half.
+                const auto destinationOffset = static_cast<std::uint32_t>(
+                    x86::registerOffset(*operation.guestRegister));
+                assembler.ldr(arm64::x17, arm64::x0, destinationOffset);
+                assembler.movImmediate(arm64::x16, UINT32_MAX);
+                assembler.bitAnd(arm64::x17, arm64::x17, arm64::x16);
+                assembler.str(arm64::x17, arm64::x0, destinationOffset);
+            }
             break;
         }
         case ir::Opcode::WriteGuestXmmLane:
