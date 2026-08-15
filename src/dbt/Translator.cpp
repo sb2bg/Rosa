@@ -92,6 +92,29 @@ storeGuest8(GuestExecutionContext *context, x86::X86State *state, std::uint64_t 
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+storeGuest16(GuestExecutionContext *context, x86::X86State *state,
+             std::uint64_t address, std::uint64_t value) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated 16-bit guest store has no address space");
+        }
+        const std::array bytes{
+            static_cast<std::uint8_t>(value),
+            static_cast<std::uint8_t>(value >> 8U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint16_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 storeGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
              std::uint64_t value) noexcept {
     try {
@@ -786,7 +809,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            const auto width = memory.width == 8 ? ir::Width::I8 : ir::Width::I64;
+            const auto width = memory.width == 8    ? ir::Width::I8
+                               : memory.width == 16 ? ir::Width::I16
+                                                    : ir::Width::I64;
             const auto base =
                 builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
             const auto displacement = builder.constant(
@@ -1776,9 +1801,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 arm64::x16,
                 operation.width == ir::Width::I8
                     ? pointerBits(&storeGuest8)
-                    : operation.width == ir::Width::I32
-                          ? pointerBits(&storeGuest32)
-                          : pointerBits(&storeGuest64));
+                    : operation.width == ir::Width::I16
+                          ? pointerBits(&storeGuest16)
+                    : operation.width == ir::Width::I32 ? pointerBits(&storeGuest32)
+                                                       : pointerBits(&storeGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

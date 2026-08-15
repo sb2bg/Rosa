@@ -434,6 +434,61 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x66U && code.size() - cursor >= 2 &&
+            code[cursor + 1] == 0xC7U) {
+            if (code.size() - cursor < 5) {
+                throw DecodeError(address, remaining,
+                                  "truncated mov word [memory], imm16");
+            }
+            const auto modrm = code[cursor + 2];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            auto operandCursor = cursor + 3;
+            if (mode > 0x2U || extension != 0 || rmEncoding == 0x4U ||
+                (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only MOV word [base+disp8/disp32], imm16 is supported");
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOV word memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[operandCursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - operandCursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOV word memory disp32");
+                }
+                displacement = readI32(code.subspan(operandCursor, 4));
+                operandCursor += 4;
+            }
+            if (code.size() - operandCursor < 2) {
+                throw DecodeError(address, remaining, "truncated MOV word imm16");
+            }
+            const auto immediate = static_cast<std::uint16_t>(
+                static_cast<std::uint16_t>(code[operandCursor]) |
+                (static_cast<std::uint16_t>(code[operandCursor + 1]) << 8U));
+            operandCursor += 2;
+            instruction.opcode = Opcode::MovMemImm;
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(rmEncoding, false), displacement, 16});
+            instruction.operands.push_back(ImmediateOperand{immediate, 16});
+            const auto length = operandCursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            cursor = operandCursor;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x66U && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0xEFU) {
             if (code.size() - cursor < 4) {

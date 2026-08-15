@@ -1262,6 +1262,58 @@ void testMovByteImmediateToGuestMemory() {
     expect(rejected, "MOV byte immediate to read-only guest memory did not fail");
 }
 
+void testMovWordImmediateToGuestMemory() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x66, 0xC7, 0x43, 0x18, 0xEF, 0xBE, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "MOV word [mem], imm16 opcode differs");
+    expectEqual(std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{16}, "MOV word [mem], imm16 width differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{0xBEEF}, "MOV word [mem], imm16 immediate differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8118},
+                          0x1122334455667788ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbx = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8118}),
+                std::uint64_t{0x112233445566BEEFULL},
+                "MOV word [mem], imm16 changed bytes outside the word");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV word [mem], imm16 changed flags");
+
+    state.rbx = 0x8FE7;
+    state.rflags = 0xAD7;
+    const std::array marker{std::uint8_t{0x5A}};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8FFF}, marker);
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("outside guest mapping") !=
+                       std::string_view::npos ||
+                   std::string_view(error.what()).find("unmapped") !=
+                       std::string_view::npos;
+    }
+    expect(rejected, "cross-page MOV word guest store did not fault");
+    expectEqual(addressSpace.readBytes(rosa::guest::GuestAddress{0x8FFF}, 1).front(),
+                std::uint8_t{0x5A},
+                "failed MOV word guest store partially changed memory");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "failed MOV word guest store changed flags");
+}
+
 void testMovGuestMemoryToRegister() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x8B, 0x03, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3297,6 +3349,7 @@ int main() {
         {"MOV low-byte register to extended base", testMovLowByteRegisterToExtendedBase},
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
         {"MOV byte immediate to guest memory", testMovByteImmediateToGuestMemory},
+        {"MOV word immediate to guest memory", testMovWordImmediateToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest memory to register with no-index SIB",
          testMovGuestMemoryToRegisterWithNoIndexSib},
