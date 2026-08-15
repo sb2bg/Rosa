@@ -345,14 +345,16 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             if (mode != 0x3U || rexR || rexX ||
-                (extension != 0x0U && extension != 0x4U && extension != 0x7U)) {
+                (extension != 0x0U && extension != 0x4U && extension != 0x5U &&
+                 extension != 0x7U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct ADD /0, AND /4, and CMP /7 from opcode 83 are supported");
+                    "only register-direct ADD /0, AND /4, SUB /5, and CMP /7 from opcode 83 are supported");
             }
             const auto immediate = std::bit_cast<std::int8_t>(code[cursor++]);
             instruction.opcode = extension == 0   ? Opcode::AddRegImm
                                  : extension == 4 ? Opcode::AndRegImm
+                                 : extension == 5 ? Opcode::SubRegImm
                                                   : Opcode::CmpRegImm;
             instruction.operands.push_back(
                 RegisterOperand{decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});

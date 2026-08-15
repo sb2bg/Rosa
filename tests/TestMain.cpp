@@ -305,6 +305,24 @@ void testSubRegImm32GeneratedExecution() {
                 "SUB r8, negative imm32 flags differ");
 }
 
+void testSubRegImm8GeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0x83, 0xEC, 0x18, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SubRegImm,
+           "SUB r64, imm8 opcode differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{0x18}, "SUB r64, imm8 immediate differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsp = 0x100;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rsp, std::uint64_t{0xE8}, "SUB rsp, imm8 result differs");
+    expectEqual(state.rflags, std::uint64_t{0x16}, "SUB rsp, imm8 flags differ");
+}
+
 void testMovRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 12> code{
         0x48, 0x89, 0xBD, 0x58, 0xFF, 0xFF, 0xFF,
@@ -764,6 +782,7 @@ int main() {
         {"PUSH imm8 guest stack faults", testPushImm8GuestStackFaults},
         {"PUSH register generated execution", testPushRegisterGeneratedExecution},
         {"SUB register imm32 generated execution", testSubRegImm32GeneratedExecution},
+        {"SUB register imm8 generated execution", testSubRegImm8GeneratedExecution},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
