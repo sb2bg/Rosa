@@ -52,6 +52,12 @@ void mapX86Commpage(guest::AddressSpace &addressSpace,
     addressSpace.mapSparseReadOnly(x86CommpageBase, guest::guestPageSize,
                                    x86CommpageNanotimeTscBaseOffset, nanotimeData,
                                    "Darwin x86_64 commpage");
+    std::array<std::uint8_t, sizeof(x86CommpageVersion)> versionBytes{};
+    writeLittleEndian(versionBytes, 0, x86CommpageVersion,
+                      sizeof(x86CommpageVersion));
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value + x86CommpageVersionOffset},
+        versionBytes);
     // Rosa does not forward guest kdebug tracing. XNU specifies that this field
     // is zero whenever global tracing is disabled.
     constexpr std::array<std::uint8_t, sizeof(std::uint32_t)> kdebugDisabled{};

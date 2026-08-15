@@ -4955,6 +4955,14 @@ void testX86Commpage() {
     rosa::guest::AddressSpace addressSpace;
     constexpr std::uint64_t continuousTimebase = 0x0123456789ABCDEFULL;
     rosa::darwin::mapX86Commpage(addressSpace, continuousTimebase);
+    const auto version = addressSpace.readBytes(
+        rosa::guest::GuestAddress{rosa::darwin::x86CommpageBase.value +
+                                  rosa::darwin::x86CommpageVersionOffset},
+        sizeof(rosa::darwin::x86CommpageVersion));
+    expectEqual(version,
+                std::vector<std::uint8_t>{
+                    static_cast<std::uint8_t>(rosa::darwin::x86CommpageVersion), 0},
+                "x86 commpage version differs");
     expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageKdebugEnableOffset}),
