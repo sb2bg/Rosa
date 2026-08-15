@@ -513,7 +513,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
-        if (!hasRex && code[cursor] != 0x8BU && code[cursor] != 0x83U) {
+        if (!hasRex && code[cursor] != 0x8BU && code[cursor] != 0x83U &&
+            code[cursor] != 0x31U) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
@@ -530,7 +531,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         const auto opcode = code[cursor++];
         if (!rexW && opcode != 0x8BU && opcode != 0x85U && opcode != 0x83U &&
-            opcode != 0x3BU) {
+            opcode != 0x3BU && opcode != 0x31U) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
         }
@@ -644,6 +645,24 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::SubRegMem;
             instruction.operands.push_back(RegisterOperand{destination, 64});
             instruction.operands.push_back(MemoryOperand{base, displacement, 64});
+        } else if (opcode == 0x31U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated xor register, register");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U || rexX) {
+                throw DecodeError(address, remaining,
+                                  "only register-direct XOR from opcode 31 is supported");
+            }
+            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+            const auto source =
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
+            const auto destination =
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
+            instruction.opcode = Opcode::XorRegReg;
+            instruction.operands.push_back(RegisterOperand{destination, width});
+            instruction.operands.push_back(RegisterOperand{source, width});
         } else if (opcode == 0x3BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated cmp r32, [base+disp]");

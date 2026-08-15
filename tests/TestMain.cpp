@@ -1037,6 +1037,34 @@ void testOrRegisterGeneratedExecution() {
     expectEqual(state.rflags, expectedFlags, "OR r64, r64 flags differ");
 }
 
+void testXor32BitRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> code{0x31, 0xF6, 0x45, 0x31, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegReg,
+           "legacy XOR r32, r32 opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{32}, "legacy XOR r32 width differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[1].operands[0]).reg ==
+               rosa::x86::Register::R8,
+           "REX XOR r8d destination differs");
+
+    const rosa::dbt::Translator translator;
+    const auto zeroEsi = translator.translate(code, rosa::guest::GuestAddress{0x1000}, 1);
+    const auto zeroR8 = translator.translate(std::span(code).subspan(2),
+                                             rosa::guest::GuestAddress{0x1002}, 1);
+    rosa::x86::X86State state;
+    state.rsi = UINT64_MAX;
+    state.r8 = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(zeroEsi.execute(state));
+    expectEqual(state.rsi, std::uint64_t{0}, "XOR esi, esi did not clear RSI");
+    expectEqual(state.rflags, std::uint64_t{0x46}, "XOR esi, esi flags differ");
+    static_cast<void>(zeroR8.execute(state));
+    expectEqual(state.r8, std::uint64_t{0}, "XOR r8d, r8d did not clear R8");
+    expectEqual(state.rflags, std::uint64_t{0x46}, "XOR r8d, r8d flags differ");
+}
+
 void testXorpsRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x57, 0xC1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -1679,6 +1707,7 @@ int main() {
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
+        {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
