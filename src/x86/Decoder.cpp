@@ -836,9 +836,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         if (code[cursor] == 0x0FU) {
             if (code.size() - cursor < 6 ||
                 (code[cursor + 1] != 0x83U && code[cursor + 1] != 0x84U &&
-                 code[cursor + 1] != 0x85U && code[cursor + 1] != 0x87U)) {
+                 code[cursor + 1] != 0x85U && code[cursor + 1] != 0x86U &&
+                 code[cursor + 1] != 0x87U)) {
                 throw DecodeError(address, remaining,
-                                  "only JAE/JE/JNE/JA rel32 from opcode 0F is supported");
+                                  "only JAE/JE/JNE/JBE/JA rel32 from opcode 0F is supported");
             }
             const auto secondOpcode = code[cursor + 1];
             const auto displacement = readI32(code.subspan(cursor + 2, 4));
@@ -846,6 +847,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.condition = secondOpcode == 0x83U   ? Condition::AboveOrEqual
                                     : secondOpcode == 0x84U ? Condition::Equal
                                     : secondOpcode == 0x85U ? Condition::NotEqual
+                                    : secondOpcode == 0x86U ? Condition::BelowOrEqual
                                                             : Condition::Above;
             instruction.length = 6;
             std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 6,

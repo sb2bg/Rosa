@@ -3212,6 +3212,36 @@ void testUnsignedBelowOrEqualConditional() {
     expectEqual(notTaken.rflags, std::uint64_t{0x2}, "JBE changed guest flags");
 }
 
+void testUnsignedBelowOrEqualLongConditional() {
+    constexpr std::array<std::uint8_t, 6> code{0x0F, 0x86, 0x02, 0, 0, 0};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].condition == rosa::x86::Condition::BelowOrEqual,
+           "JBE rel32 condition differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State carryTaken;
+    carryTaken.rflags = 0x3;
+    static_cast<void>(block.execute(carryTaken));
+    expectEqual(carryTaken.rip, std::uint64_t{0x1008},
+                "JBE rel32 did not take with CF set");
+
+    rosa::x86::X86State zeroTaken;
+    zeroTaken.rflags = 0x42;
+    static_cast<void>(block.execute(zeroTaken));
+    expectEqual(zeroTaken.rip, std::uint64_t{0x1008},
+                "JBE rel32 did not take with ZF set");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rflags = 0x2;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rip, std::uint64_t{0x1006},
+                "JBE rel32 took with CF and ZF clear");
+    expectEqual(notTaken.rflags, std::uint64_t{0x2},
+                "JBE rel32 changed flags");
+}
+
 void testSignedLessOrEqualConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x7E, 0x02}; // jle 0x1004
     const rosa::x86::Decoder decoder;
@@ -3450,6 +3480,8 @@ int main() {
         {"unsigned-above-or-equal long conditional",
          testUnsignedAboveOrEqualLongConditional},
         {"unsigned-below-or-equal conditional", testUnsignedBelowOrEqualConditional},
+        {"unsigned-below-or-equal long conditional",
+         testUnsignedBelowOrEqualLongConditional},
         {"signed-less-or-equal conditional", testSignedLessOrEqualConditional},
         {"controlled Mach-O parsing", testControlledMachOParsing},
         {"universal Mach-O x86 selection", testUniversalMachOX86Selection},
