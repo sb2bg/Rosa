@@ -741,6 +741,17 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("inc64_memory", CaseId::inc64_memory,
+                             differentialBytes_inc64_memory);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.state.rflags |= carryFlag;
+        const std::uint64_t value = INT64_MAX;
+        std::memcpy(testCase.request.memory.data() + 24, &value, sizeof(value));
+        testCase.memoryCompareOffset = 24;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("xor64_memory", CaseId::xor64_memory,
                              differentialBytes_xor64_memory);
         bindMemory(testCase, rosa::x86::Register::Rax, 0);
@@ -1595,6 +1606,78 @@ void testIncrement16BitGuestMemory() {
                 "failed INC word changed high memory byte");
     expectEqual(state.rflags, std::uint64_t{0xAD7},
                 "failed INC word changed flags");
+}
+
+void testIncrement64BitGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x49, 0xFF, 0x46, 0x18, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::IncMem,
+           "INC qword [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "INC qword [memory] length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::R14,
+           "INC qword [memory] base differs");
+    expectEqual(memory.displacement, std::int64_t{0x18},
+                "INC qword [memory] displacement differs");
+    expectEqual(memory.width, std::uint8_t{64},
+                "INC qword [memory] width differs");
+    expect(rosa::debug::dumpX86(decoded).find("inc qword [r14+0x18]") !=
+               std::string::npos,
+           "INC qword [memory] dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r14 = 0x8100;
+    state.rflags = 0x3;
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8118}, INT64_MAX);
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8118}),
+                std::uint64_t{0x8000000000000000ULL},
+                "INC qword overflow result differs");
+    expectEqual(state.r14, std::uint64_t{0x8100},
+                "INC qword changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0x897},
+                "INC qword overflow flags differ or CF changed");
+
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8118}, UINT64_MAX);
+    state.rflags = 0x2;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8118}),
+                std::uint64_t{0}, "INC qword wrap result differs");
+    expectEqual(state.rflags, std::uint64_t{0x56},
+                "INC qword wrap flags differ or CF changed");
+
+    std::array<std::uint8_t, 0x20> readOnlyBytes{};
+    const std::uint64_t sentinel = 0x0123456789ABCDEFULL;
+    std::memcpy(readOnlyBytes.data() + 0x18, &sentinel, sizeof(sentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        rosa::guest::GuestAddress{0x9000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read, readOnlyBytes,
+        "read-only qword increment test");
+    state.r14 = 0x9000;
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "INC qword on read-only guest memory did not fault");
+    expectEqual(readOnlyAddressSpace.readU64(rosa::guest::GuestAddress{0x9018}),
+                sentinel, "failed INC qword changed guest memory");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "failed INC qword changed flags");
 }
 
 void testCompare32BitRegisterWithGuestMemory() {
@@ -6821,6 +6904,7 @@ int main() {
         {"INC 32-bit register", testIncrement32BitRegister},
         {"DEC 32-bit register", testDecrement32BitRegister},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},
+        {"INC 64-bit guest memory", testIncrement64BitGuestMemory},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
         {"CMP byte register with scaled guest memory",
          testCompareByteRegisterWithScaledGuestMemory},

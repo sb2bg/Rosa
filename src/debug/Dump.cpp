@@ -345,7 +345,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         }
         case x86::Opcode::IncMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "inc word [" << x86::registerName(memory.base);
+            stream << "inc " << (memory.width == 16 ? "word" : "qword")
+                   << " [" << x86::registerName(memory.base);
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
