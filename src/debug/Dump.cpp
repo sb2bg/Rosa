@@ -57,6 +57,8 @@ const char *conditionName(x86::Condition condition) {
         return "a";
     case x86::Condition::BelowOrEqual:
         return "be";
+    case x86::Condition::LessOrEqual:
+        return "le";
     }
     return "?";
 }

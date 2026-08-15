@@ -1912,6 +1912,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
             case ir::ExitKind::Conditional: {
                 constexpr std::uint8_t zeroFlagBit = 6;
                 constexpr std::uint8_t carryFlagBit = 0;
+                constexpr std::uint8_t signFlagBit = 7;
                 const auto notTaken = assembler.makeLabel();
                 const auto taken = assembler.makeLabel();
                 const auto selected = assembler.makeLabel();
@@ -1926,9 +1927,15 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 } else if (*operation.condition == x86::Condition::Above) {
                     assembler.tbnz(arm64::x16, carryFlagBit, notTaken);
                     assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
-                } else {
+                } else if (*operation.condition == x86::Condition::BelowOrEqual) {
                     assembler.tbnz(arm64::x16, carryFlagBit, taken);
                     assembler.tbz(arm64::x16, zeroFlagBit, notTaken);
+                } else {
+                    assembler.tbnz(arm64::x16, zeroFlagBit, taken);
+                    // OF is bit 11, so shifting it down by four aligns it with SF.
+                    assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
+                    assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
+                    assembler.tbz(arm64::x17, signFlagBit, notTaken);
                 }
                 assembler.bind(taken);
                 assembler.movImmediate(arm64::x16, operation.target->value);
