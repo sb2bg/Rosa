@@ -42,6 +42,10 @@ class AddressSpace {
   public:
     void mapAnonymous(GuestAddress base, std::size_t size, Permission permissions,
                       std::string_view label = {});
+    void mapAnonymous(GuestAddress base, std::size_t size,
+                      Permission permissions,
+                      Permission maximumPermissions,
+                      std::string_view label = {});
     void mapSegment(GuestAddress base, std::size_t size, Permission permissions,
                     std::span<const std::uint8_t> fileBytes, std::string_view label = {});
     void mapSparseReadOnly(GuestAddress base, std::size_t size, std::size_t dataOffset,
@@ -76,8 +80,11 @@ class AddressSpace {
     [[nodiscard]] const Mapping &find(GuestAddress address, std::size_t size,
                                       Permission required) const;
     [[nodiscard]] Mapping &find(GuestAddress address, std::size_t size, Permission required);
-    void addMapping(GuestAddress base, std::size_t size, Permission permissions,
-                    std::span<const std::uint8_t> initialBytes, std::string_view label);
+    void addMapping(GuestAddress base, std::size_t size,
+                    Permission permissions,
+                    Permission maximumPermissions,
+                    std::span<const std::uint8_t> initialBytes,
+                    std::string_view label);
 
     std::vector<Mapping> mappings_;
 };

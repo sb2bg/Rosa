@@ -27,7 +27,14 @@ bool rangeContains(GuestAddress base, std::size_t mappingSize, GuestAddress addr
 
 void AddressSpace::mapAnonymous(GuestAddress base, std::size_t size, Permission permissions,
                                 std::string_view label) {
-    addMapping(base, size, permissions, {}, label);
+    addMapping(base, size, permissions, permissions, {}, label);
+}
+
+void AddressSpace::mapAnonymous(GuestAddress base, std::size_t size,
+                                Permission permissions,
+                                Permission maximumPermissions,
+                                std::string_view label) {
+    addMapping(base, size, permissions, maximumPermissions, {}, label);
 }
 
 void AddressSpace::mapSegment(GuestAddress base, std::size_t size, Permission permissions,
@@ -35,7 +42,7 @@ void AddressSpace::mapSegment(GuestAddress base, std::size_t size, Permission pe
     if (fileBytes.size() > size) {
         throw std::invalid_argument("guest segment file bytes exceed virtual size");
     }
-    addMapping(base, size, permissions, fileBytes, label);
+    addMapping(base, size, permissions, permissions, fileBytes, label);
 }
 
 void AddressSpace::mapSparseReadOnly(GuestAddress base, std::size_t size,
@@ -45,7 +52,7 @@ void AddressSpace::mapSparseReadOnly(GuestAddress base, std::size_t size,
     if (dataOffset > size || data.size() > size - dataOffset) {
         throw std::invalid_argument("sparse guest data lies outside its mapping");
     }
-    addMapping(base, size, Permission::Read, {}, label);
+    addMapping(base, size, Permission::Read, Permission::Read, {}, label);
     auto &mapping = mappings_.back();
     mapping.readableBytes.resize(size);
     std::fill_n(mapping.readableBytes.begin() + static_cast<std::ptrdiff_t>(dataOffset),
@@ -147,7 +154,9 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
     return ProtectResult::Success;
 }
 
-void AddressSpace::addMapping(GuestAddress base, std::size_t size, Permission permissions,
+void AddressSpace::addMapping(GuestAddress base, std::size_t size,
+                              Permission permissions,
+                              Permission maximumPermissions,
                               std::span<const std::uint8_t> initialBytes,
                               std::string_view label) {
     if (size == 0 || (base.value % guestPageSize) != 0 || (size % guestPageSize) != 0) {
@@ -155,6 +164,10 @@ void AddressSpace::addMapping(GuestAddress base, std::size_t size, Permission pe
     }
     if (base.value > std::numeric_limits<std::uint64_t>::max() - size) {
         throw std::invalid_argument("guest anonymous mapping address overflows");
+    }
+    if (!hasPermission(maximumPermissions, permissions)) {
+        throw std::invalid_argument(
+            "guest mapping permissions exceed maximum permissions");
     }
     const auto end = base.value + size;
     for (const auto &mapping : mappings_) {
@@ -164,7 +177,7 @@ void AddressSpace::addMapping(GuestAddress base, std::size_t size, Permission pe
         }
     }
     std::vector<std::uint8_t> backing;
-    if (permissions != Permission::None) {
+    if (maximumPermissions != Permission::None) {
         backing.resize(size);
         std::copy(initialBytes.begin(), initialBytes.end(), backing.begin());
     }
@@ -172,7 +185,7 @@ void AddressSpace::addMapping(GuestAddress base, std::size_t size, Permission pe
         .base = base,
         .size = size,
         .permissions = permissions,
-        .maximumPermissions = permissions,
+        .maximumPermissions = maximumPermissions,
         .bytes = std::move(backing),
         .label = std::string(label),
     });

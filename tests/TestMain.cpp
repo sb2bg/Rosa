@@ -8695,6 +8695,158 @@ void testMachVmProtectTrap() {
     }
 }
 
+void testMachVmMapTrap() {
+    constexpr rosa::guest::GuestAddress addressPointer{0x8000};
+    constexpr rosa::guest::GuestAddress occupied{0x100000000ULL};
+    constexpr std::size_t requestedSize = 0x20000;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        addressPointer, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "mach_vm_map address pointer");
+    addressSpace.mapAnonymous(
+        occupied, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read, "occupied allocation base");
+    addressSpace.writeU64(addressPointer, 0);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::vmMapTrapNumber;
+    state.rdi = 0x103;
+    state.rsi = addressPointer.value;
+    state.rdx = requestedSize;
+    state.r10 = 0xFFF;
+    state.r8 = 0x3C000001; // VM_MEMORY_DYLD | VM_FLAGS_ANYWHERE
+    state.r9 = 3;          // VM_PROT_READ | VM_PROT_WRITE
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF8000014FCULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "mach_vm_map did not return KERN_SUCCESS");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_vm_map applied BSD carry-flag semantics");
+    const auto mapped = rosa::guest::GuestAddress{
+        addressSpace.readU64(addressPointer)};
+    expectEqual(mapped.value, occupied.value + rosa::guest::guestPageSize,
+                "mach_vm_map anywhere allocation differs");
+    expectEqual(addressSpace.readU64(mapped), std::uint64_t{0},
+                "mach_vm_map anonymous memory was not zero-filled");
+    const auto mappings = addressSpace.mappingInfos();
+    const auto mappedInfo = std::ranges::find_if(
+        mappings, [mapped](const rosa::guest::MappingInfo &mapping) {
+            return mapping.base == mapped;
+        });
+    expect(mappedInfo != mappings.end(),
+           "mach_vm_map did not record the guest mapping");
+    expectEqual(mappedInfo->size, requestedSize,
+                "mach_vm_map guest mapping size differs");
+    expect(mappedInfo->permissions ==
+               (rosa::guest::Permission::Read |
+                rosa::guest::Permission::Write),
+           "mach_vm_map current permissions differ");
+
+    state.rax = rosa::darwin::MachDispatcher::vmProtectTrapNumber;
+    state.rsi = mapped.value;
+    state.rdx = requestedSize;
+    state.r10 = 0;
+    state.r8 = 5; // VM_PROT_READ | VM_PROT_EXECUTE
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "mach_vm_map did not retain VM_PROT_ALL maximum permissions");
+
+    const auto countBeforeFailure = addressSpace.mappingCount();
+    state.rax = rosa::darwin::MachDispatcher::vmMapTrapNumber;
+    state.rdi = 0xDEAD;
+    state.rsi = addressPointer.value;
+    state.rdx = requestedSize;
+    state.r10 = 0xFFF;
+    state.r8 = 0x3C000001;
+    state.r9 = 3;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0x10000003},
+                "mach_vm_map invalid task did not return MACH_SEND_INVALID_DEST");
+    expectEqual(addressSpace.mappingCount(), countBeforeFailure,
+                "failed mach_vm_map changed the mapping count");
+
+    state.rax = rosa::darwin::MachDispatcher::vmMapTrapNumber;
+    state.rdi = 0x103;
+    state.rsi = 0xDEADBEEF;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{1},
+                "mach_vm_map bad address pointer did not return KERN_INVALID_ADDRESS");
+    expectEqual(addressSpace.mappingCount(), countBeforeFailure,
+                "bad-pointer mach_vm_map changed the mapping count");
+
+    state.rax = rosa::darwin::MachDispatcher::vmMapTrapNumber;
+    state.rsi = addressPointer.value;
+    state.r8 = 0x3C000000; // fixed mappings are not implemented yet
+    bool rejected = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("Mach trap") !=
+                   std::string_view::npos;
+    }
+    expect(rejected,
+           "unsupported fixed mach_vm_map did not fail diagnostically");
+}
+
+void testGeneratedMachVmMapTrap() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress addressPointer{0x4000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0x0F, 0x00, 0x00, 0x01, // mov eax, 0x100000f
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(addressPointer, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(addressPointer, 0);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rdi = 0x103;
+    state.rsi = addressPointer.value;
+    state.rdx = 0x20000;
+    state.r10 = 0xFFF;
+    state.r8 = 0x3C000001;
+    state.r9 = 3;
+    state.rflags = 0x8D7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp},
+                          sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated mach_vm_map terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "generated mach_vm_map did not return KERN_SUCCESS");
+    const auto mapped = rosa::guest::GuestAddress{
+        addressSpace.readU64(addressPointer)};
+    expect(mapped.value >= 0x100000000ULL,
+           "generated mach_vm_map returned a low guest address");
+    expectEqual(addressSpace.readU64(mapped), std::uint64_t{0},
+                "generated mach_vm_map did not create zero-filled memory");
+    expectEqual(state.rcx, std::uint64_t{0x1007},
+                "generated mach_vm_map syscall fallthrough differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "generated mach_vm_map changed guest flags");
+}
+
 void testGeneratedMachVmProtectTrap() {
     constexpr rosa::guest::GuestAddress codeBase{0x1000};
     constexpr rosa::guest::GuestAddress dataBase{0x4000};
@@ -10689,6 +10841,8 @@ int main() {
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
         {"Mach VM protect trap", testMachVmProtectTrap},
+        {"Mach VM map trap", testMachVmMapTrap},
+        {"generated Mach VM map trap", testGeneratedMachVmMapTrap},
         {"generated Mach VM protect trap", testGeneratedMachVmProtectTrap},
         {"unsupported Mach trap diagnostic", testUnsupportedMachTrapDiagnostic},
         {"IR verification", testIrVerification},
