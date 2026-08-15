@@ -34,6 +34,7 @@ enum class Opcode {
     AndRegImm,
     TestRegReg,
     TestReg8Reg8,
+    TestRegImm,
     CmpRegImm,
     CmpRegMem,
     CmpMemImm,

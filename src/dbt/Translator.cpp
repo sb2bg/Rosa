@@ -915,6 +915,24 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateLogicFlags(result, ir::Width::I8, instruction.address);
             break;
         }
+        case x86::Opcode::TestRegImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: test immediate operand count");
+            }
+            const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (reg.width != 8 || immediate.width != 8) {
+                throw std::runtime_error("unsupported internal TEST immediate width");
+            }
+            const auto value = builder.readGuestRegister(reg.reg, ir::Width::I64,
+                                                         instruction.address);
+            const auto mask = builder.constant(immediate.value, ir::Width::I64,
+                                               instruction.address);
+            const auto result = builder.bitAnd(value, mask, ir::Width::I64,
+                                               instruction.address);
+            builder.updateLogicFlags(result, ir::Width::I8, instruction.address);
+            break;
+        }
         case x86::Opcode::CmpRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: cmp operand count");

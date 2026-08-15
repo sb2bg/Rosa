@@ -1122,6 +1122,28 @@ void testLegacyTestLowByteGeneratedExecution() {
                 "TEST signed AL flags differ");
 }
 
+void testTestAccumulatorImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0xA8, 0x03, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestRegImm,
+           "TEST AL, imm8 opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{8}, "TEST AL, imm8 register width differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{3}, "TEST AL, imm8 immediate differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0xABCDEF1234567806ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xABCDEF1234567806ULL},
+                "TEST AL, imm8 changed RAX");
+    expectEqual(state.rflags, std::uint64_t{0x2}, "TEST AL, imm8 flags differ");
+}
+
 void testLfenceGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0xAE, 0xE8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2213,6 +2235,8 @@ int main() {
         {"legacy TEST 32-bit register generated execution",
          testLegacyTest32BitRegisterGeneratedExecution},
         {"legacy TEST low-byte generated execution", testLegacyTestLowByteGeneratedExecution},
+        {"TEST accumulator immediate generated execution",
+         testTestAccumulatorImmediateGeneratedExecution},
         {"LFENCE generated execution", testLfenceGeneratedExecution},
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},
