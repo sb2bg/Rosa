@@ -3518,27 +3518,28 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (extension == 0x0U && mode <= 0x2U && rexW && !rexR && !rexX &&
+            if (extension == 0x0U && mode <= 0x2U && !rexR && !rexX &&
                 rmEncoding != 0x4U &&
-                !(mode == 0 && rmEncoding == 0x5U && !rexB)) {
+                !(mode == 0 && rmEncoding == 0x5U)) {
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
                     if (cursor >= code.size()) {
                         throw DecodeError(address, remaining,
-                                          "truncated INC qword memory disp8");
+                                          "truncated INC memory disp8");
                     }
                     displacement = std::bit_cast<std::int8_t>(code[cursor++]);
                 } else if (mode == 0x2U) {
                     if (code.size() - cursor < 4) {
                         throw DecodeError(address, remaining,
-                                          "truncated INC qword memory disp32");
+                                          "truncated INC memory disp32");
                     }
                     displacement = readI32(code.subspan(cursor, 4));
                     cursor += 4;
                 }
                 instruction.opcode = Opcode::IncMem;
                 instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(rmEncoding, rexB), displacement, 64});
+                    decodeRegister(rmEncoding, rexB), displacement,
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             } else if (extension == 0x1U && mode <= 0x2U && rexW && !rexR &&
                        !rexX && rmEncoding != 0x4U &&
                        !(mode == 0 && rmEncoding == 0x5U && !rexB)) {

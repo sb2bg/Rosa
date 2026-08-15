@@ -646,6 +646,40 @@ incrementGuest16(GuestExecutionContext *context, x86::X86State *state,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+incrementGuest32(GuestExecutionContext *context, x86::X86State *state,
+                 std::uint64_t address) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated 32-bit guest increment has no address space");
+        }
+        constexpr auto width = sizeof(std::uint32_t);
+        context->addressSpace->validateAccess(
+            guest::GuestAddress{address}, width,
+            guest::Permission::Read | guest::Permission::Write);
+        const auto original =
+            context->addressSpace->readU32(guest::GuestAddress{address});
+        const auto result = static_cast<std::uint32_t>(original + 1U);
+        const std::array resultBytes{
+            static_cast<std::uint8_t>(result),
+            static_cast<std::uint8_t>(result >> 8U),
+            static_cast<std::uint8_t>(result >> 16U),
+            static_cast<std::uint8_t>(result >> 24U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address},
+                                          resultBytes);
+        return updateIncFlags32(state, original, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 incrementGuest64(GuestExecutionContext *context, x86::X86State *state,
                  std::uint64_t address) noexcept {
     try {
@@ -1883,6 +1917,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                              instruction.address);
             builder.incrementGuestMemory(address,
                                          memory.width == 16 ? ir::Width::I16
+                                         : memory.width == 32 ? ir::Width::I32
                                                             : ir::Width::I64,
                                          instruction.address);
             break;
@@ -3159,9 +3194,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
         }
         case ir::Opcode::IncrementGuestMemory: {
             if (operation.width != ir::Width::I16 &&
+                operation.width != ir::Width::I32 &&
                 operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 16- and 64-bit guest memory increment");
+                    "ARM64 backend only implements 16-, 32-, and 64-bit guest memory increment");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -3173,6 +3209,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 arm64::x16,
                 operation.width == ir::Width::I16
                     ? pointerBits(&incrementGuest16)
+                : operation.width == ir::Width::I32
+                    ? pointerBits(&incrementGuest32)
                     : pointerBits(&incrementGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);

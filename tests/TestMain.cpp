@@ -453,6 +453,34 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "inc32_extended_memory_overflow",
+            CaseId::inc32_extended_memory_overflow,
+            differentialBytes_inc32_extended_memory_overflow);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.state.rflags |= carryFlag;
+        constexpr std::uint32_t memoryValue = 0x7FFFFFFFU;
+        std::memcpy(testCase.request.memory.data() + 0xD0, &memoryValue,
+                    sizeof(memoryValue));
+        testCase.memoryCompareOffset = 0xD0;
+        testCase.memoryCompareSize = sizeof(memoryValue);
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "inc32_extended_memory_wrap",
+            CaseId::inc32_extended_memory_wrap,
+            differentialBytes_inc32_extended_memory_wrap);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.state.rflags &= ~carryFlag;
+        constexpr std::uint32_t memoryValue = UINT32_MAX;
+        std::memcpy(testCase.request.memory.data() + 0xD0, &memoryValue,
+                    sizeof(memoryValue));
+        testCase.memoryCompareOffset = 0xD0;
+        testCase.memoryCompareSize = sizeof(memoryValue);
+        run(testCase);
+    }
+    {
         auto testCase = make("inc8_overflow", CaseId::inc8_overflow,
                              differentialBytes_inc8_overflow);
         testCase.request.state.r8 = 0x112233445566777FULL;
@@ -2732,6 +2760,88 @@ void testIncrement16BitGuestMemory() {
                 "failed INC word changed high memory byte");
     expectEqual(state.rflags, std::uint64_t{0xAD7},
                 "failed INC word changed flags");
+}
+
+void testIncrement32BitGuestMemory() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x41, 0xFF, 0x86, 0xD0, 0x00, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::IncMem,
+           "INC dword [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "INC dword [memory] length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::R14 &&
+               memory.displacement == 0xD0 && memory.width == 32,
+           "INC dword [r14+disp32] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "inc dword [r14+0xd0]") != std::string::npos,
+           "INC dword [memory] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x80D0};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+
+    addressSpace.writeU64(target, 0xDEADBEEF7FFFFFFFULL);
+    rosa::x86::X86State overflowState;
+    overflowState.r14 = page.value;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(block.execute(overflowState, &addressSpace));
+    expectEqual(addressSpace.readU64(target),
+                std::uint64_t{0xDEADBEEF80000000ULL},
+                "INC dword changed bytes outside its operand");
+    expectEqual(overflowState.r14, page.value,
+                "INC dword changed its base register");
+    expectEqual(overflowState.rflags, std::uint64_t{0x897},
+                "INC dword overflow flags differ or CF changed");
+
+    addressSpace.writeU64(target, 0xA5A5A5A5FFFFFFFFULL);
+    rosa::x86::X86State wrapState;
+    wrapState.r14 = page.value;
+    wrapState.rflags = 0x8D6;
+    static_cast<void>(block.execute(wrapState, &addressSpace));
+    expectEqual(addressSpace.readU64(target),
+                std::uint64_t{0xA5A5A5A500000000ULL},
+                "INC dword wrap result differs");
+    expectEqual(wrapState.rflags, std::uint64_t{0x56},
+                "INC dword wrap flags differ or CF changed");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[0xD0] = 0xFF;
+    readOnlyBytes[0xD1] = 0xFF;
+    readOnlyBytes[0xD2] = 0xFF;
+    readOnlyBytes[0xD3] = 0x7F;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        page, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        readOnlyBytes, "read-only dword increment test");
+    rosa::x86::X86State faultState;
+    faultState.r14 = page.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "INC dword accepted read-only guest memory");
+    expectEqual(readOnlyAddressSpace.readU32(target),
+                std::uint32_t{0x7FFFFFFF},
+                "faulted INC dword changed guest memory");
+    expectEqual(faultState.r14, page.value,
+                "faulted INC dword changed its base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted INC dword changed flags");
 }
 
 void testIncrement64BitGuestMemory() {
@@ -11619,6 +11729,7 @@ int main() {
         {"DEC 32-bit register", testDecrement32BitRegister},
         {"DEC low-byte register", testDecrementLowByteRegister},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},
+        {"INC 32-bit guest memory", testIncrement32BitGuestMemory},
         {"INC 64-bit guest memory", testIncrement64BitGuestMemory},
         {"DEC 64-bit guest memory", testDecrement64BitGuestMemory},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
