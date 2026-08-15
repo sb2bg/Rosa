@@ -551,6 +551,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "cmp64_accumulator_immediate",
+            CaseId::cmp64_accumulator_immediate,
+            differentialBytes_cmp64_accumulator_immediate);
+        testCase.request.state.rax = 0x409F;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "cmp64_accumulator_sign_extended",
+            CaseId::cmp64_accumulator_sign_extended,
+            differentialBytes_cmp64_accumulator_sign_extended);
+        testCase.request.state.rax = 0;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp32_register_legacy",
                              CaseId::cmp32_register_legacy,
                              differentialBytes_cmp32_register_legacy);
@@ -3839,7 +3855,7 @@ void testCompare32BitRegisterWithImmediate() {
                 "CMP r32, imm32 equal flags differ");
 }
 
-void testCompareEaxAccumulatorImmediate() {
+void testCompareAccumulatorImmediate() {
     constexpr std::array<std::uint8_t, 6> code{
         0x3D, 0x22, 0x00, 0x00, 0x80, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3862,6 +3878,58 @@ void testCompareEaxAccumulatorImmediate() {
                 "CMP EAX, imm32 changed RAX");
     expectEqual(state.rflags, std::uint64_t{0x46},
                 "CMP EAX, imm32 equal flags differ");
+
+    constexpr std::array<std::uint8_t, 7> observed{
+        0x48, 0x3D, 0x01, 0x00, 0x02, 0x00, 0xC3};
+    const auto observedDecoded = decoder.decodeBlock(
+        observed, rosa::guest::GuestAddress{0x2000});
+    expect(observedDecoded[0].opcode == rosa::x86::Opcode::CmpRegImm,
+           "CMP RAX, imm32 opcode differs");
+    expectEqual(observedDecoded[0].length, std::uint8_t{6},
+                "CMP RAX, imm32 length differs");
+    const auto observedDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            observedDecoded[0].operands[0]);
+    const auto observedImmediate =
+        std::get<rosa::x86::ImmediateOperand>(
+            observedDecoded[0].operands[1]);
+    expect(observedDestination.reg == rosa::x86::Register::Rax &&
+               observedDestination.width == 64,
+           "CMP RAX, imm32 destination differs");
+    expect(observedImmediate.width == 32 &&
+               observedImmediate.value == 0x20001,
+           "CMP RAX, imm32 immediate differs");
+    expect(rosa::debug::dumpX86(observedDecoded).find(
+               "cmp rax, 0x20001") != std::string::npos,
+           "CMP RAX, imm32 dump differs");
+    const auto observedBlock = translator.translate(
+        observed, rosa::guest::GuestAddress{0x2000});
+    state.rax = 0x409F;
+    state.rflags = 0x8D7;
+    static_cast<void>(observedBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x409F},
+                "CMP RAX, imm32 changed RAX");
+    expectEqual(state.rflags, std::uint64_t{0x83},
+                "CMP RAX, imm32 flags differ");
+
+    constexpr std::array<std::uint8_t, 7> negative{
+        0x48, 0x3D, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3};
+    const auto negativeDecoded = decoder.decodeBlock(
+        negative, rosa::guest::GuestAddress{0x3000});
+    expectEqual(
+        std::get<rosa::x86::ImmediateOperand>(
+            negativeDecoded[0].operands[1]).value,
+        UINT64_MAX,
+        "CMP RAX, imm32 was not sign-extended");
+    const auto negativeBlock = translator.translate(
+        negative, rosa::guest::GuestAddress{0x3000});
+    state.rax = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(negativeBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0},
+                "CMP RAX, negative imm32 changed RAX");
+    expectEqual(state.rflags, std::uint64_t{0x13},
+                "CMP RAX, negative imm32 flags differ");
 }
 
 void testCompare32BitRegisterWithShortImmediate() {
@@ -10389,7 +10457,7 @@ int main() {
          testCompareRipRelativeGuestByteWithImmediate},
         {"CMP 8-bit register with immediate", testCompare8BitRegisterWithImmediate},
         {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
-        {"CMP EAX accumulator immediate", testCompareEaxAccumulatorImmediate},
+        {"CMP accumulator immediate", testCompareAccumulatorImmediate},
         {"CMP 32-bit register with short immediate",
          testCompare32BitRegisterWithShortImmediate},
         {"CMP 64-bit registers", testCompare64BitRegisters},

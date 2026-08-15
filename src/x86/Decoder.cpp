@@ -1755,6 +1755,21 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.operands.push_back(RegisterOperand{Register::Rax, 64});
             instruction.operands.push_back(ImmediateOperand{
                 static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 32});
+        } else if (opcode == 0x3DU && rexW) {
+            if (code.size() - cursor < sizeof(std::uint32_t)) {
+                throw DecodeError(address, remaining,
+                                  "truncated cmp rax, imm32");
+            }
+            const auto immediate =
+                readI32(code.subspan(cursor, sizeof(std::uint32_t)));
+            cursor += sizeof(std::uint32_t);
+            instruction.opcode = Opcode::CmpRegImm;
+            instruction.operands.push_back(
+                RegisterOperand{Register::Rax, 64});
+            instruction.operands.push_back(ImmediateOperand{
+                static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(immediate)),
+                32});
         } else if (opcode == 0x0FU) {
             if (cursor >= code.size()) {
                 throw DecodeError(address, remaining, "truncated REX.W 0F opcode");
