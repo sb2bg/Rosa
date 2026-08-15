@@ -2206,6 +2206,50 @@ void testXor32BitRegisterFromGuestMemory() {
                 "legacy XOR r32, [memory] flags differ");
 }
 
+void testXor64BitRegisterFromGuestMemory() {
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0x33, 0x08, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegMem,
+           "XOR r64, [memory] opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{64}, "XOR r64, [memory] width differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8100},
+                          0x44454B4E494C5F5FULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x8100;
+    state.rcx = 0x44454B4E494C5F5FULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rcx, std::uint64_t{0}, "XOR r64, [memory] result differs");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "XOR r64, [memory] flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    state.rcx = 0x1122334455667788ULL;
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "XOR r64 from unmapped guest memory did not fault");
+    expectEqual(state.rcx, std::uint64_t{0x1122334455667788ULL},
+                "failed XOR r64 changed destination");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "failed XOR r64 changed flags");
+}
+
 void testXor32BitRegisterImmediate() {
     constexpr std::array<std::uint8_t, 7> code{
         0x81, 0xF1, 0x58, 0x54, 0x00, 0x00, 0xC3};
@@ -3872,6 +3916,8 @@ int main() {
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
         {"XOR 32-bit register from guest memory",
          testXor32BitRegisterFromGuestMemory},
+        {"XOR 64-bit register from guest memory",
+         testXor64BitRegisterFromGuestMemory},
         {"XOR 32-bit register immediate", testXor32BitRegisterImmediate},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},

@@ -1302,6 +1302,8 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto destination =
                 std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            const auto width = destination.width == 32 ? ir::Width::I32
+                                                       : ir::Width::I64;
             const auto base = builder.readGuestRegister(memory.base, ir::Width::I64,
                                                         instruction.address);
             const auto displacement = builder.constant(
@@ -1309,15 +1311,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             const auto address = builder.add(base, displacement, ir::Width::I64,
                                              instruction.address);
-            const auto rhs = builder.loadGuest(address, ir::Width::I32,
-                                               instruction.address);
-            const auto lhs = builder.readGuestRegister(destination.reg, ir::Width::I32,
+            const auto rhs = builder.loadGuest(address, width, instruction.address);
+            const auto lhs = builder.readGuestRegister(destination.reg, width,
                                                        instruction.address);
-            const auto result = builder.bitXor(lhs, rhs, ir::Width::I32,
+            const auto result = builder.bitXor(lhs, rhs, width,
                                                instruction.address);
-            builder.writeGuestRegister(destination.reg, result, ir::Width::I32,
+            builder.writeGuestRegister(destination.reg, result, width,
                                        instruction.address);
-            builder.updateLogicFlags(result, ir::Width::I32, instruction.address);
+            builder.updateLogicFlags(result, width, instruction.address);
             break;
         }
         case x86::Opcode::XorRegImm: {
