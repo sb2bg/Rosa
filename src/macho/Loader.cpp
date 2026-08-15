@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace rosa::macho {
 namespace {
@@ -30,7 +31,7 @@ guest::GuestAddress slidAddress(guest::GuestAddress address, std::uint64_t slide
 } // namespace
 
 LoadedImage Loader::mapImage(const MachOFile &file, guest::AddressSpace &addressSpace,
-                             std::uint64_t slide) const {
+                             std::uint64_t slide, std::string_view imageName) const {
     std::size_t mappedSegments = 0;
     const auto bytes = file.bytes();
     for (const auto &segment : file.segments()) {
@@ -42,10 +43,13 @@ LoadedImage Loader::mapImage(const MachOFile &file, guest::AddressSpace &address
         }
         const auto begin = static_cast<std::size_t>(segment.fileOffset);
         const auto size = static_cast<std::size_t>(segment.fileSize);
+        const auto mappingLabel = imageName.empty()
+                                      ? segment.name
+                                      : std::string(imageName) + ":" + segment.name;
         addressSpace.mapSegment(slidAddress(segment.virtualAddress, slide),
                                 static_cast<std::size_t>(segment.virtualSize),
                                 translatePermissions(segment.initialProtection),
-                                bytes.subspan(begin, size));
+                                bytes.subspan(begin, size), mappingLabel);
         ++mappedSegments;
     }
     const auto entry = slidAddress(file.entryPoint(), slide);
@@ -55,7 +59,8 @@ LoadedImage Loader::mapImage(const MachOFile &file, guest::AddressSpace &address
 
 LoadedImage Loader::mapImage(const std::filesystem::path &path, guest::AddressSpace &addressSpace,
                              std::uint64_t slide) const {
-    return mapImage(MachOFile::open(path), addressSpace, slide);
+    const auto pathString = path.string();
+    return mapImage(MachOFile::open(path), addressSpace, slide, pathString);
 }
 
 } // namespace rosa::macho

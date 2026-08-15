@@ -47,7 +47,7 @@ InitialStack StartupStackBuilder::build(AddressSpace &addressSpace, GuestAddress
     if (base.value > std::numeric_limits<std::uint64_t>::max() - size) {
         throw std::invalid_argument("initial guest stack range overflows");
     }
-    addressSpace.mapAnonymous(base, size, Permission::Read | Permission::Write);
+    addressSpace.mapAnonymous(base, size, Permission::Read | Permission::Write, "guest stack");
     auto cursor = base.value + size;
 
     const auto appleAddresses = placeStrings(addressSpace, base, cursor, apple);

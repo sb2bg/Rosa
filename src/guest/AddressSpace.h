@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace rosa::guest {
@@ -22,11 +24,19 @@ constexpr Permission operator|(Permission lhs, Permission rhs) {
     return static_cast<Permission>(static_cast<std::uint8_t>(lhs) | static_cast<std::uint8_t>(rhs));
 }
 
+struct MappingInfo {
+    GuestAddress base{};
+    std::size_t size{};
+    Permission permissions{Permission::None};
+    std::string label;
+};
+
 class AddressSpace {
   public:
-    void mapAnonymous(GuestAddress base, std::size_t size, Permission permissions);
+    void mapAnonymous(GuestAddress base, std::size_t size, Permission permissions,
+                      std::string_view label = {});
     void mapSegment(GuestAddress base, std::size_t size, Permission permissions,
-                    std::span<const std::uint8_t> fileBytes);
+                    std::span<const std::uint8_t> fileBytes, std::string_view label = {});
 
     [[nodiscard]] std::uint64_t readU64(GuestAddress address) const;
     [[nodiscard]] std::vector<std::uint8_t> readBytes(GuestAddress address, std::size_t size) const;
@@ -35,6 +45,7 @@ class AddressSpace {
 
     [[nodiscard]] std::span<const std::uint8_t> executableBytes(GuestAddress address) const;
     [[nodiscard]] std::size_t mappingCount() const noexcept { return mappings_.size(); }
+    [[nodiscard]] std::vector<MappingInfo> mappingInfos() const;
 
   private:
     struct Mapping {
@@ -42,13 +53,14 @@ class AddressSpace {
         std::size_t size{};
         Permission permissions{Permission::None};
         std::vector<std::uint8_t> bytes;
+        std::string label;
     };
 
     [[nodiscard]] const Mapping &find(GuestAddress address, std::size_t size,
                                       Permission required) const;
     [[nodiscard]] Mapping &find(GuestAddress address, std::size_t size, Permission required);
     void addMapping(GuestAddress base, std::size_t size, Permission permissions,
-                    std::span<const std::uint8_t> initialBytes);
+                    std::span<const std::uint8_t> initialBytes, std::string_view label);
 
     std::vector<Mapping> mappings_;
 };

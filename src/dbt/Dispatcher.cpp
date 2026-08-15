@@ -11,11 +11,18 @@ std::span<const std::uint8_t> Dispatcher::codeAt(guest::GuestAddress address) co
 DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
                                std::optional<guest::GuestAddress> returnSentinel) {
     DispatchResult result;
+    executedBlocks_ = 0;
+    recentBlocks_.clear();
     while (result.executedBlocks < maximumBlocks) {
         const auto blockAddress = guest::GuestAddress{state.rip};
         auto &block =
             cache_.getOrTranslate(blockAddress, codeAt(blockAddress), maximumInstructionsPerBlock_);
         ++result.executedBlocks;
+        ++executedBlocks_;
+        recentBlocks_.push_back(blockAddress);
+        if (recentBlocks_.size() > 16) {
+            recentBlocks_.pop_front();
+        }
 
         switch (block.execute(state, &addressSpace_)) {
         case BlockExit::Continue:

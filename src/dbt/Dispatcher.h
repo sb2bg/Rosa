@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <optional>
 #include <span>
@@ -33,6 +34,11 @@ class Dispatcher {
         std::optional<guest::GuestAddress> returnSentinel = std::nullopt);
 
     [[nodiscard]] const BlockCache &cache() const noexcept { return cache_; }
+    [[nodiscard]] std::size_t executedBlocks() const noexcept { return executedBlocks_; }
+    [[nodiscard]] std::size_t translatedBlocks() const noexcept { return cache_.size(); }
+    [[nodiscard]] const std::deque<guest::GuestAddress> &recentBlocks() const noexcept {
+        return recentBlocks_;
+    }
 
   private:
     [[nodiscard]] std::span<const std::uint8_t> codeAt(guest::GuestAddress address) const;
@@ -41,6 +47,8 @@ class Dispatcher {
     BlockCache cache_;
     darwin::SyscallDispatcher syscallDispatcher_;
     std::size_t maximumInstructionsPerBlock_;
+    std::size_t executedBlocks_{};
+    std::deque<guest::GuestAddress> recentBlocks_;
 };
 
 } // namespace rosa::dbt

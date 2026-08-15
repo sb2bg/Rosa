@@ -1,8 +1,11 @@
 #include "debug/Dump.h"
 
+#include "x86/Decoder.h"
 #include "x86/Registers.h"
 
+#include <algorithm>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <variant>
 
@@ -21,6 +24,59 @@ std::string valueName(ir::ValueId value) { return "%" + std::to_string(value.val
 
 const char *conditionName(x86::Condition condition) {
     return condition == x86::Condition::Equal ? "e" : "ne";
+}
+
+std::string permissionName(guest::Permission permission) {
+    const auto bits = static_cast<std::uint8_t>(permission);
+    std::string result;
+    result.push_back((bits & static_cast<std::uint8_t>(guest::Permission::Read)) != 0 ? 'r' : '-');
+    result.push_back((bits & static_cast<std::uint8_t>(guest::Permission::Write)) != 0 ? 'w' : '-');
+    result.push_back((bits & static_cast<std::uint8_t>(guest::Permission::Execute)) != 0 ? 'x' : '-');
+    return result;
+}
+
+bool contains(const guest::MappingInfo &mapping, std::uint64_t address) {
+    return address >= mapping.base.value && address < mapping.base.value + mapping.size;
+}
+
+std::uint64_t distanceTo(const guest::MappingInfo &mapping, std::uint64_t address) {
+    if (contains(mapping, address)) {
+        return 0;
+    }
+    if (address < mapping.base.value) {
+        return mapping.base.value - address;
+    }
+    return address - (mapping.base.value + mapping.size - 1U);
+}
+
+const guest::MappingInfo *nearestMapping(std::span<const guest::MappingInfo> mappings,
+                                         std::uint64_t address) {
+    const guest::MappingInfo *result = nullptr;
+    auto bestDistance = std::numeric_limits<std::uint64_t>::max();
+    for (const auto &mapping : mappings) {
+        const auto distance = distanceTo(mapping, address);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            result = &mapping;
+        }
+    }
+    return result;
+}
+
+void dumpMapping(std::ostringstream &stream, std::string_view role,
+                 const guest::MappingInfo *mapping) {
+    stream << "  " << role << ": ";
+    if (mapping == nullptr) {
+        stream << "<no guest mappings>\n";
+        return;
+    }
+    stream << "[0x" << std::hex << mapping->base.value << ",0x"
+           << mapping->base.value + mapping->size << ") "
+           << permissionName(mapping->permissions);
+    if (!mapping->label.empty()) {
+        stream << ' ' << mapping->label;
+    }
+    stream << '\n';
 }
 
 } // namespace
@@ -197,6 +253,77 @@ std::string dumpArm64(const arm64::Program &program) {
         }
         stream << "  " << program.listing[index] << '\n';
     }
+    return stream.str();
+}
+
+std::string dumpGuestFailure(std::string_view imageHint, const std::exception &error,
+                             const x86::X86State &state,
+                             const guest::AddressSpace &addressSpace,
+                             const dbt::Dispatcher &dispatcher) {
+    const auto mappings = addressSpace.mappingInfos();
+    const auto *ripMapping = nearestMapping(mappings, state.rip);
+    const auto *rspMapping = nearestMapping(mappings, state.rsp);
+
+    std::ostringstream stream;
+    stream << "guest fatal: image=";
+    if (ripMapping != nullptr && contains(*ripMapping, state.rip) &&
+        !ripMapping->label.empty()) {
+        stream << ripMapping->label;
+    } else {
+        stream << imageHint;
+    }
+    stream << "\n  reason: " << error.what() << '\n'
+           << "  RIP=0x" << std::hex << state.rip << " RSP=0x" << state.rsp
+           << " RFLAGS=0x" << state.rflags << '\n'
+           << "  GPRs: RAX=0x" << state.rax << " RBX=0x" << state.rbx << " RCX=0x"
+           << state.rcx << " RDX=0x" << state.rdx << " RSI=0x" << state.rsi << " RDI=0x"
+           << state.rdi << " RBP=0x" << state.rbp << '\n'
+           << "        R8=0x" << state.r8 << " R9=0x" << state.r9 << " R10=0x"
+           << state.r10 << " R11=0x" << state.r11 << " R12=0x" << state.r12 << " R13=0x"
+           << state.r13 << " R14=0x" << state.r14 << " R15=0x" << state.r15 << '\n'
+           << "  current instruction:\n";
+
+    if (const auto *decodeError = dynamic_cast<const x86::DecodeError *>(&error)) {
+        stream << "    0x" << std::hex << decodeError->address().value << ':';
+        const auto shown = std::min<std::size_t>(decodeError->remainingBytes().size(), 15);
+        for (std::size_t index = 0; index < shown; ++index) {
+            stream << ' ' << std::setw(2) << std::setfill('0')
+                   << static_cast<unsigned>(decodeError->remainingBytes()[index]);
+        }
+        stream << std::setfill(' ') << "  <unsupported or malformed>\n";
+    } else if (const auto block = dispatcher.cache().blocks().find(state.rip);
+               block != dispatcher.cache().blocks().end()) {
+        stream << dumpX86(block->second->decoded());
+    } else {
+        stream << "    <not decoded>\n";
+    }
+
+    std::vector<std::string> history;
+    for (const auto address : dispatcher.recentBlocks()) {
+        const auto block = dispatcher.cache().blocks().find(address.value);
+        if (block == dispatcher.cache().blocks().end()) {
+            continue;
+        }
+        for (const auto &instruction : block->second->decoded()) {
+            history.push_back(dumpX86(std::span(&instruction, 1)));
+        }
+    }
+    if (history.size() > 16) {
+        history.erase(history.begin(), history.end() - 16);
+    }
+    stream << "  recent guest instructions:\n";
+    if (history.empty()) {
+        stream << "    <none>\n";
+    } else {
+        for (const auto &line : history) {
+            stream << "    " << line;
+        }
+    }
+    stream << "  mappings near RIP/RSP:\n";
+    dumpMapping(stream, "RIP", ripMapping);
+    dumpMapping(stream, "RSP", rspMapping);
+    stream << "  blocks: executed=" << std::dec << dispatcher.executedBlocks()
+           << " translations=" << dispatcher.translatedBlocks() << '\n';
     return stream.str();
 }
 

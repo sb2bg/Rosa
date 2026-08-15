@@ -274,7 +274,14 @@ int runMachO(const std::filesystem::path &path, const DumpOptions &options) {
     state.rip = image.entryPoint.value;
     state.rsp = stack.stackPointer.value;
     rosa::dbt::Dispatcher dispatcher(addressSpace);
-    const auto result = dispatcher.run(state, 1'000);
+    rosa::dbt::DispatchResult result;
+    try {
+        result = dispatcher.run(state, 1'000);
+    } catch (const std::exception &error) {
+        std::cerr << rosa::debug::dumpGuestFailure(path.string(), error, state, addressSpace,
+                                                   dispatcher);
+        throw;
+    }
     dumpCachedBlocks(dispatcher, options);
     if (!result.exited) {
         throw std::runtime_error("top-level Mach-O returned without Darwin exit(2)");
@@ -299,9 +306,11 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
 
     rosa::guest::AddressSpace addressSpace;
     const rosa::macho::Loader loader;
-    const auto executable = loader.mapImage(executableFile, addressSpace);
-    const auto dyld = loader.mapImage(dyldFile, addressSpace, dyldSlide);
     const auto executableString = executablePath.string();
+    const auto dyldString = dyldPath.string();
+    const auto executable =
+        loader.mapImage(executableFile, addressSpace, 0, executableString);
+    const auto dyld = loader.mapImage(dyldFile, addressSpace, dyldSlide, dyldString);
     const std::vector<std::string> arguments{executableString};
     const std::vector<std::string> environment;
     const std::vector<std::string> apple{
@@ -331,6 +340,8 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
         }
         throw std::runtime_error("dyld returned without a guest exit syscall");
     } catch (const std::exception &error) {
+        std::cerr << rosa::debug::dumpGuestFailure(dyldString, error, state, addressSpace,
+                                                   dispatcher);
         dumpCachedBlocks(dispatcher, options);
         throw std::runtime_error("dyld experiment stopped after " +
                                  std::to_string(dispatcher.cache().size()) +

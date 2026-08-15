@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <string_view>
 #include <vector>
 
 namespace rosa::macho {
@@ -19,7 +20,8 @@ struct LoadedImage {
 class Loader {
   public:
     [[nodiscard]] LoadedImage mapImage(const MachOFile &file, guest::AddressSpace &addressSpace,
-                                       std::uint64_t slide = 0) const;
+                                       std::uint64_t slide = 0,
+                                       std::string_view imageName = {}) const;
     [[nodiscard]] LoadedImage mapImage(const std::filesystem::path &path,
                                        guest::AddressSpace &addressSpace,
                                        std::uint64_t slide = 0) const;

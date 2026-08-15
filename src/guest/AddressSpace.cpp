@@ -25,20 +25,22 @@ bool rangeContains(GuestAddress base, std::size_t mappingSize, GuestAddress addr
 
 } // namespace
 
-void AddressSpace::mapAnonymous(GuestAddress base, std::size_t size, Permission permissions) {
-    addMapping(base, size, permissions, {});
+void AddressSpace::mapAnonymous(GuestAddress base, std::size_t size, Permission permissions,
+                                std::string_view label) {
+    addMapping(base, size, permissions, {}, label);
 }
 
 void AddressSpace::mapSegment(GuestAddress base, std::size_t size, Permission permissions,
-                              std::span<const std::uint8_t> fileBytes) {
+                              std::span<const std::uint8_t> fileBytes, std::string_view label) {
     if (fileBytes.size() > size) {
         throw std::invalid_argument("guest segment file bytes exceed virtual size");
     }
-    addMapping(base, size, permissions, fileBytes);
+    addMapping(base, size, permissions, fileBytes, label);
 }
 
 void AddressSpace::addMapping(GuestAddress base, std::size_t size, Permission permissions,
-                              std::span<const std::uint8_t> initialBytes) {
+                              std::span<const std::uint8_t> initialBytes,
+                              std::string_view label) {
     if (size == 0 || (base.value % guestPageSize) != 0 || (size % guestPageSize) != 0) {
         throw std::invalid_argument("guest mappings must be nonempty and 4 KiB aligned");
     }
@@ -62,7 +64,22 @@ void AddressSpace::addMapping(GuestAddress base, std::size_t size, Permission pe
         .size = size,
         .permissions = permissions,
         .bytes = std::move(backing),
+        .label = std::string(label),
     });
+}
+
+std::vector<MappingInfo> AddressSpace::mappingInfos() const {
+    std::vector<MappingInfo> result;
+    result.reserve(mappings_.size());
+    for (const auto &mapping : mappings_) {
+        result.push_back(MappingInfo{
+            .base = mapping.base,
+            .size = mapping.size,
+            .permissions = mapping.permissions,
+            .label = mapping.label,
+        });
+    }
+    return result;
 }
 
 const AddressSpace::Mapping &AddressSpace::find(GuestAddress address, std::size_t size,

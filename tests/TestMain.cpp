@@ -2,6 +2,7 @@
 #include "arm64/CodeBuffer.h"
 #include "dbt/Dispatcher.h"
 #include "dbt/Translator.h"
+#include "debug/Dump.h"
 #include "guest/Address.h"
 #include "guest/AddressSpace.h"
 #include "guest/StartupStack.h"
@@ -408,7 +409,8 @@ void testGuestAddressSpace() {
     constexpr rosa::guest::GuestAddress base{0x4000};
     rosa::guest::AddressSpace addressSpace;
     addressSpace.mapAnonymous(base, rosa::guest::guestPageSize,
-                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+                              "test mapping");
     addressSpace.writeU64(rosa::guest::GuestAddress{0x4FF8}, 0x0123456789ABCDEFULL);
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x4FF8}),
                 std::uint64_t{0x0123456789ABCDEFULL}, "guest memory round trip differs");
@@ -420,6 +422,59 @@ void testGuestAddressSpace() {
         rejected = true;
     }
     expect(rejected, "cross-mapping guest memory access was not rejected");
+    const auto mappings = addressSpace.mappingInfos();
+    expectEqual(mappings.size(), std::size_t{1}, "mapping summary count differs");
+    expectEqual(mappings[0].base.value, base.value, "mapping summary base differs");
+    expectEqual(mappings[0].size, rosa::guest::guestPageSize,
+                "mapping summary size differs");
+    expectEqual(mappings[0].label, std::string("test mapping"),
+                "mapping summary label differs");
+}
+
+void testGuestFailureReport() {
+    constexpr std::array<std::uint8_t, 12> code{
+        0x48, 0xB8, 0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x0B,
+    };
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read | rosa::guest::Permission::Execute,
+                            code, "test-image:__TEXT");
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+                              "test stack");
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize;
+    state.rflags = 0x202;
+    rosa::dbt::Dispatcher dispatcher(addressSpace, 1);
+    std::string report;
+    try {
+        static_cast<void>(dispatcher.run(state, 8));
+    } catch (const rosa::x86::DecodeError &error) {
+        report = rosa::debug::dumpGuestFailure("fallback-image", error, state, addressSpace,
+                                               dispatcher);
+    }
+    expect(!report.empty(), "unsupported instruction did not produce a guest failure report");
+    expect(report.find("image=test-image:__TEXT") != std::string::npos,
+           "guest failure report omitted the current image");
+    expect(report.find("RIP=0x100a") != std::string::npos,
+           "guest failure report omitted RIP");
+    expect(report.find("RSP=0x9000") != std::string::npos,
+           "guest failure report omitted RSP");
+    expect(report.find("RFLAGS=0x202") != std::string::npos,
+           "guest failure report omitted RFLAGS");
+    expect(report.find("RAX=0x2a") != std::string::npos,
+           "guest failure report omitted general registers");
+    expect(report.find("0f 0b") != std::string::npos,
+           "guest failure report omitted failing instruction bytes");
+    expect(report.find("mov rax, 0x2a") != std::string::npos,
+           "guest failure report omitted recent decoded history");
+    expect(report.find("test stack") != std::string::npos,
+           "guest failure report omitted the stack mapping");
+    expect(report.find("executed=1 translations=1") != std::string::npos,
+           "guest failure report omitted execution counters");
 }
 
 std::string readGuestString(const rosa::guest::AddressSpace &addressSpace,
@@ -625,6 +680,7 @@ int main() {
         {"add signed-overflow flags", testAddFlagsSignedOverflow},
         {"and result/flags", testAndResultAndFlags},
         {"guest address space", testGuestAddressSpace},
+        {"guest failure report", testGuestFailureReport},
         {"initial Darwin stack", testInitialDarwinStack},
         {"R2 multi-block control flow", testR2MultiBlockControlFlow},
         {"R2 taken conditional", testR2TakenConditional},
