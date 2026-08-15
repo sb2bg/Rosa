@@ -298,6 +298,7 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
     constexpr std::uint64_t dyldSlide = 0x00007FF800000000ULL;
     constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
     constexpr std::size_t stackSize = 1024U * 1024U;
+    constexpr std::size_t maximumProbeBlocks = 4096;
 
     const auto executableFile = rosa::macho::MachOFile::open(executablePath);
     const auto dyldFile = rosa::macho::MachOFile::open(dyldPath);
@@ -336,7 +337,7 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
     rosa::dbt::Dispatcher dispatcher(addressSpace, 1,
                                      &rosa::darwin::sampleX86TimestampCounter);
     try {
-        const auto result = dispatcher.run(state, 64);
+        const auto result = dispatcher.run(state, maximumProbeBlocks);
         dumpCachedBlocks(dispatcher, options);
         if (result.exited) {
             std::cout << "dyld experiment exited: status=" << result.exitStatus << '\n';
