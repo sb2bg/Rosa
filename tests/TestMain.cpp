@@ -339,6 +339,14 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("add8_register_overflow",
+                             CaseId::add8_register_overflow,
+                             differentialBytes_add8_register_overflow);
+        testCase.request.state.rsi = 0x112233445566777FULL;
+        testCase.request.state.r9 = 0x8877665544332201ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("sub64_borrow", CaseId::sub64_borrow,
                              differentialBytes_sub64_borrow);
         testCase.request.state.rdi = 5;
@@ -1682,6 +1690,64 @@ void testAddRegisterToRegister() {
     expectEqual(state.r13, std::uint64_t{1}, "ADD r64, r64 result differs");
     expectEqual(state.rbx, std::uint64_t{2}, "ADD r64, r64 changed its source");
     expectEqual(state.rflags, std::uint64_t{0x13}, "ADD r64, r64 flags differ");
+}
+
+void testAddLowByteRegisters() {
+    constexpr std::array<std::uint8_t, 4> code{0x44, 0x00, 0xCE, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddRegReg,
+           "ADD r8, r8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "ADD r8, r8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rsi &&
+               destination.width == 8,
+           "ADD r8, r8 destination differs");
+    expect(source.reg == rosa::x86::Register::R9 && source.width == 8,
+           "ADD r8, r8 source differs");
+    expect(rosa::debug::dumpX86(decoded).find("add sil, r9b") !=
+               std::string::npos,
+           "ADD r8, r8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State overflowState;
+    overflowState.rsi = 0x112233445566777FULL;
+    overflowState.r9 = 0x8877665544332201ULL;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(block.execute(overflowState));
+    expectEqual(overflowState.rsi, std::uint64_t{0x1122334455667780ULL},
+                "ADD r8, r8 did not preserve upper destination bits");
+    expectEqual(overflowState.r9, std::uint64_t{0x8877665544332201ULL},
+                "ADD r8, r8 changed its source");
+    expectEqual(overflowState.rflags, std::uint64_t{0x892},
+                "ADD r8 signed-overflow flags differ");
+
+    rosa::x86::X86State carryState;
+    carryState.rsi = 0xAABBCCDDEEFF00FFULL;
+    carryState.r9 = 0x1020304050607001ULL;
+    carryState.rflags = 0x802;
+    static_cast<void>(block.execute(carryState));
+    expectEqual(carryState.rsi, std::uint64_t{0xAABBCCDDEEFF0000ULL},
+                "ADD r8 carry result differs");
+    expectEqual(carryState.rflags, std::uint64_t{0x57},
+                "ADD r8 carry flags differ");
+
+    constexpr std::array<std::uint8_t, 3> highByteCode{0x00, 0xCE, 0xC3};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            highByteCode, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected, "ADD silently represented legacy DH as SIL");
 }
 
 void testIncrement32BitRegister() {
@@ -8721,6 +8787,7 @@ int main() {
         {"SUB 32-bit register from guest memory", testSub32BitRegisterFromGuestMemory},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
+        {"ADD low-byte registers", testAddLowByteRegisters},
         {"INC 32-bit register", testIncrement32BitRegister},
         {"DEC 32-bit register", testDecrement32BitRegister},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},

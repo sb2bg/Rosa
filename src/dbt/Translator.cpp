@@ -443,6 +443,36 @@ updateAddFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *
+updateAddFlags8(x86::X86State *state, std::uint64_t lhsValue,
+                std::uint64_t rhsValue, std::uint64_t resultValue) {
+    const auto lhs = static_cast<std::uint8_t>(lhsValue);
+    const auto rhs = static_cast<std::uint8_t>(rhsValue);
+    const auto result = static_cast<std::uint8_t>(resultValue);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (static_cast<std::uint16_t>(lhs) + static_cast<std::uint16_t>(rhs) >
+        UINT8_MAX) {
+        flags |= flagCarry;
+    }
+    if ((std::popcount(static_cast<unsigned>(result)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (((lhs ^ rhs ^ result) & 0x10U) != 0) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result & 0x80U) != 0) {
+        flags |= flagSign;
+    }
+    if (((~(lhs ^ rhs) & (lhs ^ result)) & 0x80U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 template <typename Value>
 x86::X86State *updateIncFlags(x86::X86State *state, std::uint64_t originalValue,
                               std::uint64_t resultValue) {
@@ -1446,14 +1476,22 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
-            const auto lhs = builder.readGuestRegister(destination.reg, ir::Width::I64,
-                                                       instruction.address);
-            const auto rhs = builder.readGuestRegister(source.reg, ir::Width::I64,
-                                                       instruction.address);
-            const auto result = builder.add(lhs, rhs, ir::Width::I64, instruction.address);
-            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+            if (destination.width != source.width ||
+                (destination.width != 8 && destination.width != 64)) {
+                throw std::runtime_error(
+                    "only 8-bit and 64-bit register ADD are implemented");
+            }
+            const auto width = destination.width == 8 ? ir::Width::I8
+                                                       : ir::Width::I64;
+            const auto lhs = builder.readGuestRegister(
+                destination.reg, width, instruction.address);
+            const auto rhs = builder.readGuestRegister(
+                source.reg, width, instruction.address);
+            const auto result = builder.add(lhs, rhs, width, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, width,
                                        instruction.address);
-            builder.updateAddFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
+            builder.updateAddFlags(lhs, rhs, result, width,
+                                   instruction.address);
             break;
         }
         case x86::Opcode::AddRegMem: {
@@ -2925,7 +2963,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
             assembler.mov(arm64::x3, hostRegister(*operation.third));
             if (operation.opcode == ir::Opcode::UpdateAddFlags) {
-                assembler.movImmediate(arm64::x16, pointerBits(&updateAddFlags64));
+                assembler.movImmediate(
+                    arm64::x16,
+                    operation.width == ir::Width::I8
+                        ? pointerBits(&updateAddFlags8)
+                        : pointerBits(&updateAddFlags64));
             } else {
                 assembler.movImmediate(
                     arm64::x16,

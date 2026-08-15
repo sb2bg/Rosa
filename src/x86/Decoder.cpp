@@ -1617,6 +1617,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         if (!hasRex && code[cursor] != 0x24U && code[cursor] != 0x34U &&
+            code[cursor] != 0x00U &&
             code[cursor] != 0x88U &&
             code[cursor] != 0x89U &&
             code[cursor] != 0x8AU && code[cursor] != 0x8BU &&
@@ -1654,6 +1655,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                               "GS segment override is only supported for MOV r32, r/m32");
         }
         if (!rexW && opcode != 0x24U && opcode != 0x34U &&
+            opcode != 0x00U &&
             opcode != 0x88U && opcode != 0x89U &&
             opcode != 0x8AU &&
             opcode != 0x8BU && opcode != 0x85U &&
@@ -1765,6 +1767,28 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(RegisterOperand{encodedReg, 64});
                 instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
             }
+        } else if (opcode == 0x00U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated add r8, r8");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto sourceEncoding =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto destinationEncoding =
+                static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode != 0x3U ||
+                (!hasRex &&
+                 (sourceEncoding >= 0x4U || destinationEncoding >= 0x4U))) {
+                throw DecodeError(
+                    address, remaining,
+                    "only representable register-direct ADD r8, r8 is supported");
+            }
+            instruction.opcode = Opcode::AddRegReg;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(destinationEncoding, rexB), 8});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(sourceEncoding, rexR), 8});
         } else if (opcode == 0x01U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated add r64, r64");

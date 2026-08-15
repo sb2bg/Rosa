@@ -359,11 +359,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         case x86::Opcode::AddRegReg:
             stream << "add "
-                   << x86::registerName(
-                          std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", "
-                   << x86::registerName(
-                          std::get<x86::RegisterOperand>(instruction.operands[1]).reg);
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
         case x86::Opcode::AddRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
