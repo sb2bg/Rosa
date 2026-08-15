@@ -264,6 +264,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 decodeRegister(static_cast<std::uint8_t>(opcode - 0xB8U), rexB), 64});
             instruction.operands.push_back(ImmediateOperand{readU64(code.subspan(cursor, 8)), 64});
             cursor += sizeof(std::uint64_t);
+        } else if (opcode == 0x0FU) {
+            if (code.size() - cursor < 3 || code[cursor] != 0xACU) {
+                throw DecodeError(address, remaining,
+                                  "only SHRD r64, r64, imm8 is supported from REX.W 0F");
+            }
+            ++cursor;
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U || rexX) {
+                throw DecodeError(address, remaining,
+                                  "only register-direct SHRD is supported");
+            }
+            const auto source =
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
+            const auto destination =
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
+            instruction.opcode = Opcode::ShrdRegRegImm;
+            instruction.operands.push_back(RegisterOperand{destination, 64});
+            instruction.operands.push_back(RegisterOperand{source, 64});
+            instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
         } else if (opcode == 0x09U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated or r64, r64");

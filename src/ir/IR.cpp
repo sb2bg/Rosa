@@ -124,6 +124,21 @@ ValueId Builder::multiplyHighUnsigned(ValueId lhs, ValueId rhs, Width width,
     return result;
 }
 
+ValueId Builder::shiftRightDouble(ValueId low, ValueId high, std::uint8_t count,
+                                  Width width, guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShiftRightDouble,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = low,
+        .rhs = high,
+        .immediate = count,
+    });
+    return result;
+}
+
 ValueId Builder::bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -266,6 +281,19 @@ void Builder::updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress
     });
 }
 
+void Builder::updateShiftRightDoubleFlags(ValueId original, ValueId result,
+                                          std::uint8_t count, Width width,
+                                          guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateShiftRightDoubleFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = original,
+        .rhs = result,
+        .immediate = count,
+    });
+}
+
 void Builder::exitBlock(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::ExitBlock,
@@ -357,6 +385,7 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::Or:
         case Opcode::MultiplyLow:
         case Opcode::MultiplyHighUnsigned:
+        case Opcode::ShiftRightDouble:
             checkUse(operation.lhs, "left");
             checkUse(operation.rhs, "right");
             break;
@@ -391,6 +420,10 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::UpdateMultiplyFlags:
             checkUse(operation.lhs, "high result");
+            break;
+        case Opcode::UpdateShiftRightDoubleFlags:
+            checkUse(operation.lhs, "original");
+            checkUse(operation.rhs, "result");
             break;
         case Opcode::UpdateShiftLeftFlags:
             checkUse(operation.lhs, "original");

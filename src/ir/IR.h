@@ -30,6 +30,7 @@ enum class Opcode {
     ShiftLeft,
     MultiplyLow,
     MultiplyHighUnsigned,
+    ShiftRightDouble,
     And,
     Or,
     LoadGuest,
@@ -42,6 +43,7 @@ enum class Opcode {
     UpdateLogicFlags,
     UpdateShiftLeftFlags,
     UpdateMultiplyFlags,
+    UpdateShiftRightDoubleFlags,
     ExitBlock,
 };
 
@@ -90,6 +92,8 @@ class Builder {
     ValueId multiplyLow(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId multiplyHighUnsigned(ValueId lhs, ValueId rhs, Width width,
                                  guest::GuestAddress rip);
+    ValueId shiftRightDouble(ValueId low, ValueId high, std::uint8_t count, Width width,
+                             guest::GuestAddress rip);
     ValueId bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId bitOr(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId loadGuest(ValueId address, Width width, guest::GuestAddress rip);
@@ -107,6 +111,8 @@ class Builder {
     void updateShiftLeftFlags(ValueId lhs, ValueId result, ValueId count, Width width,
                               guest::GuestAddress rip);
     void updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip);
+    void updateShiftRightDoubleFlags(ValueId original, ValueId result, std::uint8_t count,
+                                     Width width, guest::GuestAddress rip);
     void exitBlock(guest::GuestAddress rip);
     void exitDirect(guest::GuestAddress target, guest::GuestAddress rip);
     void exitConditional(x86::Condition condition, guest::GuestAddress target,

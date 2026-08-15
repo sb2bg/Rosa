@@ -132,6 +132,22 @@ void Assembler::multiplyHighUnsigned(XRegister destination, XRegister lhs, XRegi
                    regName(rhs));
 }
 
+void Assembler::extract(XRegister destination, XRegister high, XRegister low,
+                        std::uint8_t lsb) {
+    requireRegister(destination);
+    requireRegister(high);
+    requireRegister(low);
+    if (lsb >= 64U) {
+        throw std::invalid_argument("64-bit EXTR bit position must be less than 64");
+    }
+    const auto word = 0x93C00000U | (static_cast<std::uint32_t>(low.encoding) << 16U) |
+                      (static_cast<std::uint32_t>(lsb) << 10U) |
+                      (static_cast<std::uint32_t>(high.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "extr " + regName(destination) + ", " + regName(high) + ", " +
+                   regName(low) + ", #" + std::to_string(lsb));
+}
+
 void Assembler::bitAnd(XRegister destination, XRegister lhs, XRegister rhs) {
     requireRegister(destination);
     requireRegister(lhs);

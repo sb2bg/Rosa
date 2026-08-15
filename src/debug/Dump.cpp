@@ -191,6 +191,16 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::registerName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
             break;
+        case x86::Opcode::ShrdRegRegImm:
+            stream << "shrd "
+                   << x86::registerName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
+                   << ", "
+                   << x86::registerName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]).reg)
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(instruction.operands[2]).value;
+            break;
         case x86::Opcode::OrRegReg:
             stream << "or "
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
@@ -302,6 +312,11 @@ std::string dumpIr(const ir::Block &block) {
             stream << "multiply_high_unsigned." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", " << valueName(*operation.rhs);
             break;
+        case ir::Opcode::ShiftRightDouble:
+            stream << "shift_right_double." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", " << valueName(*operation.rhs)
+                   << ", " << std::dec << operation.immediate;
+            break;
         case ir::Opcode::And:
             stream << "and." << widthName(operation.width) << ' ' << valueName(*operation.lhs)
                    << ", " << valueName(*operation.rhs);
@@ -355,6 +370,11 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::UpdateMultiplyFlags:
             stream << "update_multiply_flags." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::UpdateShiftRightDoubleFlags:
+            stream << "update_shift_right_double_flags." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", " << valueName(*operation.rhs)
+                   << ", " << std::dec << operation.immediate;
             break;
         case ir::Opcode::ExitBlock:
             stream << "exit_block ";
