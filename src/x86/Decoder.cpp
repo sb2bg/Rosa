@@ -2984,6 +2984,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
                 static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
+        } else if (opcode == 0xD1U) {
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining,
+                                  "truncated implicit-count shift register");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            if (!rexW || rexR || rexX || mode != 0x3U ||
+                extension != 0x5U) {
+                throw DecodeError(
+                    address, remaining,
+                    "only SHR r64, 1 from opcode D1 /5 is supported");
+            }
+            instruction.opcode = Opcode::ShrRegImm;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                64});
+            instruction.operands.push_back(ImmediateOperand{1, 8});
         } else if (opcode == 0xD3U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated shl register, cl");
