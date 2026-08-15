@@ -576,6 +576,35 @@ updateSubFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateSubFlags8(x86::X86State *state, std::uint64_t lhsValue,
+                std::uint64_t rhsValue, std::uint64_t resultValue) {
+    const auto lhs = static_cast<std::uint8_t>(lhsValue);
+    const auto rhs = static_cast<std::uint8_t>(rhsValue);
+    const auto result = static_cast<std::uint8_t>(resultValue);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (lhs < rhs) {
+        flags |= flagCarry;
+    }
+    if ((std::popcount(static_cast<unsigned>(result)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (((lhs ^ rhs ^ result) & 0x10U) != 0) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result >> 7U) != 0) {
+        flags |= flagSign;
+    }
+    if ((((lhs ^ rhs) & (lhs ^ result)) >> 7U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateSubFlags16(x86::X86State *state, std::uint64_t lhsValue,
                  std::uint64_t rhsValue, std::uint64_t resultValue) {
     const auto lhs = static_cast<std::uint16_t>(lhsValue);
@@ -955,11 +984,13 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 address = builder.add(address, index, ir::Width::I64,
                                       instruction.address);
             }
-            const auto displacement = builder.constant(
-                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
-                instruction.address);
-            address = builder.add(address, displacement, ir::Width::I64,
-                                  instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
             const auto width = destination.width == 8   ? ir::Width::I8
                                : destination.width == 32 ? ir::Width::I32
                                                          : ir::Width::I64;
@@ -1797,14 +1828,34 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto lhsRegister = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
-            const auto width = lhsRegister.width == 32 ? ir::Width::I32 : ir::Width::I64;
-            const auto base =
-                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
-            const auto displacement = builder.constant(
-                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
-                instruction.address);
-            const auto address =
-                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            const auto width = lhsRegister.width == 8   ? ir::Width::I8
+                               : lhsRegister.width == 32 ? ir::Width::I32
+                                                         : ir::Width::I64;
+            auto address = memory.hasBase
+                               ? builder.readGuestRegister(
+                                     memory.base, ir::Width::I64,
+                                     instruction.address)
+                               : builder.constant(0, ir::Width::I64,
+                                                  instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64,
+                                      instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
             const auto rhs = builder.loadGuest(address, width, instruction.address);
             const auto lhs = builder.readGuestRegister(lhsRegister.reg, width,
                                                        instruction.address);
@@ -2424,7 +2475,9 @@ arm64::Program compileToArm64(const ir::Block &block) {
             } else {
                 assembler.movImmediate(
                     arm64::x16,
-                    operation.width == ir::Width::I16
+                    operation.width == ir::Width::I8
+                        ? pointerBits(&updateSubFlags8)
+                    : operation.width == ir::Width::I16
                         ? pointerBits(&updateSubFlags16)
                     : operation.width == ir::Width::I32
                         ? pointerBits(&updateSubFlags32)

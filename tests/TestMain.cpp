@@ -396,6 +396,15 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmp8_scaled_memory", CaseId::cmp8_scaled_memory,
+                             differentialBytes_cmp8_scaled_memory);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.state.rcx = 0x18;
+        testCase.request.state.rdx = 0;
+        testCase.request.memory[0x18] = 0x80;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp32_rip_memory", CaseId::cmp32_rip_memory,
                              differentialBytes_cmp32_rip_memory);
         run(testCase);
@@ -1595,6 +1604,76 @@ void testCompare32BitRegisterWithGuestMemory() {
     expect(rejected, "CMP from unmapped guest memory did not fail");
     expectEqual(faultState.rflags, std::uint64_t{0x8D7},
                 "failed memory CMP changed flags");
+}
+
+void testCompareByteRegisterWithScaledGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x41, 0x3A, 0x14, 0x0E, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8000050A3ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegMem,
+           "SIB byte CMP opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "SIB byte CMP length differs");
+    const auto lhs =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(lhs.reg == rosa::x86::Register::Rdx && lhs.width == 8,
+           "SIB byte CMP register operand differs");
+    expect(memory.base == rosa::x86::Register::R14 &&
+               memory.index == rosa::x86::Register::Rcx &&
+               memory.scale == 1 && memory.displacement == 0 &&
+               memory.width == 8,
+           "SIB byte CMP memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("cmp dl, [r14+rcx*1]") !=
+               std::string::npos,
+           "SIB byte CMP dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> rhs{0x80};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8018}, rhs);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r14 = memoryBase.value;
+    state.rcx = 0x18;
+    state.rdx = 0x1122334455667700ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rdx, std::uint64_t{0x1122334455667700ULL},
+                "SIB byte CMP changed its register operand");
+    expectEqual(state.r14, memoryBase.value,
+                "SIB byte CMP changed its base register");
+    expectEqual(state.rcx, std::uint64_t{0x18},
+                "SIB byte CMP changed its index register");
+    expectEqual(state.rflags, std::uint64_t{0x883},
+                "SIB byte CMP did not compute 8-bit subtraction flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState = state;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SIB byte CMP from unmapped memory did not fault");
+    expectEqual(faultState.rdx, state.rdx,
+                "failed SIB byte CMP changed its register operand");
+    expectEqual(faultState.r14, state.r14,
+                "failed SIB byte CMP changed its base register");
+    expectEqual(faultState.rcx, state.rcx,
+                "failed SIB byte CMP changed its index register");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed SIB byte CMP changed flags");
 }
 
 void testLegacyCompare32BitRegisterWithGuestMemory() {
@@ -6372,6 +6451,8 @@ int main() {
         {"DEC 32-bit register", testDecrement32BitRegister},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
+        {"CMP byte register with scaled guest memory",
+         testCompareByteRegisterWithScaledGuestMemory},
         {"legacy CMP 32-bit register with guest memory",
          testLegacyCompare32BitRegisterWithGuestMemory},
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},

@@ -1404,7 +1404,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
             code[cursor] != 0x21U && code[cursor] != 0x09U &&
             code[cursor] != 0x2BU && code[cursor] != 0x33U &&
-            code[cursor] != 0x3BU && code[cursor] != 0x80U &&
+            code[cursor] != 0x3AU && code[cursor] != 0x3BU &&
+            code[cursor] != 0x80U &&
             code[cursor] != 0x81U && code[cursor] != 0xC1U &&
             code[cursor] != 0xC6U && code[cursor] != 0xD3U &&
             code[cursor] != 0xFFU) {
@@ -1428,6 +1429,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x8DU &&
             opcode != 0x09U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
+            opcode != 0x3AU &&
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
             opcode != 0x2BU && opcode != 0x33U &&
             opcode != 0x21U &&
@@ -1785,6 +1787,66 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::CmpRegReg;
             instruction.operands.push_back(RegisterOperand{lhs, width});
             instruction.operands.push_back(RegisterOperand{rhs, width});
+        } else if (opcode == 0x3AU) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining,
+                                  "truncated cmp byte register, [memory]");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto regEncoding =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode > 0x2U || (!hasRex && regEncoding >= 0x4U) ||
+                (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only CMP byte register, [base+index*scale+disp8/disp32] is supported");
+            }
+            auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated CMP byte memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(address, remaining,
+                                      "no-base CMP byte SIB is not supported");
+                }
+                base = decodeRegister(baseEncoding, rexB);
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated CMP byte memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated CMP byte memory disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::CmpRegMem;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(regEncoding, rexR), 8});
+            instruction.operands.push_back(
+                MemoryOperand{base, displacement, 8, index, scale});
         } else if (opcode == 0x3BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated cmp r32, [base+disp]");
