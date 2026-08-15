@@ -1943,6 +1943,31 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateSubFlags(lhs, rhs, result, width, instruction.address);
             break;
         }
+        case x86::Opcode::CmpMemReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: cmp memory-register operand count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto rhsRegister =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto width = memory.width == 32 ? ir::Width::I32
+                                                  : ir::Width::I64;
+            auto address = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto lhs = builder.loadGuest(address, width, instruction.address);
+            const auto rhs = builder.readGuestRegister(
+                rhsRegister.reg, width, instruction.address);
+            const auto result = builder.sub(lhs, rhs, width, instruction.address);
+            builder.updateSubFlags(lhs, rhs, result, width, instruction.address);
+            break;
+        }
         case x86::Opcode::CmpMemImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: cmp memory immediate count");

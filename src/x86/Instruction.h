@@ -53,6 +53,7 @@ enum class Opcode {
     CmpRegImm,
     CmpRegReg,
     CmpRegMem,
+    CmpMemReg,
     CmpMemImm,
     SetccReg,
     CmovccReg,

@@ -427,6 +427,19 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmp64_memory_register",
+                             CaseId::cmp64_memory_register,
+                             differentialBytes_cmp64_memory_register);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.state.rax = 7;
+        const std::uint64_t value = 5;
+        std::memcpy(testCase.request.memory.data() + 0x30, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x30;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp8_scaled_memory", CaseId::cmp8_scaled_memory,
                              differentialBytes_cmp8_scaled_memory);
         bindMemory(testCase, rosa::x86::Register::R14, 0);
@@ -1911,6 +1924,82 @@ void testCompare64BitRegisterWithGuestMemory() {
     static_cast<void>(block.execute(state, &addressSpace));
     expectEqual(state.rax, std::uint64_t{5}, "CMP r64 changed its register operand");
     expectEqual(state.rflags, std::uint64_t{0x93}, "CMP r64 flags differ");
+}
+
+void testCompareGuestMemoryWith64BitRegister() {
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0x39, 0x43, 0x30, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemReg,
+           "CMP [memory], r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "CMP [memory], r64 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto rhs =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbx &&
+               memory.displacement == 0x30 && memory.width == 64,
+           "CMP [rbx+0x30], rax memory operand differs");
+    expect(rhs.reg == rosa::x86::Register::Rax && rhs.width == 64,
+           "CMP [rbx+0x30], rax register operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("cmp [rbx+0x30], rax") !=
+               std::string::npos,
+           "CMP [rbx+0x30], rax dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8030}, 5);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbx = 0x8000;
+    state.rax = 7;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rbx, std::uint64_t{0x8000},
+                "CMP [memory], r64 changed its base");
+    expectEqual(state.rax, std::uint64_t{7},
+                "CMP [memory], r64 changed its source");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8030}),
+                std::uint64_t{5}, "CMP [memory], r64 changed memory");
+    expectEqual(state.rflags, std::uint64_t{0x93},
+                "CMP qword 5, 7 subtraction flags differ");
+
+    state.rax = 5;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP qword equal flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rbx = 0x8000;
+    faultState.rax = 7;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "CMP [unmapped], r64 did not fault");
+    expectEqual(faultState.rbx, std::uint64_t{0x8000},
+                "failed CMP [memory], r64 changed its base");
+    expectEqual(faultState.rax, std::uint64_t{7},
+                "failed CMP [memory], r64 changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed CMP [memory], r64 changed flags");
+
+    constexpr std::array<std::uint8_t, 4> registerCode{0x48, 0x39, 0xD8, 0xC3};
+    const auto registerDecoded = decoder.decodeBlock(
+        registerCode, rosa::guest::GuestAddress{0x2000});
+    expect(registerDecoded[0].opcode == rosa::x86::Opcode::CmpRegReg,
+           "register-direct opcode 39 no longer decodes as CMP register");
 }
 
 void testCompareGuestMemoryWith32BitImmediate() {
@@ -7370,6 +7459,8 @@ int main() {
         {"legacy CMP 32-bit register with guest memory",
          testLegacyCompare32BitRegisterWithGuestMemory},
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
+        {"CMP guest memory with 64-bit register",
+         testCompareGuestMemoryWith64BitRegister},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP guest memory with short immediate", testCompareGuestMemoryWithShortImmediate},
         {"CMP RIP-relative guest dword with short immediate",
