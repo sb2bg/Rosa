@@ -1903,6 +1903,40 @@ void testMovzxLowByteRegisterTo32BitRegister() {
     expect(rejectedHighByte, "MOVZX from AH was not rejected explicitly");
 }
 
+void testMovzx16BitRegisterTo32BitRegister() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x0F, 0xB7, 0xC7, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovzxRegReg,
+           "MOVZX r32, r16 opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 32 &&
+               source.reg == rosa::x86::Register::Rdi && source.width == 16,
+           "MOVZX EAX, DI operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("movzx eax, di") !=
+               std::string::npos,
+           "MOVZX EAX, DI dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = UINT64_MAX;
+    state.rdi = 0x112233445566BEEFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xBEEF},
+                "MOVZX EAX, DI result did not zero-extend");
+    expectEqual(state.rdi, std::uint64_t{0x112233445566BEEFULL},
+                "MOVZX EAX, DI changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVZX EAX, DI changed flags");
+}
+
 void testMovzxGuestWordTo32BitRegister() {
     constexpr std::array<std::uint8_t, 7> code{
         0x41, 0x0F, 0xB7, 0x4C, 0x24, 0x04, 0xC3};
@@ -4557,6 +4591,8 @@ int main() {
         {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
         {"MOVZX low-byte register to 32-bit register",
          testMovzxLowByteRegisterTo32BitRegister},
+        {"MOVZX 16-bit register to 32-bit register",
+         testMovzx16BitRegisterTo32BitRegister},
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},
         {"MOVZX guest word with scaled index", testMovzxGuestWordWithScaledIndex},
         {"MOVSXD scaled guest dword", testMovsxdScaledGuestDword},

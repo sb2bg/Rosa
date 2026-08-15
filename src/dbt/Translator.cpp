@@ -937,7 +937,8 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 std::get<x86::RegisterOperand>(instruction.operands[1]);
             const auto value = builder.readGuestRegister(
                 source.reg, ir::Width::I64, instruction.address);
-            const auto mask = builder.constant(0xFF, ir::Width::I64,
+            const auto mask = builder.constant(source.width == 8 ? 0xFF : 0xFFFF,
+                                               ir::Width::I64,
                                                instruction.address);
             const auto byte = builder.bitAnd(value, mask, ir::Width::I64,
                                              instruction.address);
