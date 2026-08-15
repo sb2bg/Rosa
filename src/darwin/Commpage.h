@@ -8,6 +8,11 @@
 namespace rosa::darwin {
 
 inline constexpr guest::GuestAddress x86CommpageBase{0x00007FFFFFE00000ULL};
+inline constexpr std::size_t x86CommpageCpuCapabilities64Offset = 0x10;
+// Advertise only the architectural mode Rosa guarantees. In particular, do not
+// expose host ARM features or Apple's kIsTranslated contract, and do not select
+// optimized x86 paths until their complete instruction families are supported.
+inline constexpr std::uint64_t x86CommpageCpuCapabilities64 = 0x200;
 inline constexpr std::size_t x86CommpageVersionOffset = 0x1E;
 inline constexpr std::uint16_t x86CommpageVersion = 14;
 inline constexpr std::size_t x86CommpageKernelPageShiftOffset = 0x4D;

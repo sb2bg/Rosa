@@ -5221,6 +5221,30 @@ void testX86Commpage() {
     rosa::guest::AddressSpace addressSpace;
     constexpr std::uint64_t continuousTimebase = 0x0123456789ABCDEFULL;
     rosa::darwin::mapX86Commpage(addressSpace, continuousTimebase);
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageCpuCapabilities64Offset}),
+                rosa::darwin::x86CommpageCpuCapabilities64,
+                "x86 commpage CPU capabilities differ");
+    constexpr auto translatedCapability = UINT64_C(0x4000000000000000);
+    expect((rosa::darwin::x86CommpageCpuCapabilities64 &
+            translatedCapability) == 0,
+           "x86 commpage falsely advertises Apple's translated-process bit");
+
+    constexpr std::array<std::uint8_t, 14> loadCapabilities{
+        0x48, 0xB8, 0x10, 0x00, 0xE0, 0xFF, 0xFF,
+        0x7F, 0x00, 0x00, 0x48, 0x8B, 0x00, 0xC3};
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(loadCapabilities,
+                                            rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State loadState;
+    loadState.rflags = 0x8D7;
+    static_cast<void>(block.execute(loadState, &addressSpace));
+    expectEqual(loadState.rax, rosa::darwin::x86CommpageCpuCapabilities64,
+                "generated x86 load read the wrong CPU capabilities");
+    expectEqual(loadState.rflags, std::uint64_t{0x8D7},
+                "x86 commpage capability load changed flags");
+
     const auto version = addressSpace.readBytes(
         rosa::guest::GuestAddress{rosa::darwin::x86CommpageBase.value +
                                   rosa::darwin::x86CommpageVersionOffset},

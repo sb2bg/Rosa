@@ -52,6 +52,14 @@ void mapX86Commpage(guest::AddressSpace &addressSpace,
     addressSpace.mapSparseReadOnly(x86CommpageBase, guest::guestPageSize,
                                    x86CommpageNanotimeTscBaseOffset, nanotimeData,
                                    "Darwin x86_64 commpage");
+    std::array<std::uint8_t, sizeof(x86CommpageCpuCapabilities64)>
+        cpuCapabilitiesBytes{};
+    writeLittleEndian(cpuCapabilitiesBytes, 0, x86CommpageCpuCapabilities64,
+                      sizeof(x86CommpageCpuCapabilities64));
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value +
+                            x86CommpageCpuCapabilities64Offset},
+        cpuCapabilitiesBytes);
     std::array<std::uint8_t, sizeof(x86CommpageVersion)> versionBytes{};
     writeLittleEndian(versionBytes, 0, x86CommpageVersion,
                       sizeof(x86CommpageVersion));
