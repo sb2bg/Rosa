@@ -16,6 +16,10 @@ namespace {
 constexpr std::uint64_t unixSyscallClass = 2U << 24U;
 constexpr std::uint64_t syscallExit = unixSyscallClass | 1U;
 constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
+constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
+// Rosa currently executes exactly one guest thread. Keep its identity in the
+// guest namespace rather than exposing a host pthread or Mach identifier.
+constexpr std::uint64_t initialGuestThreadId = 1;
 constexpr std::uint64_t carryFlag = 1U << 0U;
 constexpr std::uint64_t reservedOneFlag = 1U << 1U;
 constexpr std::size_t maximumControlledWrite = 16U * 1024U * 1024U;
@@ -58,8 +62,14 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
             .exitStatus = static_cast<int>(std::bit_cast<std::int32_t>(rawStatus)),
         };
     }
+    if (number == syscallThreadSelfid) {
+        setSuccess(state, initialGuestThreadId);
+        return {};
+    }
     if (number != syscallWrite) {
-        throw unsupported(state, syscallRip, "only BSD write(2) and exit(2) are implemented");
+        throw unsupported(state, syscallRip,
+                          "only BSD write(2), exit(2), and thread_selfid(2) are "
+                          "implemented");
     }
     if (state.rdi != STDOUT_FILENO && state.rdi != STDERR_FILENO) {
         throw unsupported(state, syscallRip,

@@ -4706,6 +4706,71 @@ void testDecoderRipRelativeLeaAndSyscall() {
                 "syscall fallthrough differs");
 }
 
+void testDarwinThreadSelfid() {
+    constexpr auto threadSelfidNumber = UINT64_C(0x02000174);
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = threadSelfidNumber;
+    state.rdi = UINT64_MAX;
+    state.r9 = 0x123456789ABCDEF0ULL;
+    state.rflags = 0x8D7;
+
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF800004F84ULL});
+    expect(!outcome.exited, "thread_selfid terminated the guest");
+    expectEqual(state.rax, std::uint64_t{1},
+                "thread_selfid returned the wrong guest-local identity");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "thread_selfid did not apply successful BSD carry semantics");
+    expectEqual(state.rdi, UINT64_MAX,
+                "thread_selfid changed an ignored argument register");
+    expectEqual(state.r9, std::uint64_t{0x123456789ABCDEF0ULL},
+                "thread_selfid changed an ignored argument register");
+
+    state.rax = threadSelfidNumber;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{1},
+                "repeated thread_selfid changed guest identity");
+}
+
+void testGeneratedDarwinThreadSelfid() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0x74, 0x01, 0x00, 0x02, // mov eax, 0x2000174
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rflags = 0x8D7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated thread_selfid terminated the guest");
+    expectEqual(state.rax, std::uint64_t{1},
+                "generated thread_selfid returned the wrong guest identity");
+    expectEqual(state.rcx, std::uint64_t{0x1007},
+                "generated thread_selfid did not preserve SYSCALL fallthrough");
+    expectEqual(state.r11, std::uint64_t{0x8D7},
+                "generated thread_selfid did not save input flags in R11");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "generated thread_selfid did not clear the BSD error flag");
+}
+
 void testMachTaskSelfTrap() {
     rosa::guest::AddressSpace addressSpace;
     rosa::darwin::SyscallDispatcher dispatcher;
@@ -6123,6 +6188,8 @@ int main() {
         {"legacy 32-bit register move execution", testLegacyRegisterMove32Execution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
+        {"Darwin thread_selfid", testDarwinThreadSelfid},
+        {"generated Darwin thread_selfid", testGeneratedDarwinThreadSelfid},
         {"Mach task-self trap", testMachTaskSelfTrap},
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
