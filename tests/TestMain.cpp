@@ -4364,7 +4364,7 @@ void testDecoderRipRelativeLeaAndSyscall() {
 
 void testMachTaskSelfTrap() {
     rosa::guest::AddressSpace addressSpace;
-    const rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::darwin::SyscallDispatcher dispatcher;
     const rosa::darwin::MachDispatcher mach;
     rosa::x86::X86State state;
     state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
@@ -4433,9 +4433,38 @@ void testGeneratedMachTaskSelfTrap() {
                 "generated task_self_trap changed guest flags");
 }
 
+void testMachReplyPortTrap() {
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    state.rdi = 0x1111111111111111ULL;
+    state.r9 = 0x9999999999999999ULL;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(state, rosa::guest::GuestAddress{0x7FF800001574ULL});
+    const rosa::darwin::GuestMachPortName first{static_cast<std::uint32_t>(state.rax)};
+    expect(first.value != 0, "mach_reply_port returned MACH_PORT_NULL");
+    expect(dispatcher.ownsReceiveRight(first),
+           "mach_reply_port did not allocate a guest receive right");
+    expect(first != dispatcher.taskSelfPortName(),
+           "mach_reply_port collided with the guest task-self port");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_reply_port applied BSD carry-flag semantics");
+    expectEqual(state.rdi, std::uint64_t{0x1111111111111111ULL},
+                "mach_reply_port changed an ignored argument register");
+    expectEqual(state.r9, std::uint64_t{0x9999999999999999ULL},
+                "mach_reply_port changed an ignored argument register");
+
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(state, rosa::guest::GuestAddress{0x7FF800001574ULL});
+    const rosa::darwin::GuestMachPortName second{static_cast<std::uint32_t>(state.rax)};
+    expect(second != first, "repeated mach_reply_port reused a receive-right name");
+    expect(dispatcher.ownsReceiveRight(first) && dispatcher.ownsReceiveRight(second),
+           "mach_reply_port lost a previously allocated receive right");
+}
+
 void testUnsupportedMachTrapDiagnostic() {
     rosa::guest::AddressSpace addressSpace;
-    const rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::darwin::SyscallDispatcher dispatcher;
     rosa::x86::X86State state;
     state.rax = rosa::darwin::MachDispatcher::syscallClass | 31U;
 
@@ -5696,6 +5725,7 @@ int main() {
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Mach task-self trap", testMachTaskSelfTrap},
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
+        {"Mach reply-port trap", testMachReplyPortTrap},
         {"unsupported Mach trap diagnostic", testUnsupportedMachTrapDiagnostic},
         {"IR verification", testIrVerification},
         {"R1 generated execution", testR1ExecutesGeneratedCode},

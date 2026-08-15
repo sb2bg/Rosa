@@ -1,5 +1,6 @@
 #include "darwin/Mach.h"
 
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -20,14 +21,36 @@ std::runtime_error unsupported(const x86::X86State &state, guest::GuestAddress r
 
 } // namespace
 
-void MachDispatcher::dispatch(x86::X86State &state, guest::GuestAddress syscallRip) const {
-    if (!isMachTrap(state.rax) || trapNumber(state.rax) != 28U) {
+bool MachDispatcher::ownsReceiveRight(GuestMachPortName name) const {
+    return std::ranges::find(receiveRights_, name) != receiveRights_.end();
+}
+
+void MachDispatcher::dispatch(x86::X86State &state, guest::GuestAddress syscallRip) {
+    if (!isMachTrap(state.rax)) {
         throw unsupported(state, syscallRip);
     }
 
     // XNU's x86_64 mach_call_munger64 writes only the trap result to saved RAX. In particular,
     // Mach traps do not use the BSD carry-flag error convention.
-    state.rax = taskSelfPortName_.value;
+    switch (trapNumber(state.rax)) {
+    case 26U: {
+        // mach_reply_port allocates a fresh receive right in the calling task on every call.
+        const auto name = nextReplyPortName_;
+        if (name.value > UINT32_MAX - 0x100U) {
+            state.rax = 0; // MACH_PORT_NULL models allocation exhaustion.
+            return;
+        }
+        nextReplyPortName_.value += 0x100U;
+        receiveRights_.push_back(name);
+        state.rax = name.value;
+        return;
+    }
+    case 28U:
+        state.rax = taskSelfPortName_.value;
+        return;
+    default:
+        throw unsupported(state, syscallRip);
+    }
 }
 
 } // namespace rosa::darwin

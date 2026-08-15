@@ -15,7 +15,7 @@ struct SyscallOutcome {
 class SyscallDispatcher {
   public:
     [[nodiscard]] SyscallOutcome dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
-                                          guest::GuestAddress syscallRip) const;
+                                          guest::GuestAddress syscallRip);
 
   private:
     MachDispatcher machDispatcher_;
