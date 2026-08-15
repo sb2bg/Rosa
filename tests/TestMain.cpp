@@ -2047,6 +2047,66 @@ void testR2TakenConditional() {
     expectEqual(result.executedBlocks, std::size_t{3}, "taken-path block count differs");
 }
 
+void testIndirectGuestMemoryCall() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress dataBase{0x8000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 32> code{
+        0x41, 0xFF, 0x54, 0x24, 0x10, 0xC3, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0x48, 0xB8, 0x2A, 0, 0, 0, 0, 0,
+        0, 0, 0xC3, 0, 0, 0, 0, 0,
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(dataBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8010}, 0x1010);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.r12 = dataBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expectEqual(state.rax, std::uint64_t{42}, "indirect guest call result differs");
+    expectEqual(state.rsp, stackBase.value + rosa::guest::guestPageSize,
+                "indirect guest call did not restore RSP");
+    expectEqual(result.executedBlocks, std::size_t{3},
+                "indirect guest call block count differs");
+}
+
+void testIndirectGuestMemoryCallFault() {
+    constexpr std::array<std::uint8_t, 5> code{0x41, 0xFF, 0x54, 0x24, 0x10};
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rip = 0x1000;
+    state.r12 = 0x8000;
+    state.rsp = 0x9000;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "indirect call through unmapped guest memory did not fail");
+    expectEqual(state.rip, std::uint64_t{0x1000},
+                "failed indirect call changed RIP");
+    expectEqual(state.rsp, std::uint64_t{0x9000},
+                "failed indirect call changed RSP");
+}
+
 void testUnsignedBelowConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x72, 0x02}; // jb 0x1004
     const rosa::x86::Decoder decoder;
@@ -2295,6 +2355,8 @@ int main() {
         {"initial Darwin stack", testInitialDarwinStack},
         {"R2 multi-block control flow", testR2MultiBlockControlFlow},
         {"R2 taken conditional", testR2TakenConditional},
+        {"indirect guest-memory call", testIndirectGuestMemoryCall},
+        {"indirect guest-memory call fault", testIndirectGuestMemoryCallFault},
         {"unsigned-below conditional", testUnsignedBelowConditional},
         {"unsigned-above conditional", testUnsignedAboveConditional},
         {"unsigned-below-or-equal conditional", testUnsignedBelowOrEqualConditional},

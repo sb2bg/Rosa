@@ -34,9 +34,15 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
             if (state.rsp < sizeof(std::uint64_t)) {
                 throw std::runtime_error("guest stack underflow while executing call");
             }
-            state.rsp -= sizeof(std::uint64_t);
-            addressSpace_.writeU64(guest::GuestAddress{state.rsp},
-                                   block.callReturnAddress()->value);
+            const auto newStackPointer = state.rsp - sizeof(std::uint64_t);
+            try {
+                addressSpace_.writeU64(guest::GuestAddress{newStackPointer},
+                                       block.callReturnAddress()->value);
+            } catch (...) {
+                state.rip = blockAddress.value;
+                throw;
+            }
+            state.rsp = newStackPointer;
             break;
         }
         case BlockExit::Return: {

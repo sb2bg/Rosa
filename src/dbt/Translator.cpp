@@ -1070,6 +1070,23 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.exitCall(*instruction.branchTarget, *instruction.fallthrough,
                              instruction.address);
             break;
+        case x86::Opcode::CallMem: {
+            if (instruction.operands.size() != 1 || !instruction.fallthrough) {
+                throw std::runtime_error("internal decoder error: indirect call operands");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto base = builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                        instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                instruction.address);
+            const auto address = builder.add(base, displacement, ir::Width::I64,
+                                             instruction.address);
+            const auto target = builder.loadGuest(address, ir::Width::I64,
+                                                  instruction.address);
+            builder.exitCall(target, *instruction.fallthrough, instruction.address);
+            break;
+        }
         case x86::Opcode::Syscall:
             builder.exitSyscall(*instruction.fallthrough, instruction.address);
             break;
@@ -1083,6 +1100,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
     const bool hasTerminator = lastOpcode == x86::Opcode::JmpRelative ||
                                lastOpcode == x86::Opcode::JccRelative ||
                                lastOpcode == x86::Opcode::CallRelative ||
+                               lastOpcode == x86::Opcode::CallMem ||
                                lastOpcode == x86::Opcode::Syscall || lastOpcode == x86::Opcode::Ret;
     if (!hasTerminator) {
         const auto &last = decoded.back();
@@ -1435,7 +1453,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 assembler.movImmediate(arm64::x16, operation.target->value);
                 break;
             case ir::ExitKind::Call:
-                assembler.movImmediate(arm64::x16, operation.target->value);
+                if (operation.lhs) {
+                    assembler.mov(arm64::x16, hostRegister(*operation.lhs));
+                } else {
+                    assembler.movImmediate(arm64::x16, operation.target->value);
+                }
                 exit = BlockExit::Call;
                 break;
             case ir::ExitKind::Syscall:

@@ -457,6 +457,17 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::CallRelative:
             stream << "call 0x" << instruction.branchTarget->value;
             break;
+        case x86::Opcode::CallMem: {
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "call [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::Syscall:
             stream << "syscall";
             break;
@@ -625,8 +636,12 @@ std::string dumpIr(const ir::Block &block) {
                 stream << "direct target=0x" << std::hex << operation.target->value;
                 break;
             case ir::ExitKind::Call:
-                stream << "call target=0x" << std::hex << operation.target->value << " return=0x"
-                       << operation.fallthrough->value;
+                if (operation.lhs) {
+                    stream << "call_indirect target=" << valueName(*operation.lhs);
+                } else {
+                    stream << "call target=0x" << std::hex << operation.target->value;
+                }
+                stream << " return=0x" << std::hex << operation.fallthrough->value;
                 break;
             case ir::ExitKind::Conditional:
                 stream << "j" << conditionName(*operation.condition) << " target=0x" << std::hex

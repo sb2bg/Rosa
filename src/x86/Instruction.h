@@ -51,6 +51,7 @@ enum class Opcode {
     JmpRelative,
     JccRelative,
     CallRelative,
+    CallMem,
     Syscall,
     Ret,
 };

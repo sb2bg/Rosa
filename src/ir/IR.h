@@ -140,6 +140,8 @@ class Builder {
                          guest::GuestAddress fallthrough, guest::GuestAddress rip);
     void exitCall(guest::GuestAddress target, guest::GuestAddress returnAddress,
                   guest::GuestAddress rip);
+    void exitCall(ValueId target, guest::GuestAddress returnAddress,
+                  guest::GuestAddress rip);
     void exitSyscall(guest::GuestAddress nextRip, guest::GuestAddress rip);
 
     [[nodiscard]] Block finish() &&;
