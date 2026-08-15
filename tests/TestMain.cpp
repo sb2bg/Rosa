@@ -476,6 +476,32 @@ void testMovGuestMemoryTo32BitRegister() {
                 "MOV r32, [base+disp8] changed flags");
 }
 
+void testMovGuestMemoryToLegacy32BitRegister() {
+    constexpr std::array<std::uint8_t, 4> code{0x8B, 0x4E, 0x0C, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rcx,
+           "legacy MOV r32, [base+disp8] destination differs");
+    expectEqual(destination.width, std::uint8_t{32},
+                "legacy MOV r32, [base+disp8] width differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x810C}, 0xFEDCBA9876543210ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsi = 0x8100;
+    state.rcx = UINT64_MAX;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rcx, std::uint64_t{0x76543210},
+                "legacy MOV r32, [base+disp8] did not zero-extend");
+}
+
 void testTestRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x85, 0xC9, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -1067,6 +1093,8 @@ int main() {
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
+        {"legacy MOV guest memory to 32-bit register",
+         testMovGuestMemoryToLegacy32BitRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},
         {"TEST 32-bit register generated execution", testTest32BitRegisterGeneratedExecution},
         {"LFENCE generated execution", testLfenceGeneratedExecution},

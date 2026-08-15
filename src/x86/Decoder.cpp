@@ -234,17 +234,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             return result;
         }
 
-        const auto rex = code[cursor];
-        if (rex < 0x40U || rex > 0x4FU) {
+        const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+        if (!hasRex && code[cursor] != 0x8BU) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
+        const auto rex = hasRex ? code[cursor] : 0U;
         const bool rexW = (rex & 0x8U) != 0;
         const bool rexB = (rex & 0x1U) != 0;
         const bool rexX = (rex & 0x2U) != 0;
         const bool rexR = (rex & 0x4U) != 0;
-        ++cursor;
-        if (cursor >= code.size()) {
-            throw DecodeError(address, remaining, "truncated after REX prefix");
+        if (hasRex) {
+            ++cursor;
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining, "truncated after REX prefix");
+            }
         }
 
         const auto opcode = code[cursor++];
