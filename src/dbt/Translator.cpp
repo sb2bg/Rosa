@@ -535,6 +535,35 @@ updateSubFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateSubFlags16(x86::X86State *state, std::uint64_t lhsValue,
+                 std::uint64_t rhsValue, std::uint64_t resultValue) {
+    const auto lhs = static_cast<std::uint16_t>(lhsValue);
+    const auto rhs = static_cast<std::uint16_t>(rhsValue);
+    const auto result = static_cast<std::uint16_t>(resultValue);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (lhs < rhs) {
+        flags |= flagCarry;
+    }
+    if ((std::popcount(static_cast<unsigned>(result & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (((lhs ^ rhs ^ result) & 0x10U) != 0) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result >> 15U) != 0) {
+        flags |= flagSign;
+    }
+    if ((((lhs ^ rhs) & (lhs ^ result)) >> 15U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateSubFlags32(x86::X86State *state, std::uint64_t lhsValue, std::uint64_t rhsValue,
                  std::uint64_t resultValue) {
     const auto lhs = static_cast<std::uint32_t>(lhsValue);
@@ -1604,6 +1633,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto address =
                 builder.add(base, displacement, ir::Width::I64, instruction.address);
             const auto width = memory.width == 8   ? ir::Width::I8
+                               : memory.width == 16 ? ir::Width::I16
                                : memory.width == 32 ? ir::Width::I32
                                                     : ir::Width::I64;
             const auto lhs = builder.loadGuest(address, width, instruction.address);
@@ -2192,9 +2222,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
             if (operation.opcode == ir::Opcode::UpdateAddFlags) {
                 assembler.movImmediate(arm64::x16, pointerBits(&updateAddFlags64));
             } else {
-                assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
-                                                       ? pointerBits(&updateSubFlags32)
-                                                       : pointerBits(&updateSubFlags64));
+                assembler.movImmediate(
+                    arm64::x16,
+                    operation.width == ir::Width::I16
+                        ? pointerBits(&updateSubFlags16)
+                    : operation.width == ir::Width::I32
+                        ? pointerBits(&updateSubFlags32)
+                        : pointerBits(&updateSubFlags64));
             }
             assembler.blr(arm64::x16);
             break;

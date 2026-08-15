@@ -500,7 +500,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::CmpMemImm: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << "cmp "
-                   << (memory.width == 8 ? "byte" : memory.width == 32 ? "dword" : "qword")
+                   << (memory.width == 8    ? "byte"
+                       : memory.width == 16 ? "word"
+                       : memory.width == 32 ? "dword"
+                                            : "qword")
                    << " ["
                    << x86::registerName(memory.base);
             if (memory.displacement < 0) {
