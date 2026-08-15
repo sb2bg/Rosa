@@ -2277,6 +2277,32 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                           instruction.address);
             break;
         }
+        case x86::Opcode::ShrRegCl: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error(
+                    "internal decoder error: shr cl operand count");
+            }
+            const auto reg =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto width = reg.width == 32 ? ir::Width::I32
+                                               : ir::Width::I64;
+            const auto lhs = builder.readGuestRegister(
+                reg.reg, width, instruction.address);
+            const auto count = builder.readGuestRegister(
+                x86::Register::Rcx, ir::Width::I64, instruction.address);
+            const auto countMask = builder.constant(
+                reg.width == 32 ? 0x1F : 0x3F, ir::Width::I64,
+                instruction.address);
+            const auto maskedCount = builder.bitAnd(
+                count, countMask, ir::Width::I64, instruction.address);
+            const auto result = builder.shiftRightLogical(
+                lhs, maskedCount, width, instruction.address);
+            builder.writeGuestRegister(reg.reg, result, width,
+                                       instruction.address);
+            builder.updateShiftRightFlags(lhs, result, maskedCount, width,
+                                          instruction.address);
+            break;
+        }
         case x86::Opcode::NegReg: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: neg operand count");
@@ -3212,9 +3238,16 @@ arm64::Program compileToArm64(const ir::Block &block) {
             }
             break;
         case ir::Opcode::ShiftRightLogical:
-            assembler.lsrImmediate(hostRegister(*operation.result),
-                                   hostRegister(*operation.lhs),
-                                   static_cast<std::uint8_t>(operation.immediate));
+            if (operation.rhs) {
+                assembler.lsrVariable(hostRegister(*operation.result),
+                                      hostRegister(*operation.lhs),
+                                      hostRegister(*operation.rhs));
+            } else {
+                assembler.lsrImmediate(
+                    hostRegister(*operation.result),
+                    hostRegister(*operation.lhs),
+                    static_cast<std::uint8_t>(operation.immediate));
+            }
             break;
         case ir::Opcode::MultiplyLow:
             assembler.multiplyLow(hostRegister(*operation.result),
@@ -3745,7 +3778,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::UpdateShiftRightFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
-            assembler.movImmediate(arm64::x3, operation.immediate);
+            if (operation.third) {
+                assembler.mov(arm64::x3, hostRegister(*operation.third));
+            } else {
+                assembler.movImmediate(arm64::x3, operation.immediate);
+            }
             assembler.movImmediate(
                 arm64::x16,
                 operation.width == ir::Width::I8

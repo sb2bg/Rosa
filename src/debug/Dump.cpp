@@ -516,6 +516,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", cl";
             break;
+        case x86::Opcode::ShrRegCl:
+            stream << "shr "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", cl";
+            break;
         case x86::Opcode::ShrRegImm:
             stream << "shr "
                    << registerOperandName(
@@ -1055,7 +1061,12 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::ShiftRightLogical:
             stream << "shift_right_logical." << widthName(operation.width) << ' '
-                   << valueName(*operation.lhs) << ", " << std::dec << operation.immediate;
+                   << valueName(*operation.lhs) << ", ";
+            if (operation.rhs) {
+                stream << valueName(*operation.rhs);
+            } else {
+                stream << std::dec << operation.immediate;
+            }
             break;
         case ir::Opcode::MultiplyLow:
             stream << "multiply_low." << widthName(operation.width) << ' '
@@ -1213,7 +1224,12 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::UpdateShiftRightFlags:
             stream << "update_shift_right_flags." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", " << valueName(*operation.rhs)
-                   << ", " << std::dec << operation.immediate;
+                   << ", ";
+            if (operation.third) {
+                stream << valueName(*operation.third);
+            } else {
+                stream << std::dec << operation.immediate;
+            }
             break;
         case ir::Opcode::UpdateMultiplyFlags:
             stream << "update_multiply_flags." << widthName(operation.width) << ' '

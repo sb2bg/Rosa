@@ -129,6 +129,8 @@ class Builder {
     ValueId shiftLeft(ValueId value, ValueId count, Width width, guest::GuestAddress rip);
     ValueId shiftRightLogical(ValueId value, std::uint8_t count, Width width,
                               guest::GuestAddress rip);
+    ValueId shiftRightLogical(ValueId value, ValueId count, Width width,
+                              guest::GuestAddress rip);
     ValueId multiplyLow(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId multiplyHighUnsigned(ValueId lhs, ValueId rhs, Width width,
                                  guest::GuestAddress rip);
@@ -189,6 +191,8 @@ class Builder {
                               guest::GuestAddress rip);
     void updateShiftRightFlags(ValueId lhs, ValueId result, std::uint8_t count, Width width,
                                guest::GuestAddress rip);
+    void updateShiftRightFlags(ValueId lhs, ValueId result, ValueId count,
+                               Width width, guest::GuestAddress rip);
     void updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip);
     void updateSignedMultiplyFlags(ValueId lhs, ValueId rhs, Width width,
                                    guest::GuestAddress rip);

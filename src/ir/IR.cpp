@@ -161,6 +161,20 @@ ValueId Builder::shiftRightLogical(ValueId value, std::uint8_t count, Width widt
     return result;
 }
 
+ValueId Builder::shiftRightLogical(ValueId value, ValueId count, Width width,
+                                   guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShiftRightLogical,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = value,
+        .rhs = count,
+    });
+    return result;
+}
+
 ValueId Builder::multiplyLow(ValueId lhs, ValueId rhs, Width width,
                              guest::GuestAddress rip) {
     const auto result = nextValue();
@@ -567,6 +581,18 @@ void Builder::updateShiftRightFlags(ValueId lhs, ValueId result, std::uint8_t co
     });
 }
 
+void Builder::updateShiftRightFlags(ValueId lhs, ValueId result, ValueId count,
+                                    Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateShiftRightFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = lhs,
+        .rhs = result,
+        .third = count,
+    });
+}
+
 void Builder::updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::UpdateMultiplyFlags,
@@ -744,6 +770,9 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::ShiftRightLogical:
             checkUse(operation.lhs, "shifted");
+            if (operation.rhs) {
+                checkUse(operation.rhs, "shift count");
+            }
             break;
         case Opcode::SignExtend32:
             checkUse(operation.lhs, "source");
@@ -888,6 +917,9 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::UpdateShiftRightFlags:
             checkUse(operation.lhs, "original");
             checkUse(operation.rhs, "result");
+            if (operation.third) {
+                checkUse(operation.third, "shift count");
+            }
             break;
         case Opcode::ExitBlock:
             if ((operation.exitKind == ExitKind::Call ||

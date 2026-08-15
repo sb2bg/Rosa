@@ -138,6 +138,20 @@ void Assembler::lslVariable(XRegister destination, XRegister source, XRegister s
                    regName(shift));
 }
 
+void Assembler::lsrVariable(XRegister destination, XRegister source,
+                            XRegister shift) {
+    requireRegister(destination);
+    requireRegister(source);
+    requireRegister(shift);
+    const auto word =
+        0x9AC02400U |
+        (static_cast<std::uint32_t>(shift.encoding) << 16U) |
+        (static_cast<std::uint32_t>(source.encoding) << 5U) |
+        static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "lsr " + regName(destination) + ", " + regName(source) + ", " +
+                   regName(shift));
+}
+
 void Assembler::multiplyLow(XRegister destination, XRegister lhs, XRegister rhs) {
     requireRegister(destination);
     requireRegister(lhs);

@@ -1047,6 +1047,32 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("shr64_cl_one", CaseId::shr64_cl_one,
+                             differentialBytes_shr64_cl_one);
+        testCase.request.state.r12 = 0x8000000000000001ULL;
+        testCase.request.state.rcx = 1;
+        testCase.flagMask =
+            carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shr64_cl_many", CaseId::shr64_cl_many,
+                             differentialBytes_shr64_cl_many);
+        testCase.request.state.r12 = 0xE000000000000200ULL;
+        testCase.request.state.rcx = 62;
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shr64_cl_masked_zero",
+                             CaseId::shr64_cl_masked_zero,
+                             differentialBytes_shr64_cl_masked_zero);
+        testCase.request.state.r12 = 0xE000000000000200ULL;
+        testCase.request.state.rcx = 64;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
         auto testCase = make("shr64_masked_zero", CaseId::shr64_masked_zero,
                              differentialBytes_shr64_masked_zero);
         testCase.request.state.rax = 0xE000000000000200ULL;
@@ -1799,6 +1825,7 @@ void testAssemblerEncodings() {
     assembler.lslImmediate(rosa::arm64::x10, rosa::arm64::x9, 32);
     assembler.lsrImmediate(rosa::arm64::x10, rosa::arm64::x9, 31);
     assembler.lslVariable(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
+    assembler.lsrVariable(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.multiplyLow(rosa::arm64::x11, rosa::arm64::x9, rosa::arm64::x10);
     assembler.multiplyHighUnsigned(rosa::arm64::x12, rosa::arm64::x9,
                                    rosa::arm64::x10);
@@ -1817,9 +1844,9 @@ void testAssemblerEncodings() {
     assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 21> expected{
+    const std::array<std::uint32_t, 22> expected{
         0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0xD35FFD2AU, 0x9ACB212AU,
-        0x9B0A7D2BU, 0x9BCA7D2CU, 0x93C9814BU, 0x8A0B012AU, 0xAA0B012AU,
+        0x9ACB252AU, 0x9B0A7D2BU, 0x9BCA7D2CU, 0x93C9814BU, 0x8A0B012AU, 0xAA0B012AU,
         0xCA0B012AU, 0x93407D2AU, 0xF9400009U, 0xB9400009U, 0xF9000009U, 0xD63F0200U,
         0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU, 0xD5033FDFU, 0xD65F03C0U,
     };
@@ -8044,6 +8071,70 @@ void testShiftRight64ImmediateGeneratedExecution() {
                 "SHR r64 masked-zero changed flags");
 }
 
+void testShiftRightClGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x49, 0xD3, 0xEC, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF80004E899ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShrRegCl,
+           "SHR r64, CL opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "SHR r64, CL length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::R12 &&
+               destination.width == 64,
+           "SHR r12, CL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("shr r12, cl") !=
+               std::string::npos,
+           "SHR r12, CL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF80004E899ULL});
+    constexpr std::uint64_t countOneFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    rosa::x86::X86State oneState;
+    oneState.r12 = 0x8000000000000001ULL;
+    oneState.rcx = 1;
+    oneState.rflags = 0x10;
+    static_cast<void>(block.execute(oneState));
+    expectEqual(oneState.r12, std::uint64_t{0x4000000000000000ULL},
+                "SHR r12, CL count-one result differs");
+    expectEqual(oneState.rcx, std::uint64_t{1},
+                "SHR r12, CL changed RCX");
+    expectEqual(oneState.rflags & countOneFlags, std::uint64_t{0x805},
+                "SHR r12, CL count-one defined flags differ");
+
+    constexpr std::uint64_t manyFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U);
+    rosa::x86::X86State manyState;
+    manyState.r12 = 0xE000000000000200ULL;
+    manyState.rcx = 62;
+    manyState.rflags = 0x810;
+    static_cast<void>(block.execute(manyState));
+    expectEqual(manyState.r12, std::uint64_t{3},
+                "SHR r12, CL count-62 result differs");
+    expectEqual(manyState.rcx, std::uint64_t{62},
+                "SHR r12, CL count-62 changed RCX");
+    expectEqual(manyState.rflags & manyFlags, std::uint64_t{0x5},
+                "SHR r12, CL count-62 defined flags differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.r12 = 0x0123456789ABCDEFULL;
+    zeroState.rcx = 0xABCDEF0000000040ULL;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.r12, std::uint64_t{0x0123456789ABCDEFULL},
+                "SHR r12, CL masked-zero changed its destination");
+    expectEqual(zeroState.rcx, std::uint64_t{0xABCDEF0000000040ULL},
+                "SHR r12, CL masked-zero changed RCX");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "SHR r12, CL masked-zero changed flags");
+}
+
 void testNeg64GeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x49, 0xF7, 0xDD, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -12829,6 +12920,7 @@ int main() {
          testShiftRight8ImmediateGeneratedExecution},
         {"SHR 32-bit immediate generated execution", testShiftRight32ImmediateGeneratedExecution},
         {"SHR 64-bit immediate generated execution", testShiftRight64ImmediateGeneratedExecution},
+        {"SHR CL generated execution", testShiftRightClGeneratedExecution},
         {"NEG 64-bit generated execution", testNeg64GeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
