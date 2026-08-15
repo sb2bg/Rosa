@@ -42,6 +42,20 @@ void Builder::writeGuestRegister(x86::Register reg, ValueId value, Width width,
     });
 }
 
+void Builder::conditionalMoveGuestRegister(x86::Register destination,
+                                           x86::Register source,
+                                           x86::Condition condition, Width width,
+                                           guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ConditionalMoveGuestReg,
+        .width = width,
+        .guestRip = rip,
+        .guestRegister = destination,
+        .condition = condition,
+        .immediate = static_cast<std::uint64_t>(source),
+    });
+}
+
 ValueId Builder::readGuestXmmLane(x86::XmmRegister reg, bool high,
                                   guest::GuestAddress rip) {
     const auto result = nextValue();
@@ -562,6 +576,12 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "source");
             if (!operation.guestRegister) {
                 errors.emplace_back("write_guest_reg has no register");
+            }
+            break;
+        case Opcode::ConditionalMoveGuestReg:
+            if (!operation.guestRegister || !operation.condition ||
+                operation.immediate >= 16) {
+                errors.emplace_back("conditional_move_guest_reg is incomplete");
             }
             break;
         case Opcode::WriteGuestXmmLane:

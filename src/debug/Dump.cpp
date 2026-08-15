@@ -480,6 +480,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]));
             break;
+        case x86::Opcode::CmovccReg:
+            stream << "cmov" << conditionName(*instruction.condition) << ' '
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]));
+            break;
         case x86::Opcode::XorpsRegReg:
             stream << "xorps "
                    << x86::xmmRegisterName(
@@ -656,6 +664,14 @@ std::string dumpIr(const ir::Block &block) {
             stream << "write_guest_reg." << widthName(operation.width) << ' '
                    << x86::registerName(*operation.guestRegister) << ", "
                    << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::ConditionalMoveGuestReg:
+            stream << "conditional_move_guest_reg."
+                   << conditionName(*operation.condition) << '.'
+                   << widthName(operation.width) << ' '
+                   << x86::registerName(*operation.guestRegister) << ", "
+                   << x86::registerName(
+                          static_cast<x86::Register>(operation.immediate));
             break;
         case ir::Opcode::WriteGuestXmmLane:
             stream << "write_guest_xmm_lane.i64 "

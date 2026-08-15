@@ -27,6 +27,7 @@ enum class Opcode {
     Constant,
     ReadGuestReg,
     WriteGuestReg,
+    ConditionalMoveGuestReg,
     ReadGuestXmmLane,
     WriteGuestXmmLane,
     Add,
@@ -100,6 +101,10 @@ class Builder {
     ValueId constant(std::uint64_t value, Width width, guest::GuestAddress rip);
     ValueId readGuestRegister(x86::Register reg, Width width, guest::GuestAddress rip);
     void writeGuestRegister(x86::Register reg, ValueId value, Width width, guest::GuestAddress rip);
+    void conditionalMoveGuestRegister(x86::Register destination,
+                                      x86::Register source,
+                                      x86::Condition condition, Width width,
+                                      guest::GuestAddress rip);
     ValueId readGuestXmmLane(x86::XmmRegister reg, bool high, guest::GuestAddress rip);
     void writeGuestXmmLane(x86::XmmRegister reg, bool high, ValueId value,
                            guest::GuestAddress rip);

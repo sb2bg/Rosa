@@ -920,28 +920,35 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 throw DecodeError(address, remaining, "truncated REX.W 0F opcode");
             }
             const auto secondOpcode = code[cursor++];
-            if (secondOpcode != 0xACU && secondOpcode != 0xBCU) {
+            if (secondOpcode != 0x42U && secondOpcode != 0xACU &&
+                secondOpcode != 0xBCU) {
                 throw DecodeError(
                     address, remaining,
-                    "only SHRD r64, r64, imm8 and BSF r64, r64 are supported from REX.W 0F");
+                    "only CMOVB, SHRD, and BSF register forms are supported from REX.W 0F");
             }
             if (cursor >= code.size() ||
                 (secondOpcode == 0xACU && code.size() - cursor < 2)) {
                 throw DecodeError(address, remaining,
                                   secondOpcode == 0xACU ? "truncated SHRD r64"
-                                                        : "truncated BSF r64");
+                                  : secondOpcode == 0xBCU ? "truncated BSF r64"
+                                                          : "truncated CMOVB r64");
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             if (mode != 0x3U || rexX) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct SHRD/BSF is supported");
+                                  "only register-direct CMOVB/SHRD/BSF is supported");
             }
             const auto encodedReg =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto encodedRm =
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
-            if (secondOpcode == 0xBCU) {
+            if (secondOpcode == 0x42U) {
+                instruction.opcode = Opcode::CmovccReg;
+                instruction.condition = Condition::Below;
+                instruction.operands.push_back(RegisterOperand{encodedReg, 64});
+                instruction.operands.push_back(RegisterOperand{encodedRm, 64});
+            } else if (secondOpcode == 0xBCU) {
                 instruction.opcode = Opcode::BitScanForwardRegReg;
                 instruction.operands.push_back(RegisterOperand{encodedReg, 64});
                 instruction.operands.push_back(RegisterOperand{encodedRm, 64});

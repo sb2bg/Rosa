@@ -3170,6 +3170,48 @@ void testSetEqualLowByteRegister() {
     expect(rejectedHighByte, "SETE AH was not rejected explicitly");
 }
 
+void testConditionalMoveBelow64() {
+    constexpr std::array<std::uint8_t, 5> code{0x4C, 0x0F, 0x42, 0xE8, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg,
+           "CMOVB opcode differs");
+    expect(decoded[0].condition == rosa::x86::Condition::Below,
+           "CMOVB condition differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R13 && destination.width == 64,
+           "CMOVB destination differs");
+    expect(source.reg == rosa::x86::Register::Rax && source.width == 64,
+           "CMOVB source differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State taken;
+    taken.rax = 0x1122334455667788ULL;
+    taken.r13 = UINT64_MAX;
+    taken.rflags = 0x8D7 | 1U;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.r13, std::uint64_t{0x1122334455667788ULL},
+                "taken CMOVB result differs");
+    expectEqual(taken.rax, std::uint64_t{0x1122334455667788ULL},
+                "CMOVB changed its source");
+    expectEqual(taken.rflags, std::uint64_t{0x8D7 | 1U},
+                "taken CMOVB changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rax = UINT64_MAX;
+    notTaken.r13 = 0xAABBCCDDEEFF0011ULL;
+    notTaken.rflags = 0x8D6 & ~std::uint64_t{1};
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.r13, std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                "untaken CMOVB changed destination");
+    expectEqual(notTaken.rflags, std::uint64_t{0x8D6 & ~std::uint64_t{1}},
+                "untaken CMOVB changed flags");
+}
+
 void testUnsignedAboveConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x77, 0x02}; // ja 0x1004
     const rosa::x86::Decoder decoder;
@@ -3563,6 +3605,7 @@ int main() {
         {"unsigned-below long conditional", testUnsignedBelowLongConditional},
         {"register-indirect jump", testRegisterIndirectJump},
         {"set equal low-byte register", testSetEqualLowByteRegister},
+        {"conditional move below 64-bit", testConditionalMoveBelow64},
         {"unsigned-above conditional", testUnsignedAboveConditional},
         {"unsigned-above long conditional", testUnsignedAboveLongConditional},
         {"unsigned-above-or-equal long conditional",

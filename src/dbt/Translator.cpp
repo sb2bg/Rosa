@@ -1479,6 +1479,19 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::CmovccReg: {
+            if (instruction.operands.size() != 2 || !instruction.condition) {
+                throw std::runtime_error("internal decoder error: cmovcc operand");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            builder.conditionalMoveGuestRegister(
+                destination.reg, source.reg, *instruction.condition, ir::Width::I64,
+                instruction.address);
+            break;
+        }
         case x86::Opcode::Push: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: push operand count");
@@ -1699,6 +1712,28 @@ arm64::Program compileToArm64(const ir::Block &block) {
                         x86::registerOffset(*operation.guestRegister)));
             }
             break;
+        case ir::Opcode::ConditionalMoveGuestReg: {
+            if (operation.width != ir::Width::I64 ||
+                *operation.condition != x86::Condition::Below) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 64-bit register CMOVB");
+            }
+            constexpr std::uint8_t carryFlagBit = 0;
+            const auto notTaken = assembler.makeLabel();
+            assembler.ldr(arm64::x16, arm64::x0,
+                          static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
+            assembler.tbz(arm64::x16, carryFlagBit, notTaken);
+            assembler.ldr(
+                arm64::x17, arm64::x0,
+                static_cast<std::uint32_t>(x86::registerOffset(
+                    static_cast<x86::Register>(operation.immediate))));
+            assembler.str(
+                arm64::x17, arm64::x0,
+                static_cast<std::uint32_t>(
+                    x86::registerOffset(*operation.guestRegister)));
+            assembler.bind(notTaken);
+            break;
+        }
         case ir::Opcode::WriteGuestXmmLane:
             assembler.str(hostRegister(*operation.lhs), arm64::x0,
                           static_cast<std::uint32_t>(x86::xmmLaneOffset(
