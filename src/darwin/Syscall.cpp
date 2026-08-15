@@ -68,7 +68,7 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
                                            guest::GuestAddress syscallRip) {
     const auto number = state.rax;
     if (MachDispatcher::isMachTrap(number)) {
-        machDispatcher_.dispatch(state, syscallRip);
+        machDispatcher_.dispatch(addressSpace, state, syscallRip);
         return {};
     }
     if ((number & syscallClassMask) == machdepSyscallClass) {

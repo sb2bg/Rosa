@@ -5337,13 +5337,15 @@ void testGeneratedMachTaskSelfTrap() {
 }
 
 void testMachReplyPortTrap() {
+    rosa::guest::AddressSpace addressSpace;
     rosa::darwin::MachDispatcher dispatcher;
     rosa::x86::X86State state;
     state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
     state.rdi = 0x1111111111111111ULL;
     state.r9 = 0x9999999999999999ULL;
     state.rflags = 0x8D7;
-    dispatcher.dispatch(state, rosa::guest::GuestAddress{0x7FF800001574ULL});
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF800001574ULL});
     const rosa::darwin::GuestMachPortName first{static_cast<std::uint32_t>(state.rax)};
     expect(first.value != 0, "mach_reply_port returned MACH_PORT_NULL");
     expect(dispatcher.ownsReceiveRight(first),
@@ -5358,11 +5360,181 @@ void testMachReplyPortTrap() {
                 "mach_reply_port changed an ignored argument register");
 
     state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
-    dispatcher.dispatch(state, rosa::guest::GuestAddress{0x7FF800001574ULL});
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF800001574ULL});
     const rosa::darwin::GuestMachPortName second{static_cast<std::uint32_t>(state.rax)};
     expect(second != first, "repeated mach_reply_port reused a receive-right name");
     expect(dispatcher.ownsReceiveRight(first) && dispatcher.ownsReceiveRight(second),
            "mach_reply_port lost a previously allocated receive right");
+}
+
+void testMachVmProtectTrap() {
+    constexpr rosa::guest::GuestAddress mappingBase{0x4000};
+    constexpr auto pageSize = rosa::guest::guestPageSize;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        mappingBase, pageSize * 3,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "mach protect test");
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x5000},
+                          0x0123456789ABCDEFULL);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::vmProtectTrapNumber;
+    state.rdi = 0x103;
+    state.rsi = 0x5000;
+    state.rdx = 8;
+    state.r10 = 0;
+    state.r8 = 1; // VM_PROT_READ
+    state.r9 = 0x9999999999999999ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "mach_vm_protect did not return KERN_SUCCESS");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_vm_protect applied BSD carry-flag semantics");
+    expectEqual(state.r9, std::uint64_t{0x9999999999999999ULL},
+                "mach_vm_protect consumed a nonexistent sixth argument");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x5000}),
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "mach_vm_protect changed guest bytes");
+
+    const auto mappings = addressSpace.mappingInfos();
+    expectEqual(mappings.size(), std::size_t{3},
+                "mach_vm_protect did not split the mapping at guest-page boundaries");
+    expectEqual(mappings[0].base.value, std::uint64_t{0x4000},
+                "mach_vm_protect prefix mapping differs");
+    expectEqual(mappings[1].base.value, std::uint64_t{0x5000},
+                "mach_vm_protect protected mapping base differs");
+    expectEqual(mappings[1].size, pageSize,
+                "mach_vm_protect did not round an 8-byte range to one guest page");
+    expect(mappings[1].permissions == rosa::guest::Permission::Read,
+           "mach_vm_protect middle-page permissions differ");
+
+    bool writeRejected = false;
+    try {
+        addressSpace.writeU64(rosa::guest::GuestAddress{0x5000}, 0);
+    } catch (const std::runtime_error &) {
+        writeRejected = true;
+    }
+    expect(writeRejected, "mach_vm_protect did not remove guest write permission");
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x4000}, 1);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x6000}, 2);
+
+    state.rax = rosa::darwin::MachDispatcher::vmProtectTrapNumber;
+    state.r8 = 3; // VM_PROT_READ | VM_PROT_WRITE
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "mach_vm_protect could not restore a maximum guest permission");
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x5000},
+                          0xFEDCBA9876543210ULL);
+
+    const auto beforeFailure = addressSpace.mappingInfos();
+    state.rax = rosa::darwin::MachDispatcher::vmProtectTrapNumber;
+    state.rsi = 0x7000;
+    state.rdx = pageSize;
+    state.r8 = 1;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{1},
+                "mach_vm_protect unmapped range did not return KERN_INVALID_ADDRESS");
+    const auto afterFailure = addressSpace.mappingInfos();
+    expectEqual(afterFailure.size(), beforeFailure.size(),
+                "failed mach_vm_protect changed the mapping count");
+    for (std::size_t index = 0; index < beforeFailure.size(); ++index) {
+        expect(afterFailure[index].permissions == beforeFailure[index].permissions,
+               "failed mach_vm_protect changed guest permissions");
+    }
+
+    state.rax = rosa::darwin::MachDispatcher::vmProtectTrapNumber;
+    state.rdi = 0xDEAD;
+    state.rsi = 0x5000;
+    state.rdx = 8;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0x10000003},
+                "mach_vm_protect invalid task did not return MACH_SEND_INVALID_DEST");
+
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, pageSize,
+                              rosa::guest::Permission::Read,
+                              "mach protect maximum test");
+    state.rax = rosa::darwin::MachDispatcher::vmProtectTrapNumber;
+    state.rdi = 0x103;
+    state.rsi = 0x8000;
+    state.rdx = 8;
+    state.r10 = 0;
+    state.r8 = 3;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{2},
+                "mach_vm_protect maximum violation did not return KERN_PROTECTION_FAILURE");
+
+    for (const auto [setMaximum, protection] :
+         std::array<std::pair<std::uint64_t, std::uint64_t>, 2>{
+             std::pair{std::uint64_t{1}, std::uint64_t{1}},
+             std::pair{std::uint64_t{0}, std::uint64_t{8}}}) {
+        state.rax = rosa::darwin::MachDispatcher::vmProtectTrapNumber;
+        state.rsi = 0x5000;
+        state.r10 = setMaximum;
+        state.r8 = protection;
+        bool rejected = false;
+        try {
+            static_cast<void>(dispatcher.dispatch(
+                addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+        } catch (const std::runtime_error &error) {
+            rejected = std::string_view(error.what()).find("Mach trap") !=
+                       std::string_view::npos;
+        }
+        expect(rejected,
+               "unsupported mach_vm_protect behavior did not fail diagnostically");
+    }
+}
+
+void testGeneratedMachVmProtectTrap() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress dataBase{0x4000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0x0E, 0x00, 0x00, 0x01, // mov eax, 0x100000e
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(dataBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rdi = 0x103;
+    state.rsi = dataBase.value;
+    state.rdx = 8;
+    state.r10 = 0;
+    state.r8 = 3;
+    state.rflags = 0x8D7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated mach_vm_protect terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "generated mach_vm_protect did not return KERN_SUCCESS");
+    expectEqual(state.rcx, std::uint64_t{0x1007},
+                "generated mach_vm_protect did not preserve SYSCALL fallthrough");
+    expectEqual(state.r11, std::uint64_t{0x8D7},
+                "generated mach_vm_protect did not save input flags in R11");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "generated mach_vm_protect changed guest flags");
 }
 
 void testUnsupportedMachTrapDiagnostic() {
@@ -6769,6 +6941,8 @@ int main() {
         {"Mach task-self trap", testMachTaskSelfTrap},
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
+        {"Mach VM protect trap", testMachVmProtectTrap},
+        {"generated Mach VM protect trap", testGeneratedMachVmProtectTrap},
         {"unsupported Mach trap diagnostic", testUnsupportedMachTrapDiagnostic},
         {"IR verification", testIrVerification},
         {"R1 generated execution", testR1ExecutesGeneratedCode},

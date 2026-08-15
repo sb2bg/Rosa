@@ -67,6 +67,86 @@ void AddressSpace::populateSparseReadOnly(GuestAddress address,
               mapping.bytes.begin() + static_cast<std::ptrdiff_t>(offset));
 }
 
+ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
+                                    Permission permissions) {
+    if (size == 0) {
+        return ProtectResult::Success;
+    }
+    if (address.value > std::numeric_limits<std::uint64_t>::max() - size) {
+        return ProtectResult::InvalidArgument;
+    }
+    const auto unroundedEnd = address.value + size;
+    if (unroundedEnd > std::numeric_limits<std::uint64_t>::max() -
+                           (guestPageSize - 1U)) {
+        return ProtectResult::InvalidArgument;
+    }
+    const auto start = address.value & ~(static_cast<std::uint64_t>(guestPageSize) - 1U);
+    const auto end = (unroundedEnd + guestPageSize - 1U) &
+                     ~(static_cast<std::uint64_t>(guestPageSize) - 1U);
+
+    auto cursor = start;
+    while (cursor < end) {
+        const auto mapping = std::ranges::find_if(mappings_, [cursor](const Mapping &candidate) {
+            return candidate.base.value <= cursor &&
+                   cursor < candidate.base.value + candidate.size;
+        });
+        if (mapping == mappings_.end()) {
+            return ProtectResult::InvalidAddress;
+        }
+        if (!hasPermission(mapping->maximumPermissions, permissions)) {
+            return ProtectResult::ProtectionFailure;
+        }
+        cursor = std::min(end, mapping->base.value + mapping->size);
+    }
+
+    const auto slice = [](const Mapping &source, std::uint64_t sliceStart,
+                          std::uint64_t sliceEnd, Permission currentPermissions) {
+        const auto offset = static_cast<std::size_t>(sliceStart - source.base.value);
+        const auto sliceSize = static_cast<std::size_t>(sliceEnd - sliceStart);
+        Mapping result{
+            .base = GuestAddress{sliceStart},
+            .size = sliceSize,
+            .permissions = currentPermissions,
+            .maximumPermissions = source.maximumPermissions,
+            .label = source.label,
+        };
+        if (!source.bytes.empty()) {
+            result.bytes.assign(
+                source.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+                source.bytes.begin() + static_cast<std::ptrdiff_t>(offset + sliceSize));
+        }
+        if (!source.readableBytes.empty()) {
+            result.readableBytes.assign(
+                source.readableBytes.begin() + static_cast<std::ptrdiff_t>(offset),
+                source.readableBytes.begin() +
+                    static_cast<std::ptrdiff_t>(offset + sliceSize));
+        }
+        return result;
+    };
+
+    std::vector<Mapping> updated;
+    updated.reserve(mappings_.size() + 2);
+    for (auto &mapping : mappings_) {
+        const auto currentStart = mapping.base.value;
+        const auto currentEnd = currentStart + mapping.size;
+        if (currentEnd <= start || currentStart >= end) {
+            updated.push_back(std::move(mapping));
+            continue;
+        }
+        if (currentStart < start) {
+            updated.push_back(slice(mapping, currentStart, start, mapping.permissions));
+        }
+        const auto protectedStart = std::max(currentStart, start);
+        const auto protectedEnd = std::min(currentEnd, end);
+        updated.push_back(slice(mapping, protectedStart, protectedEnd, permissions));
+        if (protectedEnd < currentEnd) {
+            updated.push_back(slice(mapping, protectedEnd, currentEnd, mapping.permissions));
+        }
+    }
+    mappings_ = std::move(updated);
+    return ProtectResult::Success;
+}
+
 void AddressSpace::addMapping(GuestAddress base, std::size_t size, Permission permissions,
                               std::span<const std::uint8_t> initialBytes,
                               std::string_view label) {
@@ -92,6 +172,7 @@ void AddressSpace::addMapping(GuestAddress base, std::size_t size, Permission pe
         .base = base,
         .size = size,
         .permissions = permissions,
+        .maximumPermissions = permissions,
         .bytes = std::move(backing),
         .label = std::string(label),
     });

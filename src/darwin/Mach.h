@@ -1,6 +1,7 @@
 #pragma once
 
 #include "guest/Address.h"
+#include "guest/AddressSpace.h"
 #include "x86/Registers.h"
 
 #include <cstdint>
@@ -19,6 +20,7 @@ class MachDispatcher {
     static constexpr std::uint64_t syscallClass = 1U << 24U;
     static constexpr std::uint64_t syscallClassMask = 0xFF000000U;
     static constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
+    static constexpr std::uint64_t vmProtectTrapNumber = syscallClass | 14U;
     static constexpr std::uint64_t replyPortTrapNumber = syscallClass | 26U;
     static constexpr std::uint64_t taskSelfTrapNumber = syscallClass | 28U;
 
@@ -36,7 +38,8 @@ class MachDispatcher {
 
     [[nodiscard]] bool ownsReceiveRight(GuestMachPortName name) const;
 
-    void dispatch(x86::X86State &state, guest::GuestAddress syscallRip);
+    void dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
+                  guest::GuestAddress syscallRip);
 
   private:
     // Mach port names are opaque identifiers in the guest task's namespace. This value is never

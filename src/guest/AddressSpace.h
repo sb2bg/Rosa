@@ -31,6 +31,13 @@ struct MappingInfo {
     std::string label;
 };
 
+enum class ProtectResult : std::uint8_t {
+    Success,
+    InvalidAddress,
+    ProtectionFailure,
+    InvalidArgument,
+};
+
 class AddressSpace {
   public:
     void mapAnonymous(GuestAddress base, std::size_t size, Permission permissions,
@@ -40,6 +47,8 @@ class AddressSpace {
     void mapSparseReadOnly(GuestAddress base, std::size_t size, std::size_t dataOffset,
                            std::span<const std::uint8_t> data, std::string_view label);
     void populateSparseReadOnly(GuestAddress address, std::span<const std::uint8_t> data);
+    [[nodiscard]] ProtectResult protect(GuestAddress address, std::uint64_t size,
+                                        Permission permissions);
 
     [[nodiscard]] std::uint64_t readU64(GuestAddress address) const;
     [[nodiscard]] std::uint32_t readU32(GuestAddress address) const;
@@ -56,6 +65,7 @@ class AddressSpace {
         GuestAddress base{};
         std::size_t size{};
         Permission permissions{Permission::None};
+        Permission maximumPermissions{Permission::None};
         std::vector<std::uint8_t> bytes;
         std::vector<std::uint8_t> readableBytes;
         std::string label;
