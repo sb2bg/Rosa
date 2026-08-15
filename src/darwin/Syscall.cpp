@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -22,6 +23,7 @@ constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
 constexpr std::uint64_t syscallExit = unixSyscallClass | 1U;
 constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
+constexpr std::uint64_t syscallFsgetpath = unixSyscallClass | 427U;
 constexpr std::uint64_t syscallGetentropy = unixSyscallClass | 500U;
 constexpr std::uint64_t machdepThreadFastSetCthreadSelf = 3U;
 constexpr std::uint64_t x86UserCthreadSelector = 0x0FU;
@@ -32,6 +34,13 @@ constexpr std::uint64_t initialGuestThreadId = 1;
 constexpr std::uint64_t carryFlag = 1U << 0U;
 constexpr std::uint64_t reservedOneFlag = 1U << 1U;
 constexpr std::size_t maximumControlledWrite = 16U * 1024U * 1024U;
+constexpr std::size_t maximumLongPath = 8192;
+
+struct GuestFsid {
+    std::int32_t value[2];
+};
+
+static_assert(sizeof(GuestFsid) == 8);
 
 void setSuccess(x86::X86State &state, std::uint64_t result) {
     state.rax = result;
@@ -128,10 +137,36 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         setSuccess(state, 0);
         return {};
     }
+    if (number == syscallFsgetpath) {
+        GuestFsid guestFsid{};
+        try {
+            const auto bytes = addressSpace.readBytes(
+                guest::GuestAddress{state.rdx}, sizeof(guestFsid));
+            std::memcpy(&guestFsid, bytes.data(), sizeof(guestFsid));
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        if (state.rsi == 0 || state.rsi > maximumLongPath) {
+            setError(state, EINVAL);
+            return {};
+        }
+
+        if (guestFsid.value[0] == 0 && guestFsid.value[1] == 0 && state.r10 == 0) {
+            // dyld uses an empty FileIdTuple as a probe before falling back to
+            // its known pathname. XNU cannot resolve volume zero and reports
+            // ENOTSUP without touching the output buffer.
+            setError(state, ENOTSUP);
+            return {};
+        }
+        throw unsupported(
+            state, syscallRip,
+            "fsgetpath requires a guest VFS identity resolver for a nonempty fsid/object ID");
+    }
     if (number != syscallWrite) {
         throw unsupported(state, syscallRip,
-                          "only BSD write(2), exit(2), thread_selfid(2), and "
-                          "getentropy(2) are implemented");
+                          "only BSD write(2), exit(2), thread_selfid(2), "
+                          "fsgetpath(2), and getentropy(2) are implemented");
     }
     if (state.rdi != STDOUT_FILENO && state.rdi != STDERR_FILENO) {
         throw unsupported(state, syscallRip,

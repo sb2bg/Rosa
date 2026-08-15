@@ -7589,6 +7589,88 @@ void testDarwinGetentropy() {
                 "zero-length getentropy did not clear BSD carry");
 }
 
+void testDarwinFsgetpath() {
+    constexpr auto callNumber = UINT64_C(0x020001AB);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress guestFsidAddress{0x8100};
+    constexpr rosa::guest::GuestAddress output{0x8200};
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 8> guestFsidBytes{};
+    addressSpace.writeBytes(guestFsidAddress, guestFsidBytes);
+    std::array<std::uint8_t, 64> sentinel{};
+    sentinel.fill(0xA5);
+    addressSpace.writeBytes(output, sentinel);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = callNumber;
+    state.rdi = output.value;
+    state.rsi = 0x400;
+    state.rdx = guestFsidAddress.value;
+    state.r10 = 0;
+    state.rflags = 0xAD7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF800064BC0ULL});
+    expect(!outcome.exited, "empty-tuple fsgetpath terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOTSUP),
+                "empty-tuple fsgetpath returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "empty-tuple fsgetpath did not set BSD carry");
+    expectEqual(addressSpace.readBytes(output, sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "failed empty-tuple fsgetpath changed its output buffer");
+
+    state.rax = callNumber;
+    state.rdi = output.value;
+    state.rsi = 0x400;
+    state.rdx = 0x9000;
+    state.r10 = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "fsgetpath invalid guest fsid returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "fsgetpath invalid guest fsid did not set BSD carry");
+
+    state.rax = callNumber;
+    state.rdi = output.value;
+    state.rsi = 8193;
+    state.rdx = guestFsidAddress.value;
+    state.r10 = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "oversized fsgetpath returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "oversized fsgetpath did not set BSD carry");
+
+    constexpr std::array<std::uint8_t, 8> nonemptyFsidBytes{1};
+    addressSpace.writeBytes(guestFsidAddress, nonemptyFsidBytes);
+    state.rax = callNumber;
+    state.rdi = output.value;
+    state.rsi = 0x400;
+    state.rdx = guestFsidAddress.value;
+    state.r10 = 2;
+    state.rflags = 0x2;
+    bool unsupportedIdentity = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        unsupportedIdentity = std::string_view(error.what()).find(
+                                  "guest VFS identity resolver") !=
+                              std::string_view::npos;
+    }
+    expect(unsupportedIdentity,
+           "nonempty fsgetpath identity did not stop at the guest VFS boundary");
+}
+
 void testGeneratedDarwinGetentropy() {
     constexpr rosa::guest::GuestAddress codeBase{0x1000};
     constexpr rosa::guest::GuestAddress buffer{0x8000};
@@ -9695,6 +9777,7 @@ int main() {
         {"Darwin thread_selfid", testDarwinThreadSelfid},
         {"generated Darwin thread_selfid", testGeneratedDarwinThreadSelfid},
         {"Darwin getentropy", testDarwinGetentropy},
+        {"Darwin fsgetpath", testDarwinFsgetpath},
         {"generated Darwin getentropy", testGeneratedDarwinGetentropy},
         {"Darwin thread_fast_set_cthread_self",
          testDarwinThreadFastSetCthreadSelf},
