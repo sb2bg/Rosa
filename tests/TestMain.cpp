@@ -684,6 +684,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("mov32_immediate_memory",
+                             CaseId::mov32_immediate_memory,
+                             differentialBytes_mov32_immediate_memory);
+        bindMemory(testCase, rosa::x86::Register::Rbp, 0x80);
+        const std::array sentinel{
+            std::uint8_t{0x88}, std::uint8_t{0x77}, std::uint8_t{0x66},
+            std::uint8_t{0x55}, std::uint8_t{0x44}, std::uint8_t{0x33},
+            std::uint8_t{0x22}, std::uint8_t{0x11}};
+        std::ranges::copy(sentinel, testCase.request.memory.begin() + 0x1F);
+        testCase.memoryCompareOffset = 0x1F;
+        testCase.memoryCompareSize = sentinel.size();
+        run(testCase);
+    }
+    {
         auto testCase = make("add64_memory", CaseId::add64_memory,
                              differentialBytes_add64_memory);
         bindMemory(testCase, rosa::x86::Register::Rsi, 0);
@@ -2615,6 +2629,74 @@ void testMovImmediateToGuestMemory() {
                    std::string_view::npos;
     }
     expect(rejected, "MOV immediate to unmapped guest memory did not fail");
+}
+
+void testMov32BitImmediateToGuestMemory() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0xC7, 0x45, 0x9F, 0x00, 0x00, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF80005899DULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "MOV dword [mem], imm32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "MOV dword [mem], imm32 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbp && memory.width == 32 &&
+               memory.displacement == -0x61,
+           "MOV dword [mem], imm32 memory operand differs");
+    expect(immediate.value == 0 && immediate.width == 32,
+           "MOV dword [mem], imm32 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov dword [rbp-0x61], 0x0") != std::string::npos,
+           "MOV dword [mem], imm32 dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x809F};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0x1122334455667788ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbp = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target),
+                std::uint64_t{0x1122334400000000ULL},
+                "MOV dword [mem], imm32 did not store exactly four bytes");
+    expectEqual(state.rbp, std::uint64_t{0x8100},
+                "MOV dword [mem], imm32 changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV dword [mem], imm32 changed flags");
+
+    std::array<std::uint8_t, 0xA7> readOnlyBytes{};
+    const auto sentinel = UINT64_C(0x8877665544332211);
+    std::memcpy(readOnlyBytes.data() + 0x9F, &sentinel, sizeof(sentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(memoryBase, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes);
+    rosa::x86::X86State faultState;
+    faultState.rbp = 0x8100;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOV dword immediate to read-only memory did not fault");
+    expectEqual(readOnlyAddressSpace.readU64(target), sentinel,
+                "failed MOV dword immediate changed guest memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed MOV dword immediate changed flags");
 }
 
 void testMovByteImmediateToGuestMemory() {
@@ -6482,6 +6564,8 @@ int main() {
         {"MOV low-byte register to guest memory", testMovLowByteRegisterToGuestMemory},
         {"MOV low-byte register to extended base", testMovLowByteRegisterToExtendedBase},
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
+        {"MOV 32-bit immediate to guest memory",
+         testMov32BitImmediateToGuestMemory},
         {"MOV byte immediate to guest memory", testMovByteImmediateToGuestMemory},
         {"MOV byte immediate to RIP-relative guest memory",
          testMovByteImmediateToRipRelativeGuestMemory},

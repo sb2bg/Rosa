@@ -1104,6 +1104,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
             const auto width = memory.width == 8    ? ir::Width::I8
                                : memory.width == 16 ? ir::Width::I16
+                               : memory.width == 32 ? ir::Width::I32
                                                     : ir::Width::I64;
             const auto base = memory.ripRelative
                                   ? builder.constant(

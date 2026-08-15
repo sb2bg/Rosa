@@ -1407,7 +1407,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x3AU && code[cursor] != 0x3BU &&
             code[cursor] != 0x80U &&
             code[cursor] != 0x81U && code[cursor] != 0xC1U &&
-            code[cursor] != 0xC6U && code[cursor] != 0xD3U &&
+            code[cursor] != 0xC6U && code[cursor] != 0xC7U &&
+            code[cursor] != 0xD3U &&
             code[cursor] != 0xFFU) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
@@ -1434,7 +1435,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x2BU && opcode != 0x33U &&
             opcode != 0x21U &&
             opcode != 0x81U && opcode != 0xC1U &&
-            opcode != 0xC6U && opcode != 0xD3U && opcode != 0xFFU &&
+            opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD3U &&
+            opcode != 0xFFU &&
             (opcode < 0xB8U || opcode > 0xBFU)) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
@@ -2309,15 +2311,19 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto immediate = readI32(code.subspan(cursor, 4));
             cursor += 4;
             instruction.opcode = mode == 0x3U ? Opcode::MovRegImm : Opcode::MovMemImm;
+            const auto operandWidth =
+                static_cast<std::uint8_t>(rexW ? 64U : 32U);
             if (mode == 0x3U) {
                 instruction.operands.push_back(
-                    RegisterOperand{decodeRegister(rmEncoding, rexB), 64});
+                    RegisterOperand{decodeRegister(rmEncoding, rexB), operandWidth});
             } else {
                 instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(rmEncoding, rexB), displacement, 64});
+                    decodeRegister(rmEncoding, rexB), displacement, operandWidth});
             }
             instruction.operands.push_back(ImmediateOperand{
-                static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 32});
+                rexW ? static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate))
+                     : static_cast<std::uint64_t>(static_cast<std::uint32_t>(immediate)),
+                32});
         } else if (opcode == 0x80U) {
             if (code.size() - cursor < 2) {
                 throw DecodeError(address, remaining, "truncated cmp byte [memory], imm8");
