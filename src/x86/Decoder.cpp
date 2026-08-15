@@ -1393,15 +1393,16 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto secondOpcode = code[cursor++];
             if (secondOpcode != 0x42U && secondOpcode != 0xACU &&
-                secondOpcode != 0xBCU) {
+                secondOpcode != 0xAFU && secondOpcode != 0xBCU) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMOVB, SHRD, and BSF register forms are supported from REX.W 0F");
+                    "only CMOVB, IMUL, SHRD, and BSF register forms are supported from REX.W 0F");
             }
             if (cursor >= code.size() ||
                 (secondOpcode == 0xACU && code.size() - cursor < 2)) {
                 throw DecodeError(address, remaining,
                                   secondOpcode == 0xACU ? "truncated SHRD r64"
+                                  : secondOpcode == 0xAFU ? "truncated IMUL r64"
                                   : secondOpcode == 0xBCU ? "truncated BSF r64"
                                                           : "truncated CMOVB r64");
             }
@@ -1422,6 +1423,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(RegisterOperand{encodedRm, 64});
             } else if (secondOpcode == 0xBCU) {
                 instruction.opcode = Opcode::BitScanForwardRegReg;
+                instruction.operands.push_back(RegisterOperand{encodedReg, 64});
+                instruction.operands.push_back(RegisterOperand{encodedRm, 64});
+            } else if (secondOpcode == 0xAFU) {
+                instruction.opcode = Opcode::ImulRegReg;
                 instruction.operands.push_back(RegisterOperand{encodedReg, 64});
                 instruction.operands.push_back(RegisterOperand{encodedRm, 64});
             } else {

@@ -731,6 +731,21 @@ updateMultiplyFlags64(x86::X86State *state, std::uint64_t high) {
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateSignedMultiplyFlags64(x86::X86State *state, std::uint64_t lhs,
+                            std::uint64_t rhs) {
+    std::int64_t ignoredResult = 0;
+    const bool overflow = __builtin_mul_overflow(
+        std::bit_cast<std::int64_t>(lhs), std::bit_cast<std::int64_t>(rhs),
+        &ignoredResult);
+    state->rflags = (state->rflags & ~(flagCarry | flagOverflow)) |
+                    flagReservedOne;
+    if (overflow) {
+        state->rflags |= flagCarry | flagOverflow;
+    }
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateShiftRightDoubleFlags64(x86::X86State *state, std::uint64_t original,
                               std::uint64_t result, std::uint64_t unmaskedCount) {
     const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x3FU);
@@ -1314,6 +1329,26 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateMultiplyFlags(high, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::ImulRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: imul operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto lhs = builder.readGuestRegister(
+                destination.reg, ir::Width::I64, instruction.address);
+            const auto rhs = builder.readGuestRegister(
+                source.reg, ir::Width::I64, instruction.address);
+            const auto result = builder.multiplyLow(
+                lhs, rhs, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+                                       instruction.address);
+            builder.updateSignedMultiplyFlags(lhs, rhs, ir::Width::I64,
+                                              instruction.address);
+            break;
+        }
         case x86::Opcode::ShrdRegRegImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error("internal decoder error: shrd operand count");
@@ -1845,6 +1880,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::UpdateShiftLeftFlags ||
                          operation.opcode == ir::Opcode::UpdateShiftRightFlags ||
                          operation.opcode == ir::Opcode::UpdateMultiplyFlags ||
+                         operation.opcode == ir::Opcode::UpdateSignedMultiplyFlags ||
                          operation.opcode == ir::Opcode::UpdateShiftRightDoubleFlags ||
                          operation.opcode == ir::Opcode::Push ||
                          operation.opcode == ir::Opcode::IncrementGuestMemory ||
@@ -2305,6 +2341,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::UpdateMultiplyFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
             assembler.movImmediate(arm64::x16, pointerBits(&updateMultiplyFlags64));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::UpdateSignedMultiplyFlags:
+            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x2, hostRegister(*operation.rhs));
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&updateSignedMultiplyFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateShiftRightDoubleFlags:

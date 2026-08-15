@@ -2347,6 +2347,58 @@ void testUnsignedMultiplyGeneratedExecution() {
                 "MUL nonzero-high defined flags differ");
 }
 
+void testSignedMultiply64GeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x49, 0x0F, 0xAF, 0xCD, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ImulRegReg,
+           "IMUL r64, r64 opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 64 &&
+               source.reg == rosa::x86::Register::R13 && source.width == 64,
+           "IMUL rcx, r13 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("imul rcx, r13") !=
+               std::string::npos,
+           "IMUL rcx, r13 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rcx = 2;
+    state.r13 = static_cast<std::uint64_t>(-3);
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xFFFFFFFFFFFFFFFAULL},
+                "non-overflowing signed IMUL result differs");
+    expectEqual(state.r13, static_cast<std::uint64_t>(-3),
+                "signed IMUL changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xD6},
+                "non-overflowing signed IMUL defined flags differ");
+
+    state.rcx = static_cast<std::uint64_t>(INT64_MAX);
+    state.r13 = 2;
+    state.rflags = 0xD6;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xFFFFFFFFFFFFFFFEULL},
+                "overflowing signed IMUL low result differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "overflowing signed IMUL did not set CF and OF");
+
+    state.rcx = std::uint64_t{1} << 63U;
+    state.r13 = UINT64_MAX;
+    state.rflags = 0;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{1} << 63U,
+                "minimum-times-negative-one IMUL low result differs");
+    expectEqual(state.rflags, std::uint64_t{0x803},
+                "minimum-times-negative-one IMUL flags differ");
+}
+
 void testShiftRightDoubleGeneratedExecution() {
     constexpr std::array<std::uint8_t, 6> code{0x48, 0x0F, 0xAC, 0xD0, 0x20, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -4402,6 +4454,7 @@ int main() {
         {"SHL CL generated execution", testShiftLeftClGeneratedExecution},
         {"SHR 32-bit immediate generated execution", testShiftRight32ImmediateGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
+        {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"OR short immediate generated execution", testOrShortImmediateGeneratedExecution},

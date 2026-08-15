@@ -477,6 +477,17 @@ void Builder::updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress
     });
 }
 
+void Builder::updateSignedMultiplyFlags(ValueId lhs, ValueId rhs, Width width,
+                                        guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateSignedMultiplyFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = lhs,
+        .rhs = rhs,
+    });
+}
+
 void Builder::updateShiftRightDoubleFlags(ValueId original, ValueId result,
                                           std::uint8_t count, Width width,
                                           guest::GuestAddress rip) {
@@ -708,6 +719,10 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::UpdateMultiplyFlags:
             checkUse(operation.lhs, "high result");
+            break;
+        case Opcode::UpdateSignedMultiplyFlags:
+            checkUse(operation.lhs, "left");
+            checkUse(operation.rhs, "right");
             break;
         case Opcode::UpdateShiftRightDoubleFlags:
             checkUse(operation.lhs, "original");

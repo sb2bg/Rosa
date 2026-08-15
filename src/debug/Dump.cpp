@@ -377,6 +377,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::registerName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
             break;
+        case x86::Opcode::ImulRegReg:
+            stream << "imul "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]));
+            break;
         case x86::Opcode::ShrdRegRegImm:
             stream << "shrd "
                    << x86::registerName(
@@ -918,6 +926,11 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::UpdateMultiplyFlags:
             stream << "update_multiply_flags." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::UpdateSignedMultiplyFlags:
+            stream << "update_signed_multiply_flags." << widthName(operation.width)
+                   << ' ' << valueName(*operation.lhs) << ", "
+                   << valueName(*operation.rhs);
             break;
         case ir::Opcode::UpdateShiftRightDoubleFlags:
             stream << "update_shift_right_double_flags." << widthName(operation.width) << ' '
