@@ -218,6 +218,18 @@ ValueId Builder::bitXor(ValueId lhs, ValueId rhs, Width width, guest::GuestAddre
     return result;
 }
 
+ValueId Builder::signExtend32(ValueId value, guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::SignExtend32,
+        .width = Width::I64,
+        .guestRip = rip,
+        .result = result,
+        .lhs = value,
+    });
+    return result;
+}
+
 ValueId Builder::loadGuest(ValueId address, Width width, guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -554,6 +566,9 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::ShiftRightLogical:
             checkUse(operation.lhs, "shifted");
+            break;
+        case Opcode::SignExtend32:
+            checkUse(operation.lhs, "source");
             break;
         case Opcode::Push:
             checkUse(operation.lhs, "new stack pointer");

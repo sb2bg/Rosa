@@ -746,6 +746,40 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::MovsxdRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: movsxd operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            auto address = builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                     instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(*memory.index, ir::Width::I64,
+                                                       instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64,
+                                      instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                    instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto value = builder.loadGuest(address, ir::Width::I32,
+                                                 instruction.address);
+            const auto extended = builder.signExtend32(value, instruction.address);
+            builder.writeGuestRegister(destination.reg, extended, ir::Width::I64,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::MovMemImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: mov memory immediate count");
@@ -1657,6 +1691,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::Xor:
             assembler.bitXor(hostRegister(*operation.result), hostRegister(*operation.lhs),
                              hostRegister(*operation.rhs));
+            break;
+        case ir::Opcode::SignExtend32:
+            assembler.signExtend32(hostRegister(*operation.result),
+                                   hostRegister(*operation.lhs));
             break;
         case ir::Opcode::Push: {
             const auto fault = assembler.makeLabel();

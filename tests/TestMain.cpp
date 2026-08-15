@@ -58,6 +58,7 @@ void testAssemblerEncodings() {
     assembler.bitAnd(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.bitOr(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.bitXor(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
+    assembler.signExtend32(rosa::arm64::x10, rosa::arm64::x9);
     assembler.ldr(rosa::arm64::x9, rosa::arm64::x0, 0);
     assembler.ldr32(rosa::arm64::x9, rosa::arm64::x0, 0);
     assembler.str(rosa::arm64::x9, rosa::arm64::x0, 0);
@@ -68,10 +69,10 @@ void testAssemblerEncodings() {
     assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 20> expected{
+    const std::array<std::uint32_t, 21> expected{
         0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0xD35FFD2AU, 0x9ACB212AU,
         0x9B0A7D2BU, 0x9BCA7D2CU, 0x93C9814BU, 0x8A0B012AU, 0xAA0B012AU,
-        0xCA0B012AU, 0xF9400009U, 0xB9400009U, 0xF9000009U, 0xD63F0200U,
+        0xCA0B012AU, 0x93407D2AU, 0xF9400009U, 0xB9400009U, 0xF9000009U, 0xD63F0200U,
         0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU, 0xD5033FDFU, 0xD65F03C0U,
     };
     expectEqual(assembler.words().size(), expected.size(), "assembler word count differs");
@@ -1473,6 +1474,38 @@ void testMovzxGuestWordTo32BitRegister() {
     expect(rejected, "MOVZX from unmapped guest memory did not fail");
     expectEqual(faultState.rcx, std::uint64_t{0x1234},
                 "failed MOVZX changed destination");
+}
+
+void testMovsxdScaledGuestDword() {
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0x63, 0x0C, 0x88, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovsxdRegMem,
+           "MOVSXD scaled memory opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rax,
+           "MOVSXD scaled base differs");
+    expect(memory.index == rosa::x86::Register::Rcx,
+           "MOVSXD scaled index differs");
+    expectEqual(memory.scale, std::uint8_t{4}, "MOVSXD scaled factor differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8008}, 0xFFFFFFFC);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x8000;
+    state.rcx = 2;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rcx, std::uint64_t{0xFFFFFFFFFFFFFFFCULL},
+                "MOVSXD sign-extended result differs");
+    expectEqual(state.rax, std::uint64_t{0x8000}, "MOVSXD changed base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVSXD changed flags");
 }
 
 void testMovGuestMemoryToLegacy32BitRegister() {
@@ -3112,6 +3145,7 @@ int main() {
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},
+        {"MOVSXD scaled guest dword", testMovsxdScaledGuestDword},
         {"legacy MOV guest memory to 32-bit register",
          testMovGuestMemoryToLegacy32BitRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},

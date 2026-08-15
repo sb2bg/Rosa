@@ -183,6 +183,24 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
+        case x86::Opcode::MovsxdRegMem: {
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "movsxd "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", dword [" << x86::registerName(memory.base);
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::MovMemImm: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << (memory.width == 8 ? "mov byte [" : "mov qword [")
@@ -663,6 +681,9 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::Xor:
             stream << "xor." << widthName(operation.width) << ' ' << valueName(*operation.lhs)
                    << ", " << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::SignExtend32:
+            stream << "sign_extend_32 " << valueName(*operation.lhs);
             break;
         case ir::Opcode::Push:
             stream << "push." << widthName(operation.width) << ' ' << valueName(*operation.rhs)

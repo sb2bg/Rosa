@@ -997,6 +997,59 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::XorRegReg;
             instruction.operands.push_back(RegisterOperand{destination, width});
             instruction.operands.push_back(RegisterOperand{source, width});
+        } else if (opcode == 0x63U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated movsxd r64, [memory]");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (!rexW || mode > 0x2U || (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only MOVSXD r64, dword [base+index*scale+disp] is supported");
+            }
+            auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated MOVSXD memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits = static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding = static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if ((indexEncoding == 0x4U && !rexX) ||
+                    (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                    throw DecodeError(address, remaining,
+                                      "MOVSXD SIB requires register base and index");
+                }
+                base = decodeRegister(baseEncoding, rexB);
+                index = decodeRegister(indexEncoding, rexX);
+                scale = static_cast<std::uint8_t>(1U << scaleBits);
+            } else if (rexX) {
+                throw DecodeError(address, remaining,
+                                  "REX.X requires a SIB operand for MOVSXD");
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated MOVSXD disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated MOVSXD disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::MovsxdRegMem;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR), 64});
+            instruction.operands.push_back(MemoryOperand{
+                base, displacement, 32, index, scale});
         } else if (opcode == 0x33U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated xor register, [memory]");
