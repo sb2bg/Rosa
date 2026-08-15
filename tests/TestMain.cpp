@@ -3,6 +3,8 @@
 #include "dbt/Dispatcher.h"
 #include "dbt/Translator.h"
 #include "darwin/Commpage.h"
+#include "darwin/Mach.h"
+#include "darwin/Syscall.h"
 #include "debug/Dump.h"
 #include "guest/Address.h"
 #include "guest/AddressSpace.h"
@@ -4360,6 +4362,98 @@ void testDecoderRipRelativeLeaAndSyscall() {
                 "syscall fallthrough differs");
 }
 
+void testMachTaskSelfTrap() {
+    rosa::guest::AddressSpace addressSpace;
+    const rosa::darwin::SyscallDispatcher dispatcher;
+    const rosa::darwin::MachDispatcher mach;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    state.rdi = 0x1111111111111111ULL;
+    state.rsi = 0x2222222222222222ULL;
+    state.rdx = 0x3333333333333333ULL;
+    state.r10 = 0x4444444444444444ULL;
+    state.r8 = 0x5555555555555555ULL;
+    state.r9 = 0x6666666666666666ULL;
+    state.rflags = 0x8D7;
+
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF80000158CULL});
+    expect(!outcome.exited, "task_self_trap terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(mach.taskSelfPortName().value),
+                "task_self_trap returned the wrong guest port name");
+    expect(state.rax != 0 && state.rax <= UINT32_MAX,
+           "task_self_trap did not return a valid 32-bit guest port name");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "task_self_trap applied BSD carry-flag semantics");
+    expectEqual(state.rdi, std::uint64_t{0x1111111111111111ULL},
+                "task_self_trap changed an argument register");
+    expectEqual(state.r9, std::uint64_t{0x6666666666666666ULL},
+                "task_self_trap changed an argument register");
+
+    state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(mach.taskSelfPortName().value),
+                "repeated task_self_trap returned a different guest name");
+}
+
+void testGeneratedMachTaskSelfTrap() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0x1C, 0x00, 0x00, 0x01, // mov eax, 0x100001c
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rflags = 0x8D7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated task_self_trap terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0x103},
+                "generated task_self_trap returned the wrong guest port");
+    expectEqual(state.rcx, std::uint64_t{0x1007},
+                "generated syscall did not save its fallthrough in RCX");
+    expectEqual(state.r11, std::uint64_t{0x8D7},
+                "generated syscall did not save the input flags in R11");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "generated task_self_trap changed guest flags");
+}
+
+void testUnsupportedMachTrapDiagnostic() {
+    rosa::guest::AddressSpace addressSpace;
+    const rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::syscallClass | 31U;
+
+    try {
+        static_cast<void>(
+            dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1234}));
+        throw std::runtime_error("unsupported Mach trap was accepted");
+    } catch (const std::runtime_error &error) {
+        const std::string_view message{error.what()};
+        expect(message.find("unsupported Darwin guest Mach trap") != std::string_view::npos,
+               "unsupported Mach trap diagnostic lacks its boundary class");
+        expect(message.find("trap: 31") != std::string_view::npos,
+               "unsupported Mach trap diagnostic lacks the trap number");
+        expect(message.find("RIP: 0x1234") != std::string_view::npos,
+               "unsupported Mach trap diagnostic lacks guest RIP");
+    }
+}
+
 void testIrVerification() {
     rosa::ir::Builder builder(rosa::guest::GuestAddress{0x1000});
     const auto lhs = builder.constant(40, rosa::ir::Width::I64, rosa::guest::GuestAddress{0x1000});
@@ -5600,6 +5694,9 @@ int main() {
         {"legacy 32-bit register move execution", testLegacyRegisterMove32Execution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
+        {"Mach task-self trap", testMachTaskSelfTrap},
+        {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
+        {"unsupported Mach trap diagnostic", testUnsupportedMachTrapDiagnostic},
         {"IR verification", testIrVerification},
         {"R1 generated execution", testR1ExecutesGeneratedCode},
         {"add carry/zero flags", testAddFlagsCarryAndZero},

@@ -47,6 +47,10 @@ std::runtime_error unsupported(const x86::X86State &state, guest::GuestAddress r
 SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
                                            guest::GuestAddress syscallRip) const {
     const auto number = state.rax;
+    if (MachDispatcher::isMachTrap(number)) {
+        machDispatcher_.dispatch(state, syscallRip);
+        return {};
+    }
     if (number == syscallExit) {
         const auto rawStatus = static_cast<std::uint32_t>(state.rdi);
         return SyscallOutcome{
