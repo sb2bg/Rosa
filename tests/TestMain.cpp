@@ -347,6 +347,18 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("add8_scaled_memory",
+                             CaseId::add8_scaled_memory,
+                             differentialBytes_add8_scaled_memory);
+        bindMemory(testCase, rosa::x86::Register::R10, 0);
+        testCase.request.state.rdi = 0x20;
+        testCase.request.state.rsi = 0x112233445566777FULL;
+        testCase.request.memory[0x20] = 1;
+        testCase.memoryCompareOffset = 0x20;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
         auto testCase = make("sub64_borrow", CaseId::sub64_borrow,
                              differentialBytes_sub64_borrow);
         testCase.request.state.rdi = 5;
@@ -1748,6 +1760,79 @@ void testAddLowByteRegisters() {
         rejected = true;
     }
     expect(rejected, "ADD silently represented legacy DH as SIL");
+}
+
+void testAddGuestByteToLowRegister() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x41, 0x02, 0x34, 0x3A, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddRegMem,
+           "ADD r8, byte [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "ADD r8, byte [memory] length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rsi &&
+               destination.width == 8,
+           "ADD r8, byte [memory] destination differs");
+    expect(memory.base == rosa::x86::Register::R10 &&
+               memory.index == rosa::x86::Register::Rdi &&
+               memory.scale == 1 && memory.displacement == 0 &&
+               memory.width == 8,
+           "ADD r8, byte [memory] effective address differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "add sil, [r10+rdi*1]") != std::string::npos,
+           "ADD r8, byte [memory] dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> value{1};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8018}, value);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r10 = memoryBase.value;
+    state.rdi = 0x18;
+    state.rsi = 0x112233445566777FULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rsi, std::uint64_t{0x1122334455667780ULL},
+                "ADD guest byte did not preserve upper RSI bits");
+    expectEqual(state.r10, memoryBase.value,
+                "ADD guest byte changed its base register");
+    expectEqual(state.rdi, std::uint64_t{0x18},
+                "ADD guest byte changed its index register");
+    expectEqual(addressSpace.readBytes(rosa::guest::GuestAddress{0x8018}, 1)[0],
+                std::uint8_t{1}, "ADD guest byte changed memory");
+    expectEqual(state.rflags, std::uint64_t{0x892},
+                "ADD guest byte flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.r10 = memoryBase.value;
+    faultState.rdi = 0x18;
+    faultState.rsi = 0x887766554433227FULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "ADD from unmapped guest byte did not fault");
+    expectEqual(faultState.rsi, std::uint64_t{0x887766554433227FULL},
+                "faulted ADD guest byte changed destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted ADD guest byte changed flags");
 }
 
 void testIncrement32BitRegister() {
@@ -8788,6 +8873,7 @@ int main() {
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
         {"ADD low-byte registers", testAddLowByteRegisters},
+        {"ADD guest byte to low register", testAddGuestByteToLowRegister},
         {"INC 32-bit register", testIncrement32BitRegister},
         {"DEC 32-bit register", testDecrement32BitRegister},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},

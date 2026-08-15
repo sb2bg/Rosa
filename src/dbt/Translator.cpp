@@ -1500,20 +1500,43 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
-            const auto base =
-                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
-            const auto displacement = builder.constant(
-                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
-                instruction.address);
-            const auto address =
-                builder.add(base, displacement, ir::Width::I64, instruction.address);
-            const auto rhs = builder.loadGuest(address, ir::Width::I64, instruction.address);
-            const auto lhs = builder.readGuestRegister(destination.reg, ir::Width::I64,
-                                                       instruction.address);
-            const auto result = builder.add(lhs, rhs, ir::Width::I64, instruction.address);
-            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+            if (destination.width != memory.width ||
+                (destination.width != 8 && destination.width != 64)) {
+                throw std::runtime_error(
+                    "only 8-bit and 64-bit register-memory ADD are implemented");
+            }
+            auto address = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64,
+                                      instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto width = destination.width == 8 ? ir::Width::I8
+                                                       : ir::Width::I64;
+            const auto rhs = builder.loadGuest(address, width,
+                                               instruction.address);
+            const auto lhs = builder.readGuestRegister(
+                destination.reg, width, instruction.address);
+            const auto result = builder.add(lhs, rhs, width, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, width,
                                        instruction.address);
-            builder.updateAddFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
+            builder.updateAddFlags(lhs, rhs, result, width,
+                                   instruction.address);
             break;
         }
         case x86::Opcode::IncReg: {

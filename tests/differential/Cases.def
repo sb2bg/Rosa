@@ -1,6 +1,7 @@
 // name, followed by the exact x86_64 bytes before the wrapper's final RET.
 ROSA_DIFFERENTIAL_CASE(add64_overflow, 0x48, 0x83, 0xC0, 0x01)
 ROSA_DIFFERENTIAL_CASE(add8_register_overflow, 0x44, 0x00, 0xCE)
+ROSA_DIFFERENTIAL_CASE(add8_scaled_memory, 0x41, 0x02, 0x34, 0x3A)
 ROSA_DIFFERENTIAL_CASE(sub64_borrow, 0x48, 0x29, 0xD7)
 ROSA_DIFFERENTIAL_CASE(inc32_overflow, 0x41, 0xFF, 0xC7)
 ROSA_DIFFERENTIAL_CASE(dec32_overflow, 0xFF, 0xCF)

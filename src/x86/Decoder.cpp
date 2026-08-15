@@ -1617,7 +1617,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         if (!hasRex && code[cursor] != 0x24U && code[cursor] != 0x34U &&
-            code[cursor] != 0x00U &&
+            code[cursor] != 0x00U && code[cursor] != 0x02U &&
             code[cursor] != 0x88U &&
             code[cursor] != 0x89U &&
             code[cursor] != 0x8AU && code[cursor] != 0x8BU &&
@@ -1655,7 +1655,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                               "GS segment override is only supported for MOV r32, r/m32");
         }
         if (!rexW && opcode != 0x24U && opcode != 0x34U &&
-            opcode != 0x00U &&
+            opcode != 0x00U && opcode != 0x02U &&
             opcode != 0x88U && opcode != 0x89U &&
             opcode != 0x8AU &&
             opcode != 0x8BU && opcode != 0x85U &&
@@ -1789,6 +1789,66 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 decodeRegister(destinationEncoding, rexB), 8});
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(sourceEncoding, rexR), 8});
+        } else if (opcode == 0x02U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining,
+                                  "truncated add r8, byte [memory]");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto destinationEncoding =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode == 0x3U || (!hasRex && destinationEncoding >= 0x4U) ||
+                (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only ADD r8, byte [base+index*scale+disp8/disp32] is supported");
+            }
+            auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated ADD byte memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(address, remaining,
+                                      "no-base ADD byte SIB is not supported");
+                }
+                base = decodeRegister(baseEncoding, rexB);
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated ADD byte memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated ADD byte memory disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::AddRegMem;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(destinationEncoding, rexR), 8});
+            instruction.operands.push_back(
+                MemoryOperand{base, displacement, 8, index, scale});
         } else if (opcode == 0x01U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated add r64, r64");
