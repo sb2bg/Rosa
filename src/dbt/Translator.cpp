@@ -553,6 +553,12 @@ updateDecFlags32(x86::X86State *state, std::uint64_t original,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateDecFlags8(x86::X86State *state, std::uint64_t original,
+                std::uint64_t result) {
+    return updateDecFlags<std::uint8_t>(state, original, result);
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateDecFlags64(x86::X86State *state, std::uint64_t original,
                  std::uint64_t result) {
     return updateDecFlags<std::uint64_t>(state, original, result);
@@ -1591,8 +1597,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto destination =
                 std::get<x86::RegisterOperand>(instruction.operands[0]);
-            const auto width = destination.width == 32 ? ir::Width::I32
-                                                       : ir::Width::I64;
+            const auto width = destination.width == 8    ? ir::Width::I8
+                               : destination.width == 32 ? ir::Width::I32
+                                                         : ir::Width::I64;
             const auto original = builder.readGuestRegister(
                 destination.reg, width, instruction.address);
             const auto one = builder.constant(1, width, instruction.address);
@@ -3042,10 +3049,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::UpdateDecFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
-            assembler.movImmediate(arm64::x16,
-                                   operation.width == ir::Width::I32
-                                       ? pointerBits(&updateDecFlags32)
-                                       : pointerBits(&updateDecFlags64));
+            assembler.movImmediate(
+                arm64::x16,
+                operation.width == ir::Width::I8
+                    ? pointerBits(&updateDecFlags8)
+                : operation.width == ir::Width::I32
+                    ? pointerBits(&updateDecFlags32)
+                    : pointerBits(&updateDecFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateLogicFlags:

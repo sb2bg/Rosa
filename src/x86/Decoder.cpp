@@ -3027,13 +3027,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode != 0x3U || extension != 0 ||
+            if (mode != 0x3U || extension > 1 ||
                 (!hasRex && rmEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only representable register-direct INC r8 is supported");
+                    "only representable register-direct INC/DEC r8 is supported");
             }
-            instruction.opcode = Opcode::IncReg;
+            instruction.opcode = extension == 0 ? Opcode::IncReg
+                                                 : Opcode::DecReg;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(rmEncoding, rexB), 8});
         } else if (opcode == 0xFFU) {
