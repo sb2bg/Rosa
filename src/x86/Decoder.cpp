@@ -1628,6 +1628,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x22U &&
             code[cursor] != 0x08U &&
             code[cursor] != 0x09U &&
+            code[cursor] != 0x87U &&
             code[cursor] != 0x2BU && code[cursor] != 0x33U &&
             code[cursor] != 0x3AU && code[cursor] != 0x3BU &&
             code[cursor] != 0x80U &&
@@ -1661,6 +1662,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x8BU && opcode != 0x85U &&
             opcode != 0x8DU &&
             opcode != 0x08U && opcode != 0x09U &&
+            opcode != 0x87U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
             opcode != 0x3AU &&
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
@@ -2281,6 +2283,42 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::CmpRegMem;
             instruction.operands.push_back(RegisterOperand{lhs, operandWidth});
             instruction.operands.push_back(MemoryOperand{base, displacement, operandWidth});
+        } else if (opcode == 0x87U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining,
+                                  "truncated xchg dword [memory], register");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (rexW || rexX || mode > 0x2U || rmEncoding == 0x4U ||
+                (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only XCHG dword [base+disp8/disp32], register is supported");
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated XCHG dword disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated XCHG dword disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::XchgMemReg;
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(rmEncoding, rexB), displacement, 32});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR),
+                32});
         } else if (opcode == 0x88U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov byte [memory], register");

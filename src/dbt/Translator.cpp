@@ -824,6 +824,52 @@ compareExchangeGuest32(GuestExecutionContext *context, x86::X86State *state,
     }
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *
+exchangeGuest32(GuestExecutionContext *context, x86::X86State *state,
+                std::uint64_t address, std::uint64_t sourceValue,
+                std::uint64_t destinationEncoding) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated XCHG has no guest address space");
+        }
+        if (destinationEncoding >
+            static_cast<std::uint64_t>(x86::Register::R15)) {
+            throw std::runtime_error(
+                "generated XCHG has an invalid guest register");
+        }
+        constexpr auto width = sizeof(std::uint32_t);
+        context->addressSpace->validateAccess(
+            guest::GuestAddress{address}, width,
+            guest::Permission::Read | guest::Permission::Write);
+        const auto oldValue =
+            context->addressSpace->readU32(guest::GuestAddress{address});
+        const auto newValue = static_cast<std::uint32_t>(sourceValue);
+        const std::array bytes{
+            static_cast<std::uint8_t>(newValue),
+            static_cast<std::uint8_t>(newValue >> 8U),
+            static_cast<std::uint8_t>(newValue >> 16U),
+            static_cast<std::uint8_t>(newValue >> 24U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        const auto destination =
+            static_cast<x86::Register>(destinationEncoding);
+        const auto zeroExtended = static_cast<std::uint64_t>(oldValue);
+        std::memcpy(reinterpret_cast<std::uint8_t *>(state) +
+                        x86::registerOffset(destination),
+                    &zeroExtended, sizeof(zeroExtended));
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags64(x86::X86State *state,
                                                                        std::uint64_t result) {
     auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
@@ -1714,6 +1760,36 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 address, sourceValue, ir::Width::I32, instruction.address);
             break;
         }
+        case x86::Opcode::XchgMemReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: XCHG operand count");
+            }
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            if (memory.width != 32 || source.width != 32) {
+                throw std::runtime_error(
+                    "only 32-bit guest-memory XCHG is implemented");
+            }
+            const auto base = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            auto address = base;
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(base, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto sourceValue = builder.readGuestRegister(
+                source.reg, ir::Width::I32, instruction.address);
+            builder.exchangeGuestMemory(address, sourceValue, source.reg,
+                                        ir::Width::I32,
+                                        instruction.address);
+            break;
+        }
         case x86::Opcode::LockOrMemImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
@@ -2555,6 +2631,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::IncrementGuestMemory ||
                          operation.opcode == ir::Opcode::DecrementGuestMemory ||
                          operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
+                         operation.opcode == ir::Opcode::ExchangeGuestMemory ||
                          operation.opcode == ir::Opcode::LockedOrGuestMemory ||
                          operation.opcode == ir::Opcode::StoreGuest ||
                          operation.opcode == ir::Opcode::StoreGuestXmm ||
@@ -2569,6 +2646,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    operation.opcode == ir::Opcode::IncrementGuestMemory ||
                                    operation.opcode == ir::Opcode::DecrementGuestMemory ||
                                    operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
+                                   operation.opcode == ir::Opcode::ExchangeGuestMemory ||
                                    operation.opcode == ir::Opcode::LockedOrGuestMemory ||
                                    operation.opcode == ir::Opcode::StoreGuest ||
                                    operation.opcode == ir::Opcode::StoreGuestXmm ||
@@ -2853,6 +2931,34 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(arm64::x0,
                                    static_cast<std::uint64_t>(
                                        BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::ExchangeGuestMemory: {
+            if (operation.width != ir::Width::I32 ||
+                !operation.guestRegister) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 32-bit guest-memory XCHG");
+            }
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x3, hostRegister(*operation.rhs));
+            assembler.movImmediate(
+                arm64::x4,
+                static_cast<std::uint64_t>(*operation.guestRegister));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&exchangeGuest32));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(
+                arm64::x0,
+                static_cast<std::uint64_t>(BlockExit::MemoryFault));
             assembler.ret();
             assembler.bind(committed);
             break;

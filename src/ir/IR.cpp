@@ -404,6 +404,19 @@ void Builder::compareExchangeGuestMemory(ValueId address, ValueId source,
     });
 }
 
+void Builder::exchangeGuestMemory(ValueId address, ValueId source,
+                                  x86::Register destination, Width width,
+                                  guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ExchangeGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+        .rhs = source,
+        .guestRegister = destination,
+    });
+}
+
 void Builder::lockedOrGuestMemory(ValueId address, ValueId immediate,
                                   Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -722,6 +735,18 @@ std::vector<std::string> verify(const Block &block) {
             if (operation.width != Width::I32) {
                 errors.emplace_back(
                     "compare_exchange_guest_memory currently requires i32");
+            }
+            break;
+        case Opcode::ExchangeGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            checkUse(operation.rhs, "source");
+            if (!operation.guestRegister) {
+                errors.emplace_back(
+                    "exchange_guest_memory lacks a destination register");
+            }
+            if (operation.width != Width::I32) {
+                errors.emplace_back(
+                    "exchange_guest_memory currently requires i32");
             }
             break;
         case Opcode::LockedOrGuestMemory:

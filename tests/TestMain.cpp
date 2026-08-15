@@ -552,6 +552,18 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("xchg32_memory", CaseId::xchg32_memory,
+                             differentialBytes_xchg32_memory);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0x40);
+        testCase.request.state.rdx = 0xAAAAAAAAAABBCCDDULL;
+        constexpr std::uint32_t memoryValue = 0x11223344U;
+        std::memcpy(testCase.request.memory.data() + 0x40, &memoryValue,
+                    sizeof(memoryValue));
+        testCase.memoryCompareOffset = 0x40;
+        testCase.memoryCompareSize = sizeof(memoryValue);
+        run(testCase);
+    }
+    {
         auto testCase = make("lock_or32_stack_zero",
                              CaseId::lock_or32_stack_zero,
                              differentialBytes_lock_or32_stack_zero);
@@ -2658,6 +2670,116 @@ void testLockedCompareExchangeGuestDword() {
                 "faulted LOCK CMPXCHG changed its source");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "faulted LOCK CMPXCHG changed flags");
+}
+
+void testExchangeGuestDwordWithRegister() {
+    constexpr std::array<std::uint8_t, 3> code{0x87, 0x17, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XchgMemReg,
+           "XCHG dword memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2},
+                "XCHG dword memory length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rdi &&
+               memory.displacement == 0 && memory.width == 32,
+           "XCHG dword memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rdx && source.width == 32,
+           "XCHG dword source differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "xchg dword [rdi], edx") != std::string::npos,
+           "XCHG dword dump differs");
+
+    constexpr rosa::guest::GuestAddress target{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(target, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array oldBytes{
+        std::uint8_t{0x44}, std::uint8_t{0x33}, std::uint8_t{0x22},
+        std::uint8_t{0x11}};
+    addressSpace.writeBytes(target, oldBytes);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("exchange_guest_memory.i32") != std::string::npos,
+           "XCHG did not lower through atomic guest-memory IR");
+    rosa::x86::X86State state;
+    state.rdi = target.value;
+    state.rdx = 0xAAAAAAAAAABBCCDDULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0xAABBCCDDU},
+                "XCHG stored the wrong guest dword");
+    expectEqual(state.rdx, std::uint64_t{0x11223344},
+                "XCHG did not zero-extend the old dword into EDX");
+    expectEqual(state.rdi, target.value, "XCHG changed its address base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "XCHG changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[0] = 0xDD;
+    readOnlyBytes[1] = 0xCC;
+    readOnlyBytes[2] = 0xBB;
+    readOnlyBytes[3] = 0xAA;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        target, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        readOnlyBytes, "read-only XCHG target");
+    rosa::x86::X86State faultState;
+    faultState.rdi = target.value;
+    faultState.rdx = 0xBBBBBBBBAABBCCDDULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "same-value XCHG accepted a read-only target");
+    expectEqual(readOnlyAddressSpace.readU32(target),
+                std::uint32_t{0xAABBCCDDU},
+                "faulted XCHG changed read-only memory");
+    expectEqual(faultState.rdx, std::uint64_t{0xBBBBBBBBAABBCCDDULL},
+                "faulted XCHG changed EDX");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted XCHG changed flags");
+
+    constexpr rosa::guest::GuestAddress page{0x9000};
+    constexpr rosa::guest::GuestAddress crossPageTarget{0x9FFE};
+    constexpr std::array crossPageBytes{
+        std::uint8_t{0x55}, std::uint8_t{0xAA}};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    crossPageAddressSpace.writeBytes(crossPageTarget, crossPageBytes);
+    faultState.rdi = crossPageTarget.value;
+    faultState.rdx = 0x12345678;
+    faultState.rflags = 0xBD7;
+    rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState,
+                                        &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page XCHG did not fault");
+    expect(crossPageAddressSpace.readBytes(crossPageTarget, 2) ==
+               std::vector<std::uint8_t>(crossPageBytes.begin(),
+                                         crossPageBytes.end()),
+           "cross-page XCHG partially changed memory");
+    expectEqual(faultState.rdx, std::uint64_t{0x12345678},
+                "cross-page XCHG changed EDX");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "cross-page XCHG changed flags");
 }
 
 void testLockedOrGuestDwordImmediate() {
@@ -9206,6 +9328,7 @@ int main() {
         {"CMP guest memory with 64-bit register",
          testCompareGuestMemoryWith64BitRegister},
         {"LOCK CMPXCHG guest dword", testLockedCompareExchangeGuestDword},
+        {"XCHG guest dword with register", testExchangeGuestDwordWithRegister},
         {"LOCK OR guest dword immediate", testLockedOrGuestDwordImmediate},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP guest memory with short immediate", testCompareGuestMemoryWithShortImmediate},
