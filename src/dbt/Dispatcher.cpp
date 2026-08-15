@@ -24,7 +24,7 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
             recentBlocks_.pop_front();
         }
 
-        switch (block.execute(state, &addressSpace_)) {
+        switch (block.execute(state, &addressSpace_, timestampCounterReader_)) {
         case BlockExit::Continue:
             break;
         case BlockExit::Call: {
@@ -62,6 +62,8 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
         }
         case BlockExit::MemoryFault:
             throw std::runtime_error("generated block reported a guest-memory fault without detail");
+        case BlockExit::ExecutionFault:
+            throw std::runtime_error("generated block reported a guest execution fault without detail");
         }
     }
     throw std::runtime_error("guest block limit reached before exit or return sentinel");

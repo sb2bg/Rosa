@@ -42,6 +42,8 @@ void expect(bool condition, std::string_view message) {
     }
 }
 
+std::uint64_t fixedTimestampCounter() { return 0x12345678ABCDEF01ULL; }
+
 void testAssemblerEncodings() {
     rosa::arm64::Assembler assembler;
     assembler.movImmediate(rosa::arm64::x0, 42);
@@ -551,6 +553,40 @@ void testLfenceGeneratedExecution() {
            "LFENCE did not emit an ARM64 instruction barrier");
 }
 
+void testRdtscGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0x0F, 0x31, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::Rdtsc, "RDTSC opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2}, "RDTSC length differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = UINT64_MAX;
+    state.rdx = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, nullptr, &fixedTimestampCounter));
+    expectEqual(state.rax, std::uint64_t{0xABCDEF01},
+                "RDTSC did not zero-extend EAX");
+    expectEqual(state.rdx, std::uint64_t{0x12345678},
+                "RDTSC did not zero-extend EDX");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "RDTSC changed guest flags");
+
+    rosa::x86::X86State missingSourceState;
+    missingSourceState.rax = 0x55;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(missingSourceState));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("timestamp-counter source") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RDTSC without a virtual counter source did not fail");
+    expectEqual(missingSourceState.rax, std::uint64_t{0x55},
+                "failed RDTSC changed guest EAX");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -735,6 +771,23 @@ void testX86CommpageContinuousTimebase() {
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageNanotimeGenerationOffset}),
                 std::uint32_t{1}, "x86 commpage nanotime generation differs");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageNanotimeTscBaseOffset}),
+                std::uint64_t{0}, "x86 commpage nanotime TSC base differs");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageNanotimeScaleOffset}),
+                rosa::darwin::x86CommpageNanotimeScale,
+                "x86 commpage nanotime scale differs");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageNanotimeShiftOffset}),
+                std::uint32_t{0}, "x86 commpage nanotime shift differs");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageNanotimeNanosecondsBaseOffset}),
+                std::uint64_t{0}, "x86 commpage nanotime nanoseconds base differs");
 
     bool unsupportedReadRejected = false;
     try {
@@ -960,6 +1013,7 @@ int main() {
         {"TEST register generated execution", testTestRegisterGeneratedExecution},
         {"TEST 32-bit register generated execution", testTest32BitRegisterGeneratedExecution},
         {"LFENCE generated execution", testLfenceGeneratedExecution},
+        {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},

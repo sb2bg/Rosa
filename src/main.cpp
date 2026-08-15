@@ -333,7 +333,8 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
 
     // Single-instruction translations make the first unsupported dyld requirement observable
     // after every preceding supported instruction has executed as generated ARM64.
-    rosa::dbt::Dispatcher dispatcher(addressSpace, 1);
+    rosa::dbt::Dispatcher dispatcher(addressSpace, 1,
+                                     &rosa::darwin::sampleX86TimestampCounter);
     try {
         const auto result = dispatcher.run(state, 64);
         dumpCachedBlocks(dispatcher, options);

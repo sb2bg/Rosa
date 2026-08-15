@@ -16,12 +16,15 @@
 
 namespace rosa::dbt {
 
+using TimestampCounterReader = std::uint64_t (*)();
+
 enum class BlockExit : std::uint64_t {
     Continue,
     Call,
     Return,
     Syscall,
     MemoryFault,
+    ExecutionFault,
 };
 
 class TranslatedBlock {
@@ -30,7 +33,8 @@ class TranslatedBlock {
                     arm64::Program program);
 
     [[nodiscard]] BlockExit execute(x86::X86State &state,
-                                    guest::AddressSpace *addressSpace = nullptr) const;
+                                    guest::AddressSpace *addressSpace = nullptr,
+                                    TimestampCounterReader timestampCounterReader = nullptr) const;
 
     [[nodiscard]] const std::vector<x86::DecodedInstruction> &decoded() const noexcept {
         return decoded_;

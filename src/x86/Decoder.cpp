@@ -166,6 +166,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x0FU && code.size() - cursor >= 2 &&
+            code[cursor + 1] == 0x31U) {
+            instruction.opcode = Opcode::Rdtsc;
+            instruction.length = 2;
+            instruction.bytes[0] = 0x0F;
+            instruction.bytes[1] = 0x31;
+            result.push_back(std::move(instruction));
+            cursor += 2;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0xE8U || code[cursor] == 0xE9U) {
             if (code.size() - cursor < 5) {
                 throw DecodeError(address, remaining, "truncated rel32 control transfer");

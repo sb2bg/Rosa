@@ -28,6 +28,7 @@ struct GuestExecutionContext {
     guest::GuestAddress faultAddress{};
     std::size_t faultSize{};
     std::uint64_t loadedValue{};
+    TimestampCounterReader timestampCounterReader{};
 };
 
 extern "C" __attribute__((noinline)) x86::X86State *
@@ -100,6 +101,24 @@ loadGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t 
             context->fault = std::current_exception();
             context->faultAddress = guest::GuestAddress{address};
             context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+readTimestampCounter(GuestExecutionContext *context, x86::X86State *state) noexcept {
+    try {
+        if (context == nullptr || context->timestampCounterReader == nullptr) {
+            throw std::runtime_error("generated RDTSC has no timestamp-counter source");
+        }
+        const auto value = context->timestampCounterReader();
+        state->rax = static_cast<std::uint32_t>(value);
+        state->rdx = static_cast<std::uint32_t>(value >> 32U);
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
         }
         return nullptr;
     }
@@ -369,6 +388,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
         case x86::Opcode::Lfence:
             builder.loadFence(instruction.address);
             break;
+        case x86::Opcode::Rdtsc:
+            builder.readTimestampCounter(instruction.address);
+            break;
         case x86::Opcode::JmpRelative:
             builder.exitDirect(*instruction.branchTarget, instruction.address);
             break;
@@ -424,28 +446,30 @@ arm64::XRegister hostRegister(ir::ValueId value) {
 arm64::Program compileToArm64(const ir::Block &block) {
     arm64::Assembler assembler;
     bool hasHelperCall = false;
-    bool hasGuestMemoryCall = false;
+    bool hasExecutionContextCall = false;
     for (const auto &operation : block.operations) {
         hasHelperCall |= operation.opcode == ir::Opcode::UpdateAddFlags ||
                          operation.opcode == ir::Opcode::UpdateSubFlags ||
                          operation.opcode == ir::Opcode::UpdateLogicFlags ||
                          operation.opcode == ir::Opcode::Push ||
                          operation.opcode == ir::Opcode::StoreGuest ||
-                         operation.opcode == ir::Opcode::LoadGuest;
-        hasGuestMemoryCall |= operation.opcode == ir::Opcode::Push ||
-                              operation.opcode == ir::Opcode::StoreGuest ||
-                              operation.opcode == ir::Opcode::LoadGuest;
+                         operation.opcode == ir::Opcode::LoadGuest ||
+                         operation.opcode == ir::Opcode::ReadTimestampCounter;
+        hasExecutionContextCall |= operation.opcode == ir::Opcode::Push ||
+                                   operation.opcode == ir::Opcode::StoreGuest ||
+                                   operation.opcode == ir::Opcode::LoadGuest ||
+                                   operation.opcode == ir::Opcode::ReadTimestampCounter;
     }
     if (hasHelperCall) {
         assembler.pushFrameRecord();
     }
-    if (hasGuestMemoryCall) {
+    if (hasExecutionContextCall) {
         assembler.pushCalleeSaved19And20();
         assembler.mov(arm64::x19, arm64::x1);
     }
 
     const auto emitEpilogue = [&] {
-        if (hasGuestMemoryCall) {
+        if (hasExecutionContextCall) {
             assembler.popCalleeSaved19And20();
         }
         if (hasHelperCall) {
@@ -554,6 +578,24 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.dmbIsh();
             assembler.isb();
             break;
+        case ir::Opcode::ReadTimestampCounter: {
+            const auto fault = assembler.makeLabel();
+            const auto sampled = assembler.makeLabel();
+            assembler.mov(arm64::x4, arm64::x0);
+            assembler.mov(arm64::x1, arm64::x4);
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&readTimestampCounter));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(sampled);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0,
+                                   static_cast<std::uint64_t>(BlockExit::ExecutionFault));
+            assembler.ret();
+            assembler.bind(sampled);
+            break;
+        }
         case ir::Opcode::UpdateAddFlags:
         case ir::Opcode::UpdateSubFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
@@ -640,14 +682,19 @@ TranslatedBlock::TranslatedBlock(std::vector<x86::DecodedInstruction> decoded, i
 }
 
 BlockExit TranslatedBlock::execute(x86::X86State &state,
-                                   guest::AddressSpace *addressSpace) const {
-    GuestExecutionContext context{.addressSpace = addressSpace};
+                                   guest::AddressSpace *addressSpace,
+                                   TimestampCounterReader timestampCounterReader) const {
+    GuestExecutionContext context{
+        .addressSpace = addressSpace,
+        .timestampCounterReader = timestampCounterReader,
+    };
     using Entry = std::uint64_t (*)(x86::X86State *, GuestExecutionContext *);
     const auto rawExit = executable_.entry<Entry>()(&state, &context);
-    if (rawExit > static_cast<std::uint64_t>(BlockExit::MemoryFault)) {
+    if (rawExit > static_cast<std::uint64_t>(BlockExit::ExecutionFault)) {
         throw std::runtime_error("generated block returned an invalid exit reason");
     }
-    if (rawExit == static_cast<std::uint64_t>(BlockExit::MemoryFault)) {
+    if (rawExit == static_cast<std::uint64_t>(BlockExit::MemoryFault) ||
+        rawExit == static_cast<std::uint64_t>(BlockExit::ExecutionFault)) {
         if (context.fault) {
             std::rethrow_exception(context.fault);
         }

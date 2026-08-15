@@ -26,8 +26,10 @@ class Dispatcher {
   public:
     explicit Dispatcher(
         guest::AddressSpace &addressSpace,
-        std::size_t maximumInstructionsPerBlock = std::numeric_limits<std::size_t>::max())
-        : addressSpace_(addressSpace), maximumInstructionsPerBlock_(maximumInstructionsPerBlock) {}
+        std::size_t maximumInstructionsPerBlock = std::numeric_limits<std::size_t>::max(),
+        TimestampCounterReader timestampCounterReader = nullptr)
+        : addressSpace_(addressSpace), maximumInstructionsPerBlock_(maximumInstructionsPerBlock),
+          timestampCounterReader_(timestampCounterReader) {}
 
     [[nodiscard]] DispatchResult
     run(x86::X86State &state, std::size_t maximumBlocks,
@@ -47,6 +49,7 @@ class Dispatcher {
     BlockCache cache_;
     darwin::SyscallDispatcher syscallDispatcher_;
     std::size_t maximumInstructionsPerBlock_;
+    TimestampCounterReader timestampCounterReader_{};
     std::size_t executedBlocks_{};
     std::deque<guest::GuestAddress> recentBlocks_;
 };

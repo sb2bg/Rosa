@@ -32,6 +32,7 @@ enum class Opcode {
     StoreGuest,
     Push,
     LoadFence,
+    ReadTimestampCounter,
     UpdateAddFlags,
     UpdateSubFlags,
     UpdateLogicFlags,
@@ -82,6 +83,7 @@ class Builder {
     void storeGuest(ValueId address, ValueId value, Width width, guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
+    void readTimestampCounter(guest::GuestAddress rip);
     void updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                         guest::GuestAddress rip);
     void updateSubFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
