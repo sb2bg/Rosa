@@ -382,6 +382,14 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("or8_register", CaseId::or8_register,
+                             differentialBytes_or8_register);
+        testCase.request.state.rax = 0x1122334455667780ULL;
+        testCase.request.state.rcx = 0x8877665544332201ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("xor32_register", CaseId::xor32_register,
                              differentialBytes_xor32_register);
         testCase.request.state.rsi = UINT64_MAX;
@@ -4450,6 +4458,52 @@ void testOrRegisterGeneratedExecution() {
     expectEqual(state.rflags, expectedFlags, "OR r64, r64 flags differ");
 }
 
+void testOr8BitRegistersGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0x08, 0xC8, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrRegReg,
+           "OR r8, r8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2}, "OR r8, r8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 8 && source.reg == rosa::x86::Register::Rcx &&
+               source.width == 8,
+           "OR AL, CL operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("or al, cl") != std::string::npos,
+           "OR AL, CL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667780ULL;
+    state.rcx = 0x8877665544332201ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667781ULL},
+                "OR AL, CL did not preserve upper RAX bytes");
+    expectEqual(state.rcx, std::uint64_t{0x8877665544332201ULL},
+                "OR AL, CL changed its source");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "OR AL, CL defined flags differ");
+
+    constexpr std::array<std::uint8_t, 3> highByteCode{0x08, 0xE0, 0xC3};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            highByteCode, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected, "OR AL, AH was silently treated as a low-byte register form");
+}
+
 void testOrShortImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x83, 0xC8, 0xFF, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -7249,6 +7303,7 @@ int main() {
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
+        {"OR 8-bit registers generated execution", testOr8BitRegistersGeneratedExecution},
         {"OR short immediate generated execution", testOrShortImmediateGeneratedExecution},
         {"OR 32-bit registers generated execution", testOr32BitRegistersGeneratedExecution},
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},

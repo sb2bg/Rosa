@@ -1591,7 +1591,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
-            const auto width = destination.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto width = destination.width == 8    ? ir::Width::I8
+                               : destination.width == 32 ? ir::Width::I32
+                                                         : ir::Width::I64;
             const auto lhs = builder.readGuestRegister(destination.reg, width,
                                                        instruction.address);
             const auto rhs = builder.readGuestRegister(source.reg, width,
@@ -2194,8 +2196,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 assembler.ldr(arm64::x16, arm64::x0, offset);
                 assembler.movImmediate(arm64::x17, ~std::uint64_t{0xFF});
                 assembler.bitAnd(arm64::x16, arm64::x16, arm64::x17);
-                assembler.bitOr(arm64::x16, arm64::x16,
-                                hostRegister(*operation.lhs));
+                assembler.movImmediate(arm64::x17, 0xFF);
+                assembler.bitAnd(arm64::x17,
+                                 hostRegister(*operation.lhs), arm64::x17);
+                assembler.bitOr(arm64::x16, arm64::x16, arm64::x17);
                 assembler.str(arm64::x16, arm64::x0, offset);
             } else if (operation.width == ir::Width::I32) {
                 assembler.movImmediate(arm64::x16, UINT32_MAX);

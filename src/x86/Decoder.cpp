@@ -1419,7 +1419,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x8DU &&
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
-            code[cursor] != 0x21U && code[cursor] != 0x09U &&
+            code[cursor] != 0x21U && code[cursor] != 0x08U &&
+            code[cursor] != 0x09U &&
             code[cursor] != 0x2BU && code[cursor] != 0x33U &&
             code[cursor] != 0x3AU && code[cursor] != 0x3BU &&
             code[cursor] != 0x80U &&
@@ -1446,7 +1447,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x8AU &&
             opcode != 0x8BU && opcode != 0x85U &&
             opcode != 0x8DU &&
-            opcode != 0x09U &&
+            opcode != 0x08U && opcode != 0x09U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
             opcode != 0x3AU &&
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
@@ -1592,6 +1593,28 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::AddRegMem;
             instruction.operands.push_back(RegisterOperand{destination, 64});
             instruction.operands.push_back(MemoryOperand{base, displacement, 64});
+        } else if (opcode == 0x08U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated or r8, r8");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto sourceEncoding =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto destinationEncoding =
+                static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode != 0x3U ||
+                (!hasRex &&
+                 (sourceEncoding >= 0x4U || destinationEncoding >= 0x4U))) {
+                throw DecodeError(
+                    address, remaining,
+                    "only register-direct representable low-byte OR from opcode 08 is supported");
+            }
+            instruction.opcode = Opcode::OrRegReg;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(destinationEncoding, rexB), 8});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(sourceEncoding, rexR), 8});
         } else if (opcode == 0x09U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated or r64, r64");
