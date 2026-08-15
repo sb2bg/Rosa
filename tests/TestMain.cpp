@@ -691,6 +691,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("setg_extended_taken",
+                             CaseId::setg_extended_taken,
+                             differentialBytes_setg_extended_taken);
+        testCase.request.state.r14 = 0x1122334455667788ULL;
+        testCase.request.state.rflags = 0x882;
+        run(testCase);
+    }
+    {
+        auto testCase = make("setg_extended_not_taken",
+                             CaseId::setg_extended_not_taken,
+                             differentialBytes_setg_extended_not_taken);
+        testCase.request.state.r14 = 0x1122334455667788ULL;
+        testCase.request.state.rflags = 0x802;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmovb64_taken", CaseId::cmovb64_taken,
                              differentialBytes_cmovb64_taken);
         testCase.request.state.rax = 0x1122334455667788ULL;
@@ -7751,6 +7767,68 @@ void testSetNotEqualLowByteRegister() {
                 "not-taken SETNE changed flags");
 }
 
+void testSetGreaterExtendedLowByteRegister() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x41, 0x0F, 0x9F, 0xC6, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccReg,
+           "SETG opcode differs");
+    expect(decoded[0].condition == rosa::x86::Condition::Greater,
+           "SETG condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "SETG length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::R14 &&
+               destination.width == 8,
+           "SETG extended low-byte destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("setg r14b") !=
+               std::string::npos,
+           "SETG dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r14 = 0x1122334455667788ULL;
+    state.rflags = 0x882; // ZF=0, SF=OF=1.
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r14, std::uint64_t{0x1122334455667701ULL},
+                "taken SETG did not merge one into R14B");
+    expectEqual(state.rflags, std::uint64_t{0x882},
+                "taken SETG changed flags");
+
+    state.r14 = 0xFFEEDDCCBBAA9988ULL;
+    state.rflags = 0x802; // ZF=0, SF=0, OF=1.
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r14, std::uint64_t{0xFFEEDDCCBBAA9900ULL},
+                "SETG accepted unequal SF and OF");
+    expectEqual(state.rflags, std::uint64_t{0x802},
+                "not-taken SETG changed flags");
+
+    state.r14 = UINT64_MAX;
+    state.rflags = 0x42; // ZF=1, SF=OF=0.
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r14, std::uint64_t{0xFFFFFFFFFFFFFF00ULL},
+                "SETG ignored ZF");
+    expectEqual(state.rflags, std::uint64_t{0x42},
+                "zero SETG changed flags");
+
+    constexpr std::array<std::uint8_t, 3> highByte{
+        0x0F, 0x9F, 0xC6};
+    bool rejectedHighByte = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            highByte, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejectedHighByte = true;
+    }
+    expect(rejectedHighByte,
+           "SETG DH was silently treated as a low-byte register");
+}
+
 void testConditionalMoveBelow64() {
     constexpr std::array<std::uint8_t, 5> code{0x4C, 0x0F, 0x42, 0xE8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -8379,6 +8457,8 @@ int main() {
         {"register-indirect jump", testRegisterIndirectJump},
         {"set equal low-byte register", testSetEqualLowByteRegister},
         {"set not-equal low-byte register", testSetNotEqualLowByteRegister},
+        {"set greater extended low-byte register",
+         testSetGreaterExtendedLowByteRegister},
         {"conditional move below 64-bit", testConditionalMoveBelow64},
         {"conditional move equal 64-bit", testConditionalMoveEqual64},
         {"unsigned-above conditional", testUnsignedAboveConditional},

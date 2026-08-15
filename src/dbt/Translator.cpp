@@ -2493,11 +2493,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
             break;
         case ir::Opcode::EvaluateCondition: {
             if (*operation.condition != x86::Condition::Equal &&
-                *operation.condition != x86::Condition::NotEqual) {
+                *operation.condition != x86::Condition::NotEqual &&
+                *operation.condition != x86::Condition::Greater) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements equality condition values");
+                    "ARM64 backend only implements equality/greater condition values");
             }
             constexpr std::uint8_t zeroFlagBit = 6;
+            constexpr std::uint8_t signFlagBit = 7;
             const auto done = assembler.makeLabel();
             const auto destination = hostRegister(*operation.result);
             assembler.movImmediate(destination, 0);
@@ -2505,8 +2507,14 @@ arm64::Program compileToArm64(const ir::Block &block) {
                           static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
             if (*operation.condition == x86::Condition::Equal) {
                 assembler.tbz(arm64::x16, zeroFlagBit, done);
+            } else if (*operation.condition == x86::Condition::NotEqual) {
+                assembler.tbnz(arm64::x16, zeroFlagBit, done);
             } else {
                 assembler.tbnz(arm64::x16, zeroFlagBit, done);
+                // OF is bit 11; align it with SF at bit 7 and require equality.
+                assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
+                assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
+                assembler.tbnz(arm64::x17, signFlagBit, done);
             }
             assembler.movImmediate(destination, 1);
             assembler.bind(done);
@@ -2931,6 +2939,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     assembler.tbz(arm64::x16, zeroFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::Sign) {
                     assembler.tbz(arm64::x16, signFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::Greater) {
+                    assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
+                    assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
+                    assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
+                    assembler.tbnz(arm64::x17, signFlagBit, notTaken);
                 } else {
                     assembler.tbnz(arm64::x16, zeroFlagBit, taken);
                     // OF is bit 11, so shifting it down by four aligns it with SF.

@@ -348,31 +348,41 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
-        if (code.size() - cursor >= 2 && code[cursor] == 0x0FU &&
-            (code[cursor + 1] == 0x94U || code[cursor + 1] == 0x95U)) {
-            if (code.size() - cursor < 3) {
+        const bool setHasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+        const auto setOpcodeOffset = cursor + (setHasRex ? 1U : 0U);
+        if (code.size() - setOpcodeOffset >= 2 &&
+            code[setOpcodeOffset] == 0x0FU &&
+            (code[setOpcodeOffset + 1] == 0x94U ||
+             code[setOpcodeOffset + 1] == 0x95U ||
+             code[setOpcodeOffset + 1] == 0x9FU)) {
+            if (code.size() - setOpcodeOffset < 3) {
                 throw DecodeError(address, remaining, "truncated setcc r8");
             }
-            const auto conditionOpcode = code[cursor + 1];
-            const auto modrm = code[cursor + 2];
+            const auto rex = setHasRex ? code[cursor] : 0U;
+            const auto conditionOpcode = code[setOpcodeOffset + 1];
+            const auto modrm = code[setOpcodeOffset + 2];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-            const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto extension =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode != 0x3U || extension != 0 || rmEncoding >= 0x4U) {
+            if (mode != 0x3U || extension != 0 ||
+                (!setHasRex && rmEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct SETE/SETNE to AL/CL/DL/BL is supported");
+                    "only register-direct SETE/SETNE/SETG to representable low-byte registers is supported");
             }
             instruction.opcode = Opcode::SetccReg;
             instruction.condition = conditionOpcode == 0x94U ? Condition::Equal
-                                                              : Condition::NotEqual;
+                                    : conditionOpcode == 0x95U ? Condition::NotEqual
+                                                               : Condition::Greater;
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(rmEncoding, false), 8});
-            instruction.length = 3;
-            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), 3,
-                        instruction.bytes.begin());
+                decodeRegister(rmEncoding, (rex & 0x1U) != 0), 8});
+            const auto length = setOpcodeOffset + 3 - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
             result.push_back(std::move(instruction));
-            cursor += 3;
+            cursor = setOpcodeOffset + 3;
             if (result.size() == maximumInstructions) {
                 return result;
             }

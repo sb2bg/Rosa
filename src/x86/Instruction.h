@@ -94,6 +94,7 @@ enum class Condition {
     BelowOrEqual,
     Sign,
     LessOrEqual,
+    Greater,
 };
 
 struct RegisterOperand {
