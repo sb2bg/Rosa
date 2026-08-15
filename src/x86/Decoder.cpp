@@ -2190,6 +2190,19 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
                 instruction.operands.push_back(ImmediateOperand{
                     static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 32});
+            } else if (mode == 0x3U && extension == 0x4U && !rexW && !rexR &&
+                       !rexX) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated and r32, imm32");
+                }
+                const auto immediate = static_cast<std::uint32_t>(
+                    readI32(code.subspan(cursor, 4)));
+                cursor += 4;
+                instruction.opcode = Opcode::AndRegImm;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 32});
+                instruction.operands.push_back(ImmediateOperand{immediate, 32});
             } else if (mode == 0x3U && extension == 0x6U && !rexR && !rexX) {
                 if (code.size() - cursor < 4) {
                     throw DecodeError(address, remaining, "truncated xor register, imm32");
@@ -2252,7 +2265,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             } else {
                 throw DecodeError(
                     address, remaining,
-                    "only ADD /0, SUB /5, XOR /6, and CMP /7 forms from opcode 81 are supported");
+                    "only ADD /0, AND r32 /4, SUB /5, XOR /6, and CMP /7 forms from opcode 81 are supported");
             }
         } else if (opcode == 0xFFU) {
             if (code.size() - cursor < 1) {

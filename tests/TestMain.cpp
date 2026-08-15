@@ -3749,6 +3749,79 @@ void testLegacyAnd32Immediate() {
                 "legacy AND r32, imm8 flags differ");
 }
 
+void testAnd32BitRegisterImmediate() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x41, 0x81, 0xE7, 0xFF, 0x0F, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegImm,
+           "AND r32, imm32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "AND r32, imm32 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R15 && destination.width == 32,
+           "AND r32, imm32 destination differs");
+    expectEqual(immediate.value, std::uint64_t{0xFFF},
+                "AND r32, imm32 immediate differs");
+    expectEqual(immediate.width, std::uint8_t{32},
+                "AND r32, imm32 immediate width differs");
+    expect(rosa::debug::dumpX86(decoded).find("and r15d, 0xfff") !=
+               std::string::npos,
+           "AND r32, imm32 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r15 = 0xFFFFFFFF80000800ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r15, std::uint64_t{0x800},
+                "AND r32, imm32 result did not zero-extend");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 2U},
+                "AND r32, imm32 nonzero defined flags differ");
+
+    constexpr std::array<std::uint8_t, 7> zeroCode{
+        0x81, 0xE0, 0x00, 0x00, 0x00, 0x00, 0xC3};
+    const auto zeroBlock =
+        translator.translate(zeroCode, rosa::guest::GuestAddress{0x2000});
+    state.rax = UINT64_MAX;
+    state.rflags = 0x811;
+    static_cast<void>(zeroBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0},
+                "AND EAX, imm32 zero result did not clear upper bits");
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "AND EAX, imm32 zero defined flags differ");
+
+    constexpr std::array<std::uint8_t, 7> signCode{
+        0x81, 0xE1, 0x00, 0x00, 0x00, 0x80, 0xC3};
+    const auto signBlock =
+        translator.translate(signCode, rosa::guest::GuestAddress{0x2800});
+    state.rcx = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(signBlock.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x80000000},
+                "AND ECX, imm32 sign-bit result differs");
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "AND ECX, imm32 sign defined flags differ");
+
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            std::span<const std::uint8_t>{code}.first(6),
+            rosa::guest::GuestAddress{0x3000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected, "truncated AND r32, imm32 was not rejected");
+}
+
 void testGuestAddressSpace() {
     constexpr rosa::guest::GuestAddress base{0x4000};
     rosa::guest::AddressSpace addressSpace;
@@ -4674,6 +4747,7 @@ int main() {
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
+        {"AND 32-bit register immediate", testAnd32BitRegisterImmediate},
         {"guest address space", testGuestAddressSpace},
         {"guest failure report", testGuestFailureReport},
         {"x86 commpage", testX86Commpage},
