@@ -285,6 +285,18 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
+        case x86::Opcode::CmpMemImm: {
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "cmp dword [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], 0x"
+                   << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
+            break;
+        }
         case x86::Opcode::XorpsRegReg:
             stream << "xorps "
                    << x86::xmmRegisterName(

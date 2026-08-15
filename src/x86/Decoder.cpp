@@ -516,7 +516,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         if (!hasRex && code[cursor] != 0x89U && code[cursor] != 0x8BU &&
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
-            code[cursor] != 0xC1U) {
+            code[cursor] != 0x81U && code[cursor] != 0xC1U) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
@@ -534,7 +534,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const auto opcode = code[cursor++];
         if (!rexW && opcode != 0x89U && opcode != 0x8BU && opcode != 0x85U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
-            opcode != 0x31U && opcode != 0xC1U) {
+            opcode != 0x31U && opcode != 0x81U && opcode != 0xC1U) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
         }
@@ -867,23 +867,61 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.operands.push_back(ImmediateOperand{
                 static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 32});
         } else if (opcode == 0x81U) {
-            if (code.size() - cursor < 5) {
-                throw DecodeError(address, remaining, "truncated sub r64, imm32");
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated opcode 81");
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            if (mode != 0x3U || extension != 0x5U || rexR || rexX) {
-                throw DecodeError(address, remaining,
-                                  "only register-direct SUB /5 from opcode 81 is supported");
+            if (mode == 0x3U && extension == 0x5U && rexW && !rexR && !rexX) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated sub r64, imm32");
+                }
+                const auto immediate = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+                instruction.opcode = Opcode::SubRegImm;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
+                instruction.operands.push_back(ImmediateOperand{
+                    static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 32});
+            } else if (mode <= 0x2U && extension == 0x7U && !rexW && !rexR &&
+                       !rexX) {
+                const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+                if (rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only CMP [base+disp8/disp32], imm32 memory operands are supported");
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated CMP memory disp8");
+                    }
+                    displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated CMP memory disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated CMP memory imm32");
+                }
+                const auto immediate = static_cast<std::uint32_t>(
+                    readI32(code.subspan(cursor, 4)));
+                cursor += 4;
+                instruction.opcode = Opcode::CmpMemImm;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, rexB), displacement, 32});
+                instruction.operands.push_back(ImmediateOperand{immediate, 32});
+            } else {
+                throw DecodeError(
+                    address, remaining,
+                    "only SUB r64 /5 and CMP [base+disp], imm32 /7 from opcode 81 are supported");
             }
-            const auto immediate = readI32(code.subspan(cursor, 4));
-            cursor += 4;
-            instruction.opcode = Opcode::SubRegImm;
-            instruction.operands.push_back(
-                RegisterOperand{decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
-            instruction.operands.push_back(ImmediateOperand{
-                static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 32});
         } else if (opcode == 0x83U) {
             if (code.size() - cursor < 2) {
                 throw DecodeError(address, remaining, "truncated add r64, imm8");

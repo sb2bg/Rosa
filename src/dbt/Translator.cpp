@@ -844,6 +844,26 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateSubFlags(lhs, rhs, result, width, instruction.address);
             break;
         }
+        case x86::Opcode::CmpMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: cmp memory immediate count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            const auto base =
+                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                instruction.address);
+            const auto address =
+                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            const auto lhs = builder.loadGuest(address, ir::Width::I32, instruction.address);
+            const auto rhs = builder.constant(immediate.value, ir::Width::I32,
+                                              instruction.address);
+            const auto result = builder.sub(lhs, rhs, ir::Width::I32, instruction.address);
+            builder.updateSubFlags(lhs, rhs, result, ir::Width::I32, instruction.address);
+            break;
+        }
         case x86::Opcode::Push: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: push operand count");

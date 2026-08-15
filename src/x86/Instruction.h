@@ -33,6 +33,7 @@ enum class Opcode {
     TestReg8Reg8,
     CmpRegImm,
     CmpRegMem,
+    CmpMemImm,
     XorpsRegReg,
     MovapsMemReg,
     MovupsMemReg,
