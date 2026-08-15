@@ -4807,6 +4807,85 @@ void testMovupsRegisterToGuestMemoryWithSib() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVUPS changed flags");
 }
 
+void testMovupsRegisterToRipRelativeGuestMemory() {
+    constexpr rosa::guest::GuestAddress instructionAddress{0x7FF800058A0CULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF8000C8DC0ULL};
+    constexpr rosa::guest::GuestAddress targetPage{0x7FF8000C8000ULL};
+    constexpr std::array<std::uint8_t, 8> code{
+        0x0F, 0x11, 0x05, 0xAD, 0x03, 0x07, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovupsMemReg,
+           "RIP-relative MOVUPS store opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "RIP-relative MOVUPS store length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.ripRelative && !memory.hasBase,
+           "RIP-relative MOVUPS store addressing kind differs");
+    expectEqual(memory.displacement, std::int64_t{0x703AD},
+                "RIP-relative MOVUPS store displacement differs");
+    expectEqual(memory.width, std::uint8_t{128},
+                "RIP-relative MOVUPS store width differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]).reg ==
+               rosa::x86::XmmRegister::Xmm0,
+           "RIP-relative MOVUPS store source differs");
+    expect(rosa::debug::dumpX86(decoded).find("movups [rip+0x703ad], xmm0") !=
+               std::string::npos,
+           "RIP-relative MOVUPS store dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL,
+    };
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), state.xmm[0].low,
+                "RIP-relative MOVUPS stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{target.value + 8}),
+                state.xmm[0].high,
+                "RIP-relative MOVUPS stored the wrong high lane");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "RIP-relative MOVUPS changed its low source lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "RIP-relative MOVUPS changed its high source lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative MOVUPS changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    std::fill_n(readOnlyBytes.begin() +
+                    static_cast<std::ptrdiff_t>(target.value - targetPage.value),
+                16, std::uint8_t{0xA5});
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(targetPage, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes,
+                                    "read-only RIP-relative MOVUPS target");
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative MOVUPS accepted a read-only target");
+    const auto unchanged = readOnlyAddressSpace.readBytes(target, 16);
+    expect(std::ranges::all_of(unchanged,
+                               [](std::uint8_t byte) { return byte == 0xA5; }),
+           "failed RIP-relative MOVUPS partially changed guest memory");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "failed RIP-relative MOVUPS changed flags");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "failed RIP-relative MOVUPS changed its source");
+}
+
 void testMovupsGuestMemoryToRegister() {
     constexpr std::array<std::uint8_t, 6> code{
         0x41, 0x0F, 0x10, 0x47, 0x18, 0xC3};
@@ -7003,6 +7082,8 @@ int main() {
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVAPS guest memory to register", testMovapsGuestMemoryToRegister},
         {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
+        {"MOVUPS register to RIP-relative guest memory",
+         testMovupsRegisterToRipRelativeGuestMemory},
         {"MOVUPS guest memory to register", testMovupsGuestMemoryToRegister},
         {"MOVDQA guest memory to register", testMovdqaGuestMemoryToRegister},
         {"MOVDQU register to guest memory", testMovdquRegisterToGuestMemory},

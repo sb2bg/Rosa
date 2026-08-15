@@ -1050,14 +1050,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor + 2];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode > 0x2U || (mode == 0 && rmEncoding == 0x5U)) {
+            if (mode > 0x2U) {
                 throw DecodeError(
                     address, remaining,
                     "only MOVUPS [base+disp8/disp32], xmm memory operands are supported");
             }
             cursor += 3;
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             auto baseEncoding = rmEncoding;
-            if (rmEncoding == 0x4U) {
+            if (!ripRelative && rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated MOVUPS SIB byte");
                 }
@@ -1070,7 +1071,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
             }
             std::int64_t displacement = 0;
-            if (mode == 0x1U) {
+            if (ripRelative) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated RIP-relative MOVUPS disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            } else if (mode == 0x1U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated MOVUPS memory disp8");
                 }
@@ -1082,9 +1090,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 displacement = readI32(code.subspan(cursor, 4));
                 cursor += 4;
             }
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+            }
             instruction.opcode = Opcode::MovupsMemReg;
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(baseEncoding, false), displacement, 128});
+            instruction.operands.push_back(
+                ripRelative
+                    ? MemoryOperand{Register::Rax, displacement, 128,
+                                    std::nullopt, 1, false, true}
+                    : MemoryOperand{decodeRegister(baseEncoding, false),
+                                    displacement, 128});
             instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
 
