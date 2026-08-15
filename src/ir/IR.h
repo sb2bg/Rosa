@@ -38,6 +38,7 @@ enum class Opcode {
     Xor,
     LoadGuest,
     StoreGuest,
+    StoreGuestXmm,
     Push,
     LoadFence,
     ReadTimestampCounter,
@@ -106,6 +107,8 @@ class Builder {
     ValueId bitXor(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId loadGuest(ValueId address, Width width, guest::GuestAddress rip);
     void storeGuest(ValueId address, ValueId value, Width width, guest::GuestAddress rip);
+    void storeGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
+                       guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
     void readTimestampCounter(guest::GuestAddress rip);

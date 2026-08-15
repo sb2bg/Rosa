@@ -1043,6 +1043,51 @@ void testXorpsRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "XORPS changed flags");
 }
 
+void testMovapsRegisterToGuestMemory() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x0F, 0x29, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, 0xC3,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovapsMemReg,
+           "MOVAPS [mem], xmm opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rbp, "MOVAPS base differs");
+    expectEqual(memory.displacement, std::int64_t{-0x20},
+                "MOVAPS displacement differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbp = 0x8100;
+    state.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x80E0}),
+                state.xmm[0].low, "MOVAPS stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x80E8}),
+                state.xmm[0].high, "MOVAPS stored the wrong high lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVAPS changed flags");
+
+    rosa::x86::X86State unalignedState;
+    unalignedState.rbp = 0x8108;
+    unalignedState.xmm[0] = state.xmm[0];
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(unalignedState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("16-byte aligned") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "unaligned MOVAPS guest store did not fail");
+    expectEqual(unalignedState.rbp, std::uint64_t{0x8108},
+                "failed MOVAPS changed its base register");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -1504,6 +1549,7 @@ int main() {
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
+        {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},

@@ -31,6 +31,7 @@ enum class Opcode {
     CmpRegImm,
     CmpRegMem,
     XorpsRegReg,
+    MovapsMemReg,
     Push,
     Pop,
     Lfence,
