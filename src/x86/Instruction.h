@@ -74,6 +74,7 @@ enum class Condition {
     Equal,
     NotEqual,
     Below,
+    AboveOrEqual,
     Above,
     BelowOrEqual,
     LessOrEqual,

@@ -2056,6 +2056,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::Below) {
                     assembler.tbz(arm64::x16, carryFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::AboveOrEqual) {
+                    assembler.tbnz(arm64::x16, carryFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::Above) {
                     assembler.tbnz(arm64::x16, carryFlagBit, notTaken);
                     assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);

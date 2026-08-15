@@ -3157,6 +3157,34 @@ void testUnsignedAboveLongConditional() {
                 "JA rel32 took with CF set");
 }
 
+void testUnsignedAboveOrEqualLongConditional() {
+    constexpr std::array<std::uint8_t, 6> code{0x0F, 0x83, 0x02, 0, 0, 0};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].condition == rosa::x86::Condition::AboveOrEqual,
+           "JAE rel32 condition differs");
+    expectEqual(decoded[0].branchTarget->value, std::uint64_t{0x1008},
+                "JAE rel32 target differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State taken;
+    taken.rflags = 0x8D6 & ~std::uint64_t{1};
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rip, std::uint64_t{0x1008},
+                "JAE did not take with CF clear");
+    expectEqual(taken.rflags, std::uint64_t{0x8D6 & ~std::uint64_t{1}},
+                "taken JAE changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rflags = 0x8D7 | 1U;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rip, std::uint64_t{0x1006},
+                "JAE took with CF set");
+    expectEqual(notTaken.rflags, std::uint64_t{0x8D7 | 1U},
+                "not-taken JAE changed flags");
+}
+
 void testUnsignedBelowOrEqualConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x76, 0x02}; // jbe 0x1004
     const rosa::x86::Decoder decoder;
@@ -3419,6 +3447,8 @@ int main() {
         {"set equal low-byte register", testSetEqualLowByteRegister},
         {"unsigned-above conditional", testUnsignedAboveConditional},
         {"unsigned-above long conditional", testUnsignedAboveLongConditional},
+        {"unsigned-above-or-equal long conditional",
+         testUnsignedAboveOrEqualLongConditional},
         {"unsigned-below-or-equal conditional", testUnsignedBelowOrEqualConditional},
         {"signed-less-or-equal conditional", testSignedLessOrEqualConditional},
         {"controlled Mach-O parsing", testControlledMachOParsing},

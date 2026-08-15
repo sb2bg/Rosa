@@ -53,6 +53,8 @@ const char *conditionName(x86::Condition condition) {
         return "ne";
     case x86::Condition::Below:
         return "b";
+    case x86::Condition::AboveOrEqual:
+        return "ae";
     case x86::Condition::Above:
         return "a";
     case x86::Condition::BelowOrEqual:
