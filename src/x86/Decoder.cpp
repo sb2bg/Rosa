@@ -2141,14 +2141,22 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             if (mode > 0x2U || extension != 0 || rexR || rexX ||
-                rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
+                rmEncoding == 0x4U) {
                 throw DecodeError(
                     address, remaining,
-                    "only MOV byte [base+disp8/disp32], imm8 from opcode C6 /0 is supported");
+                    "only MOV byte [base/RIP+disp8/disp32], imm8 from opcode C6 /0 is supported");
             }
             std::int64_t displacement = 0;
-            if (mode == 0x1U) {
+            if (ripRelative) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated RIP-relative MOV byte disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            } else if (mode == 0x1U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining,
                                       "truncated MOV byte memory disp8");
@@ -2165,10 +2173,19 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (cursor >= code.size()) {
                 throw DecodeError(address, remaining, "truncated MOV byte imm8");
             }
+            const auto immediate = code[cursor++];
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+            }
             instruction.opcode = Opcode::MovMemImm;
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, rexB), displacement, 8});
-            instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
+            instruction.operands.push_back(
+                ripRelative
+                    ? MemoryOperand{Register::Rax, displacement, 8, std::nullopt,
+                                    1, false, true}
+                    : MemoryOperand{decodeRegister(rmEncoding, rexB),
+                                    displacement, 8});
+            instruction.operands.push_back(ImmediateOperand{immediate, 8});
         } else if (opcode == 0xC7U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov opcode C7");
