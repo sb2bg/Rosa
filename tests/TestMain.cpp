@@ -385,6 +385,14 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("and8_register", CaseId::and8_register,
+                             differentialBytes_and8_register);
+        testCase.request.state.rax = 0x1122334455667780ULL;
+        testCase.request.state.rcx = 0x88776655443322FFULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("or64_register", CaseId::or64_register,
                              differentialBytes_or64_register);
         testCase.request.state.rax = 0x00000000ABCDEF01ULL;
@@ -6537,6 +6545,51 @@ void testAnd32BitRegisters() {
     expectEqual(state.rflags, std::uint64_t{0x6}, "AND r32, r32 flags differ");
 }
 
+void testAnd8BitRegisters() {
+    constexpr std::array<std::uint8_t, 3> code{0x20, 0xC1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegReg,
+           "AND r8, r8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2}, "AND r8, r8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 8 && source.reg == rosa::x86::Register::Rax &&
+               source.width == 8,
+           "AND CL, AL operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("and cl, al") != std::string::npos,
+           "AND CL, AL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667780ULL;
+    state.rcx = 0x88776655443322FFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x8877665544332280ULL},
+                "AND CL, AL did not preserve upper RCX bytes");
+    expectEqual(state.rax, std::uint64_t{0x1122334455667780ULL},
+                "AND CL, AL changed its source");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 7U},
+                "AND CL, AL defined flags differ");
+
+    constexpr std::array<std::uint8_t, 3> highByteCode{0x20, 0xE0, 0xC3};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            highByteCode, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected, "AND AL, AH was silently treated as a low-byte register form");
+}
+
 void testBitScanForward32() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0xBC, 0xC6, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -7870,6 +7923,7 @@ int main() {
         {"add register imm32", testAddRegisterImmediate32},
         {"and result/flags", testAndResultAndFlags},
         {"AND 32-bit registers", testAnd32BitRegisters},
+        {"AND 8-bit registers", testAnd8BitRegisters},
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
