@@ -1130,18 +1130,32 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                : source.width == 16 ? ir::Width::I16
                                : source.width == 32 ? ir::Width::I32
                                                     : ir::Width::I64;
-            const auto base = memory.ripRelative
-                                  ? builder.constant(
-                                        instruction.address.value + instruction.length,
-                                        ir::Width::I64, instruction.address)
-                                  : builder.readGuestRegister(
-                                        memory.base, ir::Width::I64,
-                                        instruction.address);
-            const auto displacement = builder.constant(
-                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
-                instruction.address);
-            const auto address =
-                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            auto address = memory.ripRelative
+                               ? builder.constant(
+                                     instruction.address.value + instruction.length,
+                                     ir::Width::I64, instruction.address)
+                               : builder.readGuestRegister(
+                                     memory.base, ir::Width::I64,
+                                     instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64,
+                                      instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
             const auto value =
                 builder.readGuestRegister(source.reg, width, instruction.address);
             builder.storeGuest(address, value, width, instruction.address);

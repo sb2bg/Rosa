@@ -926,6 +926,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("mov8_extended_scaled_store",
+                             CaseId::mov8_extended_scaled_store,
+                             differentialBytes_mov8_extended_scaled_store);
+        bindMemory(testCase, rosa::x86::Register::R8, 0);
+        testCase.request.state.rcx = 0x20;
+        testCase.request.state.r11 = 0x11223344556677A5ULL;
+        testCase.request.memory[0x21] = 0x11;
+        testCase.request.memory[0x22] = 0;
+        testCase.request.memory[0x23] = 0x22;
+        testCase.memoryCompareOffset = 0x21;
+        testCase.memoryCompareSize = 3;
+        run(testCase);
+    }
+    {
         auto testCase = make("mov32_immediate_memory",
                              CaseId::mov32_immediate_memory,
                              differentialBytes_mov32_immediate_memory);
@@ -3467,6 +3481,83 @@ void testMovLowByteRegisterToGuestMemory() {
     expect(rejected, "MOV byte to unmapped guest memory did not fail");
     expectEqual(faultState.rflags, std::uint64_t{0x8D7},
                 "failed MOV byte store changed flags");
+}
+
+void testMovExtendedLowByteToScaledGuestMemory() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x45, 0x88, 0x5C, 0x08, 0x02, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "scaled byte MOV store opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "scaled byte MOV store length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R8 &&
+               memory.index == rosa::x86::Register::Rcx &&
+               memory.scale == 1 && memory.displacement == 2 &&
+               memory.width == 8,
+           "scaled byte MOV store effective address differs");
+    expect(source.reg == rosa::x86::Register::R11 && source.width == 8,
+           "scaled byte MOV store source differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov [r8+rcx*1+0x2], r11b") != std::string::npos,
+           "scaled byte MOV store dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8022};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array sentinel{
+        std::uint8_t{0x11}, std::uint8_t{0}, std::uint8_t{0x22}};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{target.value - 1},
+                            sentinel);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r8 = memoryBase.value;
+    state.rcx = 0x20;
+    state.r11 = 0x11223344556677A5ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    const auto stored = addressSpace.readBytes(
+        rosa::guest::GuestAddress{target.value - 1}, 3);
+    expect(stored[0] == 0x11 && stored[1] == 0xA5 && stored[2] == 0x22,
+           "scaled byte MOV store changed the wrong guest bytes");
+    expectEqual(state.r8, memoryBase.value,
+                "scaled byte MOV store changed its base");
+    expectEqual(state.rcx, std::uint64_t{0x20},
+                "scaled byte MOV store changed its index");
+    expectEqual(state.r11, std::uint64_t{0x11223344556677A5ULL},
+                "scaled byte MOV store changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "scaled byte MOV store changed flags");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                                      rosa::guest::Permission::Read);
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "scaled byte MOV store accepted read-only memory");
+    expectEqual(readOnlyAddressSpace.readBytes(target, 1)[0], std::uint8_t{0},
+                "faulted scaled byte MOV store changed memory");
+    expectEqual(state.r11, std::uint64_t{0x11223344556677A5ULL},
+                "faulted scaled byte MOV store changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "faulted scaled byte MOV store changed flags");
 }
 
 void testMovLowByteRegisterToRipRelativeGuestMemory() {
@@ -8914,6 +9005,8 @@ int main() {
          testMovRipRelativeGuestDwordToRegister},
         {"MOV 32-bit register to guest memory", testMov32BitRegisterToGuestMemory},
         {"MOV low-byte register to guest memory", testMovLowByteRegisterToGuestMemory},
+        {"MOV extended low byte to scaled guest memory",
+         testMovExtendedLowByteToScaledGuestMemory},
         {"MOV low-byte register to RIP-relative guest memory",
          testMovLowByteRegisterToRipRelativeGuestMemory},
         {"MOV low-byte register to extended base", testMovLowByteRegisterToExtendedBase},
