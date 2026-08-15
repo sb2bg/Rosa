@@ -1416,6 +1416,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 constexpr std::uint8_t zeroFlagBit = 6;
                 constexpr std::uint8_t carryFlagBit = 0;
                 const auto notTaken = assembler.makeLabel();
+                const auto taken = assembler.makeLabel();
                 const auto selected = assembler.makeLabel();
                 assembler.ldr(arm64::x16, arm64::x0,
                               static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
@@ -1425,10 +1426,14 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::Below) {
                     assembler.tbz(arm64::x16, carryFlagBit, notTaken);
-                } else {
+                } else if (*operation.condition == x86::Condition::Above) {
                     assembler.tbnz(arm64::x16, carryFlagBit, notTaken);
                     assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
+                } else {
+                    assembler.tbnz(arm64::x16, carryFlagBit, taken);
+                    assembler.tbz(arm64::x16, zeroFlagBit, notTaken);
                 }
+                assembler.bind(taken);
                 assembler.movImmediate(arm64::x16, operation.target->value);
                 assembler.b(selected);
                 assembler.bind(notTaken);

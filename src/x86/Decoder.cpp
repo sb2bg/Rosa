@@ -475,7 +475,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if (code[cursor] == 0xEBU || code[cursor] == 0x72U || code[cursor] == 0x74U ||
-            code[cursor] == 0x75U || code[cursor] == 0x77U) {
+            code[cursor] == 0x75U || code[cursor] == 0x76U || code[cursor] == 0x77U) {
             if (code.size() - cursor < 2) {
                 throw DecodeError(address, remaining, "truncated rel8 control transfer");
             }
@@ -491,6 +491,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.condition = opcode == 0x72U   ? Condition::Below
                                         : opcode == 0x74U ? Condition::Equal
                                         : opcode == 0x75U ? Condition::NotEqual
+                                        : opcode == 0x76U ? Condition::BelowOrEqual
                                                           : Condition::Above;
             }
             result.push_back(std::move(instruction));

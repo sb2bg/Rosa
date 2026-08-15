@@ -58,6 +58,7 @@ enum class Condition {
     NotEqual,
     Below,
     Above,
+    BelowOrEqual,
 };
 
 struct RegisterOperand {
