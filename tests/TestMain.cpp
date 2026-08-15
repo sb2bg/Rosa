@@ -1199,6 +1199,41 @@ void testMovGuestMemoryToRegister() {
                 "failed guest-memory load changed the destination register");
 }
 
+void testMovGuestMemoryToRegisterWithNoIndexSib() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x49, 0x8B, 0x74, 0x24, 0xE0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegMem,
+           "MOV r64, [SIB base+disp8] opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R12,
+           "MOV no-index SIB extended base differs");
+    expectEqual(memory.displacement, std::int64_t{-0x20},
+                "MOV no-index SIB displacement differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8000},
+                          0x1122334455667788ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r12 = 0x8020;
+    state.rsi = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rsi, std::uint64_t{0x1122334455667788ULL},
+                "MOV no-index SIB loaded value differs");
+    expectEqual(state.r12, std::uint64_t{0x8020},
+                "MOV no-index SIB changed base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV no-index SIB changed flags");
+}
+
 void testMovGuestMemoryTo32BitRegister() {
     constexpr std::array<std::uint8_t, 5> code{0x44, 0x8B, 0x46, 0x18, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2884,6 +2919,8 @@ int main() {
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
         {"MOV byte immediate to guest memory", testMovByteImmediateToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
+        {"MOV guest memory to register with no-index SIB",
+         testMovGuestMemoryToRegisterWithNoIndexSib},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},

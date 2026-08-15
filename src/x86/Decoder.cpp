@@ -1147,11 +1147,30 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     RegisterOperand{opcode == 0x89U ? reg : rm, operandWidth});
             } else {
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-                if (rexX || mode > 0x2U || rmEncoding == 0x4U ||
+                if (rexX || mode > 0x2U ||
                     (mode == 0 && rmEncoding == 0x5U)) {
                     throw DecodeError(
                         address, remaining,
                         "only MOV register to/from [base+disp8/disp32] memory operands are supported");
+                }
+                auto base = rm;
+                if (rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining, "truncated MOV memory SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    if (scaleBits != 0 || indexEncoding != 0x4U ||
+                        (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only no-index SIB addressing is supported for MOV");
+                    }
+                    base = decodeRegister(baseEncoding, rexB);
                 }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
@@ -1171,13 +1190,13 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 if (opcode == 0x89U) {
                     instruction.opcode = Opcode::MovMemReg;
                     instruction.operands.push_back(
-                        MemoryOperand{rm, displacement, operandWidth});
+                        MemoryOperand{base, displacement, operandWidth});
                     instruction.operands.push_back(RegisterOperand{reg, operandWidth});
                 } else {
                     instruction.opcode = Opcode::MovRegMem;
                     instruction.operands.push_back(RegisterOperand{reg, operandWidth});
                     instruction.operands.push_back(
-                        MemoryOperand{rm, displacement, operandWidth});
+                        MemoryOperand{base, displacement, operandWidth});
                 }
             }
         } else if (opcode == 0x84U) {
