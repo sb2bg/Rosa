@@ -1065,6 +1065,22 @@ std::string dumpGuestFailure(std::string_view imageHint, const std::exception &e
     dumpMapping(stream, "RSP", rspMapping);
     stream << "  blocks: executed=" << std::dec << dispatcher.executedBlocks()
            << " translations=" << dispatcher.translatedBlocks() << '\n';
+    const auto hotBlocks = dispatcher.hotBlocks();
+    if (!hotBlocks.empty()) {
+        stream << "  hot guest blocks:\n";
+        for (const auto &hot : hotBlocks) {
+            stream << "    0x" << std::hex << hot.address.value << std::dec
+                   << " count=" << hot.count;
+            const auto block = dispatcher.cache().blocks().find(hot.address.value);
+            if (block != dispatcher.cache().blocks().end() &&
+                !block->second->decoded().empty()) {
+                stream << "  " << dumpX86(
+                    std::span(&block->second->decoded().front(), 1));
+            } else {
+                stream << '\n';
+            }
+        }
+    }
     return stream.str();
 }
 

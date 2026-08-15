@@ -1,8 +1,30 @@
 #include "dbt/Dispatcher.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace rosa::dbt {
+
+std::vector<BlockExecutionCount>
+Dispatcher::hotBlocks(std::size_t minimumExecutions, std::size_t limit) const {
+    std::vector<BlockExecutionCount> result;
+    result.reserve(blockExecutionCounts_.size());
+    for (const auto &[address, count] : blockExecutionCounts_) {
+        if (count >= minimumExecutions) {
+            result.push_back(BlockExecutionCount{guest::GuestAddress{address}, count});
+        }
+    }
+    std::ranges::sort(result, [](const auto &lhs, const auto &rhs) {
+        if (lhs.count != rhs.count) {
+            return lhs.count > rhs.count;
+        }
+        return lhs.address.value < rhs.address.value;
+    });
+    if (result.size() > limit) {
+        result.resize(limit);
+    }
+    return result;
+}
 
 std::span<const std::uint8_t> Dispatcher::codeAt(guest::GuestAddress address) const {
     return addressSpace_.executableBytes(address);
@@ -13,12 +35,14 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
     DispatchResult result;
     executedBlocks_ = 0;
     recentBlocks_.clear();
+    blockExecutionCounts_.clear();
     while (result.executedBlocks < maximumBlocks) {
         const auto blockAddress = guest::GuestAddress{state.rip};
         auto &block =
             cache_.getOrTranslate(blockAddress, codeAt(blockAddress), maximumInstructionsPerBlock_);
         ++result.executedBlocks;
         ++executedBlocks_;
+        ++blockExecutionCounts_[blockAddress.value];
         recentBlocks_.push_back(blockAddress);
         if (recentBlocks_.size() > 16) {
             recentBlocks_.pop_front();

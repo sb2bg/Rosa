@@ -3894,6 +3894,36 @@ void testGuestFailureReport() {
            "guest failure report omitted execution counters");
 }
 
+void testHotGuestBlockDiagnostics() {
+    constexpr std::array<std::uint8_t, 2> code{0xEB, 0xFE};
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code, "hot-loop:__TEXT");
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    rosa::dbt::Dispatcher dispatcher(addressSpace, 1);
+    std::string report;
+    try {
+        static_cast<void>(dispatcher.run(state, 40));
+    } catch (const std::runtime_error &error) {
+        report = rosa::debug::dumpGuestFailure("hot-loop", error, state,
+                                               addressSpace, dispatcher);
+    }
+    expect(!report.empty(), "hot guest loop did not hit its diagnostic limit");
+    const auto hot = dispatcher.hotBlocks();
+    expectEqual(hot.size(), std::size_t{1}, "hot guest block count differs");
+    expectEqual(hot[0].address.value, codeBase.value,
+                "hot guest block address differs");
+    expectEqual(hot[0].count, std::size_t{40},
+                "hot guest block execution count differs");
+    expect(report.find("hot guest blocks:") != std::string::npos &&
+               report.find("0x1000 count=40") != std::string::npos,
+           "guest failure report omitted hot-block diagnostics");
+}
+
 void testX86Commpage() {
     rosa::guest::AddressSpace addressSpace;
     constexpr std::uint64_t continuousTimebase = 0x0123456789ABCDEFULL;
@@ -4750,6 +4780,7 @@ int main() {
         {"AND 32-bit register immediate", testAnd32BitRegisterImmediate},
         {"guest address space", testGuestAddressSpace},
         {"guest failure report", testGuestFailureReport},
+        {"hot guest block diagnostics", testHotGuestBlockDiagnostics},
         {"x86 commpage", testX86Commpage},
         {"initial Darwin stack", testInitialDarwinStack},
         {"R2 multi-block control flow", testR2MultiBlockControlFlow},
