@@ -1731,12 +1731,13 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 throw DecodeError(address, remaining, "truncated REX.W 0F opcode");
             }
             const auto secondOpcode = code[cursor++];
-            if (secondOpcode != 0x42U && secondOpcode != 0x44U &&
+            if (secondOpcode != 0x42U && secondOpcode != 0x43U &&
+                secondOpcode != 0x44U &&
                 secondOpcode != 0xACU &&
                 secondOpcode != 0xAFU && secondOpcode != 0xBCU) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMOVB/CMOVE, IMUL, SHRD, and BSF register forms are supported from REX.W 0F");
+                    "only CMOVB/CMOVAE/CMOVE, IMUL, SHRD, and BSF register forms are supported from REX.W 0F");
             }
             if (cursor >= code.size() ||
                 (secondOpcode == 0xACU && code.size() - cursor < 2)) {
@@ -1751,16 +1752,19 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (mode != 0x3U || rexX) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct CMOVB/CMOVE/IMUL/SHRD/BSF is supported");
+                    "only register-direct CMOVB/CMOVAE/CMOVE/IMUL/SHRD/BSF is supported");
             }
             const auto encodedReg =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto encodedRm =
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
-            if (secondOpcode == 0x42U || secondOpcode == 0x44U) {
+            if (secondOpcode == 0x42U || secondOpcode == 0x43U ||
+                secondOpcode == 0x44U) {
                 instruction.opcode = Opcode::CmovccReg;
                 instruction.condition = secondOpcode == 0x42U
                                             ? Condition::Below
+                                        : secondOpcode == 0x43U
+                                            ? Condition::AboveOrEqual
                                             : Condition::Equal;
                 instruction.operands.push_back(RegisterOperand{encodedReg, 64});
                 instruction.operands.push_back(RegisterOperand{encodedRm, 64});

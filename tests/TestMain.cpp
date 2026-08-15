@@ -817,6 +817,23 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmovae64_taken", CaseId::cmovae64_taken,
+                             differentialBytes_cmovae64_taken);
+        testCase.request.state.rsi = 0x0123456789ABCDEFULL;
+        testCase.request.state.r15 = UINT64_MAX;
+        testCase.request.state.rflags &= ~carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("cmovae64_not_taken",
+                             CaseId::cmovae64_not_taken,
+                             differentialBytes_cmovae64_not_taken);
+        testCase.request.state.rsi = UINT64_MAX;
+        testCase.request.state.r15 = 0xAABBCCDDEEFF0011ULL;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmove64_taken", CaseId::cmove64_taken,
                              differentialBytes_cmove64_taken);
         testCase.request.state.rax = 0x1122334455667788ULL;
@@ -9340,6 +9357,58 @@ void testConditionalMoveBelow64() {
                 "untaken CMOVB changed flags");
 }
 
+void testConditionalMoveAboveOrEqual64() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x4C, 0x0F, 0x43, 0xFE, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg,
+           "CMOVAE opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "CMOVAE length differs");
+    expect(decoded[0].condition == rosa::x86::Condition::AboveOrEqual,
+           "CMOVAE condition differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R15 &&
+               destination.width == 64,
+           "CMOVAE destination differs");
+    expect(source.reg == rosa::x86::Register::Rsi && source.width == 64,
+           "CMOVAE source differs");
+    expect(rosa::debug::dumpX86(decoded).find("cmovae r15, rsi") !=
+               std::string::npos,
+           "CMOVAE dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State taken;
+    taken.rsi = 0x0123456789ABCDEFULL;
+    taken.r15 = UINT64_MAX;
+    taken.rflags = 0x8D6 & ~std::uint64_t{1};
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.r15, std::uint64_t{0x0123456789ABCDEFULL},
+                "taken CMOVAE result differs");
+    expectEqual(taken.rsi, std::uint64_t{0x0123456789ABCDEFULL},
+                "CMOVAE changed its source");
+    expectEqual(taken.rflags, std::uint64_t{0x8D6 & ~std::uint64_t{1}},
+                "taken CMOVAE changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rsi = UINT64_MAX;
+    notTaken.r15 = 0xAABBCCDDEEFF0011ULL;
+    notTaken.rflags = 0xAD7 | 1U;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.r15, std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                "untaken CMOVAE changed destination");
+    expectEqual(notTaken.rsi, UINT64_MAX, "untaken CMOVAE changed source");
+    expectEqual(notTaken.rflags, std::uint64_t{0xAD7 | 1U},
+                "untaken CMOVAE changed flags");
+}
+
 void testConditionalMoveEqual64() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x0F, 0x44, 0xC8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -9952,6 +10021,8 @@ int main() {
         {"set greater extended low-byte register",
          testSetGreaterExtendedLowByteRegister},
         {"conditional move below 64-bit", testConditionalMoveBelow64},
+        {"conditional move above-or-equal 64-bit",
+         testConditionalMoveAboveOrEqual64},
         {"conditional move equal 64-bit", testConditionalMoveEqual64},
         {"unsigned-above conditional", testUnsignedAboveConditional},
         {"unsigned-above long conditional", testUnsignedAboveLongConditional},

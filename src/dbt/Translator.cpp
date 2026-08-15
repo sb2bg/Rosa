@@ -2756,16 +2756,21 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::ConditionalMoveGuestReg: {
             if (operation.width != ir::Width::I64 ||
                 (*operation.condition != x86::Condition::Below &&
+                 *operation.condition != x86::Condition::AboveOrEqual &&
                  *operation.condition != x86::Condition::Equal)) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 64-bit register CMOVB/CMOVE");
+                    "ARM64 backend only implements 64-bit register CMOVB/CMOVAE/CMOVE");
             }
             const auto flagBit = static_cast<std::uint8_t>(
-                *operation.condition == x86::Condition::Below ? 0U : 6U);
+                *operation.condition == x86::Condition::Equal ? 6U : 0U);
             const auto notTaken = assembler.makeLabel();
             assembler.ldr(arm64::x16, arm64::x0,
                           static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
-            assembler.tbz(arm64::x16, flagBit, notTaken);
+            if (*operation.condition == x86::Condition::AboveOrEqual) {
+                assembler.tbnz(arm64::x16, flagBit, notTaken);
+            } else {
+                assembler.tbz(arm64::x16, flagBit, notTaken);
+            }
             assembler.ldr(
                 arm64::x17, arm64::x0,
                 static_cast<std::uint32_t>(x86::registerOffset(
