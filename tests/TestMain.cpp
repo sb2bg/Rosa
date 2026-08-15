@@ -1089,6 +1089,15 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("shr32_implicit_one",
+                             CaseId::shr32_implicit_one,
+                             differentialBytes_shr32_implicit_one);
+        testCase.request.state.rdx = 0xAABBCCDD80000001ULL;
+        testCase.flagMask =
+            carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("shr64_cl_one", CaseId::shr64_cl_one,
                              differentialBytes_shr64_cl_one);
         testCase.request.state.r12 = 0x8000000000000001ULL;
@@ -8174,6 +8183,33 @@ void testShiftRight64ImmediateGeneratedExecution() {
     expectEqual(implicitState.rflags & definedOneFlags,
                 std::uint64_t{(1U << 0U) | (1U << 2U) | (1U << 11U)},
                 "implicit-count SHR defined flags differ");
+
+    constexpr std::array<std::uint8_t, 3> implicit32{0xD1, 0xEA, 0xC3};
+    const auto implicit32Decoded = decoder.decodeBlock(
+        implicit32, rosa::guest::GuestAddress{0x7FF80005986FULL});
+    expect(implicit32Decoded[0].opcode == rosa::x86::Opcode::ShrRegImm,
+           "implicit-count SHR r32 opcode differs");
+    expectEqual(implicit32Decoded[0].length, std::uint8_t{2},
+                "implicit-count SHR r32 length differs");
+    const auto implicit32Destination =
+        std::get<rosa::x86::RegisterOperand>(implicit32Decoded[0].operands[0]);
+    expect(implicit32Destination.reg == rosa::x86::Register::Rdx &&
+               implicit32Destination.width == 32,
+           "implicit-count SHR edx destination differs");
+    expect(rosa::debug::dumpX86(implicit32Decoded).find("shr edx, 0x1") !=
+               std::string::npos,
+           "implicit-count SHR edx dump differs");
+    const auto implicit32Block = translator.translate(
+        implicit32, rosa::guest::GuestAddress{0x7FF80005986FULL});
+    rosa::x86::X86State implicit32State;
+    implicit32State.rdx = 0xAABBCCDD80000001ULL;
+    implicit32State.rflags = 0x10;
+    static_cast<void>(implicit32Block.execute(implicit32State));
+    expectEqual(implicit32State.rdx, std::uint64_t{0x40000000},
+                "implicit-count SHR edx result or zero extension differs");
+    expectEqual(implicit32State.rflags & definedOneFlags,
+                std::uint64_t{(1U << 0U) | (1U << 2U) | (1U << 11U)},
+                "implicit-count SHR edx defined flags differ");
 
     constexpr std::array<std::uint8_t, 5> zeroCount{0x48, 0xC1, 0xE8, 0x40, 0xC3};
     const auto zeroBlock = translator.translate(zeroCount, rosa::guest::GuestAddress{0x3000});

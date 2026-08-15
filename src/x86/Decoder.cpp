@@ -1822,7 +1822,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x81U && code[cursor] != 0xC0U &&
             code[cursor] != 0xC1U &&
             code[cursor] != 0xC6U && code[cursor] != 0xC7U &&
-            code[cursor] != 0xD0U && code[cursor] != 0xD3U &&
+            code[cursor] != 0xD0U && code[cursor] != 0xD1U &&
+            code[cursor] != 0xD3U &&
             code[cursor] != 0xF7U &&
             code[cursor] != 0xFEU && code[cursor] != 0xFFU) {
             throw DecodeError(address, remaining, "expected REX prefix");
@@ -1863,6 +1864,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x0FU &&
             opcode != 0x81U && opcode != 0xC0U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD0U &&
+            opcode != 0xD1U &&
             opcode != 0xD3U &&
             opcode != 0xF7U &&
             opcode != 0xFEU && opcode != 0xFFU &&
@@ -3251,16 +3253,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            if (!rexW || rexR || rexX || mode != 0x3U ||
-                extension != 0x5U) {
+            if (rexR || rexX || mode != 0x3U || extension != 0x5U) {
                 throw DecodeError(
                     address, remaining,
-                    "only SHR r64, 1 from opcode D1 /5 is supported");
+                    "only register-direct SHR r32/r64, 1 from opcode D1 /5 is supported");
             }
             instruction.opcode = Opcode::ShrRegImm;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
-                64});
+                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             instruction.operands.push_back(ImmediateOperand{1, 8});
         } else if (opcode == 0xD3U) {
             if (code.size() - cursor < 1) {
