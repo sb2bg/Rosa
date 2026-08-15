@@ -367,6 +367,13 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("and8_accumulator", CaseId::and8_accumulator,
+                             differentialBytes_and8_accumulator);
+        testCase.request.state.rax = 0x11223344556677A5ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("or64_register", CaseId::or64_register,
                              differentialBytes_or64_register);
         testCase.request.state.rax = 0x00000000ABCDEF01ULL;
@@ -5594,6 +5601,46 @@ void testLegacyAnd32Immediate() {
                 "legacy AND r32, imm8 flags differ");
 }
 
+void testAnd8BitAccumulatorImmediate() {
+    constexpr std::array<std::uint8_t, 3> code{0x24, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegImm,
+           "AND AL, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2}, "AND AL, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 8,
+           "AND AL, imm8 destination differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{1}, "AND AL, imm8 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("and al, 0x1") != std::string::npos,
+           "AND AL, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x11223344556677A5ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667701ULL},
+                "AND AL, imm8 did not preserve upper RAX bytes");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0},
+                "AND AL, imm8 nonzero defined flags differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0xFFEEDDCCBBAA5500ULL;
+    zeroState.rflags = 0x810;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0xFFEEDDCCBBAA5500ULL},
+                "AND AL, imm8 zero result changed upper RAX bytes");
+    expectEqual(zeroState.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "AND AL, imm8 zero defined flags differ");
+}
+
 void testAnd32BitRegisterImmediate() {
     constexpr std::array<std::uint8_t, 8> code{
         0x41, 0x81, 0xE7, 0xFF, 0x0F, 0x00, 0x00, 0xC3};
@@ -6733,6 +6780,7 @@ int main() {
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
+        {"AND 8-bit accumulator immediate", testAnd8BitAccumulatorImmediate},
         {"AND 32-bit register immediate", testAnd32BitRegisterImmediate},
         {"guest address space", testGuestAddressSpace},
         {"guest failure report", testGuestFailureReport},
