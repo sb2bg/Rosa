@@ -859,29 +859,38 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
-            const auto base =
-                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
-            const auto displacement = builder.constant(
-                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
-                instruction.address);
-            auto result = builder.add(base, displacement, ir::Width::I64,
-                                      instruction.address);
+            std::optional<ir::ValueId> result;
+            if (memory.hasBase) {
+                result = builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                   instruction.address);
+            }
             if (memory.index) {
-                if (memory.scale != 1) {
-                    throw std::runtime_error("unsupported internal LEA index scale");
-                }
-                const auto index = builder.readGuestRegister(
+                auto index = builder.readGuestRegister(
                     *memory.index, ir::Width::I64, instruction.address);
-                result = builder.add(result, index, ir::Width::I64,
-                                     instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                result = result ? builder.add(*result, index, ir::Width::I64,
+                                              instruction.address)
+                                : index;
+            }
+            if (memory.displacement != 0 || !result) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                    instruction.address);
+                result = result ? builder.add(*result, displacement, ir::Width::I64,
+                                              instruction.address)
+                                : displacement;
             }
             if (destination.width == 32) {
                 const auto mask = builder.constant(UINT32_MAX, ir::Width::I64,
                                                    instruction.address);
-                result = builder.bitAnd(result, mask, ir::Width::I64,
+                result = builder.bitAnd(*result, mask, ir::Width::I64,
                                         instruction.address);
             }
-            builder.writeGuestRegister(destination.reg, result,
+            builder.writeGuestRegister(destination.reg, *result,
                                        destination.width == 32 ? ir::Width::I32
                                                                : ir::Width::I64,
                                        instruction.address);

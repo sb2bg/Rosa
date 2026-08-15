@@ -2406,6 +2406,58 @@ void testLeaBaseIndexExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "LEA changed guest flags");
 }
 
+void testLeaNoBaseScaledIndexExecution() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x48, 0x8D, 0x0C, 0xCD, 0x18, 0x00, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::LeaRegMem,
+           "no-base scaled LEA opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(!memory.hasBase, "no-base scaled LEA acquired a base");
+    expect(memory.index == rosa::x86::Register::Rcx,
+           "no-base scaled LEA index differs");
+    expectEqual(memory.scale, std::uint8_t{8}, "no-base scaled LEA scale differs");
+    expectEqual(memory.displacement, std::int64_t{0x18},
+                "no-base scaled LEA displacement differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rcx = 5;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x40},
+                "no-base scaled LEA result differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "no-base scaled LEA changed guest flags");
+
+    constexpr std::array<std::uint8_t, 9> negativeDisplacement{
+        0x48, 0x8D, 0x04, 0x8D, 0xF8, 0xFF, 0xFF, 0xFF, 0xC3};
+    const auto negativeBlock = translator.translate(
+        negativeDisplacement, rosa::guest::GuestAddress{0x2000});
+    state.rcx = 3;
+    static_cast<void>(negativeBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{4},
+                "no-base scaled LEA did not sign-extend disp32");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "no-base scaled LEA with negative displacement changed flags");
+
+    constexpr std::array<std::uint8_t, 9> noBaseOrIndex{
+        0x48, 0x8D, 0x14, 0x25, 0x78, 0x56, 0x34, 0x12, 0xC3};
+    const auto displacementBlock = translator.translate(
+        noBaseOrIndex, rosa::guest::GuestAddress{0x3000});
+    state.rdx = UINT64_MAX;
+    state.rsp = 0xDEADBEEF;
+    static_cast<void>(displacementBlock.execute(state));
+    expectEqual(state.rdx, std::uint64_t{0x12345678},
+                "no-base no-index LEA read a dummy base register");
+    expectEqual(state.rsp, std::uint64_t{0xDEADBEEF},
+                "no-base no-index LEA changed an unrelated register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "no-base no-index LEA changed flags");
+}
+
 void testLegacyRegisterMove32Execution() {
     constexpr std::array<std::uint8_t, 3> code{0x89, 0xFB, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3205,6 +3257,7 @@ int main() {
         {"LEA base displacement execution", testLeaBaseDisplacementExecution},
         {"LEA 32-bit base displacement execution", testLea32BitBaseDisplacementExecution},
         {"LEA base index execution", testLeaBaseIndexExecution},
+        {"LEA no-base scaled index execution", testLeaNoBaseScaledIndexExecution},
         {"legacy 32-bit register move execution", testLegacyRegisterMove32Execution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
