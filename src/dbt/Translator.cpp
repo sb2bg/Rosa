@@ -2303,6 +2303,25 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                           instruction.address);
             break;
         }
+        case x86::Opcode::NotReg: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: not operand count");
+            }
+            const auto reg =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto width = reg.width == 32 ? ir::Width::I32
+                                               : ir::Width::I64;
+            const auto original = builder.readGuestRegister(
+                reg.reg, width, instruction.address);
+            const auto mask = builder.constant(
+                reg.width == 32 ? UINT32_MAX : UINT64_MAX, width,
+                instruction.address);
+            const auto result = builder.bitXor(original, mask, width,
+                                               instruction.address);
+            builder.writeGuestRegister(reg.reg, result, width,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::NegReg: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: neg operand count");

@@ -1823,6 +1823,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0xC1U &&
             code[cursor] != 0xC6U && code[cursor] != 0xC7U &&
             code[cursor] != 0xD0U && code[cursor] != 0xD3U &&
+            code[cursor] != 0xF7U &&
             code[cursor] != 0xFEU && code[cursor] != 0xFFU) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
@@ -1863,6 +1864,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x81U && opcode != 0xC0U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD0U &&
             opcode != 0xD3U &&
+            opcode != 0xF7U &&
             opcode != 0xFEU && opcode != 0xFFU &&
             (opcode < 0xB0U || opcode > 0xB7U) &&
             (opcode < 0xB8U || opcode > 0xBFU)) {
@@ -3284,14 +3286,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            if (mode != 0x3U || (extension != 0x3U && extension != 0x4U) ||
-                !rexW || rexR || rexX) {
+            if (mode != 0x3U ||
+                (extension != 0x2U && extension != 0x3U &&
+                 extension != 0x4U) ||
+                ((extension == 0x3U || extension == 0x4U) && !rexW) ||
+                rexR || rexX) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct NEG /3 and MUL /4 r64 from opcode F7 are supported");
+                                  "only register-direct NOT /2 and r64 NEG /3 or MUL /4 from opcode F7 are supported");
             }
-            instruction.opcode = extension == 0x3U ? Opcode::NegReg : Opcode::MulReg;
+            instruction.opcode = extension == 0x2U   ? Opcode::NotReg
+                                 : extension == 0x3U ? Opcode::NegReg
+                                                     : Opcode::MulReg;
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
         } else if (opcode == 0xC6U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov byte opcode C6");

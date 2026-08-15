@@ -1122,6 +1122,13 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("not32_accumulator", CaseId::not32_accumulator,
+                             differentialBytes_not32_accumulator);
+        testCase.request.state.rax = 0xAABBCCDD10203040ULL;
+        testCase.request.state.rflags = 0x8D7;
+        run(testCase);
+    }
+    {
         auto testCase = make("neg64_zero", CaseId::neg64_zero,
                              differentialBytes_neg64_zero);
         testCase.request.state.r13 = 0;
@@ -8244,6 +8251,43 @@ void testShiftRightClGeneratedExecution() {
                 "SHR r12, CL masked-zero changed flags");
 }
 
+void testNot32GeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0xF7, 0xD0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF800036677ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::NotReg,
+           "NOT r32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2},
+                "NOT r32 length differs");
+    const auto operand =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(operand.reg == rosa::x86::Register::Rax && operand.width == 32,
+           "NOT eax operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("not eax") != std::string::npos,
+           "NOT eax dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF800036677ULL});
+    rosa::x86::X86State state;
+    state.rax = 0xAABBCCDD10203040ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xEFDFCFBF},
+                "NOT eax result or zero extension differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "NOT eax changed flags");
+
+    state.rax = UINT64_C(0xFFFFFFFF00000000);
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{UINT32_MAX},
+                "NOT eax zero edge differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "NOT eax zero edge changed flags");
+}
+
 void testNeg64GeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x49, 0xF7, 0xDD, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -13218,6 +13262,7 @@ int main() {
         {"SHR 32-bit immediate generated execution", testShiftRight32ImmediateGeneratedExecution},
         {"SHR 64-bit immediate generated execution", testShiftRight64ImmediateGeneratedExecution},
         {"SHR CL generated execution", testShiftRightClGeneratedExecution},
+        {"NOT 32-bit generated execution", testNot32GeneratedExecution},
         {"NEG 64-bit generated execution", testNeg64GeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
