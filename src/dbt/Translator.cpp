@@ -350,6 +350,30 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateSubFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::SubRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: sub memory operand count");
+            }
+            const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            const auto base =
+                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                instruction.address);
+            const auto address =
+                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            const auto rhs = builder.loadGuest(address, ir::Width::I64, instruction.address);
+            // Read the destination after the load helper so no caller-saved IR value
+            // remains live across the helper boundary.
+            const auto lhs = builder.readGuestRegister(destination.reg, ir::Width::I64,
+                                                       instruction.address);
+            const auto result = builder.sub(lhs, rhs, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+                                       instruction.address);
+            builder.updateSubFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::ShlRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: shl operand count");

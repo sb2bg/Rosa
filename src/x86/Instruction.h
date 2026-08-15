@@ -19,6 +19,7 @@ enum class Opcode {
     LeaRegRipRelative,
     AddRegImm,
     SubRegImm,
+    SubRegMem,
     ShlRegImm,
     OrRegReg,
     AndRegImm,

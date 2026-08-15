@@ -281,6 +281,38 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::OrRegReg;
             instruction.operands.push_back(RegisterOperand{destination, 64});
             instruction.operands.push_back(RegisterOperand{source, 64});
+        } else if (opcode == 0x2BU) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated sub r64, [base+disp]");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (rexX || mode > 0x2U || rmEncoding == 0x4U ||
+                (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only SUB r64, [base+disp8/disp32] memory operands are supported");
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated SUB memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated SUB memory disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            const auto destination =
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
+            const auto base = decodeRegister(rmEncoding, rexB);
+            instruction.opcode = Opcode::SubRegMem;
+            instruction.operands.push_back(RegisterOperand{destination, 64});
+            instruction.operands.push_back(MemoryOperand{base, displacement, 64});
         } else if (opcode == 0x89U || opcode == 0x8BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov r64, r64");
