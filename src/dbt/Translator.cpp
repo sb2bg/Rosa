@@ -850,6 +850,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             break;
         }
         case x86::Opcode::MovupsRegMem:
+        case x86::Opcode::MovdquRegMem:
         case x86::Opcode::MovdqaRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: movdqa load operand count");
