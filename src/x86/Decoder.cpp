@@ -1272,7 +1272,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             return result;
         }
 
-        if (code[cursor] == 0xEBU || code[cursor] == 0x72U || code[cursor] == 0x74U ||
+        if (code[cursor] == 0xEBU || code[cursor] == 0x72U || code[cursor] == 0x73U ||
+            code[cursor] == 0x74U ||
             code[cursor] == 0x75U || code[cursor] == 0x76U || code[cursor] == 0x77U ||
             code[cursor] == 0x78U || code[cursor] == 0x7EU) {
             if (code.size() - cursor < 2) {
@@ -1288,6 +1289,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.fallthrough = guest::GuestAddress{address.value + 2};
             if (opcode != 0xEBU) {
                 instruction.condition = opcode == 0x72U   ? Condition::Below
+                                        : opcode == 0x73U ? Condition::AboveOrEqual
                                         : opcode == 0x74U ? Condition::Equal
                                         : opcode == 0x75U ? Condition::NotEqual
                                         : opcode == 0x76U ? Condition::BelowOrEqual
