@@ -189,6 +189,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                     std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
             }
             break;
+        case x86::Opcode::Lfence:
+            stream << "lfence";
+            break;
         case x86::Opcode::JmpRelative:
             stream << "jmp 0x" << instruction.branchTarget->value;
             break;
@@ -256,6 +259,9 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::LoadGuest:
             stream << "load_guest." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::LoadFence:
+            stream << "load_fence";
             break;
         case ir::Opcode::UpdateAddFlags:
             stream << "update_add_flags." << widthName(operation.width) << ' '

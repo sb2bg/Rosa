@@ -366,6 +366,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.push(newStackPointer, value, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::Lfence:
+            builder.loadFence(instruction.address);
+            break;
         case x86::Opcode::JmpRelative:
             builder.exitDirect(*instruction.branchTarget, instruction.address);
             break;
@@ -547,6 +550,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                                               loadedValue)));
             break;
         }
+        case ir::Opcode::LoadFence:
+            assembler.dmbIsh();
+            assembler.isb();
+            break;
         case ir::Opcode::UpdateAddFlags:
         case ir::Opcode::UpdateSubFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));

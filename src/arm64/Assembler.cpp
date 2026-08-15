@@ -215,6 +215,10 @@ void Assembler::popCalleeSaved19And20() {
     emit(0xA8C153F3U, "ldp x19, x20, [sp], #16");
 }
 
+void Assembler::dmbIsh() { emit(0xD5033BBFU, "dmb ish"); }
+
+void Assembler::isb() { emit(0xD5033FDFU, "isb"); }
+
 void Assembler::ret() { emit(0xD65F03C0U, "ret"); }
 
 Program Assembler::finish() && {

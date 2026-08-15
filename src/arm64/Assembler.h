@@ -58,6 +58,8 @@ class Assembler {
     void popFrameRecord();
     void pushCalleeSaved19And20();
     void popCalleeSaved19And20();
+    void dmbIsh();
+    void isb();
     void ret();
 
     [[nodiscard]] const std::vector<std::uint32_t> &words() const noexcept { return words_; }

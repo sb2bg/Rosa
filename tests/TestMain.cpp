@@ -53,11 +53,14 @@ void testAssemblerEncodings() {
     assembler.blr(rosa::arm64::x16);
     assembler.pushFrameRecord();
     assembler.popFrameRecord();
+    assembler.dmbIsh();
+    assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 10> expected{
+    const std::array<std::uint32_t, 12> expected{
         0xD2800540U, 0x8B0B012AU, 0x8A0B012AU, 0xF9400009U, 0xB9400009U,
-        0xF9000009U, 0xD63F0200U, 0xA9BF7BFDU, 0xA8C17BFDU, 0xD65F03C0U,
+        0xF9000009U, 0xD63F0200U, 0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU,
+        0xD5033FDFU, 0xD65F03C0U,
     };
     expectEqual(assembler.words().size(), expected.size(), "assembler word count differs");
     for (std::size_t index = 0; index < expected.size(); ++index) {
@@ -524,6 +527,30 @@ void testTest32BitRegisterGeneratedExecution() {
     expectEqual(state.rflags, expectedFlags, "TEST r32, r32 flags differ");
 }
 
+void testLfenceGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0xAE, 0xE8, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::Lfence, "LFENCE opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "LFENCE length differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x0123456789ABCDEFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x0123456789ABCDEFULL},
+                "LFENCE changed a guest register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "LFENCE changed guest flags");
+    expect(std::find(block.program().listing.begin(), block.program().listing.end(), "dmb ish") !=
+               block.program().listing.end(),
+           "LFENCE did not emit an ARM64 memory barrier");
+    expect(std::find(block.program().listing.begin(), block.program().listing.end(), "isb") !=
+               block.program().listing.end(),
+           "LFENCE did not emit an ARM64 instruction barrier");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -932,6 +959,7 @@ int main() {
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},
         {"TEST 32-bit register generated execution", testTest32BitRegisterGeneratedExecution},
+        {"LFENCE generated execution", testLfenceGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},

@@ -115,6 +115,14 @@ void Builder::push(ValueId newStackPointer, ValueId value, Width width,
     });
 }
 
+void Builder::loadFence(guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LoadFence,
+        .width = Width::I64,
+        .guestRip = rip,
+    });
+}
+
 void Builder::updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                              guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -249,6 +257,8 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::LoadGuest:
             checkUse(operation.lhs, "guest address");
+            break;
+        case Opcode::LoadFence:
             break;
         case Opcode::UpdateAddFlags:
         case Opcode::UpdateSubFlags:
