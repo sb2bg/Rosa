@@ -687,6 +687,18 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("xor8_scaled_memory", CaseId::xor8_scaled_memory,
+                             differentialBytes_xor8_scaled_memory);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 0x11223344556677FFULL;
+        testCase.request.state.rcx = 0x30;
+        testCase.request.memory[0x30] = 0x0F;
+        testCase.memoryCompareOffset = 0x30;
+        testCase.memoryCompareSize = 1;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("test16_register", CaseId::test16_register,
                              differentialBytes_test16_register);
         testCase.request.state.r14 = 0xA5A5A5A500008000ULL;
@@ -8654,6 +8666,79 @@ void testXor32BitRegisterFromGuestMemory() {
                 "legacy XOR r32, [memory] flags differ");
 }
 
+void testXorByteRegisterFromScaledGuestMemory() {
+    constexpr std::array<std::uint8_t, 4> code{0x32, 0x04, 0x0F, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF80003665EULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegMem,
+           "XOR r8, byte [scaled memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "XOR r8, byte [scaled memory] length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 8 &&
+               memory.base == rosa::x86::Register::Rdi &&
+               memory.index == rosa::x86::Register::Rcx &&
+               memory.scale == 1 && memory.displacement == 0 &&
+               memory.width == 8,
+           "XOR AL, byte [RDI+RCX] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("xor al, [rdi+rcx]") !=
+               std::string::npos,
+           "XOR AL, byte [RDI+RCX] dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> memoryValue{0x0F};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8030}, memoryValue);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF80003665EULL});
+    rosa::x86::X86State state;
+    state.rax = 0x11223344556677FFULL;
+    state.rdi = 0x8000;
+    state.rcx = 0x30;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0x11223344556677F0ULL},
+                "XOR byte memory result or upper-register preservation differs");
+    expectEqual(state.rdi, std::uint64_t{0x8000},
+                "XOR byte memory changed its base");
+    expectEqual(state.rcx, std::uint64_t{0x30},
+                "XOR byte memory changed its index");
+    constexpr std::uint64_t definedLogicFlags =
+        0x1U | 0x4U | 0x40U | 0x80U | 0x800U;
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0x84},
+                "XOR byte memory defined logic flags differ");
+    expectEqual(addressSpace.readBytes(rosa::guest::GuestAddress{0x8030}, 1).front(),
+                std::uint8_t{0x0F}, "XOR byte memory changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0xAABBCCDDEEFF00FFULL;
+    faultState.rdi = 0x8000;
+    faultState.rcx = 0x30;
+    faultState.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "XOR byte from unmapped guest memory did not fault");
+    expectEqual(faultState.rax, std::uint64_t{0xAABBCCDDEEFF00FFULL},
+                "failed XOR byte memory changed destination");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "failed XOR byte memory changed flags");
+}
+
 void testXor64BitRegisterFromGuestMemory() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x33, 0x08, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -13067,6 +13152,8 @@ int main() {
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
         {"XOR 32-bit register from guest memory",
          testXor32BitRegisterFromGuestMemory},
+        {"XOR byte register from scaled guest memory",
+         testXorByteRegisterFromScaledGuestMemory},
         {"XOR 64-bit register from guest memory",
          testXor64BitRegisterFromGuestMemory},
         {"XOR 32-bit register immediate", testXor32BitRegisterImmediate},
