@@ -1623,6 +1623,34 @@ void testLeaBaseDisplacementExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "LEA changed flags");
 }
 
+void testLeaBaseIndexExecution() {
+    constexpr std::array<std::uint8_t, 5> code{0x4A, 0x8D, 0x14, 0x28, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::LeaRegMem,
+           "LEA base+index opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx,
+           "LEA base+index destination differs");
+    expect(memory.base == rosa::x86::Register::Rax, "LEA SIB base differs");
+    expect(memory.index == rosa::x86::Register::R13, "LEA SIB extended index differs");
+    expectEqual(memory.scale, std::uint8_t{1}, "LEA SIB scale differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x1000;
+    state.r13 = 0x234;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdx, std::uint64_t{0x1234}, "LEA base+index result differs");
+    expectEqual(state.rax, std::uint64_t{0x1000}, "LEA changed its base register");
+    expectEqual(state.r13, std::uint64_t{0x234}, "LEA changed its index register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "LEA changed guest flags");
+}
+
 void testLegacyRegisterMove32Execution() {
     constexpr std::array<std::uint8_t, 3> code{0x89, 0xFB, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2147,6 +2175,7 @@ int main() {
         {"MOVDQU register to guest memory", testMovdquRegisterToGuestMemory},
         {"register move execution", testRegisterMoveExecution},
         {"LEA base displacement execution", testLeaBaseDisplacementExecution},
+        {"LEA base index execution", testLeaBaseIndexExecution},
         {"legacy 32-bit register move execution", testLegacyRegisterMove32Execution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},

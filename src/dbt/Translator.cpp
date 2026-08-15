@@ -618,8 +618,17 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto displacement = builder.constant(
                 static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
                 instruction.address);
-            const auto result =
-                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            auto result = builder.add(base, displacement, ir::Width::I64,
+                                      instruction.address);
+            if (memory.index) {
+                if (memory.scale != 1) {
+                    throw std::runtime_error("unsupported internal LEA index scale");
+                }
+                const auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                result = builder.add(result, index, ir::Width::I64,
+                                     instruction.address);
+            }
             builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
                                        instruction.address);
             break;

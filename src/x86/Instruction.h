@@ -70,9 +70,19 @@ struct ImmediateOperand {
 };
 
 struct MemoryOperand {
+    MemoryOperand() = default;
+    MemoryOperand(Register baseValue, std::int64_t displacementValue,
+                  std::uint8_t widthValue,
+                  std::optional<Register> indexValue = std::nullopt,
+                  std::uint8_t scaleValue = 1)
+        : base(baseValue), displacement(displacementValue), width(widthValue),
+          index(indexValue), scale(scaleValue) {}
+
     Register base{};
     std::int64_t displacement{};
     std::uint8_t width{};
+    std::optional<Register> index;
+    std::uint8_t scale{1};
 };
 
 struct XmmRegisterOperand {

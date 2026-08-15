@@ -834,11 +834,34 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     RegisterOperand{decodeRegister(destination, rexR), 64});
                 instruction.operands.push_back(ImmediateOperand{target.value, 64});
             } else {
-                if (rexX || mode > 0x2U || memoryRegister == 0x4U ||
-                    (mode == 0 && memoryRegister == 0x5U)) {
+                if (mode > 0x2U || (mode == 0 && memoryRegister == 0x5U)) {
                     throw DecodeError(
                         address, remaining,
-                        "only LEA r64, [base+disp8/disp32] addressing is supported");
+                        "only LEA r64, [base+index+disp8/disp32] addressing is supported");
+                }
+                auto base = decodeRegister(memoryRegister, rexB);
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
+                if (memoryRegister == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining, "truncated LEA SIB byte");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits = static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    if (scaleBits != 0 || (indexEncoding == 0x4U && !rexX) ||
+                        (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only scale-1 LEA SIB operands with a register base and index are supported");
+                    }
+                    base = decodeRegister(baseEncoding, rexB);
+                    index = decodeRegister(indexEncoding, rexX);
+                } else if (rexX) {
+                    throw DecodeError(address, remaining,
+                                      "REX.X requires a SIB operand for LEA");
                 }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
@@ -856,8 +879,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.opcode = Opcode::LeaRegMem;
                 instruction.operands.push_back(
                     RegisterOperand{decodeRegister(destination, rexR), 64});
-                instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(memoryRegister, rexB), displacement, 64});
+                instruction.operands.push_back(
+                    MemoryOperand{base, displacement, 64, index, scale});
             }
         } else if (opcode == 0xC1U) {
             if (code.size() - cursor < 2) {
