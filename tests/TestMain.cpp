@@ -267,6 +267,43 @@ void testPushRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "register PUSH changed guest flags");
 }
 
+void testSubRegImm32GeneratedExecution() {
+    constexpr std::array<std::uint8_t, 8> positive{
+        0x48, 0x81, 0xEC, 0x58, 0x06, 0x00, 0x00, 0xC3,
+    };
+    constexpr std::array<std::uint8_t, 8> negative{
+        0x49, 0x81, 0xE8, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(positive, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SubRegImm,
+           "SUB r64, imm32 opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rsp,
+           "SUB r64, imm32 destination differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{0x658}, "SUB r64, imm32 immediate differs");
+
+    const rosa::dbt::Translator translator;
+    const auto positiveBlock = translator.translate(positive, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State positiveState;
+    positiveState.rsp = 0x1000;
+    static_cast<void>(positiveBlock.execute(positiveState));
+    expectEqual(positiveState.rsp, std::uint64_t{0x9A8},
+                "SUB rsp, positive imm32 result differs");
+    expectEqual(positiveState.rflags, std::uint64_t{0x12},
+                "SUB rsp, positive imm32 flags differ");
+
+    const auto negativeBlock = translator.translate(negative, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State negativeState;
+    negativeState.r8 = 41;
+    static_cast<void>(negativeBlock.execute(negativeState));
+    expectEqual(negativeState.r8, std::uint64_t{42},
+                "SUB r8, negative imm32 did not use sign extension");
+    expectEqual(negativeState.rflags, std::uint64_t{0x13},
+                "SUB r8, negative imm32 flags differ");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -578,6 +615,7 @@ int main() {
         {"PUSH imm8 generated execution", testPushImm8GeneratedExecution},
         {"PUSH imm8 guest stack faults", testPushImm8GuestStackFaults},
         {"PUSH register generated execution", testPushRegisterGeneratedExecution},
+        {"SUB register imm32 generated execution", testSubRegImm32GeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},

@@ -16,6 +16,7 @@ enum class Opcode {
     MovRegReg,
     LeaRegRipRelative,
     AddRegImm,
+    SubRegImm,
     AndRegImm,
     CmpRegImm,
     Push,
