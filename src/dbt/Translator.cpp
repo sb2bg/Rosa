@@ -617,6 +617,35 @@ addGuest64(GuestExecutionContext *context, x86::X86State *state,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+incrementGuest8(GuestExecutionContext *context, x86::X86State *state,
+                std::uint64_t address) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated 8-bit guest increment has no address space");
+        }
+        context->addressSpace->validateAccess(
+            guest::GuestAddress{address}, 1,
+            guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace
+                                  ->readBytes(guest::GuestAddress{address}, 1)
+                                  .front();
+        const auto result = static_cast<std::uint8_t>(original + 1U);
+        const std::array resultBytes{result};
+        context->addressSpace->writeBytes(guest::GuestAddress{address},
+                                          resultBytes);
+        return updateIncFlags8(state, original, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint8_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 incrementGuest16(GuestExecutionContext *context, x86::X86State *state,
                  std::uint64_t address) noexcept {
     try {
@@ -1921,15 +1950,31 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 throw std::runtime_error("internal decoder error: memory increment operand");
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            const auto base = builder.readGuestRegister(
+            auto address = builder.readGuestRegister(
                 memory.base, ir::Width::I64, instruction.address);
-            const auto displacement = builder.constant(
-                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
-                instruction.address);
-            const auto address = builder.add(base, displacement, ir::Width::I64,
-                                             instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(
+                            std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64,
+                                      instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
             builder.incrementGuestMemory(address,
-                                         memory.width == 16 ? ir::Width::I16
+                                         memory.width == 8 ? ir::Width::I8
+                                         : memory.width == 16 ? ir::Width::I16
                                          : memory.width == 32 ? ir::Width::I32
                                                             : ir::Width::I64,
                                          instruction.address);
@@ -3206,11 +3251,12 @@ arm64::Program compileToArm64(const ir::Block &block) {
             break;
         }
         case ir::Opcode::IncrementGuestMemory: {
-            if (operation.width != ir::Width::I16 &&
+            if (operation.width != ir::Width::I8 &&
+                operation.width != ir::Width::I16 &&
                 operation.width != ir::Width::I32 &&
                 operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 16-, 32-, and 64-bit guest memory increment");
+                    "ARM64 backend only implements 8-, 16-, 32-, and 64-bit guest memory increment");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -3220,7 +3266,9 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(
                 arm64::x16,
-                operation.width == ir::Width::I16
+                operation.width == ir::Width::I8
+                    ? pointerBits(&incrementGuest8)
+                : operation.width == ir::Width::I16
                     ? pointerBits(&incrementGuest16)
                 : operation.width == ir::Width::I32
                     ? pointerBits(&incrementGuest32)

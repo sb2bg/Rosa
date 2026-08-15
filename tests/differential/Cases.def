@@ -24,6 +24,8 @@ ROSA_DIFFERENTIAL_CASE(inc32_extended_memory_overflow, 0x41, 0xFF, 0x86,
 ROSA_DIFFERENTIAL_CASE(inc32_extended_memory_wrap, 0x41, 0xFF, 0x86, 0xD0,
                        0x00, 0x00, 0x00)
 ROSA_DIFFERENTIAL_CASE(inc8_overflow, 0x41, 0xFE, 0xC0)
+ROSA_DIFFERENTIAL_CASE(inc8_scaled_memory_overflow, 0xFE, 0x44, 0x33, 0x58)
+ROSA_DIFFERENTIAL_CASE(inc8_scaled_memory_wrap, 0xFE, 0x44, 0x33, 0x58)
 ROSA_DIFFERENTIAL_CASE(dec32_overflow, 0xFF, 0xCF)
 ROSA_DIFFERENTIAL_CASE(dec8_overflow, 0xFE, 0xC8)
 ROSA_DIFFERENTIAL_CASE(dec64_memory, 0x48, 0xFF, 0x4B, 0x18)

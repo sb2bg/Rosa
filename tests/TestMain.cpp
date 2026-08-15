@@ -488,6 +488,31 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "inc8_scaled_memory_overflow",
+            CaseId::inc8_scaled_memory_overflow,
+            differentialBytes_inc8_scaled_memory_overflow);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.state.rsi = 0x20;
+        testCase.request.state.rflags |= carryFlag;
+        testCase.request.memory[0x78] = 0x7F;
+        testCase.memoryCompareOffset = 0x78;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "inc8_scaled_memory_wrap", CaseId::inc8_scaled_memory_wrap,
+            differentialBytes_inc8_scaled_memory_wrap);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.state.rsi = 0x20;
+        testCase.request.state.rflags &= ~carryFlag;
+        testCase.request.memory[0x78] = 0xFF;
+        testCase.memoryCompareOffset = 0x78;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
         auto testCase = make("dec32_overflow", CaseId::dec32_overflow,
                              differentialBytes_dec32_overflow);
         testCase.request.state.rdi = 0xBBBBBBBB80000000ULL;
@@ -2728,6 +2753,98 @@ void testDecrementLowByteRegister() {
         rejected = true;
     }
     expect(rejected, "DEC silently represented legacy AH as SPL");
+}
+
+void testIncrement8BitGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0xFE, 0x44, 0x33, 0x58, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF8000500A0ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::IncMem,
+           "INC byte [scaled memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "INC byte [scaled memory] length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rbx && memory.index &&
+               *memory.index == rosa::x86::Register::Rsi &&
+               memory.scale == 1 && memory.displacement == 0x58 &&
+               memory.width == 8,
+           "INC byte [rbx+rsi+disp8] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "inc byte [rbx+rsi*1+0x58]") != std::string::npos,
+           "INC byte [scaled memory] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8078};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF8000500A0ULL});
+
+    constexpr std::array overflowBytes{std::uint8_t{0x11},
+                                       std::uint8_t{0x7F},
+                                       std::uint8_t{0x22}};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{target.value - 1},
+                            overflowBytes);
+    rosa::x86::X86State overflowState;
+    overflowState.rbx = page.value;
+    overflowState.rsi = 0x20;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(block.execute(overflowState, &addressSpace));
+    expect(addressSpace.readBytes(
+               rosa::guest::GuestAddress{target.value - 1}, 3) ==
+               std::vector<std::uint8_t>({0x11, 0x80, 0x22}),
+           "INC byte changed bytes outside its operand");
+    expectEqual(overflowState.rbx, page.value,
+                "INC byte changed its base register");
+    expectEqual(overflowState.rsi, std::uint64_t{0x20},
+                "INC byte changed its index register");
+    expectEqual(overflowState.rflags, std::uint64_t{0x893},
+                "INC byte overflow flags differ or CF changed");
+
+    addressSpace.writeBytes(target, std::array{std::uint8_t{0xFF}});
+    rosa::x86::X86State wrapState;
+    wrapState.rbx = page.value;
+    wrapState.rsi = 0x20;
+    wrapState.rflags = 0x8D6;
+    static_cast<void>(block.execute(wrapState, &addressSpace));
+    expectEqual(addressSpace.readBytes(target, 1).front(), std::uint8_t{0},
+                "INC byte wrap result differs");
+    expectEqual(wrapState.rflags, std::uint64_t{0x56},
+                "INC byte wrap flags differ or CF changed");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[0x78] = 0x7F;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        page, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        readOnlyBytes, "read-only byte increment target");
+    rosa::x86::X86State faultState;
+    faultState.rbx = page.value;
+    faultState.rsi = 0x20;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "INC byte accepted read-only guest memory");
+    expectEqual(readOnlyAddressSpace.readBytes(target, 1).front(),
+                std::uint8_t{0x7F},
+                "faulted INC byte changed guest memory");
+    expectEqual(faultState.rbx, page.value,
+                "faulted INC byte changed its base");
+    expectEqual(faultState.rsi, std::uint64_t{0x20},
+                "faulted INC byte changed its index");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted INC byte changed flags");
 }
 
 void testIncrement16BitGuestMemory() {
@@ -11934,6 +12051,7 @@ int main() {
         {"INC low-byte register", testIncrementLowByteRegister},
         {"DEC 32-bit register", testDecrement32BitRegister},
         {"DEC low-byte register", testDecrementLowByteRegister},
+        {"INC 8-bit guest memory", testIncrement8BitGuestMemory},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},
         {"INC 32-bit guest memory", testIncrement32BitGuestMemory},
         {"INC 64-bit guest memory", testIncrement64BitGuestMemory},
