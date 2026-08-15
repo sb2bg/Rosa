@@ -770,6 +770,27 @@ void testAndResultAndFlags() {
     expectEqual(state.rflags, std::uint64_t{0x86}, "AND PF/SF flags differ");
 }
 
+void testLegacyAnd32Immediate() {
+    constexpr std::array<std::uint8_t, 4> code{0x83, 0xE1, 0x1F, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegImm,
+           "legacy AND r32, imm8 opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{32}, "legacy AND r32, imm8 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rcx = 0xFFFFFFFF000000FFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x1F},
+                "legacy AND r32, imm8 did not zero-extend the result");
+    expectEqual(state.rflags, std::uint64_t{0x2},
+                "legacy AND r32, imm8 flags differ");
+}
+
 void testGuestAddressSpace() {
     constexpr rosa::guest::GuestAddress base{0x4000};
     rosa::guest::AddressSpace addressSpace;
@@ -1109,6 +1130,7 @@ int main() {
         {"add carry/zero flags", testAddFlagsCarryAndZero},
         {"add signed-overflow flags", testAddFlagsSignedOverflow},
         {"and result/flags", testAndResultAndFlags},
+        {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
         {"guest address space", testGuestAddressSpace},
         {"guest failure report", testGuestFailureReport},
         {"x86 commpage continuous timebase", testX86CommpageContinuousTimebase},

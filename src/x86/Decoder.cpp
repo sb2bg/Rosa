@@ -235,7 +235,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
-        if (!hasRex && code[cursor] != 0x8BU) {
+        if (!hasRex && code[cursor] != 0x8BU && code[cursor] != 0x83U) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
@@ -251,7 +251,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto opcode = code[cursor++];
-        if (!rexW && opcode != 0x8BU && opcode != 0x85U) {
+        if (!rexW && opcode != 0x8BU && opcode != 0x85U && opcode != 0x83U) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
         }
@@ -376,8 +376,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                   "only register-direct SHL /4 from opcode C1 is supported");
             }
             instruction.opcode = Opcode::ShlRegImm;
-            instruction.operands.push_back(
-                RegisterOperand{decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
             instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
         } else if (opcode == 0xC7U) {
             if (code.size() - cursor < 5) {
@@ -422,6 +422,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            if (!rexW && extension != 0x4U) {
+                throw DecodeError(address, remaining,
+                                  "only 32-bit AND /4 is supported from legacy opcode 83");
+            }
             if (mode != 0x3U || rexR || rexX ||
                 (extension != 0x0U && extension != 0x4U && extension != 0x5U &&
                  extension != 0x7U)) {
@@ -434,8 +438,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                  : extension == 4 ? Opcode::AndRegImm
                                  : extension == 5 ? Opcode::SubRegImm
                                                   : Opcode::CmpRegImm;
-            instruction.operands.push_back(
-                RegisterOperand{decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             instruction.operands.push_back(ImmediateOperand{
                 static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
         } else {
