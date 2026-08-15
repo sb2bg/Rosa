@@ -1957,17 +1957,19 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto secondOpcode = code[cursor++];
             if (secondOpcode != 0x42U && secondOpcode != 0x43U &&
-                secondOpcode != 0x44U && secondOpcode != 0x47U &&
+                secondOpcode != 0x44U && secondOpcode != 0x45U &&
+                secondOpcode != 0x47U &&
                 secondOpcode != 0xACU &&
                 secondOpcode != 0xAFU && secondOpcode != 0xBCU &&
                 secondOpcode != 0xBDU) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMOVB/CMOVAE/CMOVE/CMOVA, IMUL, SHRD, BSF, and BSR register forms are supported from 0F");
+                    "only CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA, IMUL, SHRD, BSF, and BSR register forms are supported from 0F");
             }
             const bool isConditionalMove =
                 secondOpcode == 0x42U || secondOpcode == 0x43U ||
-                secondOpcode == 0x44U || secondOpcode == 0x47U;
+                secondOpcode == 0x44U || secondOpcode == 0x45U ||
+                secondOpcode == 0x47U;
             if (!rexW && !isConditionalMove) {
                 throw DecodeError(
                     address, remaining,
@@ -1987,7 +1989,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (mode != 0x3U || rexX) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct CMOVB/CMOVAE/CMOVE/CMOVA/IMUL/SHRD/BSF/BSR is supported");
+                    "only register-direct CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA/IMUL/SHRD/BSF/BSR is supported");
             }
             const auto encodedReg =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
@@ -1999,6 +2001,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                             ? Condition::Below
                                         : secondOpcode == 0x43U
                                             ? Condition::AboveOrEqual
+                                        : secondOpcode == 0x45U
+                                            ? Condition::NotEqual
                                         : secondOpcode == 0x47U
                                             ? Condition::Above
                                             : Condition::Equal;

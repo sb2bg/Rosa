@@ -1300,6 +1300,24 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "cmovne64_extended_taken", CaseId::cmovne64_extended_taken,
+            differentialBytes_cmovne64_extended_taken);
+        testCase.request.state.rcx = 0x1122334455667788ULL;
+        testCase.request.state.r12 = UINT64_MAX;
+        testCase.request.state.rflags &= ~zeroFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "cmovne64_extended_not_taken", CaseId::cmovne64_extended_not_taken,
+            differentialBytes_cmovne64_extended_not_taken);
+        testCase.request.state.rcx = UINT64_MAX;
+        testCase.request.state.r12 = 0xAABBCCDDEEFF0011ULL;
+        testCase.request.state.rflags |= zeroFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmove32_extended_taken",
                              CaseId::cmove32_extended_taken,
                              differentialBytes_cmove32_extended_taken);
@@ -12284,6 +12302,58 @@ void testConditionalMoveEqual64() {
                 "untaken CMOVE changed flags");
 }
 
+void testConditionalMoveNotEqual64Extended() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x4C, 0x0F, 0x45, 0xE1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF80004EA65ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg,
+           "CMOVNE opcode differs");
+    expect(decoded[0].condition == rosa::x86::Condition::NotEqual,
+           "CMOVNE condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "CMOVNE length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R12 &&
+               destination.width == 64 &&
+               source.reg == rosa::x86::Register::Rcx && source.width == 64,
+           "CMOVNE r12, rcx operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmovne r12, rcx") !=
+               std::string::npos,
+           "CMOVNE dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF80004EA65ULL});
+    rosa::x86::X86State taken;
+    taken.rcx = 0x1122334455667788ULL;
+    taken.r12 = UINT64_MAX;
+    taken.rflags = 0x897 & ~zeroFlag;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.r12, std::uint64_t{0x1122334455667788ULL},
+                "taken CMOVNE result differs");
+    expectEqual(taken.rcx, std::uint64_t{0x1122334455667788ULL},
+                "CMOVNE changed its source");
+    expectEqual(taken.rflags, std::uint64_t{0x897 & ~zeroFlag},
+                "taken CMOVNE changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rcx = UINT64_MAX;
+    notTaken.r12 = 0xAABBCCDDEEFF0011ULL;
+    notTaken.rflags = 0x897 | zeroFlag;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.r12, std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                "untaken CMOVNE changed destination");
+    expectEqual(notTaken.rcx, UINT64_MAX,
+                "untaken CMOVNE changed source");
+    expectEqual(notTaken.rflags, std::uint64_t{0x897 | zeroFlag},
+                "untaken CMOVNE changed flags");
+}
+
 void testConditionalMoveEqual32Extended() {
     constexpr std::array<std::uint8_t, 5> code{
         0x41, 0x0F, 0x44, 0xC0, 0xC3};
@@ -13090,6 +13160,8 @@ int main() {
          testConditionalMoveAboveOrEqual32},
         {"conditional move above 64-bit", testConditionalMoveAbove64},
         {"conditional move equal 64-bit", testConditionalMoveEqual64},
+        {"conditional move not-equal extended 64-bit",
+         testConditionalMoveNotEqual64Extended},
         {"conditional move equal extended 32-bit",
          testConditionalMoveEqual32Extended},
         {"unsigned-above conditional", testUnsignedAboveConditional},

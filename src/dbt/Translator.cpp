@@ -3169,9 +3169,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 (*operation.condition != x86::Condition::Below &&
                  *operation.condition != x86::Condition::AboveOrEqual &&
                  *operation.condition != x86::Condition::Above &&
-                 *operation.condition != x86::Condition::Equal)) {
+                 *operation.condition != x86::Condition::Equal &&
+                 *operation.condition != x86::Condition::NotEqual)) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 32- and 64-bit register CMOVB/CMOVAE/CMOVE/CMOVA");
+                    "ARM64 backend only implements 32- and 64-bit register CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA");
             }
             constexpr std::uint8_t carryFlagBit = 0;
             constexpr std::uint8_t zeroFlagBit = 6;
@@ -3184,6 +3185,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 assembler.tbnz(arm64::x16, carryFlagBit, notTaken);
             } else if (*operation.condition == x86::Condition::Equal) {
                 assembler.tbz(arm64::x16, zeroFlagBit, notTaken);
+            } else if (*operation.condition == x86::Condition::NotEqual) {
+                assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
             } else {
                 assembler.tbnz(arm64::x16, carryFlagBit, notTaken);
                 assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
