@@ -2155,6 +2155,22 @@ void testXor32BitRegisterImmediate() {
     expectEqual(state.rcx, std::uint64_t{0},
                 "XOR r32, imm32 result or zero extension differs");
     expectEqual(state.rflags, std::uint64_t{0x46}, "XOR r32, imm32 flags differ");
+
+    constexpr std::array<std::uint8_t, 6> accumulatorCode{
+        0x35, 0x58, 0x54, 0x00, 0x00, 0xC3};
+    const auto accumulatorDecoded = decoder.decodeBlock(
+        accumulatorCode, rosa::guest::GuestAddress{0x2000});
+    expect(accumulatorDecoded[0].opcode == rosa::x86::Opcode::XorRegImm,
+           "XOR EAX, imm32 opcode differs");
+    const auto accumulatorBlock = translator.translate(
+        accumulatorCode, rosa::guest::GuestAddress{0x2000});
+    state.rax = 0xAAAAAAAA00005458ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(accumulatorBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0},
+                "XOR EAX, imm32 did not zero-extend result");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "XOR EAX, imm32 flags differ");
 }
 
 void testXorpsRegisterGeneratedExecution() {

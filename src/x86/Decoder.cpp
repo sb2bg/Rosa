@@ -197,6 +197,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x35U) {
+            if (code.size() - cursor < 5) {
+                throw DecodeError(address, remaining, "truncated xor eax, imm32");
+            }
+            const auto immediate = static_cast<std::uint32_t>(
+                readI32(code.subspan(cursor + 1, sizeof(std::uint32_t))));
+            instruction.opcode = Opcode::XorRegImm;
+            instruction.length = 5;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 5,
+                        instruction.bytes.begin());
+            instruction.operands.push_back(RegisterOperand{Register::Rax, 32});
+            instruction.operands.push_back(ImmediateOperand{immediate, 32});
+            result.push_back(std::move(instruction));
+            cursor += 5;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if ((code[cursor] >= 0x50U && code[cursor] <= 0x57U) ||
             (code[cursor] >= 0x40U && code[cursor] <= 0x4FU &&
              code.size() - cursor >= 2 && code[cursor + 1] >= 0x50U &&
