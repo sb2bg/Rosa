@@ -550,11 +550,13 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (extension != 0x7U || mode > 0x2U || rmEncoding == 0x4U ||
-                (mode == 0 && rmEncoding == 0x5U)) {
+            if (extension != 0x7U ||
+                (mode != 0x3U &&
+                 (rmEncoding == 0x4U ||
+                  (mode == 0 && rmEncoding == 0x5U)))) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMP word [base+disp8/disp32], imm8 is supported");
+                    "only CMP r16 or word [base+disp8/disp32], imm8 is supported");
             }
             auto operandCursor = cursor + 3;
             std::int64_t displacement = 0;
@@ -578,9 +580,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto immediate =
                 std::bit_cast<std::int8_t>(code[operandCursor++]);
-            instruction.opcode = Opcode::CmpMemImm;
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, false), displacement, 16});
+            instruction.opcode = mode == 0x3U ? Opcode::CmpRegImm
+                                              : Opcode::CmpMemImm;
+            if (mode == 0x3U) {
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, false), 16});
+            } else {
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, false), displacement, 16});
+            }
             instruction.operands.push_back(ImmediateOperand{
                 static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
             const auto length = operandCursor - instructionStart;

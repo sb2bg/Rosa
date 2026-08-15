@@ -1078,6 +1078,42 @@ void testCompareGuestWordWithShortImmediate() {
                 "failed CMP word changed flags");
 }
 
+void testCompare16BitRegisterWithShortImmediate() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x83, 0xFF, 0x0D, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegImm,
+           "CMP r16, imm8 opcode differs");
+    const auto reg = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(reg.reg == rosa::x86::Register::Rdi && reg.width == 16,
+           "CMP DI, imm8 register differs");
+    expect(rosa::debug::dumpX86(decoded).find("cmp di, 0xd") !=
+               std::string::npos,
+           "CMP DI, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = 0xA5A5A5A500000005ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0xA5A5A5A500000005ULL},
+                "CMP DI changed its register");
+    expectEqual(state.rflags, std::uint64_t{0x93},
+                "CMP DI, positive imm8 flags differ");
+
+    constexpr std::array<std::uint8_t, 5> negativeCode{
+        0x66, 0x83, 0xFF, 0xFF, 0xC3};
+    const auto negativeBlock = translator.translate(
+        negativeCode, rosa::guest::GuestAddress{0x2000});
+    state.rdi = 0x112233445566FFFFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(negativeBlock.execute(state));
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP DI did not sign-extend negative imm8");
+}
+
 void testCompareGuestByteWithImmediate() {
     constexpr std::array<std::uint8_t, 5> code{0x80, 0x7D, 0xD7, 0x00, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -4469,6 +4505,8 @@ int main() {
         {"CMP guest memory with short immediate", testCompareGuestMemoryWithShortImmediate},
         {"CMP guest qword with short immediate", testCompareGuestQwordWithShortImmediate},
         {"CMP guest word with short immediate", testCompareGuestWordWithShortImmediate},
+        {"CMP 16-bit register with short immediate",
+         testCompare16BitRegisterWithShortImmediate},
         {"CMP guest byte with immediate", testCompareGuestByteWithImmediate},
         {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
         {"CMP EAX accumulator immediate", testCompareEaxAccumulatorImmediate},
