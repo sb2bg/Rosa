@@ -1578,13 +1578,26 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                : memory.width == 16 ? ir::Width::I16
                                : memory.width == 32 ? ir::Width::I32
                                                     : ir::Width::I64;
-            const auto base = memory.ripRelative
-                                  ? builder.constant(
-                                        instruction.address.value + instruction.length,
-                                        ir::Width::I64, instruction.address)
-                                  : builder.readGuestRegister(
-                                        memory.base, ir::Width::I64,
-                                        instruction.address);
+            auto base = memory.ripRelative
+                            ? builder.constant(
+                                  instruction.address.value + instruction.length,
+                                  ir::Width::I64, instruction.address)
+                            : builder.readGuestRegister(
+                                  memory.base, ir::Width::I64,
+                                  instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(
+                            std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                base = builder.add(base, index, ir::Width::I64,
+                                   instruction.address);
+            }
             const auto displacement = builder.constant(
                 static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
                 instruction.address);

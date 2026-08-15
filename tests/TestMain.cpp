@@ -1296,6 +1296,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "mov8_immediate_scaled_memory",
+            CaseId::mov8_immediate_scaled_memory,
+            differentialBytes_mov8_immediate_scaled_memory);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.state.rdx = 0x20;
+        testCase.request.memory[0x77] = 0x11;
+        testCase.request.memory[0x78] = 0xA5;
+        testCase.request.memory[0x79] = 0x22;
+        testCase.memoryCompareOffset = 0x77;
+        testCase.memoryCompareSize = 3;
+        run(testCase);
+    }
+    {
         auto testCase = make("mov8_scaled_memory", CaseId::mov8_scaled_memory,
                              differentialBytes_mov8_scaled_memory);
         bindMemory(testCase, rosa::x86::Register::Rax, 0);
@@ -5625,6 +5639,90 @@ void testMovByteImmediateToGuestMemory() {
                    std::string_view::npos;
     }
     expect(rejected, "MOV byte immediate to read-only guest memory did not fail");
+}
+
+void testMovByteImmediateToScaledGuestMemory() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0xC6, 0x44, 0x13, 0x58, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF8000500FBULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "MOV byte [scaled memory], imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "MOV byte [scaled memory], imm8 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbx && memory.index &&
+               *memory.index == rosa::x86::Register::Rdx &&
+               memory.scale == 1 && memory.displacement == 0x58 &&
+               memory.width == 8,
+           "MOV byte [rbx+rdx+disp8], imm8 operand differs");
+    expect(immediate.value == 0 && immediate.width == 8,
+           "MOV byte [scaled memory], imm8 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov byte [rbx+rdx*1+0x58], 0x0") != std::string::npos,
+           "MOV byte [scaled memory], imm8 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8078};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array sentinel{std::uint8_t{0x11}, std::uint8_t{0xA5},
+                                  std::uint8_t{0x22}};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{target.value - 1},
+                            sentinel);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF8000500FBULL});
+    rosa::x86::X86State state;
+    state.rbx = page.value;
+    state.rdx = 0x20;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    const auto result = addressSpace.readBytes(
+        rosa::guest::GuestAddress{target.value - 1}, sentinel.size());
+    expect(result == std::vector<std::uint8_t>({0x11, 0x00, 0x22}),
+           "MOV byte [scaled memory], imm8 changed the wrong bytes");
+    expectEqual(state.rbx, page.value,
+                "MOV byte [scaled memory], imm8 changed its base");
+    expectEqual(state.rdx, std::uint64_t{0x20},
+                "MOV byte [scaled memory], imm8 changed its index");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV byte [scaled memory], imm8 changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[0x78] = 0xA5;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        page, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        readOnlyBytes, "read-only scaled byte immediate target");
+    rosa::x86::X86State faultState;
+    faultState.rbx = page.value;
+    faultState.rdx = 0x20;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected,
+           "MOV byte immediate accepted read-only scaled guest memory");
+    expectEqual(readOnlyAddressSpace.readBytes(target, 1).front(),
+                std::uint8_t{0xA5},
+                "faulted scaled byte immediate MOV changed memory");
+    expectEqual(faultState.rbx, page.value,
+                "faulted scaled byte immediate MOV changed its base");
+    expectEqual(faultState.rdx, std::uint64_t{0x20},
+                "faulted scaled byte immediate MOV changed its index");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted scaled byte immediate MOV changed flags");
 }
 
 void testMovByteImmediateToRipRelativeGuestMemory() {
@@ -11897,6 +11995,8 @@ int main() {
         {"MOV 32-bit immediate to guest memory",
          testMov32BitImmediateToGuestMemory},
         {"MOV byte immediate to guest memory", testMovByteImmediateToGuestMemory},
+        {"MOV byte immediate to scaled guest memory",
+         testMovByteImmediateToScaledGuestMemory},
         {"MOV byte immediate to RIP-relative guest memory",
          testMovByteImmediateToRipRelativeGuestMemory},
         {"MOV word immediate to guest memory", testMovWordImmediateToGuestMemory},
