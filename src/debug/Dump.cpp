@@ -17,6 +17,8 @@ const char *widthName(ir::Width width) {
     switch (width) {
     case ir::Width::I8:
         return "i8";
+    case ir::Width::I16:
+        return "i16";
     case ir::Width::I32:
         return "i32";
     case ir::Width::I64:
@@ -157,6 +159,20 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
+        case x86::Opcode::MovzxRegMem: {
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "movzx "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", word [" << x86::registerName(memory.base);
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {

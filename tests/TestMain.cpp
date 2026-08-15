@@ -1281,6 +1281,54 @@ void testMovGuestMemoryToByteRegister() {
                 "failed MOV byte load changed flags");
 }
 
+void testMovzxGuestWordTo32BitRegister() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x41, 0x0F, 0xB7, 0x4C, 0x24, 0x04, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovzxRegMem,
+           "MOVZX r32, word [memory] opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rcx,
+           "MOVZX destination differs");
+    expect(std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]).base ==
+               rosa::x86::Register::R12,
+           "MOVZX no-index SIB base differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> word{0x58, 0x54};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8004}, word);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r12 = 0x8000;
+    state.rcx = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rcx, std::uint64_t{0x5458},
+                "MOVZX word result or zero extension differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVZX changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.r12 = 0x8000;
+    faultState.rcx = 0x1234;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOVZX from unmapped guest memory did not fail");
+    expectEqual(faultState.rcx, std::uint64_t{0x1234},
+                "failed MOVZX changed destination");
+}
+
 void testMovGuestMemoryToLegacy32BitRegister() {
     constexpr std::array<std::uint8_t, 4> code{0x8B, 0x4E, 0x0C, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2796,6 +2844,7 @@ int main() {
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
+        {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},
         {"legacy MOV guest memory to 32-bit register",
          testMovGuestMemoryToLegacy32BitRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},

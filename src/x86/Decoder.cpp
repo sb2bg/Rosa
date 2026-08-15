@@ -265,6 +265,72 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        const bool movzxHasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+        const auto movzxOpcodeOffset = cursor + (movzxHasRex ? 1U : 0U);
+        if (code.size() - movzxOpcodeOffset >= 2 &&
+            code[movzxOpcodeOffset] == 0x0FU && code[movzxOpcodeOffset + 1] == 0xB7U) {
+            if (code.size() - movzxOpcodeOffset < 3) {
+                throw DecodeError(address, remaining, "truncated movzx r32, word [memory]");
+            }
+            const auto rex = movzxHasRex ? code[cursor] : 0U;
+            const bool rexW = (rex & 0x8U) != 0;
+            const bool rexR = (rex & 0x4U) != 0;
+            const bool rexX = (rex & 0x2U) != 0;
+            const bool rexB = (rex & 0x1U) != 0;
+            cursor = movzxOpcodeOffset + 2;
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (rexW || rexX || mode > 0x2U ||
+                (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only MOVZX r32, word [base+disp8/disp32] is supported");
+            }
+            auto baseEncoding = rmEncoding;
+            if (rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated MOVZX memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits = static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding = static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if (scaleBits != 0 || indexEncoding != 0x4U ||
+                    (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                    throw DecodeError(address, remaining,
+                                      "only no-index SIB addressing is supported for MOVZX");
+                }
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated MOVZX disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated MOVZX disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::MovzxRegMem;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR), 32});
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(baseEncoding, rexB), displacement, 16});
+            const auto length = cursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,
+                        instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x0FU && code.size() - cursor >= 2 &&
             code[cursor + 1] == 0xBCU) {
             if (code.size() - cursor < 3) {

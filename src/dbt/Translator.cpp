@@ -303,6 +303,28 @@ loadGuest8(GuestExecutionContext *context, x86::X86State *state, std::uint64_t a
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+loadGuest16(GuestExecutionContext *context, x86::X86State *state,
+            std::uint64_t address) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated guest load has no address space");
+        }
+        const auto bytes =
+            context->addressSpace->readBytes(guest::GuestAddress{address}, 2);
+        context->loadedValue = static_cast<std::uint64_t>(bytes[0]) |
+                               (static_cast<std::uint64_t>(bytes[1]) << 8U);
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint16_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 loadGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address) noexcept {
     try {
         if (context == nullptr || context->addressSpace == nullptr) {
@@ -701,6 +723,26 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                                          : ir::Width::I64;
             const auto value = builder.loadGuest(address, width, instruction.address);
             builder.writeGuestRegister(destination.reg, value, width,
+                                       instruction.address);
+            break;
+        }
+        case x86::Opcode::MovzxRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: movzx operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            const auto base = builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                        instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                instruction.address);
+            const auto address = builder.add(base, displacement, ir::Width::I64,
+                                             instruction.address);
+            const auto value = builder.loadGuest(address, ir::Width::I16,
+                                                 instruction.address);
+            builder.writeGuestRegister(destination.reg, value, ir::Width::I32,
                                        instruction.address);
             break;
         }
@@ -1715,6 +1757,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 arm64::x16,
                 operation.width == ir::Width::I8
                     ? pointerBits(&loadGuest8)
+                    : operation.width == ir::Width::I16
+                          ? pointerBits(&loadGuest16)
                     : operation.width == ir::Width::I32 ? pointerBits(&loadGuest32)
                                                        : pointerBits(&loadGuest64));
             assembler.blr(arm64::x16);
