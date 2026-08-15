@@ -2563,6 +2563,61 @@ void testMovapsRegisterToGuestMemory() {
                 "failed MOVAPS changed its base register");
 }
 
+void testMovapsGuestMemoryToRegister() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x0F, 0x28, 0x45, 0xE0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovapsRegMem,
+           "MOVAPS xmm, [mem] opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbp &&
+               memory.displacement == -0x20 && memory.width == 128,
+           "MOVAPS xmm, [rbp-0x20] memory operand differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x80E0},
+                          0x0123456789ABCDEFULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x80E8},
+                          0xFEDCBA9876543210ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbp = 0x8100;
+    state.xmm[0] = {.low = 1, .high = 2};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVAPS load low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVAPS load high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVAPS load changed flags");
+
+    state.rbp = 0x8108;
+    state.xmm[0] = {.low = 3, .high = 4};
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("16-byte aligned") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "unaligned MOVAPS guest load did not fault");
+    expectEqual(state.rbp, std::uint64_t{0x8108},
+                "failed MOVAPS changed its base register");
+    expectEqual(state.xmm[0].low, std::uint64_t{3},
+                "failed MOVAPS changed low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{4},
+                "failed MOVAPS changed high lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "failed MOVAPS changed flags");
+}
+
 void testMovupsRegisterToGuestMemoryWithSib() {
     constexpr std::array<std::uint8_t, 6> code{0x0F, 0x11, 0x44, 0x24, 0x10, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -4047,6 +4102,7 @@ int main() {
         {"PMOVMSKB generated execution", testPmovmskbGeneratedExecution},
         {"PSHUFD register execution", testPshufdRegisterExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
+        {"MOVAPS guest memory to register", testMovapsGuestMemoryToRegister},
         {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
         {"MOVUPS guest memory to register", testMovupsGuestMemoryToRegister},
         {"MOVDQA guest memory to register", testMovdqaGuestMemoryToRegister},

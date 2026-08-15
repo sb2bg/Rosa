@@ -596,9 +596,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
+        case x86::Opcode::MovapsRegMem:
         case x86::Opcode::MovupsRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
-            stream << "movups "
+            stream << (instruction.opcode == x86::Opcode::MovapsRegMem
+                           ? "movaps "
+                           : "movups ")
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg)
                    << ", [" << x86::registerName(memory.base);

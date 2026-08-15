@@ -182,7 +182,8 @@ loadGuestXmm128(GuestExecutionContext *context, x86::X86State *state,
             throw std::runtime_error("generated XMM guest load has an invalid register");
         }
         if (alignmentRequired != 0 && (address & 0xFU) != 0) {
-            throw std::runtime_error("MOVDQA guest address is not 16-byte aligned");
+            throw std::runtime_error(
+                "aligned XMM guest address is not 16-byte aligned");
         }
         const auto bytes = context->addressSpace->readBytes(guest::GuestAddress{address}, 16);
         x86::X86State::XmmValue value;
@@ -908,6 +909,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                   instruction.address);
             break;
         }
+        case x86::Opcode::MovapsRegMem:
         case x86::Opcode::MovupsRegMem:
         case x86::Opcode::MovdquRegMem:
         case x86::Opcode::MovdqaRegMem: {
@@ -925,7 +927,8 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto address =
                 builder.add(base, displacement, ir::Width::I64, instruction.address);
             builder.loadGuestXmm(address, destination,
-                                 instruction.opcode == x86::Opcode::MovdqaRegMem,
+                                 instruction.opcode == x86::Opcode::MovapsRegMem ||
+                                     instruction.opcode == x86::Opcode::MovdqaRegMem,
                                  instruction.address);
             break;
         }

@@ -890,10 +890,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const auto movupsLoadOpcodeOffset = cursor + (movupsLoadHasRex ? 1U : 0U);
         if (code.size() - movupsLoadOpcodeOffset >= 2 &&
             code[movupsLoadOpcodeOffset] == 0x0FU &&
-            code[movupsLoadOpcodeOffset + 1] == 0x10U) {
+            (code[movupsLoadOpcodeOffset + 1] == 0x10U ||
+             code[movupsLoadOpcodeOffset + 1] == 0x28U)) {
+            const bool aligned = code[movupsLoadOpcodeOffset + 1] == 0x28U;
             if (code.size() - movupsLoadOpcodeOffset < 3) {
                 throw DecodeError(address, remaining,
-                                  "truncated movups xmm, [memory]");
+                                  "truncated xmm load from guest memory");
             }
             const auto rex = movupsLoadHasRex ? code[cursor] : 0U;
             const bool rexR = (rex & 0x4U) != 0;
@@ -906,7 +908,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only MOVUPS xmm, [base+disp8/disp32] memory operands are supported");
+                    "only MOVAPS/MOVUPS xmm, [base+disp8/disp32] memory operands are supported");
             }
             auto operandCursor = movupsLoadOpcodeOffset + 3;
             std::int64_t displacement = 0;
@@ -924,7 +926,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 displacement = readI32(code.subspan(operandCursor, 4));
                 operandCursor += 4;
             }
-            instruction.opcode = Opcode::MovupsRegMem;
+            instruction.opcode = aligned ? Opcode::MovapsRegMem
+                                         : Opcode::MovupsRegMem;
             instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
                 static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) |
                                           (rexR ? 0x8U : 0U)))});
