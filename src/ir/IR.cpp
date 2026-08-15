@@ -42,6 +42,32 @@ void Builder::writeGuestRegister(x86::Register reg, ValueId value, Width width,
     });
 }
 
+ValueId Builder::readGuestXmmLane(x86::XmmRegister reg, bool high,
+                                  guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ReadGuestXmmLane,
+        .width = Width::I64,
+        .guestRip = rip,
+        .result = result,
+        .guestXmmRegister = reg,
+        .immediate = high ? 1U : 0U,
+    });
+    return result;
+}
+
+void Builder::writeGuestXmmLane(x86::XmmRegister reg, bool high, ValueId value,
+                                guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::WriteGuestXmmLane,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = value,
+        .guestXmmRegister = reg,
+        .immediate = high ? 1U : 0U,
+    });
+}
+
 ValueId Builder::add(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -156,6 +182,19 @@ ValueId Builder::bitOr(ValueId lhs, ValueId rhs, Width width, guest::GuestAddres
     const auto result = nextValue();
     block_.operations.push_back(Operation{
         .opcode = Opcode::Or,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = lhs,
+        .rhs = rhs,
+    });
+    return result;
+}
+
+ValueId Builder::bitXor(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::Xor,
         .width = width,
         .guestRip = rip,
         .result = result,
@@ -373,16 +412,28 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::Constant:
         case Opcode::ReadGuestReg:
             break;
+        case Opcode::ReadGuestXmmLane:
+            if (!operation.guestXmmRegister) {
+                errors.emplace_back("read_guest_xmm_lane has no register");
+            }
+            break;
         case Opcode::WriteGuestReg:
             checkUse(operation.lhs, "source");
             if (!operation.guestRegister) {
                 errors.emplace_back("write_guest_reg has no register");
             }
             break;
+        case Opcode::WriteGuestXmmLane:
+            checkUse(operation.lhs, "source");
+            if (!operation.guestXmmRegister) {
+                errors.emplace_back("write_guest_xmm_lane has no register");
+            }
+            break;
         case Opcode::Add:
         case Opcode::Sub:
         case Opcode::And:
         case Opcode::Or:
+        case Opcode::Xor:
         case Opcode::MultiplyLow:
         case Opcode::MultiplyHighUnsigned:
         case Opcode::ShiftRightDouble:

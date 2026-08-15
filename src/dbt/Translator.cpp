@@ -553,6 +553,28 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateLogicFlags(result, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::XorpsRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: xorps operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto destinationLow =
+                builder.readGuestXmmLane(destination, false, instruction.address);
+            const auto sourceLow = builder.readGuestXmmLane(source, false, instruction.address);
+            const auto low = builder.bitXor(destinationLow, sourceLow, ir::Width::I64,
+                                            instruction.address);
+            builder.writeGuestXmmLane(destination, false, low, instruction.address);
+            const auto destinationHigh =
+                builder.readGuestXmmLane(destination, true, instruction.address);
+            const auto sourceHigh = builder.readGuestXmmLane(source, true, instruction.address);
+            const auto high = builder.bitXor(destinationHigh, sourceHigh, ir::Width::I64,
+                                             instruction.address);
+            builder.writeGuestXmmLane(destination, true, high, instruction.address);
+            break;
+        }
         case x86::Opcode::AndRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: and operand count");
@@ -775,10 +797,20 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     static_cast<std::uint32_t>(x86::registerOffset(*operation.guestRegister)));
             }
             break;
+        case ir::Opcode::ReadGuestXmmLane:
+            assembler.ldr(hostRegister(*operation.result), arm64::x0,
+                          static_cast<std::uint32_t>(x86::xmmLaneOffset(
+                              *operation.guestXmmRegister, operation.immediate != 0)));
+            break;
         case ir::Opcode::WriteGuestReg:
             assembler.str(
                 hostRegister(*operation.lhs), arm64::x0,
                 static_cast<std::uint32_t>(x86::registerOffset(*operation.guestRegister)));
+            break;
+        case ir::Opcode::WriteGuestXmmLane:
+            assembler.str(hostRegister(*operation.lhs), arm64::x0,
+                          static_cast<std::uint32_t>(x86::xmmLaneOffset(
+                              *operation.guestXmmRegister, operation.immediate != 0)));
             break;
         case ir::Opcode::Add:
             assembler.add(hostRegister(*operation.result), hostRegister(*operation.lhs),
@@ -821,6 +853,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::Or:
             assembler.bitOr(hostRegister(*operation.result), hostRegister(*operation.lhs),
                             hostRegister(*operation.rhs));
+            break;
+        case ir::Opcode::Xor:
+            assembler.bitXor(hostRegister(*operation.result), hostRegister(*operation.lhs),
+                             hostRegister(*operation.rhs));
             break;
         case ir::Opcode::Push: {
             const auto fault = assembler.makeLabel();

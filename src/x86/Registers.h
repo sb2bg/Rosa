@@ -27,6 +27,33 @@ enum class Register : std::uint8_t {
     R15,
 };
 
+enum class XmmRegister : std::uint8_t {
+    Xmm0,
+    Xmm1,
+    Xmm2,
+    Xmm3,
+    Xmm4,
+    Xmm5,
+    Xmm6,
+    Xmm7,
+    Xmm8,
+    Xmm9,
+    Xmm10,
+    Xmm11,
+    Xmm12,
+    Xmm13,
+    Xmm14,
+    Xmm15,
+};
+
+constexpr std::string_view xmmRegisterName(XmmRegister reg) {
+    constexpr std::array names{
+        "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+        "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
+    };
+    return names.at(static_cast<std::size_t>(reg));
+}
+
 constexpr std::string_view registerName(Register reg) {
     constexpr std::array names{
         "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
@@ -56,6 +83,12 @@ struct alignas(16) X86State {
 
     std::uint64_t rip{};
     std::uint64_t rflags{0x2};
+
+    struct XmmValue {
+        std::uint64_t low{};
+        std::uint64_t high{};
+    };
+    std::array<XmmValue, 16> xmm{};
 };
 
 static_assert(std::is_standard_layout_v<X86State>);
@@ -96,6 +129,12 @@ constexpr std::size_t registerOffset(Register reg) {
         return offsetof(X86State, r15);
     }
     return 0;
+}
+
+constexpr std::size_t xmmLaneOffset(XmmRegister reg, bool high) {
+    return offsetof(X86State, xmm) +
+           static_cast<std::size_t>(reg) * sizeof(X86State::XmmValue) +
+           (high ? offsetof(X86State::XmmValue, high) : offsetof(X86State::XmmValue, low));
 }
 
 } // namespace rosa::x86

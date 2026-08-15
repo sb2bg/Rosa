@@ -50,6 +50,7 @@ class Assembler {
     void extract(XRegister destination, XRegister high, XRegister low, std::uint8_t lsb);
     void bitAnd(XRegister destination, XRegister lhs, XRegister rhs);
     void bitOr(XRegister destination, XRegister lhs, XRegister rhs);
+    void bitXor(XRegister destination, XRegister lhs, XRegister rhs);
     void ldr(XRegister destination, XRegister base, std::uint32_t byteOffset);
     void ldr32(XRegister destination, XRegister base, std::uint32_t byteOffset);
     void str(XRegister source, XRegister base, std::uint32_t byteOffset);

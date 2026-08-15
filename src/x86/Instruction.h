@@ -30,6 +30,7 @@ enum class Opcode {
     TestRegReg,
     CmpRegImm,
     CmpRegMem,
+    XorpsRegReg,
     Push,
     Pop,
     Lfence,
@@ -62,7 +63,12 @@ struct MemoryOperand {
     std::uint8_t width{};
 };
 
-using Operand = std::variant<RegisterOperand, ImmediateOperand, MemoryOperand>;
+struct XmmRegisterOperand {
+    XmmRegister reg{};
+};
+
+using Operand = std::variant<RegisterOperand, ImmediateOperand, MemoryOperand,
+                             XmmRegisterOperand>;
 
 struct DecodedInstruction {
     guest::GuestAddress address{};

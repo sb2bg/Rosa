@@ -255,6 +255,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
+        case x86::Opcode::XorpsRegReg:
+            stream << "xorps "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
+            break;
         case x86::Opcode::Push:
             stream << "push ";
             if (std::holds_alternative<x86::ImmediateOperand>(instruction.operands[0])) {
@@ -315,9 +323,20 @@ std::string dumpIr(const ir::Block &block) {
             stream << "read_guest_reg." << widthName(operation.width) << ' '
                    << x86::registerName(*operation.guestRegister);
             break;
+        case ir::Opcode::ReadGuestXmmLane:
+            stream << "read_guest_xmm_lane.i64 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister) << '.'
+                   << (operation.immediate == 0 ? "low" : "high");
+            break;
         case ir::Opcode::WriteGuestReg:
             stream << "write_guest_reg." << widthName(operation.width) << ' '
                    << x86::registerName(*operation.guestRegister) << ", "
+                   << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::WriteGuestXmmLane:
+            stream << "write_guest_xmm_lane.i64 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister) << '.'
+                   << (operation.immediate == 0 ? "low" : "high") << ", "
                    << valueName(*operation.lhs);
             break;
         case ir::Opcode::Add:
@@ -356,6 +375,10 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::Or:
             stream << "or." << widthName(operation.width) << ' ' << valueName(*operation.lhs)
+                   << ", " << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::Xor:
+            stream << "xor." << widthName(operation.width) << ' ' << valueName(*operation.lhs)
                    << ", " << valueName(*operation.rhs);
             break;
         case ir::Opcode::Push:
