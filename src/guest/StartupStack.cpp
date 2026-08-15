@@ -40,7 +40,8 @@ std::vector<GuestAddress> placeStrings(AddressSpace &addressSpace, GuestAddress 
 InitialStack StartupStackBuilder::build(AddressSpace &addressSpace, GuestAddress base,
                                         std::size_t size, std::span<const std::string> arguments,
                                         std::span<const std::string> environment,
-                                        std::span<const std::string> apple) const {
+                                        std::span<const std::string> apple,
+                                        std::optional<GuestAddress> mainExecutable) const {
     if (arguments.empty()) {
         throw std::invalid_argument("initial Darwin guest stack requires argv[0]");
     }
@@ -55,8 +56,14 @@ InitialStack StartupStackBuilder::build(AddressSpace &addressSpace, GuestAddress
     const auto argumentAddresses = placeStrings(addressSpace, base, cursor, arguments);
 
     std::vector<std::uint64_t> words;
-    words.reserve(1 + argumentAddresses.size() + 1 + environmentAddresses.size() + 1 +
-                  appleAddresses.size() + 1);
+    words.reserve((mainExecutable ? 1U : 0U) + 1 + argumentAddresses.size() + 1 +
+                  environmentAddresses.size() + 1 + appleAddresses.size() + 1);
+    // dyld's KernelArgs begins with the main executable's Mach-O header,
+    // followed by the normal argc/argv/envp/apple vectors. Direct executable
+    // entry points receive the normal vectors without this dyld-only prefix.
+    if (mainExecutable) {
+        words.push_back(mainExecutable->value);
+    }
     words.push_back(arguments.size());
     for (const auto address : argumentAddresses) {
         words.push_back(address.value);

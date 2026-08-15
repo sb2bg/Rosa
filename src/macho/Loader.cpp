@@ -1,6 +1,7 @@
 #include "macho/Loader.h"
 
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -33,6 +34,7 @@ guest::GuestAddress slidAddress(guest::GuestAddress address, std::uint64_t slide
 LoadedImage Loader::mapImage(const MachOFile &file, guest::AddressSpace &addressSpace,
                              std::uint64_t slide, std::string_view imageName) const {
     std::size_t mappedSegments = 0;
+    std::optional<guest::GuestAddress> loadAddress;
     const auto bytes = file.bytes();
     for (const auto &segment : file.segments()) {
         if (segment.virtualSize == 0) {
@@ -50,11 +52,24 @@ LoadedImage Loader::mapImage(const MachOFile &file, guest::AddressSpace &address
                                 static_cast<std::size_t>(segment.virtualSize),
                                 translatePermissions(segment.initialProtection),
                                 bytes.subspan(begin, size), mappingLabel);
+        if (segment.fileOffset == 0 && segment.fileSize >= 32) {
+            if (loadAddress) {
+                throw std::runtime_error(
+                    "Mach-O has multiple segments containing its header");
+            }
+            loadAddress = slidAddress(segment.virtualAddress, slide);
+        }
         ++mappedSegments;
+    }
+    if (!loadAddress) {
+        throw std::runtime_error("Mach-O has no mapped segment containing its header");
     }
     const auto entry = slidAddress(file.entryPoint(), slide);
     static_cast<void>(addressSpace.executableBytes(entry));
-    return LoadedImage{.entryPoint = entry, .slide = slide, .mappedSegments = mappedSegments};
+    return LoadedImage{.loadAddress = *loadAddress,
+                       .entryPoint = entry,
+                       .slide = slide,
+                       .mappedSegments = mappedSegments};
 }
 
 LoadedImage Loader::mapImage(const std::filesystem::path &path, guest::AddressSpace &addressSpace,

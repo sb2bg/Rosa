@@ -5610,6 +5610,30 @@ void testInitialDarwinStack() {
                 "guest apple[0] differs");
 }
 
+void testInitialDyldStack() {
+    constexpr rosa::guest::GuestAddress base{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress executableHeader{0x100000000ULL};
+    constexpr std::size_t size = 2 * rosa::guest::guestPageSize;
+    const std::vector<std::string> arguments{"/guest/program"};
+    const std::vector<std::string> environment;
+    const std::vector<std::string> apple{"executable_path=/guest/program"};
+    rosa::guest::AddressSpace addressSpace;
+    const rosa::guest::StartupStackBuilder builder;
+    const auto stack = builder.build(addressSpace, base, size, arguments,
+                                     environment, apple, executableHeader);
+    expectEqual(stack.stackPointer.value & 0xFU, std::uint64_t{0},
+                "initial dyld stack pointer is not 16-byte aligned");
+    expectEqual(addressSpace.readU64(stack.stackPointer), executableHeader.value,
+                "initial dyld stack lacks the main Mach-O header");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
+                    stack.stackPointer.value + sizeof(std::uint64_t)}),
+                std::uint64_t{1}, "initial dyld stack argc differs");
+    const auto argv0 = addressSpace.readU64(rosa::guest::GuestAddress{
+        stack.stackPointer.value + (2 * sizeof(std::uint64_t))});
+    expectEqual(readGuestString(addressSpace, rosa::guest::GuestAddress{argv0}),
+                arguments[0], "initial dyld stack argv[0] differs");
+}
+
 constexpr std::array<std::uint8_t, 41> r2Code{
     0x48, 0xB8, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0xF8, 0x28,
     0x75, 0x07, 0xE8, 0x0E, 0x00, 0x00, 0x00, 0xEB, 0x11, 0x48, 0xB8, 0x00, 0x00, 0x00,
@@ -6156,6 +6180,11 @@ void testControlledMachOParsing() {
     const rosa::macho::Loader loader;
     const auto image = loader.mapImage(file, addressSpace);
     expectEqual(image.mappedSegments, std::size_t{3}, "Mach-O mapped-segment count differs");
+    expectEqual(image.loadAddress.value, std::uint64_t{0x100000000ULL},
+                "Mach-O load address differs");
+    expectEqual(addressSpace.readU32(image.loadAddress),
+                std::uint32_t{0xFEEDFACFU},
+                "Mach-O load address does not point at its header");
     expectEqual(addressSpace.mappingCount(), image.mappedSegments,
                 "guest mapping count differs from loaded segment count");
     expectEqual(addressSpace.executableBytes(image.entryPoint).front(), std::uint8_t{0x48},
@@ -6394,6 +6423,7 @@ int main() {
         {"hot guest block diagnostics", testHotGuestBlockDiagnostics},
         {"x86 commpage", testX86Commpage},
         {"initial Darwin stack", testInitialDarwinStack},
+        {"initial dyld stack", testInitialDyldStack},
         {"R2 multi-block control flow", testR2MultiBlockControlFlow},
         {"R2 taken conditional", testR2TakenConditional},
         {"indirect guest-memory call", testIndirectGuestMemoryCall},

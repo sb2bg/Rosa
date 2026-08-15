@@ -12,6 +12,7 @@
 namespace rosa::macho {
 
 struct LoadedImage {
+    guest::GuestAddress loadAddress{};
     guest::GuestAddress entryPoint{};
     std::uint64_t slide{};
     std::size_t mappedSegments{};
