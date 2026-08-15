@@ -385,6 +385,55 @@ void testMovRegisterToGuestMemory() {
                 "failed guest-memory MOV changed the source register");
 }
 
+void testMovGuestMemoryToRegister() {
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0x8B, 0x03, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegMem,
+           "MOV r64, [base] opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rax,
+           "MOV r64, [base] destination differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbx,
+           "MOV r64, [base] base register differs");
+    expectEqual(memory.displacement, std::int64_t{0},
+                "MOV r64, [base] displacement differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::uint64_t value = 0x0123456789ABCDEFULL;
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8100}, value);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbx = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, value, "MOV r64, [base] loaded the wrong guest value");
+    expectEqual(state.rbx, std::uint64_t{0x8100},
+                "MOV r64, [base] changed the base register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV r64, [base] changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x55;
+    faultState.rbx = 0x8100;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOV from unmapped guest memory did not fail");
+    expectEqual(faultState.rax, std::uint64_t{0x55},
+                "failed guest-memory load changed the destination register");
+}
+
 void testTestRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x85, 0xC9, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -784,6 +833,7 @@ int main() {
         {"SUB register imm32 generated execution", testSubRegImm32GeneratedExecution},
         {"SUB register imm8 generated execution", testSubRegImm8GeneratedExecution},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
+        {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},

@@ -15,6 +15,7 @@ enum class Opcode {
     MovRegImm,
     MovRegReg,
     MovMemReg,
+    MovRegMem,
     LeaRegRipRelative,
     AddRegImm,
     SubRegImm,

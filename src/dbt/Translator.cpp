@@ -27,6 +27,7 @@ struct GuestExecutionContext {
     std::exception_ptr fault;
     guest::GuestAddress faultAddress{};
     std::size_t faultSize{};
+    std::uint64_t loadedValue{};
 };
 
 extern "C" __attribute__((noinline)) x86::X86State *
@@ -57,6 +58,24 @@ storeGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t
             throw std::runtime_error("generated guest store has no address space");
         }
         context->addressSpace->writeU64(guest::GuestAddress{address}, value);
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint64_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+loadGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated guest load has no address space");
+        }
+        context->loadedValue = context->addressSpace->readU64(guest::GuestAddress{address});
         return state;
     } catch (...) {
         if (context != nullptr) {
@@ -188,6 +207,24 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto value =
                 builder.readGuestRegister(source.reg, ir::Width::I64, instruction.address);
             builder.storeGuest(address, value, ir::Width::I64, instruction.address);
+            break;
+        }
+        case x86::Opcode::MovRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: mov load operand count");
+            }
+            const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            const auto base =
+                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                instruction.address);
+            const auto address =
+                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            const auto value = builder.loadGuest(address, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(destination.reg, value, ir::Width::I64,
+                                       instruction.address);
             break;
         }
         case x86::Opcode::LeaRegRipRelative: {
@@ -353,9 +390,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::UpdateSubFlags ||
                          operation.opcode == ir::Opcode::UpdateLogicFlags ||
                          operation.opcode == ir::Opcode::Push ||
-                         operation.opcode == ir::Opcode::StoreGuest;
+                         operation.opcode == ir::Opcode::StoreGuest ||
+                         operation.opcode == ir::Opcode::LoadGuest;
         hasGuestMemoryCall |= operation.opcode == ir::Opcode::Push ||
-                              operation.opcode == ir::Opcode::StoreGuest;
+                              operation.opcode == ir::Opcode::StoreGuest ||
+                              operation.opcode == ir::Opcode::LoadGuest;
     }
     if (hasHelperCall) {
         assembler.pushFrameRecord();
@@ -439,6 +478,28 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    static_cast<std::uint64_t>(BlockExit::MemoryFault));
             assembler.ret();
             assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::LoadGuest: {
+            const auto fault = assembler.makeLabel();
+            const auto loaded = assembler.makeLabel();
+            assembler.mov(arm64::x4, arm64::x0);
+            assembler.mov(arm64::x1, arm64::x4);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&loadGuest64));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(loaded);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0,
+                                   static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(loaded);
+            assembler.ldr(hostRegister(*operation.result), arm64::x19,
+                          static_cast<std::uint32_t>(offsetof(GuestExecutionContext,
+                                                              loadedValue)));
             break;
         }
         case ir::Opcode::UpdateAddFlags:

@@ -81,6 +81,18 @@ ValueId Builder::bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddre
     return result;
 }
 
+ValueId Builder::loadGuest(ValueId address, Width width, guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LoadGuest,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = address,
+    });
+    return result;
+}
+
 void Builder::storeGuest(ValueId address, ValueId value, Width width,
                          guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -234,6 +246,9 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::StoreGuest:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "stored value");
+            break;
+        case Opcode::LoadGuest:
+            checkUse(operation.lhs, "guest address");
             break;
         case Opcode::UpdateAddFlags:
         case Opcode::UpdateSubFlags:

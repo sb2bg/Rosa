@@ -116,6 +116,20 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(instruction.operands[1]).reg);
             break;
         }
+        case x86::Opcode::MovRegMem: {
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "mov "
+                   << x86::registerName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
+                   << ", [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::LeaRegRipRelative:
             stream << "lea "
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
@@ -222,6 +236,10 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::StoreGuest:
             stream << "store_guest." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", " << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::LoadGuest:
+            stream << "load_guest." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs);
             break;
         case ir::Opcode::UpdateAddFlags:
             stream << "update_add_flags." << widthName(operation.width) << ' '
