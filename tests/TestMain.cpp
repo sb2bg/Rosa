@@ -1006,6 +1006,17 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("mov64_scaled_store",
+                             CaseId::mov64_scaled_store,
+                             differentialBytes_mov64_scaled_store);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rdx = 0x20;
+        testCase.request.state.rsi = 0x0123456789ABCDEFULL;
+        testCase.memoryCompareOffset = 0x20;
+        testCase.memoryCompareSize = sizeof(std::uint64_t);
+        run(testCase);
+    }
+    {
         auto testCase = make("mov32_immediate_memory",
                              CaseId::mov32_immediate_memory,
                              differentialBytes_mov32_immediate_memory);
@@ -3873,6 +3884,82 @@ void testMov32BitRegisterToGuestMemory() {
     expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{0x812C}),
                 UINT32_MAX, "MOV [mem], r32 overwrote adjacent bytes");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOV [mem], r32 changed flags");
+}
+
+void testMov64BitRegisterToScaledGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x48, 0x89, 0x34, 0x17, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "scaled qword MOV store opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "scaled qword MOV store length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rdi && memory.index &&
+               *memory.index == rosa::x86::Register::Rdx && memory.scale == 1 &&
+               memory.displacement == 0 && memory.width == 64,
+           "scaled qword MOV store memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rsi && source.width == 64,
+           "scaled qword MOV store source differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov [rdi+rdx*1], rsi") != std::string::npos,
+           "scaled qword MOV store dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8020};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, UINT64_MAX);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = page.value;
+    state.rdx = 0x20;
+    state.rsi = 0x0123456789ABCDEFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target),
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "scaled qword MOV stored the wrong value");
+    expectEqual(state.rdi, page.value, "scaled qword MOV changed its base");
+    expectEqual(state.rdx, std::uint64_t{0x20},
+                "scaled qword MOV changed its index");
+    expectEqual(state.rsi, std::uint64_t{0x0123456789ABCDEFULL},
+                "scaled qword MOV changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "scaled qword MOV changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    constexpr std::uint64_t readOnlySentinel = 0xA5A5A5A5A5A5A5A5ULL;
+    std::memcpy(readOnlyBytes.data() + 0x20, &readOnlySentinel,
+                sizeof(readOnlySentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(page, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes, "read-only scaled MOV target");
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "scaled qword MOV accepted read-only guest memory");
+    expectEqual(readOnlyAddressSpace.readU64(target), readOnlySentinel,
+                "faulted scaled qword MOV changed guest memory");
+    expectEqual(state.rsi, std::uint64_t{0x0123456789ABCDEFULL},
+                "faulted scaled qword MOV changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "faulted scaled qword MOV changed flags");
 }
 
 void testMovLowByteRegisterToGuestMemory() {
@@ -9671,6 +9758,8 @@ int main() {
         {"MOV RIP-relative guest dword to register",
          testMovRipRelativeGuestDwordToRegister},
         {"MOV 32-bit register to guest memory", testMov32BitRegisterToGuestMemory},
+        {"MOV 64-bit register to scaled guest memory",
+         testMov64BitRegisterToScaledGuestMemory},
         {"MOV low-byte register to guest memory", testMovLowByteRegisterToGuestMemory},
         {"MOV extended low byte to scaled guest memory",
          testMovExtendedLowByteToScaledGuestMemory},
