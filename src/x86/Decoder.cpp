@@ -558,7 +558,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const auto opcode = code[cursor++];
         if (!rexW && opcode != 0x89U && opcode != 0x8BU && opcode != 0x85U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
-            opcode != 0x31U && opcode != 0x80U && opcode != 0x81U && opcode != 0xC1U &&
+            opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
+            opcode != 0x81U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xFFU &&
             (opcode < 0xB8U || opcode > 0xBFU)) {
             throw DecodeError(address, remaining,
@@ -729,9 +730,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto rhs =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto lhs = decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
+            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
             instruction.opcode = Opcode::CmpRegReg;
-            instruction.operands.push_back(RegisterOperand{lhs, 64});
-            instruction.operands.push_back(RegisterOperand{rhs, 64});
+            instruction.operands.push_back(RegisterOperand{lhs, width});
+            instruction.operands.push_back(RegisterOperand{rhs, width});
         } else if (opcode == 0x3BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated cmp r32, [base+disp]");
