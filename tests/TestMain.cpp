@@ -538,6 +538,23 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("or8_extended_immediate",
+                             CaseId::or8_extended_immediate,
+                             differentialBytes_or8_extended_immediate);
+        testCase.request.state.r8 = 0x1122334455667780ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "or8_extended_immediate_zero",
+            CaseId::or8_extended_immediate_zero,
+            differentialBytes_or8_extended_immediate_zero);
+        testCase.request.state.r8 = 0x1122334455667700ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("xor32_register", CaseId::xor32_register,
                              differentialBytes_xor32_register);
         testCase.request.state.rsi = UINT64_MAX;
@@ -7291,6 +7308,55 @@ void testOrShortImmediateGeneratedExecution() {
                 "OR r32, imm8 result did not zero-extend");
     expectEqual(state.rflags, std::uint64_t{0x6},
                 "OR r32, imm8 flags differ");
+
+    constexpr std::array<std::uint8_t, 5> extendedCode{
+        0x41, 0x80, 0xC8, 0x0F, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x3000});
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::OrRegImm,
+           "OR extended r8, imm8 opcode differs");
+    expectEqual(extendedDecoded[0].length, std::uint8_t{4},
+                "OR extended r8, imm8 length differs");
+    const auto extendedDestination = std::get<rosa::x86::RegisterOperand>(
+        extendedDecoded[0].operands[0]);
+    const auto extendedImmediate = std::get<rosa::x86::ImmediateOperand>(
+        extendedDecoded[0].operands[1]);
+    expect(extendedDestination.reg == rosa::x86::Register::R8 &&
+               extendedDestination.width == 8 &&
+               extendedImmediate.width == 8 &&
+               extendedImmediate.value == 0x0F,
+           "OR r8b, imm8 operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find("or r8b, 0xf") !=
+               std::string::npos,
+           "OR r8b, imm8 dump differs");
+
+    const auto extendedBlock = translator.translate(
+        extendedCode, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State extendedState;
+    extendedState.r8 = 0x1122334455667780ULL;
+    extendedState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.r8, std::uint64_t{0x112233445566778FULL},
+                "OR r8b immediate did not preserve upper register bytes");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(extendedState.rflags & definedLogicFlags,
+                std::uint64_t{1U << 7U},
+                "OR r8b immediate defined flags differ");
+
+    constexpr std::array<std::uint8_t, 5> zeroCode{
+        0x41, 0x80, 0xC8, 0x00, 0xC3};
+    const auto zeroBlock = translator.translate(
+        zeroCode, rosa::guest::GuestAddress{0x4000});
+    extendedState.r8 = 0x1122334455667700ULL;
+    extendedState.rflags = 0x8D7;
+    static_cast<void>(zeroBlock.execute(extendedState));
+    expectEqual(extendedState.r8, std::uint64_t{0x1122334455667700ULL},
+                "OR r8b zero immediate changed the byte");
+    expectEqual(extendedState.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "OR r8b zero defined flags differ");
 }
 
 void testOr32BitRegistersGeneratedExecution() {
