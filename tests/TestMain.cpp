@@ -558,8 +558,10 @@ void testSub32BitRegisterFromGuestMemory() {
                               rosa::guest::guestPageSize,
                               rosa::guest::Permission::Read |
                                   rosa::guest::Permission::Write);
-    constexpr std::array<std::uint8_t, 4> seven{7, 0, 0, 0};
-    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8118}, seven);
+    constexpr std::array<std::uint8_t, 8> sourceWithUpperSentinel{
+        7, 0, 0, 0, 0xEF, 0xBE, 0xAD, 0xDE};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8118},
+                            sourceWithUpperSentinel);
     const rosa::dbt::Translator translator;
     const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
     rosa::x86::X86State state;
