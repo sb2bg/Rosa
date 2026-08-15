@@ -513,8 +513,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
-        if (!hasRex && code[cursor] != 0x8BU && code[cursor] != 0x83U &&
-            code[cursor] != 0x31U) {
+        if (!hasRex && code[cursor] != 0x89U && code[cursor] != 0x8BU &&
+            code[cursor] != 0x83U && code[cursor] != 0x31U) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
@@ -530,8 +530,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto opcode = code[cursor++];
-        if (!rexW && opcode != 0x8BU && opcode != 0x85U && opcode != 0x83U &&
-            opcode != 0x3BU && opcode != 0x31U) {
+        if (!rexW && opcode != 0x89U && opcode != 0x8BU && opcode != 0x85U &&
+            opcode != 0x83U && opcode != 0x3BU && opcode != 0x31U) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
         }
@@ -705,10 +705,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto reg = decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto rm = decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
             const auto operandWidth = static_cast<std::uint8_t>(rexW ? 64U : 32U);
-            if (mode == 0x3U && !rexX && rexW) {
+            if (mode == 0x3U && !rexX) {
                 instruction.opcode = Opcode::MovRegReg;
-                instruction.operands.push_back(RegisterOperand{opcode == 0x89U ? rm : reg, 64});
-                instruction.operands.push_back(RegisterOperand{opcode == 0x89U ? reg : rm, 64});
+                instruction.operands.push_back(
+                    RegisterOperand{opcode == 0x89U ? rm : reg, operandWidth});
+                instruction.operands.push_back(
+                    RegisterOperand{opcode == 0x89U ? reg : rm, operandWidth});
             } else {
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
                 if (rexX || mode > 0x2U || rmEncoding == 0x4U ||

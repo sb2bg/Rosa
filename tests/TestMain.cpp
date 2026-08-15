@@ -1256,6 +1256,27 @@ void testRegisterMoveExecution() {
     expectEqual(state.rdi, state.rsp, "generated register MOV result differs");
 }
 
+void testLegacyRegisterMove32Execution() {
+    constexpr std::array<std::uint8_t, 3> code{0x89, 0xFB, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegReg,
+           "legacy MOV r32, r32 opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{32}, "legacy MOV r32 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = 0xFFFFFFFF12345678ULL;
+    state.rbx = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rbx, std::uint64_t{0x12345678},
+                "legacy MOV ebx, edi did not clear the upper half");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "legacy MOV r32 changed flags");
+}
+
 void testDecoderRejectsUnsupportedInstruction() {
     constexpr std::array<std::uint8_t, 2> code{0x0F, 0x0B};
     const rosa::x86::Decoder decoder;
@@ -1714,6 +1735,7 @@ int main() {
         {"MOVDQA guest memory to register", testMovdqaGuestMemoryToRegister},
         {"MOVDQU register to guest memory", testMovdquRegisterToGuestMemory},
         {"register move execution", testRegisterMoveExecution},
+        {"legacy 32-bit register move execution", testLegacyRegisterMove32Execution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"IR verification", testIrVerification},
