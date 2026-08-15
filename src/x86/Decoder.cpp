@@ -2462,12 +2462,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode > 0x2U || rexX || (mode == 0 && rmEncoding == 0x5U)) {
+            if (mode > 0x2U || (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only XOR register, [base+disp8/disp32] is supported");
+                    "only XOR register, [base+index*scale+disp8/disp32] is supported");
             }
             auto baseEncoding = rmEncoding;
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
             if (rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated XOR memory SIB");
@@ -2476,10 +2478,18 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto scaleBits = static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
                 const auto indexEncoding = static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
                 baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-                if (scaleBits != 0 || indexEncoding != 0x4U ||
-                    (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                if (mode == 0 && baseEncoding == 0x5U) {
                     throw DecodeError(address, remaining,
-                                      "only no-index SIB addressing is supported for XOR");
+                                      "no-base SIB addressing is not supported for XOR");
+                }
+                if (indexEncoding != 0x4U || rexX) {
+                    if (mode != 0) {
+                        throw DecodeError(
+                            address, remaining,
+                            "indexed XOR memory currently requires zero displacement");
+                    }
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
                 }
             }
             std::int64_t displacement = 0;
@@ -2501,7 +2511,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR),
                 operandWidth});
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(baseEncoding, rexB), displacement, operandWidth});
+                decodeRegister(baseEncoding, rexB), displacement, operandWidth,
+                index, scale});
         } else if (opcode == 0x38U) {
             if (cursor >= code.size()) {
                 throw DecodeError(address, remaining,
