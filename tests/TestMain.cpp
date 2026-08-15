@@ -16,16 +16,27 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <functional>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
+
+#if ROSA_HAS_X86_ORACLE
+#include "differential/Protocol.h"
+#endif
 
 namespace {
 
@@ -43,6 +54,536 @@ void expect(bool condition, std::string_view message) {
 }
 
 std::uint64_t fixedTimestampCounter() { return 0x12345678ABCDEF01ULL; }
+
+#if ROSA_HAS_X86_ORACLE
+
+#define ROSA_DIFFERENTIAL_CASE(name, ...)                                          \
+    constexpr auto differentialBytes_##name =                                     \
+        std::to_array<std::uint8_t>({__VA_ARGS__, 0xC3});
+#include "differential/Cases.def"
+#undef ROSA_DIFFERENTIAL_CASE
+
+constexpr std::uint64_t carryFlag = 1U << 0U;
+constexpr std::uint64_t parityFlag = 1U << 2U;
+constexpr std::uint64_t auxiliaryFlag = 1U << 4U;
+constexpr std::uint64_t zeroFlag = 1U << 6U;
+constexpr std::uint64_t signFlag = 1U << 7U;
+constexpr std::uint64_t overflowFlag = 1U << 11U;
+constexpr std::uint64_t arithmeticFlags =
+    carryFlag | parityFlag | auxiliaryFlag | zeroFlag | signFlag | overflowFlag;
+constexpr std::uint64_t logicDefinedFlags =
+    carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+constexpr std::uint16_t allGprsExceptRsp =
+    static_cast<std::uint16_t>(UINT16_MAX &
+                               ~(1U << static_cast<unsigned>(rosa::x86::Register::Rsp)));
+
+struct DifferentialCase {
+    std::string_view name;
+    rosa::differential::Request request;
+    std::span<const std::uint8_t> code;
+    std::uint16_t gprMask{allGprsExceptRsp};
+    std::uint64_t flagMask{arithmeticFlags};
+    std::uint16_t xmmMask{UINT16_MAX};
+    std::size_t memoryCompareOffset{};
+    std::size_t memoryCompareSize{};
+    std::size_t stackCompareOffset{};
+    std::size_t stackCompareSize{};
+};
+
+std::uint64_t registerValue(const rosa::x86::X86State &state,
+                            rosa::x86::Register reg) {
+    std::uint64_t result = 0;
+    const auto *bytes = reinterpret_cast<const std::uint8_t *>(&state);
+    std::memcpy(&result, bytes + rosa::x86::registerOffset(reg), sizeof(result));
+    return result;
+}
+
+void setRegisterValue(rosa::x86::X86State &state, rosa::x86::Register reg,
+                      std::uint64_t value) {
+    auto *bytes = reinterpret_cast<std::uint8_t *>(&state);
+    std::memcpy(bytes + rosa::x86::registerOffset(reg), &value, sizeof(value));
+}
+
+bool writeFully(int descriptor, std::span<const std::byte> bytes) {
+    while (!bytes.empty()) {
+        const auto count = ::write(descriptor, bytes.data(), bytes.size());
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        bytes = bytes.subspan(static_cast<std::size_t>(count));
+    }
+    return true;
+}
+
+bool readFully(int descriptor, std::span<std::byte> bytes) {
+    while (!bytes.empty()) {
+        const auto count = ::read(descriptor, bytes.data(), bytes.size());
+        if (count == 0) {
+            return false;
+        }
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        bytes = bytes.subspan(static_cast<std::size_t>(count));
+    }
+    return true;
+}
+
+rosa::differential::Result
+runX86Oracle(const rosa::differential::Request &request) {
+    int requestPipe[2]{};
+    int resultPipe[2]{};
+    if (::pipe(requestPipe) != 0 || ::pipe(resultPipe) != 0) {
+        throw std::runtime_error("failed to create x86 oracle pipes");
+    }
+    const auto child = ::fork();
+    if (child < 0) {
+        throw std::runtime_error("failed to fork x86 oracle");
+    }
+    if (child == 0) {
+        static_cast<void>(::dup2(requestPipe[0], STDIN_FILENO));
+        static_cast<void>(::dup2(resultPipe[1], STDOUT_FILENO));
+        ::close(requestPipe[0]);
+        ::close(requestPipe[1]);
+        ::close(resultPipe[0]);
+        ::close(resultPipe[1]);
+        ::execl("/usr/bin/arch", "arch", "-x86_64", ROSA_TEST_X86_ORACLE_PATH,
+                static_cast<char *>(nullptr));
+        _exit(127);
+    }
+
+    ::close(requestPipe[0]);
+    ::close(resultPipe[1]);
+    const auto wrote = writeFully(
+        requestPipe[1], std::as_bytes(std::span(&request, std::size_t{1})));
+    ::close(requestPipe[1]);
+    rosa::differential::Result result;
+    const auto read = readFully(
+        resultPipe[0], std::as_writable_bytes(std::span(&result, std::size_t{1})));
+    ::close(resultPipe[0]);
+    int status = 0;
+    static_cast<void>(::waitpid(child, &status, 0));
+    if (!wrote || !read || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+        result.magic != rosa::differential::protocolMagic || result.status != 0) {
+        throw std::runtime_error("x86 Rosetta oracle did not return a valid result");
+    }
+    return result;
+}
+
+rosa::differential::Result runRosaDifferential(const DifferentialCase &testCase) {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            testCase.code, "differential:__TEXT");
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write,
+                              "differential memory");
+    addressSpace.writeBytes(memoryBase, testCase.request.memory);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write,
+                              "differential stack");
+
+    auto state = testCase.request.state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::differential::stackSize - 8;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+    if (testCase.request.memoryBaseRegister != rosa::differential::noRegister) {
+        setRegisterValue(
+            state,
+            static_cast<rosa::x86::Register>(testCase.request.memoryBaseRegister),
+            memoryBase.value + testCase.request.memoryBaseOffset);
+    }
+    if (testCase.request.codePointerMemoryOffset != rosa::differential::noOffset) {
+        addressSpace.writeU64(
+            rosa::guest::GuestAddress{memoryBase.value +
+                                      testCase.request.codePointerMemoryOffset},
+            codeBase.value + testCase.request.codePointerTargetOffset);
+    }
+
+    rosa::differential::Result result;
+    result.initial = state;
+    rosa::dbt::Dispatcher dispatcher(addressSpace, 1);
+    static_cast<void>(dispatcher.run(state, 128, sentinel));
+    result.final = state;
+    const auto memory = addressSpace.readBytes(memoryBase, result.memory.size());
+    std::ranges::copy(memory, result.memory.begin());
+    const auto stack = addressSpace.readBytes(stackBase, result.stack.size());
+    std::ranges::copy(stack, result.stack.begin());
+    return result;
+}
+
+std::string hexadecimal(std::uint64_t value) {
+    std::ostringstream stream;
+    stream << "0x" << std::hex << value;
+    return stream.str();
+}
+
+void compareDifferentialResult(const DifferentialCase &testCase,
+                               const rosa::differential::Result &oracle,
+                               const rosa::differential::Result &rosaResult) {
+    for (unsigned encoded = 0; encoded < 16; ++encoded) {
+        if ((testCase.gprMask & (1U << encoded)) == 0) {
+            continue;
+        }
+        const auto reg = static_cast<rosa::x86::Register>(encoded);
+        const auto expected = registerValue(oracle.final, reg);
+        const auto actual = registerValue(rosaResult.final, reg);
+        if (actual != expected) {
+            throw std::runtime_error(
+                std::string(testCase.name) + ": " +
+                std::string(rosa::x86::registerName(reg)) + " expected " +
+                hexadecimal(expected) + " but Rosa produced " + hexadecimal(actual));
+        }
+    }
+
+    const auto expectedFlags = oracle.final.rflags & testCase.flagMask;
+    const auto actualFlags = rosaResult.final.rflags & testCase.flagMask;
+    if (actualFlags != expectedFlags) {
+        throw std::runtime_error(std::string(testCase.name) +
+                                 ": defined RFLAGS expected " +
+                                 hexadecimal(expectedFlags) + " but Rosa produced " +
+                                 hexadecimal(actualFlags) + " (mask " +
+                                 hexadecimal(testCase.flagMask) + ")");
+    }
+
+    const auto oracleStackDelta = oracle.final.rsp - oracle.initial.rsp;
+    const auto rosaStackDelta = rosaResult.final.rsp - rosaResult.initial.rsp;
+    if (rosaStackDelta != oracleStackDelta) {
+        throw std::runtime_error(std::string(testCase.name) +
+                                 ": normalized RSP delta differs");
+    }
+
+    for (unsigned encoded = 0; encoded < 16; ++encoded) {
+        if ((testCase.xmmMask & (1U << encoded)) == 0) {
+            continue;
+        }
+        const auto &expected = oracle.final.xmm[encoded];
+        const auto &actual = rosaResult.final.xmm[encoded];
+        if (actual.low != expected.low || actual.high != expected.high) {
+            throw std::runtime_error(std::string(testCase.name) + ": xmm" +
+                                     std::to_string(encoded) + " differs");
+        }
+    }
+
+    const auto memoryEnd = testCase.memoryCompareOffset + testCase.memoryCompareSize;
+    if (memoryEnd > oracle.memory.size() ||
+        !std::equal(oracle.memory.begin() +
+                        static_cast<std::ptrdiff_t>(testCase.memoryCompareOffset),
+                    oracle.memory.begin() + static_cast<std::ptrdiff_t>(memoryEnd),
+                    rosaResult.memory.begin() +
+                        static_cast<std::ptrdiff_t>(testCase.memoryCompareOffset))) {
+        throw std::runtime_error(std::string(testCase.name) +
+                                 ": selected guest memory differs");
+    }
+    const auto stackEnd = testCase.stackCompareOffset + testCase.stackCompareSize;
+    if (stackEnd > oracle.stack.size() ||
+        !std::equal(oracle.stack.begin() +
+                        static_cast<std::ptrdiff_t>(testCase.stackCompareOffset),
+                    oracle.stack.begin() + static_cast<std::ptrdiff_t>(stackEnd),
+                    rosaResult.stack.begin() +
+                        static_cast<std::ptrdiff_t>(testCase.stackCompareOffset))) {
+        throw std::runtime_error(std::string(testCase.name) +
+                                 ": selected guest stack memory differs");
+    }
+}
+
+#endif
+
+#if ROSA_HAS_X86_ORACLE
+
+void testRosettaDifferentialSemantics() {
+    using rosa::differential::CaseId;
+    std::size_t compared = 0;
+    const auto run = [&compared](DifferentialCase testCase) {
+        const auto oracle = runX86Oracle(testCase.request);
+        const auto rosaResult = runRosaDifferential(testCase);
+        compareDifferentialResult(testCase, oracle, rosaResult);
+        ++compared;
+    };
+    const auto make = [](std::string_view name, CaseId id,
+                         std::span<const std::uint8_t> code) {
+        DifferentialCase result;
+        result.name = name;
+        result.request.caseId = id;
+        result.request.state.rflags = 0x8D7;
+        result.code = code;
+        return result;
+    };
+    const auto bindMemory = [](DifferentialCase &testCase, rosa::x86::Register reg,
+                               std::uint32_t offset) {
+        testCase.request.memoryBaseRegister = static_cast<std::uint8_t>(reg);
+        testCase.request.memoryBaseOffset = offset;
+        testCase.gprMask = static_cast<std::uint16_t>(
+            testCase.gprMask & ~(1U << static_cast<unsigned>(reg)));
+    };
+
+    {
+        auto testCase = make("add64_overflow", CaseId::add64_overflow,
+                             differentialBytes_add64_overflow);
+        testCase.request.state.rax = INT64_MAX;
+        run(testCase);
+    }
+    {
+        auto testCase = make("sub64_borrow", CaseId::sub64_borrow,
+                             differentialBytes_sub64_borrow);
+        testCase.request.state.rdi = 5;
+        testCase.request.state.rdx = 7;
+        run(testCase);
+    }
+    {
+        auto testCase = make("inc32_overflow", CaseId::inc32_overflow,
+                             differentialBytes_inc32_overflow);
+        testCase.request.state.r15 = 0xAAAAAAAA7FFFFFFFULL;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("dec32_overflow", CaseId::dec32_overflow,
+                             differentialBytes_dec32_overflow);
+        testCase.request.state.rdi = 0xBBBBBBBB80000000ULL;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("and32_mask", CaseId::and32_mask,
+                             differentialBytes_and32_mask);
+        testCase.request.state.r15 = 0xFFFFFFFF80000800ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make("or64_register", CaseId::or64_register,
+                             differentialBytes_or64_register);
+        testCase.request.state.rax = 0x00000000ABCDEF01ULL;
+        testCase.request.state.rdx = 0x1234567800000000ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make("xor32_register", CaseId::xor32_register,
+                             differentialBytes_xor32_register);
+        testCase.request.state.rsi = UINT64_MAX;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make("test16_register", CaseId::test16_register,
+                             differentialBytes_test16_register);
+        testCase.request.state.r14 = 0xA5A5A5A500008000ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make("cmp64_register", CaseId::cmp64_register,
+                             differentialBytes_cmp64_register);
+        testCase.request.state.r14 = 5;
+        testCase.request.state.r13 = 7;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shl64_one", CaseId::shl64_one,
+                             differentialBytes_shl64_one);
+        testCase.request.state.rax = 0x8000000000000001ULL;
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shl64_masked_zero", CaseId::shl64_masked_zero,
+                             differentialBytes_shl64_masked_zero);
+        testCase.request.state.rax = 0x55;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shr32_many", CaseId::shr32_many,
+                             differentialBytes_shr32_many);
+        testCase.request.state.rax = 0xFFFFFFFF80000001ULL;
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shrd64_many", CaseId::shrd64_many,
+                             differentialBytes_shrd64_many);
+        testCase.request.state.rax = 0x0123456789ABCDEFULL;
+        testCase.request.state.rdx = 0xFEDCBA9876543210ULL;
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("mul64_wide", CaseId::mul64_wide,
+                             differentialBytes_mul64_wide);
+        testCase.request.state.rax = UINT64_MAX;
+        testCase.request.state.rcx = 2;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("imul64_overflow", CaseId::imul64_overflow,
+                             differentialBytes_imul64_overflow);
+        testCase.request.state.rcx = INT64_MAX;
+        testCase.request.state.r13 = 2;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("bsf64_nonzero", CaseId::bsf64_nonzero,
+                             differentialBytes_bsf64_nonzero);
+        testCase.request.state.rdx = UINT64_MAX;
+        testCase.request.state.rcx = std::uint64_t{1} << 40U;
+        testCase.flagMask = zeroFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("movzx8_register", CaseId::movzx8_register,
+                             differentialBytes_movzx8_register);
+        testCase.request.state.rcx = 0xAABBCCDDEEFF00A5ULL;
+        testCase.request.state.r13 = UINT64_MAX;
+        run(testCase);
+    }
+    {
+        auto testCase = make("lea_scaled", CaseId::lea_scaled,
+                             differentialBytes_lea_scaled);
+        testCase.request.state.rax = 0x1000;
+        testCase.request.state.r13 = 0x234;
+        run(testCase);
+    }
+    {
+        auto testCase = make("sete_low_byte", CaseId::sete_low_byte,
+                             differentialBytes_sete_low_byte);
+        testCase.request.state.rax = 0x1122334455667788ULL;
+        testCase.request.state.rflags |= zeroFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("cmovb64_taken", CaseId::cmovb64_taken,
+                             differentialBytes_cmovb64_taken);
+        testCase.request.state.rax = 0x1122334455667788ULL;
+        testCase.request.state.r13 = UINT64_MAX;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_equal_taken", CaseId::branch_equal_taken,
+                             differentialBytes_branch_equal_taken);
+        testCase.request.state.rax = 42;
+        run(testCase);
+    }
+    {
+        auto testCase = make("relative_call_stack", CaseId::relative_call_stack,
+                             differentialBytes_relative_call_stack);
+        testCase.request.state.rcx = 41;
+        run(testCase);
+    }
+    {
+        auto testCase = make("indirect_call_memory", CaseId::indirect_call_memory,
+                             differentialBytes_indirect_call_memory);
+        testCase.request.state.rcx = 41;
+        bindMemory(testCase, rosa::x86::Register::R12, 0);
+        testCase.request.codePointerMemoryOffset = 0x10;
+        testCase.request.codePointerTargetOffset = 6;
+        run(testCase);
+    }
+    {
+        auto testCase = make("push_sign_extend", CaseId::push_sign_extend,
+                             differentialBytes_push_sign_extend);
+        testCase.request.state.rax = 0;
+        testCase.stackCompareOffset = rosa::differential::stackSize - 16;
+        testCase.stackCompareSize = 8;
+        run(testCase);
+    }
+    {
+        auto testCase = make("xorps_register", CaseId::xorps_register,
+                             differentialBytes_xorps_register);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+        testCase.request.state.xmm[1] = {
+            .low = 0x1111111111111111ULL, .high = 0x2222222222222222ULL};
+        run(testCase);
+    }
+    {
+        auto testCase = make("pxor_register", CaseId::pxor_register,
+                             differentialBytes_pxor_register);
+        testCase.request.state.xmm[0] = {
+            .low = UINT64_MAX, .high = 0x0123456789ABCDEFULL};
+        run(testCase);
+    }
+    {
+        auto testCase = make("pmovmskb", CaseId::pmovmskb,
+                             differentialBytes_pmovmskb);
+        testCase.request.state.rsi = UINT64_MAX;
+        testCase.request.state.xmm[0] = {
+            .low = 0x8000000000000080ULL, .high = 0x0000000000008000ULL};
+        run(testCase);
+    }
+    {
+        auto testCase = make("pshufd", CaseId::pshufd,
+                             differentialBytes_pshufd);
+        testCase.request.state.xmm[0] = {
+            .low = 0x2222222211111111ULL, .high = 0x4444444433333333ULL};
+        run(testCase);
+    }
+    {
+        auto testCase = make("mov32_scaled_memory", CaseId::mov32_scaled_memory,
+                             differentialBytes_mov32_scaled_memory);
+        bindMemory(testCase, rosa::x86::Register::R14, 16);
+        testCase.request.state.rbx = 3;
+        testCase.request.state.rdx = UINT64_MAX;
+        const std::uint32_t value = 0xA5B6C7D8U;
+        std::memcpy(testCase.request.memory.data() + 32, &value, sizeof(value));
+        testCase.memoryCompareOffset = 32;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("movaps_load", CaseId::movaps_load,
+                             differentialBytes_movaps_load);
+        bindMemory(testCase, rosa::x86::Register::Rbp, 32);
+        const std::array<std::uint64_t, 2> value{
+            0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL};
+        std::memcpy(testCase.request.memory.data(), value.data(), sizeof(value));
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("movups_load", CaseId::movups_load,
+                             differentialBytes_movups_load);
+        bindMemory(testCase, rosa::x86::Register::R15, 3);
+        const std::array<std::uint64_t, 2> value{
+            0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL};
+        std::memcpy(testCase.request.memory.data() + 27, value.data(), sizeof(value));
+        testCase.memoryCompareOffset = 27;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("movq_store", CaseId::movq_store,
+                             differentialBytes_movq_store);
+        bindMemory(testCase, rosa::x86::Register::Rsi, 3);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+        testCase.memoryCompareOffset = 35;
+        testCase.memoryCompareSize = 8;
+        run(testCase);
+    }
+
+    expectEqual(compared, static_cast<std::size_t>(CaseId::Count),
+                "not every differential case was executed");
+}
+
+#endif
 
 void testAssemblerEncodings() {
     rosa::arm64::Assembler assembler;
@@ -4653,6 +5194,9 @@ void testR3ControlledMachOExecution() {
 
 int main() {
     const std::vector<std::pair<std::string_view, std::function<void()>>> tests{
+#if ROSA_HAS_X86_ORACLE
+        {"Rosetta semantic differential corpus", testRosettaDifferentialSemantics},
+#endif
         {"arm64 assembler encodings", testAssemblerEncodings},
         {"R0 generated execution", testR0ExecutesGeneratedCode},
         {"arm64 label fixups", testAssemblerLabels},

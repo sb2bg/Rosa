@@ -88,6 +88,44 @@ if(BUILD_TESTING)
     )
     add_custom_target(rosa_test_hello_macho ALL DEPENDS "${ROSA_TEST_HELLO_MACHO}")
 
+    option(ROSA_ENABLE_ROSETTA_DIFFERENTIAL_TESTS
+           "Run x86 semantic differential tests when Apple Rosetta is available" ON)
+    if(ROSA_ENABLE_ROSETTA_DIFFERENTIAL_TESTS)
+        execute_process(
+            COMMAND /usr/bin/arch -x86_64 /usr/bin/true
+            RESULT_VARIABLE ROSA_ROSETTA_PROBE_RESULT
+            OUTPUT_QUIET
+            ERROR_QUIET
+        )
+    else()
+        set(ROSA_ROSETTA_PROBE_RESULT 1)
+    endif()
+    if(ROSA_ROSETTA_PROBE_RESULT EQUAL 0)
+        set(ROSA_TEST_X86_ORACLE "${ROSA_TEST_FIXTURE_DIR}/rosa-x86-oracle")
+        add_custom_command(
+            OUTPUT "${ROSA_TEST_X86_ORACLE}"
+            COMMAND "${CMAKE_CXX_COMPILER}"
+                    -arch x86_64
+                    -std=c++23
+                    -Wall
+                    -Wextra
+                    -Wpedantic
+                    -I "${CMAKE_CURRENT_SOURCE_DIR}/src"
+                    -I "${CMAKE_CURRENT_SOURCE_DIR}/tests/differential"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/differential/Oracle.cpp"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/differential/OracleRunner.S"
+                    -o "${ROSA_TEST_X86_ORACLE}"
+            DEPENDS
+                tests/differential/Oracle.cpp
+                tests/differential/OracleRunner.S
+                tests/differential/Protocol.h
+                tests/differential/Cases.def
+                src/x86/Registers.h
+            VERBATIM
+        )
+        add_custom_target(rosa_test_x86_oracle ALL DEPENDS "${ROSA_TEST_X86_ORACLE}")
+    endif()
+
     add_executable(rosa_tests tests/TestMain.cpp)
     target_link_libraries(rosa_tests PRIVATE rosa_core)
     target_compile_definitions(rosa_tests PRIVATE
@@ -95,6 +133,13 @@ if(BUILD_TESTING)
         ROSA_TEST_HELLO_MACHO_PATH="${ROSA_TEST_HELLO_MACHO}"
     )
     add_dependencies(rosa_tests rosa_test_macho rosa_test_hello_macho)
+    if(ROSA_ROSETTA_PROBE_RESULT EQUAL 0)
+        target_compile_definitions(rosa_tests PRIVATE
+            ROSA_HAS_X86_ORACLE=1
+            ROSA_TEST_X86_ORACLE_PATH="${ROSA_TEST_X86_ORACLE}"
+        )
+        add_dependencies(rosa_tests rosa_test_x86_oracle)
+    endif()
     add_test(NAME rosa_tests COMMAND rosa_tests)
     add_test(NAME rosa_hello_darwin COMMAND rosa run "${ROSA_TEST_HELLO_MACHO}")
     set_tests_properties(rosa_hello_darwin PROPERTIES
