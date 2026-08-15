@@ -44,7 +44,15 @@ std::string registerOperandName(x86::RegisterOperand operand) {
 }
 
 const char *conditionName(x86::Condition condition) {
-    return condition == x86::Condition::Equal ? "e" : "ne";
+    switch (condition) {
+    case x86::Condition::Equal:
+        return "e";
+    case x86::Condition::NotEqual:
+        return "ne";
+    case x86::Condition::Below:
+        return "b";
+    }
+    return "?";
 }
 
 std::string permissionName(guest::Permission permission) {

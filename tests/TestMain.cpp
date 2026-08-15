@@ -1947,6 +1947,33 @@ void testR2TakenConditional() {
     expectEqual(result.executedBlocks, std::size_t{3}, "taken-path block count differs");
 }
 
+void testUnsignedBelowConditional() {
+    constexpr std::array<std::uint8_t, 2> code{0x72, 0x02}; // jb 0x1004
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::JccRelative,
+           "JB rel8 opcode differs");
+    expect(decoded[0].condition == rosa::x86::Condition::Below,
+           "JB rel8 condition differs");
+    expectEqual(decoded[0].branchTarget->value, std::uint64_t{0x1004},
+                "JB rel8 target differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State taken;
+    taken.rflags = 0x8D7 | 1U;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rip, std::uint64_t{0x1004}, "JB did not take when CF was set");
+    expectEqual(taken.rflags, std::uint64_t{0x8D7 | 1U}, "JB changed guest flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rflags = 0x8D6 & ~std::uint64_t{1};
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rip, std::uint64_t{0x1002}, "JB took when CF was clear");
+    expectEqual(notTaken.rflags, std::uint64_t{0x8D6 & ~std::uint64_t{1}},
+                "not-taken JB changed guest flags");
+}
+
 void testControlledMachOParsing() {
     const auto file = rosa::macho::MachOFile::open(ROSA_TEST_MACHO_PATH);
     expectEqual(file.cpuType(), std::uint32_t{0x01000007U}, "Mach-O CPU type differs");
@@ -2109,6 +2136,7 @@ int main() {
         {"initial Darwin stack", testInitialDarwinStack},
         {"R2 multi-block control flow", testR2MultiBlockControlFlow},
         {"R2 taken conditional", testR2TakenConditional},
+        {"unsigned-below conditional", testUnsignedBelowConditional},
         {"controlled Mach-O parsing", testControlledMachOParsing},
         {"universal Mach-O x86 selection", testUniversalMachOX86Selection},
         {"malformed Mach-O rejection", testMalformedMachORejection},

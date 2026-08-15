@@ -55,6 +55,7 @@ enum class Opcode {
 enum class Condition {
     Equal,
     NotEqual,
+    Below,
 };
 
 struct RegisterOperand {
