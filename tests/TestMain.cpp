@@ -1846,6 +1846,73 @@ void testCompareGuestByteWithImmediate() {
                 "failed CMP byte changed flags");
 }
 
+void testCompareRipRelativeGuestByteWithImmediate() {
+    constexpr std::array<std::uint8_t, 8> observed{
+        0x80, 0x3D, 0x94, 0x3F, 0x0C, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF800004E75ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observed, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "RIP-relative CMP byte opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "RIP-relative CMP byte length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 8 &&
+               memory.displacement == 0xC3F94,
+           "RIP-relative CMP byte memory operand differs");
+    expect(immediate.value == 0 && immediate.width == 8,
+           "RIP-relative CMP byte immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "cmp byte [rip+0xc3f94], 0x0 ; 0x7ff8000c8e10") !=
+               std::string::npos,
+           "RIP-relative CMP byte dump differs");
+
+    constexpr std::array<std::uint8_t, 8> code{
+        0x80, 0x3D, 0xF9, 0x0F, 0x00, 0x00, 0x00, 0xC3};
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    constexpr rosa::guest::GuestAddress target{0x2000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(target, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const std::array<std::uint8_t, 1> zero{0};
+    addressSpace.writeBytes(target, zero);
+    rosa::x86::X86State state;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "RIP-relative CMP byte equal flags differ");
+    expectEqual(addressSpace.readBytes(target, 1).front(), std::uint8_t{0},
+                "RIP-relative CMP byte changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative CMP byte from unmapped memory did not fault");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed RIP-relative CMP byte changed flags");
+
+    bool truncatedRejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            std::span<const std::uint8_t>{observed}.first(6), observedRip));
+    } catch (const rosa::x86::DecodeError &) {
+        truncatedRejected = true;
+    }
+    expect(truncatedRejected, "truncated RIP-relative CMP byte was not rejected");
+}
+
 void testCompare32BitRegisterWithImmediate() {
     constexpr std::array<std::uint8_t, 7> code{
         0x81, 0xFA, 0xCF, 0xFA, 0xED, 0xFE, 0xC3,
@@ -5450,6 +5517,8 @@ int main() {
         {"CMP 16-bit register with short immediate",
          testCompare16BitRegisterWithShortImmediate},
         {"CMP guest byte with immediate", testCompareGuestByteWithImmediate},
+        {"CMP RIP-relative guest byte with immediate",
+         testCompareRipRelativeGuestByteWithImmediate},
         {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
         {"CMP EAX accumulator immediate", testCompareEaxAccumulatorImmediate},
         {"CMP 32-bit register with short immediate",

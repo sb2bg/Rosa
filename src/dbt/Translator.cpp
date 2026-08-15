@@ -1759,8 +1759,13 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            const auto base =
-                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            const auto base = memory.ripRelative
+                                  ? builder.constant(
+                                        instruction.address.value + instruction.length,
+                                        ir::Width::I64, instruction.address)
+                                  : builder.readGuestRegister(
+                                        memory.base, ir::Width::I64,
+                                        instruction.address);
             const auto displacement = builder.constant(
                 static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
                 instruction.address);

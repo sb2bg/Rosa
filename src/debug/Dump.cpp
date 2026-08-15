@@ -529,10 +529,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "cmp "
                    << (memory.width == 8    ? "byte"
                        : memory.width == 16 ? "word"
-                       : memory.width == 32 ? "dword"
+                   : memory.width == 32 ? "dword"
                                             : "qword")
-                   << " ["
-                   << x86::registerName(memory.base);
+                   << " [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else {
+                stream << x86::registerName(memory.base);
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
@@ -540,6 +544,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             }
             stream << "], 0x"
                    << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
+            if (memory.ripRelative) {
+                const auto target = instruction.address.value + instruction.length +
+                                    static_cast<std::uint64_t>(memory.displacement);
+                stream << " ; 0x" << target;
+            }
             break;
         }
         case x86::Opcode::SetccReg:
