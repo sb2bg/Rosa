@@ -612,6 +612,34 @@ void testCompare32BitRegisterWithGuestMemory() {
                 "failed memory CMP changed flags");
 }
 
+void testLegacyCompare32BitRegisterWithGuestMemory() {
+    constexpr std::array<std::uint8_t, 4> code{0x3B, 0x47, 0x28, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegMem,
+           "legacy CMP r32, [base+disp8] opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{32}, "legacy CMP r32 memory width differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8028}, 0x19);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0xA5A5A5A500000019ULL;
+    state.rdi = 0x8000;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0xA5A5A5A500000019ULL},
+                "legacy CMP memory changed EAX");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "legacy CMP memory equal flags differ");
+}
+
 void testCompare64BitRegisterWithGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x3B, 0x45, 0xE0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2302,6 +2330,8 @@ int main() {
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
+        {"legacy CMP 32-bit register with guest memory",
+         testLegacyCompare32BitRegisterWithGuestMemory},
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
