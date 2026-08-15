@@ -2120,6 +2120,22 @@ void testXor32BitRegisterFromGuestMemory() {
                 "failed XOR memory changed destination");
     expectEqual(faultState.rflags, std::uint64_t{0x8D7},
                 "failed XOR memory changed flags");
+
+    constexpr std::array<std::uint8_t, 3> legacyCode{0x33, 0x08, 0xC3};
+    const auto legacyDecoded = decoder.decodeBlock(
+        legacyCode, rosa::guest::GuestAddress{0x2000});
+    expect(legacyDecoded[0].opcode == rosa::x86::Opcode::XorRegMem,
+           "legacy XOR r32, [memory] opcode differs");
+    const auto legacyBlock = translator.translate(
+        legacyCode, rosa::guest::GuestAddress{0x2000});
+    state.rax = 0x8000;
+    state.rcx = 0xAAAAAAAA45545F5FULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(legacyBlock.execute(state, &addressSpace));
+    expectEqual(state.rcx, std::uint64_t{0},
+                "legacy XOR r32, [memory] result differs");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "legacy XOR r32, [memory] flags differ");
 }
 
 void testXor32BitRegisterImmediate() {
