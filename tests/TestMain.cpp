@@ -2300,6 +2300,58 @@ void testMovupsRegisterToGuestMemoryWithSib() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVUPS changed flags");
 }
 
+void testMovupsGuestMemoryToRegister() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x41, 0x0F, 0x10, 0x47, 0x18, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovupsRegMem,
+           "MOVUPS xmm, [mem] opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R15,
+           "MOVUPS load REX.B base differs");
+    expectEqual(memory.displacement, std::int64_t{0x18},
+                "MOVUPS load displacement differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x811B},
+                          0x0123456789ABCDEFULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8123},
+                          0xFEDCBA9876543210ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r15 = 0x8103;
+    state.xmm[0] = {.low = 1, .high = 2};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVUPS load low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVUPS load high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVUPS load changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    state.xmm[0] = {.low = 3, .high = 4};
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOVUPS load from unmapped guest memory did not fault");
+    expectEqual(state.xmm[0].low, std::uint64_t{3},
+                "failed MOVUPS load changed low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{4},
+                "failed MOVUPS load changed high lane");
+}
+
 void testMovdqaGuestMemoryToRegister() {
     constexpr std::array<std::uint8_t, 9> code{
         0x66, 0x0F, 0x6F, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, 0xC3,
@@ -3573,6 +3625,7 @@ int main() {
         {"PMOVMSKB generated execution", testPmovmskbGeneratedExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
+        {"MOVUPS guest memory to register", testMovupsGuestMemoryToRegister},
         {"MOVDQA guest memory to register", testMovdqaGuestMemoryToRegister},
         {"MOVDQU register to guest memory", testMovdquRegisterToGuestMemory},
         {"register move execution", testRegisterMoveExecution},

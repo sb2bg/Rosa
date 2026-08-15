@@ -849,6 +849,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                   instruction.address);
             break;
         }
+        case x86::Opcode::MovupsRegMem:
         case x86::Opcode::MovdqaRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: movdqa load operand count");
@@ -863,7 +864,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             const auto address =
                 builder.add(base, displacement, ir::Width::I64, instruction.address);
-            builder.loadGuestXmm(address, destination, true, instruction.address);
+            builder.loadGuestXmm(address, destination,
+                                 instruction.opcode == x86::Opcode::MovdqaRegMem,
+                                 instruction.address);
             break;
         }
         case x86::Opcode::LeaRegRipRelative: {
