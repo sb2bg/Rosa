@@ -152,6 +152,29 @@ void testDecoderExtendedRegisterAndSignedImmediate() {
                 "imm8 was not sign-extended");
 }
 
+void testLegacyMov32ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> code{0xBF, 0x34, 0x00, 0x07, 0x1F, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegImm,
+           "legacy MOV r32, imm32 opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rdi,
+           "legacy MOV r32 destination differs");
+    expectEqual(destination.width, std::uint8_t{32}, "legacy MOV r32 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0x1F070034},
+                "legacy MOV r32 did not clear the upper half");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "legacy MOV r32 changed flags");
+}
+
 void testDecoderPushImm8() {
     constexpr std::array<std::uint8_t, 3> positive{0x6A, 0x7F, 0xC3};
     constexpr std::array<std::uint8_t, 3> negative{0x6A, 0x80, 0xC3};
@@ -1630,6 +1653,7 @@ int main() {
         {"arm64 label fixups", testAssemblerLabels},
         {"R1 decoder", testDecoderR1},
         {"extended register and signed immediate", testDecoderExtendedRegisterAndSignedImmediate},
+        {"legacy MOV 32-bit immediate", testLegacyMov32ImmediateGeneratedExecution},
         {"PUSH imm8 decoder", testDecoderPushImm8},
         {"PUSH imm8 generated execution", testPushImm8GeneratedExecution},
         {"PUSH imm8 guest stack faults", testPushImm8GuestStackFaults},

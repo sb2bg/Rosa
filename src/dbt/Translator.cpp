@@ -395,9 +395,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            const auto value =
-                builder.constant(immediate.value, ir::Width::I64, instruction.address);
-            builder.writeGuestRegister(reg.reg, value, ir::Width::I64, instruction.address);
+            const auto width = reg.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto value = builder.constant(immediate.value, width, instruction.address);
+            builder.writeGuestRegister(reg.reg, value, width, instruction.address);
             break;
         }
         case x86::Opcode::MovRegReg: {
