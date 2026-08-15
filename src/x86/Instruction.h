@@ -29,6 +29,7 @@ enum class Opcode {
     XorRegReg,
     AndRegImm,
     TestRegReg,
+    TestReg8Reg8,
     CmpRegImm,
     CmpRegMem,
     XorpsRegReg,

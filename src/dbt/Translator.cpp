@@ -304,6 +304,23 @@ extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags32(x86::X86S
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags8(x86::X86State *state,
+                                                                      std::uint64_t result) {
+    const auto result8 = static_cast<std::uint8_t>(result);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if ((std::popcount(static_cast<unsigned>(result8)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (result8 == 0) {
+        flags |= flagZero;
+    }
+    if ((result8 >> 7U) != 0) {
+        flags |= flagSign;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *
 updateShiftLeftFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t result,
                        std::uint64_t unmaskedCount) {
@@ -726,6 +743,26 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateLogicFlags(result, width, instruction.address);
             break;
         }
+        case x86::Opcode::TestReg8Reg8: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: test byte operand count");
+            }
+            const auto lhsRegister = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto rhsRegister = std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto lhs = builder.readGuestRegister(lhsRegister.reg, ir::Width::I64,
+                                                       instruction.address);
+            const auto rhs = builder.readGuestRegister(rhsRegister.reg, ir::Width::I64,
+                                                       instruction.address);
+            const auto mask = builder.constant(0xFF, ir::Width::I64, instruction.address);
+            const auto maskedLhs = builder.bitAnd(lhs, mask, ir::Width::I64,
+                                                  instruction.address);
+            const auto maskedRhs = builder.bitAnd(rhs, mask, ir::Width::I64,
+                                                  instruction.address);
+            const auto result = builder.bitAnd(maskedLhs, maskedRhs, ir::Width::I64,
+                                               instruction.address);
+            builder.updateLogicFlags(result, ir::Width::I8, instruction.address);
+            break;
+        }
         case x86::Opcode::CmpRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: cmp operand count");
@@ -1128,9 +1165,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
             break;
         case ir::Opcode::UpdateLogicFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
-            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
-                                                   ? pointerBits(&updateLogicFlags32)
-                                                   : pointerBits(&updateLogicFlags64));
+            assembler.movImmediate(
+                arm64::x16,
+                operation.width == ir::Width::I8
+                    ? pointerBits(&updateLogicFlags8)
+                    : operation.width == ir::Width::I32
+                          ? pointerBits(&updateLogicFlags32)
+                          : pointerBits(&updateLogicFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateShiftLeftFlags:

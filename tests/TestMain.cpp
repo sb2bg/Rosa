@@ -834,6 +834,33 @@ void testLegacyTest32BitRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x46}, "legacy TEST flags differ");
 }
 
+void testLegacyTestLowByteGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0x84, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestReg8Reg8,
+           "legacy TEST r8, r8 opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{8}, "legacy TEST r8 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0xFFFFFFFFFFFFFF00ULL;
+    zeroState.rflags = 0x8D7;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0xFFFFFFFFFFFFFF00ULL},
+                "TEST al, al changed RAX");
+    expectEqual(zeroState.rflags, std::uint64_t{0x46},
+                "TEST zero AL flags differ");
+
+    rosa::x86::X86State signState;
+    signState.rax = 0x80;
+    static_cast<void>(block.execute(signState));
+    expectEqual(signState.rflags, std::uint64_t{0x82},
+                "TEST signed AL flags differ");
+}
+
 void testLfenceGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0xAE, 0xE8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -1747,6 +1774,7 @@ int main() {
         {"TEST 32-bit register generated execution", testTest32BitRegisterGeneratedExecution},
         {"legacy TEST 32-bit register generated execution",
          testLegacyTest32BitRegisterGeneratedExecution},
+        {"legacy TEST low-byte generated execution", testLegacyTestLowByteGeneratedExecution},
         {"LFENCE generated execution", testLfenceGeneratedExecution},
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},

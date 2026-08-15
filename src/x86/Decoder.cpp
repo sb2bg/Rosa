@@ -515,7 +515,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         if (!hasRex && code[cursor] != 0x89U && code[cursor] != 0x8BU &&
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
-            code[cursor] != 0x31U) {
+            code[cursor] != 0x84U && code[cursor] != 0x31U) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
@@ -532,7 +532,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         const auto opcode = code[cursor++];
         if (!rexW && opcode != 0x89U && opcode != 0x8BU && opcode != 0x85U &&
-            opcode != 0x83U && opcode != 0x3BU && opcode != 0x31U) {
+            opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
+            opcode != 0x31U) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
         }
@@ -747,6 +748,24 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         MemoryOperand{rm, displacement, operandWidth});
                 }
             }
+        } else if (opcode == 0x84U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated test r8, r8");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto regEncoding = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (hasRex || mode != 0x3U || regEncoding > 0x3U || rmEncoding > 0x3U) {
+                throw DecodeError(
+                    address, remaining,
+                    "only legacy low-byte AL/CL/DL/BL register TEST is supported");
+            }
+            instruction.opcode = Opcode::TestReg8Reg8;
+            instruction.operands.push_back(
+                RegisterOperand{decodeRegister(rmEncoding, false), 8});
+            instruction.operands.push_back(
+                RegisterOperand{decodeRegister(regEncoding, false), 8});
         } else if (opcode == 0x85U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated test r64, r64");

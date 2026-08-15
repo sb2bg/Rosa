@@ -15,6 +15,8 @@ namespace {
 
 const char *widthName(ir::Width width) {
     switch (width) {
+    case ir::Width::I8:
+        return "i8";
     case ir::Width::I32:
         return "i32";
     case ir::Width::I64:
@@ -26,6 +28,10 @@ const char *widthName(ir::Width width) {
 std::string valueName(ir::ValueId value) { return "%" + std::to_string(value.value); }
 
 std::string registerOperandName(x86::RegisterOperand operand) {
+    if (operand.width == 8) {
+        constexpr std::array legacyByteNames{"al", "cl", "dl", "bl"};
+        return std::string(legacyByteNames.at(static_cast<std::size_t>(operand.reg)));
+    }
     if (operand.width != 32) {
         return std::string(x86::registerName(operand.reg));
     }
@@ -239,6 +245,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
         case x86::Opcode::TestRegReg:
+            stream << "test "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]));
+            break;
+        case x86::Opcode::TestReg8Reg8:
             stream << "test "
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
