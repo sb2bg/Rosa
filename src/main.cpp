@@ -313,7 +313,7 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
     const auto executable =
         loader.mapImage(executableFile, addressSpace, 0, executableString);
     const auto dyld = loader.mapImage(dyldFile, addressSpace, dyldSlide, dyldString);
-    rosa::darwin::mapX86CommpageContinuousTimebase(
+    rosa::darwin::mapX86Commpage(
         addressSpace, rosa::darwin::sampleHostContinuousTimebase());
     const std::vector<std::string> arguments{executableString};
     const std::vector<std::string> environment;

@@ -1460,10 +1460,14 @@ void testGuestFailureReport() {
            "guest failure report omitted execution counters");
 }
 
-void testX86CommpageContinuousTimebase() {
+void testX86Commpage() {
     rosa::guest::AddressSpace addressSpace;
     constexpr std::uint64_t continuousTimebase = 0x0123456789ABCDEFULL;
-    rosa::darwin::mapX86CommpageContinuousTimebase(addressSpace, continuousTimebase);
+    rosa::darwin::mapX86Commpage(addressSpace, continuousTimebase);
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageKdebugEnableOffset}),
+                std::uint32_t{0}, "x86 commpage kdebug state is not disabled");
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageContinuousTimebaseOffset}),
@@ -1746,7 +1750,7 @@ int main() {
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
         {"guest address space", testGuestAddressSpace},
         {"guest failure report", testGuestFailureReport},
-        {"x86 commpage continuous timebase", testX86CommpageContinuousTimebase},
+        {"x86 commpage", testX86Commpage},
         {"initial Darwin stack", testInitialDarwinStack},
         {"R2 multi-block control flow", testR2MultiBlockControlFlow},
         {"R2 taken conditional", testR2TakenConditional},
