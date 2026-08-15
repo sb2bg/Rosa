@@ -1182,7 +1182,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
             code[cursor] != 0x21U && code[cursor] != 0x09U &&
-            code[cursor] != 0x33U &&
+            code[cursor] != 0x2BU && code[cursor] != 0x33U &&
             code[cursor] != 0x3BU && code[cursor] != 0x80U &&
             code[cursor] != 0x81U && code[cursor] != 0xC1U &&
             code[cursor] != 0xC6U && code[cursor] != 0xFFU) {
@@ -1207,7 +1207,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x09U &&
             opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
             opcode != 0x31U && opcode != 0x39U && opcode != 0x80U &&
-            opcode != 0x33U &&
+            opcode != 0x2BU && opcode != 0x33U &&
             opcode != 0x21U &&
             opcode != 0x81U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xFFU &&
@@ -1353,7 +1353,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.operands.push_back(RegisterOperand{source, width});
         } else if (opcode == 0x2BU) {
             if (code.size() - cursor < 1) {
-                throw DecodeError(address, remaining, "truncated sub r64, [base+disp]");
+                throw DecodeError(address, remaining, "truncated sub register, [base+disp]");
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
@@ -1362,7 +1362,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only SUB r64, [base+disp8/disp32] memory operands are supported");
+                    "only SUB register, [base+disp8/disp32] memory operands are supported");
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -1380,9 +1380,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto destination =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto base = decodeRegister(rmEncoding, rexB);
+            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
             instruction.opcode = Opcode::SubRegMem;
-            instruction.operands.push_back(RegisterOperand{destination, 64});
-            instruction.operands.push_back(MemoryOperand{base, displacement, 64});
+            instruction.operands.push_back(RegisterOperand{destination, width});
+            instruction.operands.push_back(MemoryOperand{base, displacement, width});
         } else if (opcode == 0x21U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated and register, register");

@@ -1143,15 +1143,17 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             const auto address =
                 builder.add(base, displacement, ir::Width::I64, instruction.address);
-            const auto rhs = builder.loadGuest(address, ir::Width::I64, instruction.address);
+            const auto width = destination.width == 32 ? ir::Width::I32
+                                                       : ir::Width::I64;
+            const auto rhs = builder.loadGuest(address, width, instruction.address);
             // Read the destination after the load helper so no caller-saved IR value
             // remains live across the helper boundary.
-            const auto lhs = builder.readGuestRegister(destination.reg, ir::Width::I64,
+            const auto lhs = builder.readGuestRegister(destination.reg, width,
                                                        instruction.address);
-            const auto result = builder.sub(lhs, rhs, ir::Width::I64, instruction.address);
-            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+            const auto result = builder.sub(lhs, rhs, width, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, width,
                                        instruction.address);
-            builder.updateSubFlags(lhs, rhs, result, ir::Width::I64, instruction.address);
+            builder.updateSubFlags(lhs, rhs, result, width, instruction.address);
             break;
         }
         case x86::Opcode::ShlRegImm: {
@@ -1819,6 +1821,14 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 assembler.bitOr(arm64::x16, arm64::x16,
                                 hostRegister(*operation.lhs));
                 assembler.str(arm64::x16, arm64::x0, offset);
+            } else if (operation.width == ir::Width::I32) {
+                assembler.movImmediate(arm64::x16, UINT32_MAX);
+                assembler.bitAnd(arm64::x16, hostRegister(*operation.lhs),
+                                 arm64::x16);
+                assembler.str(
+                    arm64::x16, arm64::x0,
+                    static_cast<std::uint32_t>(
+                        x86::registerOffset(*operation.guestRegister)));
             } else {
                 assembler.str(
                     hostRegister(*operation.lhs), arm64::x0,

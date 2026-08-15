@@ -538,6 +538,57 @@ void testSubRegisterFromGuestMemory() {
                 "failed memory SUB changed flags");
 }
 
+void testSub32BitRegisterFromGuestMemory() {
+    constexpr std::array<std::uint8_t, 4> code{0x2B, 0x56, 0x18, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SubRegMem,
+           "SUB r32, [base+disp8] opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx && destination.width == 32,
+           "SUB EDX, [base+disp8] destination differs");
+    expect(memory.base == rosa::x86::Register::Rsi &&
+               memory.displacement == 0x18 && memory.width == 32,
+           "SUB EDX, [RSI+disp8] memory operand differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 4> seven{7, 0, 0, 0};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8118}, seven);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdx = 0xA5A5A5A500000005ULL;
+    state.rsi = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rdx, std::uint64_t{0xFFFFFFFE},
+                "SUB r32, [memory] result did not zero-extend");
+    expectEqual(state.rflags, std::uint64_t{0x93},
+                "SUB r32, [memory] flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    state.rdx = 0xA5A5A5A500000005ULL;
+    state.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SUB r32 from unmapped guest memory did not fail");
+    expectEqual(state.rdx, std::uint64_t{0xA5A5A5A500000005ULL},
+                "failed SUB r32 changed its destination");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "failed SUB r32 changed flags");
+}
+
 void testAddRegisterFromGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x03, 0x46, 0x10, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3927,6 +3978,7 @@ int main() {
         {"SUB register imm8 generated execution", testSubRegImm8GeneratedExecution},
         {"SUB register from register", testSubRegisterFromRegister},
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
+        {"SUB 32-bit register from guest memory", testSub32BitRegisterFromGuestMemory},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
         {"INC 32-bit register", testIncrement32BitRegister},
