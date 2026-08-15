@@ -366,6 +366,22 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                          instruction.address);
             break;
         }
+        case x86::Opcode::OrRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: or operand count");
+            }
+            const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto lhs =
+                builder.readGuestRegister(destination.reg, ir::Width::I64, instruction.address);
+            const auto rhs =
+                builder.readGuestRegister(source.reg, ir::Width::I64, instruction.address);
+            const auto result = builder.bitOr(lhs, rhs, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+                                       instruction.address);
+            builder.updateLogicFlags(result, ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::AndRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: and operand count");
@@ -561,6 +577,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::And:
             assembler.bitAnd(hostRegister(*operation.result), hostRegister(*operation.lhs),
                              hostRegister(*operation.rhs));
+            break;
+        case ir::Opcode::Or:
+            assembler.bitOr(hostRegister(*operation.result), hostRegister(*operation.lhs),
+                            hostRegister(*operation.rhs));
             break;
         case ir::Opcode::Push: {
             const auto fault = assembler.makeLabel();

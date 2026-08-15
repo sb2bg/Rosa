@@ -95,6 +95,19 @@ ValueId Builder::bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddre
     return result;
 }
 
+ValueId Builder::bitOr(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::Or,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = lhs,
+        .rhs = rhs,
+    });
+    return result;
+}
+
 ValueId Builder::loadGuest(ValueId address, Width width, guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -278,6 +291,7 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::Add:
         case Opcode::Sub:
         case Opcode::And:
+        case Opcode::Or:
             checkUse(operation.lhs, "left");
             checkUse(operation.rhs, "right");
             break;

@@ -20,6 +20,7 @@ enum class Opcode {
     AddRegImm,
     SubRegImm,
     ShlRegImm,
+    OrRegReg,
     AndRegImm,
     TestRegReg,
     CmpRegImm,

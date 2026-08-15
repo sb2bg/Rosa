@@ -110,6 +110,16 @@ void Assembler::bitAnd(XRegister destination, XRegister lhs, XRegister rhs) {
     emit(word, "and " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
 }
 
+void Assembler::bitOr(XRegister destination, XRegister lhs, XRegister rhs) {
+    requireRegister(destination);
+    requireRegister(lhs);
+    requireRegister(rhs);
+    const auto word = 0xAA000000U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
+                      (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "orr " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
+}
+
 void Assembler::ldr(XRegister destination, XRegister base, std::uint32_t byteOffset) {
     requireRegister(destination);
     requireRegister(base);

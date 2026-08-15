@@ -166,6 +166,13 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
                    << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::OrRegReg:
+            stream << "or "
+                   << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
+                   << ", "
+                   << x86::registerName(
+                          std::get<x86::RegisterOperand>(instruction.operands[1]).reg);
+            break;
         case x86::Opcode::AndRegImm:
             stream << "and "
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
@@ -258,6 +265,10 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::And:
             stream << "and." << widthName(operation.width) << ' ' << valueName(*operation.lhs)
+                   << ", " << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::Or:
+            stream << "or." << widthName(operation.width) << ' ' << valueName(*operation.lhs)
                    << ", " << valueName(*operation.rhs);
             break;
         case ir::Opcode::Push:

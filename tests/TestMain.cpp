@@ -50,6 +50,7 @@ void testAssemblerEncodings() {
     assembler.add(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.lslImmediate(rosa::arm64::x10, rosa::arm64::x9, 32);
     assembler.bitAnd(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
+    assembler.bitOr(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.ldr(rosa::arm64::x9, rosa::arm64::x0, 0);
     assembler.ldr32(rosa::arm64::x9, rosa::arm64::x0, 0);
     assembler.str(rosa::arm64::x9, rosa::arm64::x0, 0);
@@ -60,9 +61,9 @@ void testAssemblerEncodings() {
     assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 13> expected{
-        0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0x8A0B012AU, 0xF9400009U, 0xB9400009U,
-        0xF9000009U, 0xD63F0200U, 0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU,
+    const std::array<std::uint32_t, 14> expected{
+        0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0x8A0B012AU, 0xAA0B012AU, 0xF9400009U,
+        0xB9400009U, 0xF9000009U, 0xD63F0200U, 0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU,
         0xD5033FDFU, 0xD65F03C0U,
     };
     expectEqual(assembler.words().size(), expected.size(), "assembler word count differs");
@@ -621,6 +622,28 @@ void testShiftLeftImmediateGeneratedExecution() {
                 "SHL with a masked zero count changed flags");
 }
 
+void testOrRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0x09, 0xD0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrRegReg,
+           "OR r64, r64 opcode differs");
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x00000000ABCDEF01ULL;
+    state.rdx = 0x1234567800000000ULL;
+    state.rflags = UINT64_MAX;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x12345678ABCDEF01ULL},
+                "OR r64, r64 result differs");
+    expectEqual(state.rdx, std::uint64_t{0x1234567800000000ULL},
+                "OR r64, r64 changed its source");
+    constexpr auto expectedFlags =
+        (UINT64_MAX & ~std::uint64_t{0x8D5}) | std::uint64_t{0x2};
+    expectEqual(state.rflags, expectedFlags, "OR r64, r64 flags differ");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -1049,6 +1072,7 @@ int main() {
         {"LFENCE generated execution", testLfenceGeneratedExecution},
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},
+        {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
