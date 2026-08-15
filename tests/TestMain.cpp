@@ -2897,6 +2897,29 @@ void testUnsignedBelowConditional() {
                 "not-taken JB changed guest flags");
 }
 
+void testRegisterIndirectJump() {
+    constexpr std::array<std::uint8_t, 2> code{0xFF, 0xE1};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::JmpReg,
+           "JMP register opcode differs");
+    expect(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::Register::Rcx,
+           "JMP register target differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rcx = 0x123456789ABCDEF0ULL;
+    state.rsp = 0x8000;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rip, std::uint64_t{0x123456789ABCDEF0ULL},
+                "JMP register selected target differs");
+    expectEqual(state.rsp, std::uint64_t{0x8000}, "JMP register changed RSP");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "JMP register changed flags");
+}
+
 void testUnsignedAboveConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x77, 0x02}; // ja 0x1004
     const rosa::x86::Decoder decoder;
@@ -3202,6 +3225,7 @@ int main() {
         {"indirect guest-memory call", testIndirectGuestMemoryCall},
         {"indirect guest-memory call fault", testIndirectGuestMemoryCallFault},
         {"unsigned-below conditional", testUnsignedBelowConditional},
+        {"register-indirect jump", testRegisterIndirectJump},
         {"unsigned-above conditional", testUnsignedAboveConditional},
         {"unsigned-above long conditional", testUnsignedAboveLongConditional},
         {"unsigned-below-or-equal conditional", testUnsignedBelowOrEqualConditional},

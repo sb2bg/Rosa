@@ -151,6 +151,7 @@ class Builder {
                                      Width width, guest::GuestAddress rip);
     void exitBlock(guest::GuestAddress rip);
     void exitDirect(guest::GuestAddress target, guest::GuestAddress rip);
+    void exitDirect(ValueId target, guest::GuestAddress rip);
     void exitConditional(x86::Condition condition, guest::GuestAddress target,
                          guest::GuestAddress fallthrough, guest::GuestAddress rip);
     void exitCall(guest::GuestAddress target, guest::GuestAddress returnAddress,

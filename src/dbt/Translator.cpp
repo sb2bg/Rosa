@@ -1484,6 +1484,16 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
         case x86::Opcode::JmpRelative:
             builder.exitDirect(*instruction.branchTarget, instruction.address);
             break;
+        case x86::Opcode::JmpReg: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: indirect jump operand count");
+            }
+            const auto target = builder.readGuestRegister(
+                std::get<x86::RegisterOperand>(instruction.operands[0]).reg,
+                ir::Width::I64, instruction.address);
+            builder.exitDirect(target, instruction.address);
+            break;
+        }
         case x86::Opcode::JccRelative:
             builder.exitConditional(*instruction.condition, *instruction.branchTarget,
                                     *instruction.fallthrough, instruction.address);
@@ -1520,6 +1530,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
 
     const auto lastOpcode = decoded.back().opcode;
     const bool hasTerminator = lastOpcode == x86::Opcode::JmpRelative ||
+                               lastOpcode == x86::Opcode::JmpReg ||
                                lastOpcode == x86::Opcode::JccRelative ||
                                lastOpcode == x86::Opcode::CallRelative ||
                                lastOpcode == x86::Opcode::CallMem ||
@@ -1943,7 +1954,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 exit = BlockExit::Return;
                 break;
             case ir::ExitKind::Direct:
-                assembler.movImmediate(arm64::x16, operation.target->value);
+                if (operation.lhs) {
+                    assembler.mov(arm64::x16, hostRegister(*operation.lhs));
+                } else {
+                    assembler.movImmediate(arm64::x16, operation.target->value);
+                }
                 break;
             case ir::ExitKind::Call:
                 if (operation.lhs) {

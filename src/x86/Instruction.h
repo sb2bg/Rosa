@@ -61,6 +61,7 @@ enum class Opcode {
     Lfence,
     Rdtsc,
     JmpRelative,
+    JmpReg,
     JccRelative,
     CallRelative,
     CallMem,

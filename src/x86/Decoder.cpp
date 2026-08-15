@@ -778,7 +778,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
             code[cursor] != 0x21U && code[cursor] != 0x09U &&
             code[cursor] != 0x3BU && code[cursor] != 0x80U &&
-            code[cursor] != 0x81U && code[cursor] != 0xC1U && code[cursor] != 0xC6U) {
+            code[cursor] != 0x81U && code[cursor] != 0xC1U &&
+            code[cursor] != 0xC6U && code[cursor] != 0xFFU) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
@@ -1637,11 +1638,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(RegisterOperand{
                     decodeRegister(rmEncoding, rexB),
                     static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+            } else if (extension == 0x4U && mode == 0x3U && !rexR && !rexX) {
+                instruction.opcode = Opcode::JmpReg;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, rexB), 64});
             } else if (extension != 0x2U || mode > 0x2U || rexR || rexX ||
                        (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register INC /0 and CALL qword [base+disp8/disp32] /2 are supported from opcode FF");
+                    "only register INC /0, CALL memory /2, and register JMP /4 are supported from opcode FF");
             } else {
                 auto baseEncoding = rmEncoding;
                 if (rmEncoding == 0x4U) {
@@ -1757,7 +1762,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         instruction.length = static_cast<std::uint8_t>(length);
         std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,
                     instruction.bytes.begin());
-        const auto terminatesBlock = instruction.opcode == Opcode::CallMem;
+        const auto terminatesBlock = instruction.opcode == Opcode::CallMem ||
+                                     instruction.opcode == Opcode::JmpReg;
         result.push_back(std::move(instruction));
         if (terminatesBlock) {
             return result;

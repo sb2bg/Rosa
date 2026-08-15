@@ -458,6 +458,16 @@ void Builder::exitDirect(guest::GuestAddress target, guest::GuestAddress rip) {
     });
 }
 
+void Builder::exitDirect(ValueId target, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ExitBlock,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = target,
+        .exitKind = ExitKind::Direct,
+    });
+}
+
 void Builder::exitConditional(x86::Condition condition, guest::GuestAddress target,
                               guest::GuestAddress fallthrough, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -644,8 +654,10 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.rhs, "result");
             break;
         case Opcode::ExitBlock:
-            if (operation.exitKind == ExitKind::Call && operation.lhs) {
-                checkUse(operation.lhs, "indirect call target");
+            if ((operation.exitKind == ExitKind::Call ||
+                 operation.exitKind == ExitKind::Direct) &&
+                operation.lhs) {
+                checkUse(operation.lhs, "indirect exit target");
             } else if (operation.exitKind != ExitKind::Return && !operation.target) {
                 errors.emplace_back("non-return exit has no target");
             }

@@ -573,6 +573,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::JmpRelative:
             stream << "jmp 0x" << instruction.branchTarget->value;
             break;
+        case x86::Opcode::JmpReg:
+            stream << "jmp "
+                   << x86::registerName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
+            break;
         case x86::Opcode::JccRelative:
             stream << 'j' << conditionName(*instruction.condition) << " 0x"
                    << instruction.branchTarget->value;
@@ -777,7 +782,11 @@ std::string dumpIr(const ir::Block &block) {
                 stream << "return ret_at=0x" << std::hex << operation.guestRip.value;
                 break;
             case ir::ExitKind::Direct:
-                stream << "direct target=0x" << std::hex << operation.target->value;
+                if (operation.lhs) {
+                    stream << "indirect target=" << valueName(*operation.lhs);
+                } else {
+                    stream << "direct target=0x" << std::hex << operation.target->value;
+                }
                 break;
             case ir::ExitKind::Call:
                 if (operation.lhs) {
