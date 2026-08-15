@@ -1405,7 +1405,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x2BU && code[cursor] != 0x33U &&
             code[cursor] != 0x3BU && code[cursor] != 0x80U &&
             code[cursor] != 0x81U && code[cursor] != 0xC1U &&
-            code[cursor] != 0xC6U && code[cursor] != 0xFFU) {
+            code[cursor] != 0xC6U && code[cursor] != 0xD3U &&
+            code[cursor] != 0xFFU) {
             throw DecodeError(address, remaining, "expected REX prefix");
         }
         const auto rex = hasRex ? code[cursor] : 0U;
@@ -1430,7 +1431,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x2BU && opcode != 0x33U &&
             opcode != 0x21U &&
             opcode != 0x81U && opcode != 0xC1U &&
-            opcode != 0xC6U && opcode != 0xFFU &&
+            opcode != 0xC6U && opcode != 0xD3U && opcode != 0xFFU &&
             (opcode < 0xB8U || opcode > 0xBFU)) {
             throw DecodeError(address, remaining,
                               "only a 32-bit memory MOV is supported without REX.W");
@@ -2103,7 +2104,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
         } else if (opcode == 0xD3U) {
             if (code.size() - cursor < 1) {
-                throw DecodeError(address, remaining, "truncated shl r64, cl");
+                throw DecodeError(address, remaining, "truncated shl register, cl");
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
@@ -2114,7 +2115,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             instruction.opcode = Opcode::ShlRegCl;
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
         } else if (opcode == 0xF7U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mul r64");

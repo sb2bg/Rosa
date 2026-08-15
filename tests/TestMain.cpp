@@ -415,6 +415,24 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("shl32_cl_one", CaseId::shl32_cl_one,
+                             differentialBytes_shl32_cl_one);
+        testCase.request.state.rax = 0xFFFFFFFF80000001ULL;
+        testCase.request.state.rcx = 1;
+        testCase.flagMask =
+            carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shl32_cl_masked_zero",
+                             CaseId::shl32_cl_masked_zero,
+                             differentialBytes_shl32_cl_masked_zero);
+        testCase.request.state.rax = 0xAAAAAAAA12345678ULL;
+        testCase.request.state.rcx = 32;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
         auto testCase = make("shr32_many", CaseId::shr32_many,
                              differentialBytes_shr32_many);
         testCase.request.state.rax = 0xFFFFFFFF80000001ULL;
@@ -3467,6 +3485,58 @@ void testShiftLeftClGeneratedExecution() {
                 "SHL r64, CL with a masked zero count changed flags");
 }
 
+void testShiftLeft32ClGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0xD3, 0xE0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShlRegCl,
+           "SHL r32, CL opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 32,
+           "SHL EAX, CL destination differs");
+    expectEqual(decoded[0].length, std::uint8_t{2}, "SHL EAX, CL length differs");
+    expect(rosa::debug::dumpX86(decoded).find("shl eax, cl") !=
+               std::string::npos,
+           "SHL EAX, CL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0xFFFFFFFF80000001ULL;
+    state.rcx = 1;
+    state.rflags = 0x10;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{2},
+                "SHL EAX, CL result did not zero-extend");
+    expectEqual(state.rcx, std::uint64_t{1}, "SHL EAX, CL changed RCX");
+    expectEqual(state.rflags, std::uint64_t{0x813},
+                "SHL EAX, CL count-one flags differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0xAAAAAAAA12345678ULL;
+    zeroState.rcx = 32;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0x12345678},
+                "SHL EAX, CL masked-zero result did not zero-extend");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "SHL EAX, CL masked-zero count changed flags");
+
+    rosa::x86::X86State manyState;
+    manyState.rax = 0xFFFFFFFF80000001ULL;
+    manyState.rcx = 31;
+    manyState.rflags = 0x810;
+    static_cast<void>(block.execute(manyState));
+    expectEqual(manyState.rax, std::uint64_t{0x80000000},
+                "SHL EAX, CL count-31 result differs");
+    constexpr std::uint64_t definedManyFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U);
+    expectEqual(manyState.rflags & definedManyFlags,
+                std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "SHL EAX, CL count-31 defined flags differ");
+}
+
 void testShiftRight32ImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0xC1, 0xE8, 0x1F, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -5955,6 +6025,7 @@ int main() {
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},
         {"SHL CL generated execution", testShiftLeftClGeneratedExecution},
+        {"SHL 32-bit CL generated execution", testShiftLeft32ClGeneratedExecution},
         {"SHR 32-bit immediate generated execution", testShiftRight32ImmediateGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
