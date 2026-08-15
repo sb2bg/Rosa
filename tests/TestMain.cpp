@@ -1835,6 +1835,25 @@ void testXor32BitRegisterFromGuestMemory() {
                 "failed XOR memory changed flags");
 }
 
+void testXor32BitRegisterImmediate() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x81, 0xF1, 0x58, 0x54, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegImm,
+           "XOR r32, imm32 opcode differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rcx = 0xAAAAAAAA00005458ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0},
+                "XOR r32, imm32 result or zero extension differs");
+    expectEqual(state.rflags, std::uint64_t{0x46}, "XOR r32, imm32 flags differ");
+}
+
 void testXorpsRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x57, 0xC1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2866,6 +2885,7 @@ int main() {
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
         {"XOR 32-bit register from guest memory",
          testXor32BitRegisterFromGuestMemory},
+        {"XOR 32-bit register immediate", testXor32BitRegisterImmediate},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PCMPEQB guest memory generated execution",

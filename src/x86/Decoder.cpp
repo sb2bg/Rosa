@@ -1458,6 +1458,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
                 instruction.operands.push_back(ImmediateOperand{
                     static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 32});
+            } else if (mode == 0x3U && extension == 0x6U && !rexR && !rexX) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated xor register, imm32");
+                }
+                const auto immediate = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+                instruction.opcode = Opcode::XorRegImm;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                instruction.operands.push_back(ImmediateOperand{
+                    rexW ? static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate))
+                         : static_cast<std::uint32_t>(immediate),
+                    32});
             } else if (mode == 0x3U && extension == 0x7U && !rexW && !rexR &&
                        !rexX) {
                 if (code.size() - cursor < 4) {
@@ -1506,7 +1520,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             } else {
                 throw DecodeError(
                     address, remaining,
-                    "only SUB r64 /5 and CMP r32/[base+disp] /7 from opcode 81 are supported");
+                    "only SUB /5, XOR /6, and CMP /7 forms from opcode 81 are supported");
             }
         } else if (opcode == 0xFFU) {
             if (code.size() - cursor < 1) {
