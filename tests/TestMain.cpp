@@ -1172,6 +1172,16 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("mov16_extended_base_store",
+                             CaseId::mov16_extended_base_store,
+                             differentialBytes_mov16_extended_base_store);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.state.rcx = 0xAABBCCDDEEFFBEEFULL;
+        testCase.memoryCompareOffset = 0x48;
+        testCase.memoryCompareSize = sizeof(std::uint16_t);
+        run(testCase);
+    }
+    {
         auto testCase = make("mov64_immediate_memory",
                              CaseId::mov64_immediate_memory,
                              differentialBytes_mov64_immediate_memory);
@@ -5127,6 +5137,48 @@ void testMovWordRegisterToGuestMemory() {
                 "MOV word register store changed source");
     expectEqual(state.rflags, std::uint64_t{0x8D7},
                 "MOV word register store changed flags");
+
+    constexpr std::array<std::uint8_t, 6> extendedBaseCode{
+        0x66, 0x41, 0x89, 0x4E, 0x48, 0xC3};
+    const auto extendedBaseDecoded = decoder.decodeBlock(
+        extendedBaseCode, rosa::guest::GuestAddress{0x2000});
+    expect(extendedBaseDecoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "REX MOV word store opcode differs");
+    expectEqual(extendedBaseDecoded[0].length, std::uint8_t{5},
+                "REX MOV word store length differs");
+    const auto extendedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            extendedBaseDecoded[0].operands[0]);
+    const auto extendedSource =
+        std::get<rosa::x86::RegisterOperand>(
+            extendedBaseDecoded[0].operands[1]);
+    expect(extendedMemory.base == rosa::x86::Register::R14 &&
+               extendedMemory.displacement == 0x48 &&
+               extendedMemory.width == 16,
+           "REX MOV word store memory operand differs");
+    expect(extendedSource.reg == rosa::x86::Register::Rcx &&
+               extendedSource.width == 16,
+           "REX MOV word store source differs");
+    expect(rosa::debug::dumpX86(extendedBaseDecoded).find(
+               "mov [r14+0x48], cx") != std::string::npos,
+           "REX MOV word store dump differs");
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8148},
+                          0x1122334455667788ULL);
+    const auto extendedBaseBlock = translator.translate(
+        extendedBaseCode, rosa::guest::GuestAddress{0x2000});
+    state.r14 = 0x8100;
+    state.rcx = 0xAABBCCDDEEFFBEEFULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(extendedBaseBlock.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8148}),
+                std::uint64_t{0x112233445566BEEFULL},
+                "REX MOV word store changed adjacent bytes");
+    expectEqual(state.r14, std::uint64_t{0x8100},
+                "REX MOV word store changed its base");
+    expectEqual(state.rcx, std::uint64_t{0xAABBCCDDEEFFBEEFULL},
+                "REX MOV word store changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "REX MOV word store changed flags");
 }
 
 void testMovGuestMemoryToRegister() {
