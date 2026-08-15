@@ -408,6 +408,21 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("add32_extended_immediate_carry",
+                             CaseId::add32_extended_immediate_carry,
+                             differentialBytes_add32_extended_immediate_carry);
+        testCase.request.state.r13 = 0xAAAAAAAAFFFF0020ULL;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "add32_extended_immediate_overflow",
+            CaseId::add32_extended_immediate_overflow,
+            differentialBytes_add32_extended_immediate_overflow);
+        testCase.request.state.r13 = 0xAAAAAAAA7FFF0020ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("sub64_borrow", CaseId::sub64_borrow,
                              differentialBytes_sub64_borrow);
         testCase.request.state.rdi = 5;
@@ -9453,6 +9468,48 @@ void testAddRegisterImmediate32() {
     expectEqual(state.rax, UINT64_MAX, "ADD r64, negative imm32 result differs");
     expectEqual(state.rflags, std::uint64_t{0x86},
                 "ADD r64, negative imm32 flags differ");
+
+    constexpr std::array<std::uint8_t, 8> extended{
+        0x41, 0x81, 0xC5, 0xE0, 0xFF, 0x00, 0x00, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extended, rosa::guest::GuestAddress{0x3000});
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::AddRegImm,
+           "ADD extended r32, imm32 opcode differs");
+    expectEqual(extendedDecoded[0].length, std::uint8_t{7},
+                "ADD extended r32, imm32 length differs");
+    const auto extendedDestination = std::get<rosa::x86::RegisterOperand>(
+        extendedDecoded[0].operands[0]);
+    const auto extendedImmediate = std::get<rosa::x86::ImmediateOperand>(
+        extendedDecoded[0].operands[1]);
+    expect(extendedDestination.reg == rosa::x86::Register::R13 &&
+               extendedDestination.width == 32,
+           "ADD extended r32 destination differs");
+    expect(extendedImmediate.width == 32 &&
+               extendedImmediate.value == 0xFFE0,
+           "ADD r32 imm32 did not preserve its raw bit pattern");
+    expect(rosa::debug::dumpX86(extendedDecoded).find(
+               "add r13d, 0xffe0") != std::string::npos,
+           "ADD extended r32 dump differs");
+
+    const auto extendedBlock = translator.translate(
+        extended, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State carryState;
+    carryState.r13 = 0xAAAAAAAAFFFF0020ULL;
+    carryState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(carryState));
+    expectEqual(carryState.r13, std::uint64_t{0},
+                "ADD r32 imm32 did not zero-extend its wrapped result");
+    expectEqual(carryState.rflags, std::uint64_t{0x47},
+                "ADD r32 imm32 carry flags differ");
+
+    rosa::x86::X86State overflowState;
+    overflowState.r13 = 0xAAAAAAAA7FFF0020ULL;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(overflowState));
+    expectEqual(overflowState.r13, std::uint64_t{0x80000000},
+                "ADD r32 imm32 overflow result differs");
+    expectEqual(overflowState.rflags, std::uint64_t{0x886},
+                "ADD r32 imm32 overflow flags differ");
 }
 
 void testAddRaxAccumulatorImmediate() {

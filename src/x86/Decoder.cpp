@@ -3212,20 +3212,39 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            if (mode == 0x3U && (extension == 0x0U || extension == 0x5U) &&
-                rexW && !rexR && !rexX) {
+            if (mode == 0x3U && extension == 0x0U && !rexR && !rexX) {
                 if (code.size() - cursor < 4) {
                     throw DecodeError(address, remaining,
-                                      "truncated add/sub r64, imm32");
+                                      "truncated add register, imm32");
                 }
                 const auto immediate = readI32(code.subspan(cursor, 4));
                 cursor += 4;
-                instruction.opcode = extension == 0x0U ? Opcode::AddRegImm
-                                                       : Opcode::SubRegImm;
+                instruction.opcode = Opcode::AddRegImm;
                 instruction.operands.push_back(RegisterOperand{
-                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), 64});
+                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
                 instruction.operands.push_back(ImmediateOperand{
-                    static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 32});
+                    rexW ? static_cast<std::uint64_t>(
+                               static_cast<std::int64_t>(immediate))
+                         : static_cast<std::uint64_t>(
+                               static_cast<std::uint32_t>(immediate)),
+                    32});
+            } else if (mode == 0x3U && extension == 0x5U && rexW &&
+                       !rexR && !rexX) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated sub r64, imm32");
+                }
+                const auto immediate = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+                instruction.opcode = Opcode::SubRegImm;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                    64});
+                instruction.operands.push_back(ImmediateOperand{
+                    static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(immediate)),
+                    32});
             } else if (mode == 0x3U && extension == 0x4U && !rexR &&
                        !rexX) {
                 if (code.size() - cursor < 4) {
