@@ -125,6 +125,15 @@ std::uint64_t AddressSpace::readU64(GuestAddress address) const {
     return value;
 }
 
+std::uint32_t AddressSpace::readU32(GuestAddress address) const {
+    const auto bytes = readBytes(address, sizeof(std::uint32_t));
+    std::uint32_t value = 0;
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        value |= static_cast<std::uint32_t>(bytes[index]) << (index * 8U);
+    }
+    return value;
+}
+
 std::vector<std::uint8_t> AddressSpace::readBytes(GuestAddress address, std::size_t size) const {
     std::vector<std::uint8_t> result;
     result.reserve(size);

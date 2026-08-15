@@ -48,15 +48,16 @@ void testAssemblerEncodings() {
     assembler.add(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.bitAnd(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.ldr(rosa::arm64::x9, rosa::arm64::x0, 0);
+    assembler.ldr32(rosa::arm64::x9, rosa::arm64::x0, 0);
     assembler.str(rosa::arm64::x9, rosa::arm64::x0, 0);
     assembler.blr(rosa::arm64::x16);
     assembler.pushFrameRecord();
     assembler.popFrameRecord();
     assembler.ret();
 
-    const std::array<std::uint32_t, 9> expected{
-        0xD2800540U, 0x8B0B012AU, 0x8A0B012AU, 0xF9400009U, 0xF9000009U,
-        0xD63F0200U, 0xA9BF7BFDU, 0xA8C17BFDU, 0xD65F03C0U,
+    const std::array<std::uint32_t, 10> expected{
+        0xD2800540U, 0x8B0B012AU, 0x8A0B012AU, 0xF9400009U, 0xB9400009U,
+        0xF9000009U, 0xD63F0200U, 0xA9BF7BFDU, 0xA8C17BFDU, 0xD65F03C0U,
     };
     expectEqual(assembler.words().size(), expected.size(), "assembler word count differs");
     for (std::size_t index = 0; index < expected.size(); ++index) {
@@ -433,6 +434,39 @@ void testMovGuestMemoryToRegister() {
     expect(rejected, "MOV from unmapped guest memory did not fail");
     expectEqual(faultState.rax, std::uint64_t{0x55},
                 "failed guest-memory load changed the destination register");
+}
+
+void testMovGuestMemoryTo32BitRegister() {
+    constexpr std::array<std::uint8_t, 5> code{0x44, 0x8B, 0x46, 0x18, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegMem,
+           "MOV r32, [base+disp8] opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::R8,
+           "MOV r32, [base+disp8] extended destination differs");
+    expectEqual(destination.width, std::uint8_t{32},
+                "MOV r32, [base+disp8] destination width differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8118}, 0xFEDCBA9876543210ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsi = 0x8100;
+    state.r8 = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r8, std::uint64_t{0x76543210},
+                "MOV r32, [base+disp8] did not zero-extend the guest value");
+    expectEqual(state.rsi, std::uint64_t{0x8100},
+                "MOV r32, [base+disp8] changed the base register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV r32, [base+disp8] changed flags");
 }
 
 void testTestRegisterGeneratedExecution() {
@@ -867,6 +901,7 @@ int main() {
         {"SUB register imm8 generated execution", testSubRegImm8GeneratedExecution},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
+        {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},
         {"register move execution", testRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},

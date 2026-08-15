@@ -105,6 +105,20 @@ void Assembler::ldr(XRegister destination, XRegister base, std::uint32_t byteOff
                    std::to_string(byteOffset) + "]");
 }
 
+void Assembler::ldr32(XRegister destination, XRegister base, std::uint32_t byteOffset) {
+    requireRegister(destination);
+    requireRegister(base);
+    if ((byteOffset % 4U) != 0 || byteOffset > 16380U) {
+        throw std::invalid_argument("32-bit LDR offset must be aligned and <= 16380");
+    }
+    const auto scaledOffset = byteOffset / 4U;
+    const auto word = 0xB9400000U | (scaledOffset << 10U) |
+                      (static_cast<std::uint32_t>(base.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "ldr w" + std::to_string(destination.encoding) + ", [" + regName(base) + ", #" +
+                   std::to_string(byteOffset) + "]");
+}
+
 void Assembler::str(XRegister source, XRegister base, std::uint32_t byteOffset) {
     requireRegister(source);
     requireRegister(base);

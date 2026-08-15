@@ -14,6 +14,8 @@ namespace {
 
 const char *widthName(ir::Width width) {
     switch (width) {
+    case ir::Width::I32:
+        return "i32";
     case ir::Width::I64:
         return "i64";
     }

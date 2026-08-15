@@ -12,6 +12,7 @@
 namespace rosa::ir {
 
 enum class Width : std::uint8_t {
+    I32 = 32,
     I64 = 64,
 };
 

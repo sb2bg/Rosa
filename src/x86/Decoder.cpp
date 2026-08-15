@@ -207,9 +207,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto rex = code[cursor];
-        if (rex < 0x48U || rex > 0x4FU) {
-            throw DecodeError(address, remaining, "expected REX.W prefix");
+        if (rex < 0x40U || rex > 0x4FU) {
+            throw DecodeError(address, remaining, "expected REX prefix");
         }
+        const bool rexW = (rex & 0x8U) != 0;
         const bool rexB = (rex & 0x1U) != 0;
         const bool rexX = (rex & 0x2U) != 0;
         const bool rexR = (rex & 0x4U) != 0;
@@ -219,6 +220,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto opcode = code[cursor++];
+        if (!rexW && opcode != 0x8BU) {
+            throw DecodeError(address, remaining,
+                              "only a 32-bit memory MOV is supported without REX.W");
+        }
         if (opcode >= 0xB8U && opcode <= 0xBFU) {
             if (code.size() - cursor < sizeof(std::uint64_t)) {
                 throw DecodeError(address, remaining, "truncated mov r64, imm64");
@@ -236,14 +241,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto reg = decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto rm = decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
-            if (mode == 0x3U && !rexX) {
+            const auto operandWidth = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+            if (mode == 0x3U && !rexX && rexW) {
                 instruction.opcode = Opcode::MovRegReg;
                 instruction.operands.push_back(RegisterOperand{opcode == 0x89U ? rm : reg, 64});
                 instruction.operands.push_back(RegisterOperand{opcode == 0x89U ? reg : rm, 64});
             } else {
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
                 if (rexX || mode > 0x2U || rmEncoding == 0x4U ||
-                    (mode == 0 && rmEncoding == 0x5U)) {
+                    (mode == 0 && rmEncoding == 0x5U) || (!rexW && opcode != 0x8BU)) {
                     throw DecodeError(
                         address, remaining,
                         "only MOV r64 to/from [base+disp8/disp32] memory operands are supported");
@@ -265,12 +271,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 if (opcode == 0x89U) {
                     instruction.opcode = Opcode::MovMemReg;
-                    instruction.operands.push_back(MemoryOperand{rm, displacement, 64});
-                    instruction.operands.push_back(RegisterOperand{reg, 64});
+                    instruction.operands.push_back(
+                        MemoryOperand{rm, displacement, operandWidth});
+                    instruction.operands.push_back(RegisterOperand{reg, operandWidth});
                 } else {
                     instruction.opcode = Opcode::MovRegMem;
-                    instruction.operands.push_back(RegisterOperand{reg, 64});
-                    instruction.operands.push_back(MemoryOperand{rm, displacement, 64});
+                    instruction.operands.push_back(RegisterOperand{reg, operandWidth});
+                    instruction.operands.push_back(
+                        MemoryOperand{rm, displacement, operandWidth});
                 }
             }
         } else if (opcode == 0x85U) {
