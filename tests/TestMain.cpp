@@ -404,6 +404,14 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("test8_register_immediate",
+                             CaseId::test8_register_immediate,
+                             differentialBytes_test8_register_immediate);
+        testCase.request.state.rdx = 0x1122334455667782ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp64_register", CaseId::cmp64_register,
                              differentialBytes_cmp64_register);
         testCase.request.state.r14 = 5;
@@ -4048,6 +4056,57 @@ void testTestAccumulatorImmediateGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x2}, "TEST AL, imm8 flags differ");
 }
 
+void testTestLowByteRegisterImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0xF6, 0xC2, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestRegImm,
+           "TEST DL, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "TEST DL, imm8 length differs");
+    const auto operand =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(operand.reg == rosa::x86::Register::Rdx && operand.width == 8,
+           "TEST DL, imm8 register differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{1}, "TEST DL, imm8 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("test dl, 0x1") != std::string::npos,
+           "TEST DL, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdx = 0x1122334455667782ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdx, std::uint64_t{0x1122334455667782ULL},
+                "TEST DL, imm8 changed RDX");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "TEST DL, imm8 zero-result flags differ");
+
+    constexpr std::array<std::uint8_t, 4> signCode{0xF6, 0xC2, 0x80, 0xC3};
+    const auto signBlock = translator.translate(
+        signCode, rosa::guest::GuestAddress{0x2000});
+    state.rdx = 0x80;
+    state.rflags = 0x8D7;
+    static_cast<void>(signBlock.execute(state));
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 7U},
+                "TEST DL, imm8 sign-result flags differ");
+
+    constexpr std::array<std::uint8_t, 4> highByteCode{0xF6, 0xE6, 0x01, 0xC3};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            highByteCode, rosa::guest::GuestAddress{0x3000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected, "TEST DH, imm8 was silently treated as a low-byte register form");
+}
+
 void testLfenceGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0xAE, 0xE8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -7345,6 +7404,8 @@ int main() {
         {"legacy TEST low-byte generated execution", testLegacyTestLowByteGeneratedExecution},
         {"TEST accumulator immediate generated execution",
          testTestAccumulatorImmediateGeneratedExecution},
+        {"TEST low-byte register immediate generated execution",
+         testTestLowByteRegisterImmediateGeneratedExecution},
         {"LFENCE generated execution", testLfenceGeneratedExecution},
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},

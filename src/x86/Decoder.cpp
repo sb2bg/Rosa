@@ -135,6 +135,34 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0xF6U) {
+            if (code.size() - cursor < 3) {
+                throw DecodeError(address, remaining, "truncated test r8, imm8");
+            }
+            const auto modrm = code[cursor + 1];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto registerEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode != 0x3U || extension != 0 || registerEncoding >= 0x4U) {
+                throw DecodeError(
+                    address, remaining,
+                    "only register-direct TEST AL/CL/DL/BL, imm8 from opcode F6 /0 is supported");
+            }
+            instruction.opcode = Opcode::TestRegImm;
+            instruction.length = 3;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 3,
+                        instruction.bytes.begin());
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(registerEncoding, false), 8});
+            instruction.operands.push_back(ImmediateOperand{code[cursor + 2], 8});
+            result.push_back(std::move(instruction));
+            cursor += 3;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x3DU) {
             if (code.size() - cursor < 5) {
                 throw DecodeError(address, remaining, "truncated cmp eax, imm32");
