@@ -2886,12 +2886,32 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
-            if (extension != 0 || rexR || rexX ||
-                (mode != 0x3U && (rmEncoding == 0x4U ||
-                                  (mode == 0 && rmEncoding == 0x5U && !ripRelative)))) {
+            // In 64-bit mode the non-SIB mod=00,r/m=5 encoding is
+            // RIP-relative even when REX.B is present; that extension bit is
+            // ignored for this special form.
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
+            if (extension != 0 || rexR || (rexX && rmEncoding != 0x4U)) {
                 throw DecodeError(address, remaining,
-                                  "only register or [base+disp] MOV from opcode C7 /0 is supported");
+                                  "only register or [base/SIB+disp] MOV from opcode C7 /0 is supported");
+            }
+            auto base = decodeRegister(rmEncoding, rexB);
+            if (mode != 0x3U && rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOV immediate SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                const bool hasIndex = indexEncoding != 0x4U || rexX;
+                const bool noBase = mode == 0 && baseEncoding == 0x5U;
+                if (hasIndex || noBase) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only no-index, based MOV immediate SIB is supported");
+                }
+                base = decodeRegister(baseEncoding, rexB);
             }
             std::int64_t displacement = 0;
             if (ripRelative) {
@@ -2933,8 +2953,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     ripRelative
                         ? MemoryOperand{Register::Rax, displacement, operandWidth,
                                         std::nullopt, 1, false, true}
-                        : MemoryOperand{decodeRegister(rmEncoding, rexB),
-                                        displacement, operandWidth});
+                        : MemoryOperand{base, displacement, operandWidth});
             }
             instruction.operands.push_back(ImmediateOperand{
                 rexW ? static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate))
