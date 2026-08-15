@@ -664,6 +664,17 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("mov8_scaled_memory", CaseId::mov8_scaled_memory,
+                             differentialBytes_mov8_scaled_memory);
+        bindMemory(testCase, rosa::x86::Register::Rax, 0);
+        testCase.request.state.rcx = 0x18;
+        testCase.request.state.rdx = 0x1122334455667788ULL;
+        testCase.request.memory[0x18] = 0xA5;
+        testCase.memoryCompareOffset = 0x18;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
         auto testCase = make("add64_memory", CaseId::add64_memory,
                              differentialBytes_add64_memory);
         bindMemory(testCase, rosa::x86::Register::Rsi, 0);
@@ -2982,6 +2993,73 @@ void testMovGuestMemoryToByteRegister() {
                 "failed MOV byte load changed destination");
     expectEqual(faultState.rflags, std::uint64_t{0x8D7},
                 "failed MOV byte load changed flags");
+}
+
+void testMovGuestMemoryToByteRegisterWithScaledIndex() {
+    constexpr std::array<std::uint8_t, 4> code{0x8A, 0x14, 0x08, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF8000050A0ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegMem,
+           "SIB byte MOV load opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "SIB byte MOV load length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx &&
+               destination.width == 8,
+           "SIB byte MOV load destination differs");
+    expect(memory.base == rosa::x86::Register::Rax &&
+               memory.index == rosa::x86::Register::Rcx &&
+               memory.scale == 1 && memory.displacement == 0 &&
+               memory.width == 8,
+           "SIB byte MOV load effective address differs");
+    expect(rosa::debug::dumpX86(decoded).find("mov dl, [rax+rcx*1]") !=
+               std::string::npos,
+           "SIB byte MOV load dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> value{0xA5};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8018}, value);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x8010;
+    state.rcx = 8;
+    state.rdx = 0x1122334455667788ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rdx, std::uint64_t{0x11223344556677A5ULL},
+                "SIB byte MOV load changed bytes above DL");
+    expectEqual(state.rax, std::uint64_t{0x8010},
+                "SIB byte MOV load changed its base register");
+    expectEqual(state.rcx, std::uint64_t{8},
+                "SIB byte MOV load changed its index register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "SIB byte MOV load changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState = state;
+    faultState.rdx = 0x8877665544332211ULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SIB byte MOV load from unmapped memory did not fault");
+    expectEqual(faultState.rdx, std::uint64_t{0x8877665544332211ULL},
+                "failed SIB byte MOV load changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed SIB byte MOV load changed flags");
 }
 
 void testMovzxLowByteRegisterTo32BitRegister() {
@@ -6335,6 +6413,8 @@ int main() {
          testMovGuestMemoryTo32BitRegisterWithScaledIndex},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
+        {"MOV guest memory to byte register with scaled index",
+         testMovGuestMemoryToByteRegisterWithScaledIndex},
         {"MOVZX low-byte register to 32-bit register",
          testMovzxLowByteRegisterTo32BitRegister},
         {"MOVZX guest byte to 32-bit register",

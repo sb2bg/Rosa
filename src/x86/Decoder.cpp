@@ -1398,7 +1398,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         if (!hasRex && code[cursor] != 0x88U && code[cursor] != 0x89U &&
-            code[cursor] != 0x8BU && code[cursor] != 0x8DU &&
+            code[cursor] != 0x8AU && code[cursor] != 0x8BU &&
+            code[cursor] != 0x8DU &&
             code[cursor] != 0x85U && code[cursor] != 0x83U &&
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
             code[cursor] != 0x21U && code[cursor] != 0x09U &&
@@ -1855,12 +1856,39 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto regEncoding =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode > 0x2U || rexW || rexX || rmEncoding == 0x4U ||
+            if (mode > 0x2U || rexW ||
+                (!hasRex && regEncoding >= 0x4U) ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only MOV byte register, [base+disp8/disp32] is supported");
+                    "only MOV byte register, [base+index*scale+disp8/disp32] is supported");
+            }
+            auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOV byte memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(address, remaining,
+                                      "no-base MOV byte SIB is not supported");
+                }
+                base = decodeRegister(baseEncoding, rexB);
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -1876,11 +1904,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 cursor += 4;
             }
             const auto destination =
-                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
+                decodeRegister(regEncoding, rexR);
             instruction.opcode = Opcode::MovRegMem;
             instruction.operands.push_back(RegisterOperand{destination, 8});
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, rexB), displacement, 8});
+            instruction.operands.push_back(
+                MemoryOperand{base, displacement, 8, index, scale});
         } else if (opcode == 0x89U || opcode == 0x8BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov r64, r64");
