@@ -641,6 +641,74 @@ void testIncrement32BitRegister() {
                 "INC r32 zero flags differ or CF was not preserved");
 }
 
+void testIncrement16BitGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0xFF, 0x40, 0x18, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::IncMem,
+           "INC word [memory] opcode differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x8100;
+    state.rflags = 0x3;
+    const std::array overflowValue{std::uint8_t{0xFF}, std::uint8_t{0x7F}};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8118}, overflowValue);
+    static_cast<void>(block.execute(state, &addressSpace));
+    const auto overflowResult =
+        addressSpace.readBytes(rosa::guest::GuestAddress{0x8118}, 2);
+    expectEqual(overflowResult[0], std::uint8_t{0x00},
+                "INC word overflow low byte differs");
+    expectEqual(overflowResult[1], std::uint8_t{0x80},
+                "INC word overflow high byte differs");
+    expectEqual(state.rflags, std::uint64_t{0x897},
+                "INC word overflow flags differ or CF changed");
+
+    const std::array wrapValue{std::uint8_t{0xFF}, std::uint8_t{0xFF}};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8118}, wrapValue);
+    state.rflags = 0x2;
+    static_cast<void>(block.execute(state, &addressSpace));
+    const auto wrapResult =
+        addressSpace.readBytes(rosa::guest::GuestAddress{0x8118}, 2);
+    expectEqual(wrapResult[0], std::uint8_t{0}, "INC word wrap low byte differs");
+    expectEqual(wrapResult[1], std::uint8_t{0}, "INC word wrap high byte differs");
+    expectEqual(state.rflags, std::uint64_t{0x56},
+                "INC word wrap flags differ or CF changed");
+
+    std::array<std::uint8_t, 0x1A> readOnlyBytes{};
+    readOnlyBytes[0x18] = 0x34;
+    readOnlyBytes[0x19] = 0x12;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        rosa::guest::GuestAddress{0x9000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read, readOnlyBytes, "read-only increment test");
+    state.rax = 0x9000;
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "INC word on read-only guest memory did not fault");
+    const auto unchanged =
+        readOnlyAddressSpace.readBytes(rosa::guest::GuestAddress{0x9018}, 2);
+    expectEqual(unchanged[0], std::uint8_t{0x34},
+                "failed INC word changed low memory byte");
+    expectEqual(unchanged[1], std::uint8_t{0x12},
+                "failed INC word changed high memory byte");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "failed INC word changed flags");
+}
+
 void testCompare32BitRegisterWithGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x44, 0x3B, 0x46, 0x18, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3752,6 +3820,7 @@ int main() {
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
         {"INC 32-bit register", testIncrement32BitRegister},
+        {"INC 16-bit guest memory", testIncrement16BitGuestMemory},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
         {"legacy CMP 32-bit register with guest memory",
          testLegacyCompare32BitRegisterWithGuestMemory},

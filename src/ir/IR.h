@@ -51,6 +51,7 @@ enum class Opcode {
     ShuffleXmmDwords,
     BitScanForward,
     Push,
+    IncrementGuestMemory,
     LoadFence,
     ReadTimestampCounter,
     UpdateAddFlags,
@@ -143,6 +144,8 @@ class Builder {
     void bitScanForward(x86::Register destination, x86::Register source,
                         Width width, guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
+    void incrementGuestMemory(ValueId address, Width width,
+                              guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
     void readTimestampCounter(guest::GuestAddress rip);
     void updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,

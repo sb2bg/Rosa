@@ -291,6 +291,17 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
+        case x86::Opcode::IncMem: {
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "inc word [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::IncReg:
             stream << "inc "
                    << registerOperandName(
@@ -794,6 +805,10 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::Push:
             stream << "push." << widthName(operation.width) << ' ' << valueName(*operation.rhs)
                    << ", new_rsp=" << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::IncrementGuestMemory:
+            stream << "increment_guest_memory." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs);
             break;
         case ir::Opcode::StoreGuest:
             stream << "store_guest." << widthName(operation.width) << ' '

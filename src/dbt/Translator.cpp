@@ -480,6 +480,35 @@ updateIncFlags64(x86::X86State *state, std::uint64_t original,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+incrementGuest16(GuestExecutionContext *context, x86::X86State *state,
+                 std::uint64_t address) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated 16-bit guest increment has no address space");
+        }
+        const auto bytes =
+            context->addressSpace->readBytes(guest::GuestAddress{address}, 2);
+        const auto original = static_cast<std::uint16_t>(
+            static_cast<std::uint16_t>(bytes[0]) |
+            (static_cast<std::uint16_t>(bytes[1]) << 8U));
+        const auto result = static_cast<std::uint16_t>(original + 1U);
+        const std::array resultBytes{
+            static_cast<std::uint8_t>(result),
+            static_cast<std::uint8_t>(result >> 8U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, resultBytes);
+        return updateIncFlags<std::uint16_t>(state, original, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint16_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateSubFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std::uint64_t result) {
     auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
     if (lhs < rhs) {
@@ -1050,6 +1079,22 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
                                        instruction.address);
             builder.updateIncFlags(original, result, width, instruction.address);
+            break;
+        }
+        case x86::Opcode::IncMem: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: memory increment operand");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto base = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                instruction.address);
+            const auto address = builder.add(base, displacement, ir::Width::I64,
+                                             instruction.address);
+            builder.incrementGuestMemory(address, ir::Width::I16,
+                                         instruction.address);
             break;
         }
         case x86::Opcode::SubRegImm: {
@@ -1706,6 +1751,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::UpdateMultiplyFlags ||
                          operation.opcode == ir::Opcode::UpdateShiftRightDoubleFlags ||
                          operation.opcode == ir::Opcode::Push ||
+                         operation.opcode == ir::Opcode::IncrementGuestMemory ||
                          operation.opcode == ir::Opcode::StoreGuest ||
                          operation.opcode == ir::Opcode::StoreGuestXmm ||
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
@@ -1716,6 +1762,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::LoadGuest ||
                          operation.opcode == ir::Opcode::ReadTimestampCounter;
         hasExecutionContextCall |= operation.opcode == ir::Opcode::Push ||
+                                   operation.opcode == ir::Opcode::IncrementGuestMemory ||
                                    operation.opcode == ir::Opcode::StoreGuest ||
                                    operation.opcode == ir::Opcode::StoreGuestXmm ||
                                    operation.opcode == ir::Opcode::LoadGuestXmm ||
@@ -1885,6 +1932,29 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x3, hostRegister(*operation.rhs));
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(arm64::x16, pointerBits(&commitPush64));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0,
+                                   static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::IncrementGuestMemory: {
+            if (operation.width != ir::Width::I16) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 16-bit guest memory increment");
+            }
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x4, arm64::x0);
+            assembler.mov(arm64::x1, arm64::x4);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&incrementGuest16));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

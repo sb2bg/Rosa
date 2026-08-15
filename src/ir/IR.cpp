@@ -362,6 +362,16 @@ void Builder::push(ValueId newStackPointer, ValueId value, Width width,
     });
 }
 
+void Builder::incrementGuestMemory(ValueId address, Width width,
+                                   guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::IncrementGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+    });
+}
+
 void Builder::loadFence(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::LoadFence,
@@ -635,6 +645,9 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::Push:
             checkUse(operation.lhs, "new stack pointer");
             checkUse(operation.rhs, "pushed value");
+            break;
+        case Opcode::IncrementGuestMemory:
+            checkUse(operation.lhs, "guest address");
             break;
         case Opcode::StoreGuest:
             checkUse(operation.lhs, "guest address");
