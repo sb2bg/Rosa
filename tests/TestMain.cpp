@@ -1674,6 +1674,25 @@ void testOrRegisterGeneratedExecution() {
     expectEqual(state.rflags, expectedFlags, "OR r64, r64 flags differ");
 }
 
+void testOrShortImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0x83, 0xC8, 0xFF, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrRegImm,
+           "OR r64, imm8 opcode differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                UINT64_MAX, "OR imm8 was not sign-extended");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 0x1234;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, UINT64_MAX, "OR r64, imm8 result differs");
+    expectEqual(state.rflags, std::uint64_t{0x86}, "OR r64, imm8 flags differ");
+}
+
 void testXor32BitRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 6> code{0x31, 0xF6, 0x45, 0x31, 0xC0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -2672,6 +2691,7 @@ int main() {
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
+        {"OR short immediate generated execution", testOrShortImmediateGeneratedExecution},
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},

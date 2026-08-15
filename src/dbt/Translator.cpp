@@ -988,6 +988,25 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateLogicFlags(result, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::OrRegImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: or immediate operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto immediate =
+                std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            const auto lhs = builder.readGuestRegister(destination.reg, ir::Width::I64,
+                                                       instruction.address);
+            const auto rhs = builder.constant(immediate.value, ir::Width::I64,
+                                              instruction.address);
+            const auto result = builder.bitOr(lhs, rhs, ir::Width::I64,
+                                              instruction.address);
+            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+                                       instruction.address);
+            builder.updateLogicFlags(result, ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::XorRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: xor operand count");

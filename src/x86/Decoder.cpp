@@ -1401,14 +1401,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                   "only 32-bit AND /4 and CMP /7 are supported from legacy opcode 83");
             }
             if (mode != 0x3U || rexR || rexX ||
-                (extension != 0x0U && extension != 0x4U && extension != 0x5U &&
+                (extension != 0x0U && extension != 0x1U && extension != 0x4U && extension != 0x5U &&
                  extension != 0x7U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct ADD /0, AND /4, SUB /5, and CMP /7 from opcode 83 are supported");
+                    "only register-direct ADD /0, OR /1, AND /4, SUB /5, and CMP /7 from opcode 83 are supported");
             }
             const auto immediate = std::bit_cast<std::int8_t>(code[cursor++]);
             instruction.opcode = extension == 0   ? Opcode::AddRegImm
+                                 : extension == 1 ? Opcode::OrRegImm
                                  : extension == 4 ? Opcode::AndRegImm
                                  : extension == 5 ? Opcode::SubRegImm
                                                   : Opcode::CmpRegImm;
