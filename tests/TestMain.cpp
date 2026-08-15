@@ -682,6 +682,47 @@ void testCompare32BitRegisterWithImmediate() {
                 "CMP r32, imm32 equal flags differ");
 }
 
+void testCompare32BitRegisterWithShortImmediate() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x83, 0xFA, 0x0D, // cmp edx, 13
+        0x83, 0xF9, 0xFF, // cmp ecx, -1
+        0xC3,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegImm,
+           "CMP r32, imm8 positive opcode differs");
+    expectEqual(std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]).width,
+                std::uint8_t{32}, "CMP r32, imm8 positive width differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{13}, "CMP r32, imm8 positive immediate differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[1].operands[1]).value,
+                UINT64_MAX, "CMP r32, imm8 negative sign extension differs");
+
+    const rosa::dbt::Translator translator;
+    const auto first = translator.translate(code, rosa::guest::GuestAddress{0x1000}, 1);
+    rosa::x86::X86State positiveState;
+    positiveState.rdx = 0xA5A5A5A500000007ULL;
+    positiveState.rflags = 0x8D7;
+    static_cast<void>(first.execute(positiveState));
+    expectEqual(positiveState.rdx, std::uint64_t{0xA5A5A5A500000007ULL},
+                "CMP r32, positive imm8 changed its register");
+    expectEqual(positiveState.rflags, std::uint64_t{0x97},
+                "CMP r32, positive imm8 flags differ");
+
+    const auto second = translator.translate(
+        std::span<const std::uint8_t>{code}.subspan(3),
+        rosa::guest::GuestAddress{0x1003}, 1);
+    rosa::x86::X86State negativeState;
+    negativeState.rcx = 0x12345678FFFFFFFFULL;
+    negativeState.rflags = 0x8D7;
+    static_cast<void>(second.execute(negativeState));
+    expectEqual(negativeState.rcx, std::uint64_t{0x12345678FFFFFFFFULL},
+                "CMP r32, negative imm8 changed its register");
+    expectEqual(negativeState.rflags, std::uint64_t{0x46},
+                "CMP r32, negative imm8 flags differ");
+}
+
 void testMovRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 12> code{
         0x48, 0x89, 0xBD, 0x58, 0xFF, 0xFF, 0xFF,
@@ -2022,6 +2063,8 @@ int main() {
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP 32-bit register with immediate", testCompare32BitRegisterWithImmediate},
+        {"CMP 32-bit register with short immediate",
+         testCompare32BitRegisterWithShortImmediate},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
         {"MOV 32-bit register to guest memory", testMov32BitRegisterToGuestMemory},
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
