@@ -176,6 +176,28 @@ void testLegacyMov32ImmediateGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "legacy MOV r32 changed flags");
 }
 
+void testLegacyMovLowByteImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0xB1, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegImm,
+           "MOV low byte, imm8 opcode differs");
+    const auto operand = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(operand.reg == rosa::x86::Register::Rcx,
+           "MOV CL, imm8 register differs");
+    expectEqual(operand.width, std::uint8_t{8}, "MOV CL, imm8 width differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rcx = 0xAABBCCDDEEFF0080ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xAABBCCDDEEFF0001ULL},
+                "MOV CL, imm8 did not preserve upper register bits");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOV CL, imm8 changed flags");
+}
+
 void testRexExtendedMov32ImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 7> code{
         0x41, 0xBD, 0x20, 0x00, 0x00, 0x00, 0xC3,
@@ -2417,6 +2439,8 @@ int main() {
         {"R1 decoder", testDecoderR1},
         {"extended register and signed immediate", testDecoderExtendedRegisterAndSignedImmediate},
         {"legacy MOV 32-bit immediate", testLegacyMov32ImmediateGeneratedExecution},
+        {"legacy MOV low-byte immediate",
+         testLegacyMovLowByteImmediateGeneratedExecution},
         {"REX extended MOV 32-bit immediate", testRexExtendedMov32ImmediateGeneratedExecution},
         {"PUSH imm8 decoder", testDecoderPushImm8},
         {"PUSH imm8 generated execution", testPushImm8GeneratedExecution},

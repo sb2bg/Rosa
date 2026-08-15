@@ -543,6 +543,23 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (reg.width == 8) {
+                const auto original = builder.readGuestRegister(
+                    reg.reg, ir::Width::I64, instruction.address);
+                const auto clearMask = builder.constant(~std::uint64_t{0xFF},
+                                                        ir::Width::I64,
+                                                        instruction.address);
+                const auto cleared = builder.bitAnd(original, clearMask,
+                                                    ir::Width::I64,
+                                                    instruction.address);
+                const auto byte = builder.constant(immediate.value, ir::Width::I64,
+                                                   instruction.address);
+                const auto result = builder.bitOr(cleared, byte, ir::Width::I64,
+                                                  instruction.address);
+                builder.writeGuestRegister(reg.reg, result, ir::Width::I64,
+                                           instruction.address);
+                break;
+            }
             const auto width = reg.width == 32 ? ir::Width::I32 : ir::Width::I64;
             const auto value = builder.constant(immediate.value, width, instruction.address);
             builder.writeGuestRegister(reg.reg, value, width, instruction.address);

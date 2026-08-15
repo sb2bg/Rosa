@@ -135,6 +135,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] >= 0xB0U && code[cursor] <= 0xB3U) {
+            if (code.size() - cursor < 2) {
+                throw DecodeError(address, remaining, "truncated mov low-byte register, imm8");
+            }
+            const auto opcode = code[cursor];
+            instruction.opcode = Opcode::MovRegImm;
+            instruction.length = 2;
+            instruction.bytes[0] = opcode;
+            instruction.bytes[1] = code[cursor + 1];
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(opcode - 0xB0U), false), 8});
+            instruction.operands.push_back(ImmediateOperand{code[cursor + 1], 8});
+            result.push_back(std::move(instruction));
+            cursor += 2;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] >= 0xB8U && code[cursor] <= 0xBFU) {
             if (code.size() - cursor < 5) {
                 throw DecodeError(address, remaining, "truncated mov r32, imm32");
