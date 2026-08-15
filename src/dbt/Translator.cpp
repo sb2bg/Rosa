@@ -449,7 +449,8 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             break;
         }
         case x86::Opcode::MovapsMemReg:
-        case x86::Opcode::MovupsMemReg: {
+        case x86::Opcode::MovupsMemReg:
+        case x86::Opcode::MovdquMemReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: movaps store operand count");
             }

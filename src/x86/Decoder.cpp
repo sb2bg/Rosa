@@ -379,6 +379,63 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0xF3U && code.size() - cursor >= 3 &&
+            code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x7FU) {
+            if (code.size() - cursor < 4) {
+                throw DecodeError(address, remaining, "truncated movdqu [base+disp], xmm");
+            }
+            const auto modrm = code[cursor + 3];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode > 0x2U || (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only MOVDQU [base+disp8/disp32], xmm memory operands are supported");
+            }
+            cursor += 4;
+            auto baseEncoding = rmEncoding;
+            if (rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated MOVDQU SIB byte");
+                }
+                const auto sib = code[cursor++];
+                const auto indexEncoding = static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if (indexEncoding != 0x4U || (mode == 0 && baseEncoding == 0x5U)) {
+                    throw DecodeError(address, remaining,
+                                      "only no-index MOVDQU SIB addressing is supported");
+                }
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining, "truncated MOVDQU memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated MOVDQU memory disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::MovdquMemReg;
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(baseEncoding, false), displacement, 128});
+            instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
+
+            const auto length = cursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,
+                        instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0xE8U || code[cursor] == 0xE9U) {
             if (code.size() - cursor < 5) {
                 throw DecodeError(address, remaining, "truncated rel32 control transfer");
