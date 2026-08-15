@@ -401,6 +401,21 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("add8_accumulator_immediate",
+                             CaseId::add8_accumulator_immediate,
+                             differentialBytes_add8_accumulator_immediate);
+        testCase.request.state.rax = 0xAABBCCDDEEFF0001ULL;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "add8_accumulator_immediate_overflow",
+            CaseId::add8_accumulator_immediate_overflow,
+            differentialBytes_add8_accumulator_immediate_overflow);
+        testCase.request.state.rax = 0xAABBCCDDEEFF007AULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("add32_sign_extended_immediate",
                              CaseId::add32_sign_extended_immediate,
                              differentialBytes_add32_sign_extended_immediate);
@@ -2767,6 +2782,49 @@ void testAddImmediateToLowByte() {
                 "ADD DL, imm8 carry result differs");
     expectEqual(carryState.rflags, std::uint64_t{0x13},
                 "ADD DL, imm8 carry flags differ");
+
+    constexpr std::array<std::uint8_t, 3> accumulatorCode{
+        0x04, 0x06, 0xC3};
+    const auto accumulatorDecoded = decoder.decodeBlock(
+        accumulatorCode, rosa::guest::GuestAddress{0x7FF80005997DULL});
+    expect(accumulatorDecoded[0].opcode == rosa::x86::Opcode::AddRegImm,
+           "ADD AL, imm8 opcode differs");
+    expectEqual(accumulatorDecoded[0].length, std::uint8_t{2},
+                "ADD AL, imm8 length differs");
+    const auto accumulatorDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            accumulatorDecoded[0].operands[0]);
+    const auto accumulatorImmediate =
+        std::get<rosa::x86::ImmediateOperand>(
+            accumulatorDecoded[0].operands[1]);
+    expect(accumulatorDestination.reg == rosa::x86::Register::Rax &&
+               accumulatorDestination.width == 8 &&
+               accumulatorImmediate.value == 6 &&
+               accumulatorImmediate.width == 8,
+           "ADD AL, imm8 operands differ");
+    expect(rosa::debug::dumpX86(accumulatorDecoded).find("add al, 0x6") !=
+               std::string::npos,
+           "ADD AL, imm8 dump differs");
+    const auto accumulatorBlock = translator.translate(
+        accumulatorCode, rosa::guest::GuestAddress{0x7FF80005997DULL});
+    rosa::x86::X86State accumulatorState;
+    accumulatorState.rax = 0xAABBCCDDEEFF0001ULL;
+    accumulatorState.rflags = 0x8D7;
+    static_cast<void>(accumulatorBlock.execute(accumulatorState));
+    expectEqual(accumulatorState.rax,
+                std::uint64_t{0xAABBCCDDEEFF0007ULL},
+                "ADD AL, imm8 did not preserve upper RAX bits");
+    expectEqual(accumulatorState.rflags, std::uint64_t{0x2},
+                "ADD AL, imm8 normal flags differ");
+
+    accumulatorState.rax = 0xAABBCCDDEEFF007AULL;
+    accumulatorState.rflags = 0x8D7;
+    static_cast<void>(accumulatorBlock.execute(accumulatorState));
+    expectEqual(accumulatorState.rax,
+                std::uint64_t{0xAABBCCDDEEFF0080ULL},
+                "ADD AL, imm8 overflow result differs");
+    expectEqual(accumulatorState.rflags, std::uint64_t{0x892},
+                "ADD AL, imm8 overflow flags differ");
 
     constexpr std::array<std::uint8_t, 4> highByteCode{
         0x80, 0xC4, 0x01, 0xC3};

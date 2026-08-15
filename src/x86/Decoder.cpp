@@ -178,6 +178,27 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x04U) {
+            if (code.size() - cursor < 2) {
+                throw DecodeError(address, remaining,
+                                  "truncated add al, imm8");
+            }
+            instruction.opcode = Opcode::AddRegImm;
+            instruction.length = 2;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 2,
+                        instruction.bytes.begin());
+            instruction.operands.push_back(
+                RegisterOperand{Register::Rax, 8});
+            instruction.operands.push_back(
+                ImmediateOperand{code[cursor + 1], 8});
+            result.push_back(std::move(instruction));
+            cursor += 2;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x3CU) {
             if (code.size() - cursor < 2) {
                 throw DecodeError(address, remaining,
