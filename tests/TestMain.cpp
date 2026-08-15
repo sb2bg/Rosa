@@ -1552,6 +1552,70 @@ void testMovGuestMemoryToRegisterWithNoIndexSib() {
                 "MOV no-index SIB changed flags");
 }
 
+void testMovGuestMemoryTo32BitRegisterWithScaledIndex() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x41, 0x8B, 0x54, 0x9E, 0x04, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegMem,
+           "MOV r32, [base+index*scale+disp8] opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx &&
+               destination.width == 32,
+           "indexed MOV EDX destination differs");
+    expect(memory.base == rosa::x86::Register::R14 &&
+               memory.index == rosa::x86::Register::Rbx &&
+               memory.scale == 4 && memory.displacement == 4 &&
+               memory.width == 32,
+           "indexed MOV memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("[r14+rbx*4+0x4]") !=
+               std::string::npos,
+           "indexed MOV dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 8> sourceWithUpperSentinel{
+        0x12, 0x34, 0x56, 0x78, 0xEF, 0xBE, 0xAD, 0xDE};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8110},
+                            sourceWithUpperSentinel);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r14 = 0x8100;
+    state.rbx = 3;
+    state.rdx = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rdx, std::uint64_t{0x78563412},
+                "indexed MOV dword result or zero extension differs");
+    expectEqual(state.r14, std::uint64_t{0x8100},
+                "indexed MOV changed its base");
+    expectEqual(state.rbx, std::uint64_t{3},
+                "indexed MOV changed its index");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "indexed MOV changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    state.rdx = UINT64_MAX;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "indexed MOV from unmapped guest memory did not fault");
+    expectEqual(state.rdx, UINT64_MAX,
+                "failed indexed MOV changed its destination");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "failed indexed MOV changed flags");
+}
+
 void testMovGuestMemoryTo32BitRegister() {
     constexpr std::array<std::uint8_t, 5> code{0x44, 0x8B, 0x46, 0x18, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -4110,6 +4174,8 @@ int main() {
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest memory to register with no-index SIB",
          testMovGuestMemoryToRegisterWithNoIndexSib},
+        {"MOV guest memory to 32-bit register with scaled index",
+         testMovGuestMemoryTo32BitRegisterWithScaledIndex},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
         {"MOVZX low-byte register to 32-bit register",

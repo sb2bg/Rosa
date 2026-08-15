@@ -1711,13 +1711,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     RegisterOperand{opcode == 0x89U ? reg : rm, operandWidth});
             } else {
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-                if (rexX || mode > 0x2U ||
+                if (mode > 0x2U ||
                     (mode == 0 && rmEncoding == 0x5U)) {
                     throw DecodeError(
                         address, remaining,
                         "only MOV register to/from [base+disp8/disp32] memory operands are supported");
                 }
                 auto base = rm;
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
                 if (rmEncoding == 0x4U) {
                     if (cursor >= code.size()) {
                         throw DecodeError(address, remaining, "truncated MOV memory SIB");
@@ -1728,13 +1730,21 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     const auto indexEncoding =
                         static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
                     const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-                    if (scaleBits != 0 || indexEncoding != 0x4U ||
-                        (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                    const bool hasIndex = indexEncoding != 0x4U || rexX;
+                    if ((mode == 0 && baseEncoding == 0x5U) ||
+                        (opcode == 0x89U && hasIndex)) {
                         throw DecodeError(
                             address, remaining,
-                            "only no-index SIB addressing is supported for MOV");
+                            "unsupported MOV SIB addressing form");
                     }
                     base = decodeRegister(baseEncoding, rexB);
+                    if (hasIndex) {
+                        index = decodeRegister(indexEncoding, rexX);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                } else if (rexX) {
+                    throw DecodeError(address, remaining,
+                                      "REX.X requires a SIB operand for MOV");
                 }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
@@ -1760,7 +1770,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     instruction.opcode = Opcode::MovRegMem;
                     instruction.operands.push_back(RegisterOperand{reg, operandWidth});
                     instruction.operands.push_back(
-                        MemoryOperand{base, displacement, operandWidth});
+                        MemoryOperand{base, displacement, operandWidth, index, scale});
                 }
             }
         } else if (opcode == 0x84U) {

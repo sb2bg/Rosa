@@ -182,6 +182,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", [" << x86::registerName(memory.base);
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
