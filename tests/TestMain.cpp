@@ -507,6 +507,23 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("and8_register_immediate",
+                             CaseId::and8_register_immediate,
+                             differentialBytes_and8_register_immediate);
+        testCase.request.state.rcx = 0x1122334455667781ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "and8_register_immediate_zero",
+            CaseId::and8_register_immediate_zero,
+            differentialBytes_and8_register_immediate_zero);
+        testCase.request.state.rcx = 0x1122334455667780ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("and8_register", CaseId::and8_register,
                              differentialBytes_and8_register);
         testCase.request.state.rax = 0x1122334455667780ULL;
@@ -10194,6 +10211,64 @@ void testAnd8BitAccumulatorImmediate() {
                 "AND AL, imm8 zero defined flags differ");
 }
 
+void testAnd8BitRegisterImmediate() {
+    constexpr std::array<std::uint8_t, 4> code{0x80, 0xE1, 0x7F, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegImm,
+           "AND r8, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "AND r8, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 8 && immediate.width == 8 &&
+               immediate.value == 0x7F,
+           "AND CL, imm8 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("and cl, 0x7f") !=
+               std::string::npos,
+           "AND CL, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rcx = 0x1122334455667781ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x1122334455667701ULL},
+                "AND CL immediate did not preserve upper RCX bytes");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0},
+                "AND CL immediate nonzero defined flags differ");
+
+    state.rcx = 0x1122334455667780ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x1122334455667700ULL},
+                "AND CL immediate zero result differs");
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "AND CL immediate zero defined flags differ");
+
+    constexpr std::array<std::uint8_t, 3> legacyHighByte{
+        0x80, 0xE4, 0x7F};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            legacyHighByte, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected,
+           "AND silently treated legacy AH as a representable low byte");
+}
+
 void testAnd32BitRegisterImmediate() {
     constexpr std::array<std::uint8_t, 8> code{
         0x41, 0x81, 0xE7, 0xFF, 0x0F, 0x00, 0x00, 0xC3};
@@ -11639,6 +11714,7 @@ int main() {
         {"BSF 64-bit registers", testBitScanForward64},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
         {"AND 8-bit accumulator immediate", testAnd8BitAccumulatorImmediate},
+        {"AND 8-bit register immediate", testAnd8BitRegisterImmediate},
         {"AND 32-bit register immediate", testAnd32BitRegisterImmediate},
         {"guest address space", testGuestAddressSpace},
         {"guest failure report", testGuestFailureReport},
