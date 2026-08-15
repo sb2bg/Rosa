@@ -31,6 +31,17 @@ ValueId Builder::readGuestRegister(x86::Register reg, Width width, guest::GuestA
     return result;
 }
 
+ValueId Builder::readGuestGsBase(guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ReadGuestGsBase,
+        .width = Width::I64,
+        .guestRip = rip,
+        .result = result,
+    });
+    return result;
+}
+
 void Builder::writeGuestRegister(x86::Register reg, ValueId value, Width width,
                                  guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -622,6 +633,7 @@ std::vector<std::string> verify(const Block &block) {
         switch (operation.opcode) {
         case Opcode::Constant:
         case Opcode::ReadGuestReg:
+        case Opcode::ReadGuestGsBase:
             break;
         case Opcode::ReadGuestXmmLane:
             if (!operation.guestXmmRegister) {

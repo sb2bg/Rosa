@@ -105,16 +105,22 @@ struct ImmediateOperand {
     std::uint8_t width{};
 };
 
+enum class Segment {
+    None,
+    Gs,
+};
+
 struct MemoryOperand {
     MemoryOperand() = default;
     MemoryOperand(Register baseValue, std::int64_t displacementValue,
                   std::uint8_t widthValue,
                   std::optional<Register> indexValue = std::nullopt,
                   std::uint8_t scaleValue = 1, bool hasBaseValue = true,
-                  bool ripRelativeValue = false)
+                  bool ripRelativeValue = false,
+                  Segment segmentValue = Segment::None)
         : base(baseValue), displacement(displacementValue), width(widthValue),
           index(indexValue), scale(scaleValue), hasBase(hasBaseValue),
-          ripRelative(ripRelativeValue) {}
+          ripRelative(ripRelativeValue), segment(segmentValue) {}
 
     Register base{};
     std::int64_t displacement{};
@@ -123,6 +129,7 @@ struct MemoryOperand {
     std::uint8_t scale{1};
     bool hasBase{true};
     bool ripRelative{};
+    Segment segment{Segment::None};
 };
 
 struct XmmRegisterOperand {

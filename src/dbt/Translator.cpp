@@ -1039,13 +1039,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
-            auto address = memory.ripRelative
-                               ? builder.constant(
-                                     instruction.address.value + instruction.length,
-                                     ir::Width::I64, instruction.address)
-                               : builder.readGuestRegister(
-                                     memory.base, ir::Width::I64,
-                                     instruction.address);
+            std::optional<ir::ValueId> address;
+            if (memory.ripRelative) {
+                address = builder.constant(
+                    instruction.address.value + instruction.length,
+                    ir::Width::I64, instruction.address);
+            } else if (memory.hasBase) {
+                address = builder.readGuestRegister(
+                    memory.base, ir::Width::I64, instruction.address);
+            }
             if (memory.index) {
                 auto index = builder.readGuestRegister(
                     *memory.index, ir::Width::I64, instruction.address);
@@ -1054,20 +1056,33 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                         index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
                         ir::Width::I64, instruction.address);
                 }
-                address = builder.add(address, index, ir::Width::I64,
-                                      instruction.address);
+                address = address ? builder.add(*address, index, ir::Width::I64,
+                                                instruction.address)
+                                  : index;
             }
             if (memory.displacement != 0) {
                 const auto displacement = builder.constant(
                     static_cast<std::uint64_t>(memory.displacement),
                     ir::Width::I64, instruction.address);
-                address = builder.add(address, displacement, ir::Width::I64,
-                                      instruction.address);
+                address = address ? builder.add(*address, displacement,
+                                                ir::Width::I64,
+                                                instruction.address)
+                                  : displacement;
+            }
+            if (memory.segment == x86::Segment::Gs) {
+                const auto gsBase = builder.readGuestGsBase(instruction.address);
+                address = address ? builder.add(gsBase, *address, ir::Width::I64,
+                                                instruction.address)
+                                  : gsBase;
+            }
+            if (!address) {
+                address = builder.constant(0, ir::Width::I64,
+                                           instruction.address);
             }
             const auto width = destination.width == 8   ? ir::Width::I8
                                : destination.width == 32 ? ir::Width::I32
                                                          : ir::Width::I64;
-            const auto value = builder.loadGuest(address, width, instruction.address);
+            const auto value = builder.loadGuest(*address, width, instruction.address);
             builder.writeGuestRegister(destination.reg, value, width,
                                        instruction.address);
             break;
@@ -2278,6 +2293,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     hostRegister(*operation.result), arm64::x0,
                     static_cast<std::uint32_t>(x86::registerOffset(*operation.guestRegister)));
             }
+            break;
+        case ir::Opcode::ReadGuestGsBase:
+            assembler.ldr(hostRegister(*operation.result), arm64::x0,
+                          static_cast<std::uint32_t>(
+                              offsetof(x86::X86State, gsBase)));
             break;
         case ir::Opcode::ReadGuestXmmLane:
             assembler.ldr(hostRegister(*operation.result), arm64::x0,

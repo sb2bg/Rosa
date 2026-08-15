@@ -192,9 +192,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", [";
+            if (memory.segment == x86::Segment::Gs) {
+                stream << "gs:";
+            }
             if (memory.ripRelative) {
                 stream << "rip";
-            } else {
+            } else if (memory.hasBase) {
                 stream << x86::registerName(memory.base);
             }
             if (memory.index) {
@@ -204,7 +207,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
-                stream << "+0x" << memory.displacement;
+                if (memory.hasBase || memory.index || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
             }
             stream << ']';
             if (memory.ripRelative) {
@@ -860,6 +866,9 @@ std::string dumpIr(const ir::Block &block) {
             stream << "read_guest_reg." << widthName(operation.width) << ' '
                    << x86::registerName(*operation.guestRegister);
             break;
+        case ir::Opcode::ReadGuestGsBase:
+            stream << "read_guest_gs_base.i64";
+            break;
         case ir::Opcode::ReadGuestXmmLane:
             stream << "read_guest_xmm_lane.i64 "
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << '.'
@@ -1113,7 +1122,8 @@ std::string dumpGuestFailure(std::string_view imageHint, const std::exception &e
     }
     stream << "\n  reason: " << error.what() << '\n'
            << "  RIP=0x" << std::hex << state.rip << " RSP=0x" << state.rsp
-           << " RFLAGS=0x" << state.rflags << '\n'
+           << " RFLAGS=0x" << state.rflags << " GSBASE=0x" << state.gsBase
+           << '\n'
            << "  GPRs: RAX=0x" << state.rax << " RBX=0x" << state.rbx << " RCX=0x"
            << state.rcx << " RDX=0x" << state.rdx << " RSI=0x" << state.rsi << " RDI=0x"
            << state.rdi << " RBP=0x" << state.rbp << '\n'

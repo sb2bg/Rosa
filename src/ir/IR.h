@@ -26,6 +26,7 @@ struct ValueId {
 enum class Opcode {
     Constant,
     ReadGuestReg,
+    ReadGuestGsBase,
     WriteGuestReg,
     ConditionalMoveGuestReg,
     ReadGuestXmmLane,
@@ -106,6 +107,7 @@ class Builder {
 
     ValueId constant(std::uint64_t value, Width width, guest::GuestAddress rip);
     ValueId readGuestRegister(x86::Register reg, Width width, guest::GuestAddress rip);
+    ValueId readGuestGsBase(guest::GuestAddress rip);
     void writeGuestRegister(x86::Register reg, ValueId value, Width width, guest::GuestAddress rip);
     void conditionalMoveGuestRegister(x86::Register destination,
                                       x86::Register source,

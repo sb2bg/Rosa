@@ -1471,6 +1471,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             return result;
         }
 
+        const bool hasGsOverride = code[cursor] == 0x65U;
+        if (hasGsOverride) {
+            ++cursor;
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining,
+                                  "truncated after GS segment override");
+            }
+        }
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         if (!hasRex && code[cursor] != 0x24U && code[cursor] != 0x34U &&
             code[cursor] != 0x88U &&
@@ -1504,6 +1512,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto opcode = code[cursor++];
+        if (hasGsOverride && opcode != 0x8BU) {
+            throw DecodeError(address, remaining,
+                              "GS segment override is only supported for MOV r32, r/m32");
+        }
         if (!rexW && opcode != 0x24U && opcode != 0x34U &&
             opcode != 0x88U && opcode != 0x89U &&
             opcode != 0x8AU &&
@@ -2177,7 +2189,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     address, cursor - instructionStart, displacement));
                 const auto memory = MemoryOperand{
                     Register::Rax, displacement, operandWidth, std::nullopt, 1,
-                    false, true};
+                    false, true,
+                    hasGsOverride ? Segment::Gs : Segment::None};
                 if (opcode == 0x89U) {
                     instruction.opcode = Opcode::MovMemReg;
                     instruction.operands.push_back(memory);
@@ -2187,7 +2200,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     instruction.operands.push_back(RegisterOperand{reg, operandWidth});
                     instruction.operands.push_back(memory);
                 }
-            } else if (mode == 0x3U && !rexX) {
+            } else if (mode == 0x3U && !rexX && !hasGsOverride) {
                 instruction.opcode = Opcode::MovRegReg;
                 instruction.operands.push_back(
                     RegisterOperand{opcode == 0x89U ? rm : reg, operandWidth});
@@ -2203,6 +2216,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 auto base = rm;
                 std::optional<Register> index;
                 std::uint8_t scale = 1;
+                bool hasBase = true;
                 if (rmEncoding == 0x4U) {
                     if (cursor >= code.size()) {
                         throw DecodeError(address, remaining, "truncated MOV memory SIB");
@@ -2214,20 +2228,31 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
                     const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
                     const bool hasIndex = indexEncoding != 0x4U || rexX;
-                    if ((mode == 0 && baseEncoding == 0x5U) ||
+                    const bool noBase = mode == 0 && baseEncoding == 0x5U;
+                    if ((noBase && (!hasGsOverride || opcode != 0x8BU || hasIndex)) ||
                         (opcode == 0x89U && hasIndex)) {
                         throw DecodeError(
                             address, remaining,
                             "unsupported MOV SIB addressing form");
                     }
-                    base = decodeRegister(baseEncoding, rexB);
+                    hasBase = !noBase;
+                    if (hasBase) {
+                        base = decodeRegister(baseEncoding, rexB);
+                    }
                     if (hasIndex) {
                         index = decodeRegister(indexEncoding, rexX);
                         scale = static_cast<std::uint8_t>(1U << scaleBits);
                     }
                 }
                 std::int64_t displacement = 0;
-                if (mode == 0x1U) {
+                if (!hasBase) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated no-base MOV SIB displacement");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                } else if (mode == 0x1U) {
                     if (cursor >= code.size()) {
                         throw DecodeError(address, remaining,
                                           "truncated MOV memory disp8");
@@ -2250,7 +2275,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     instruction.opcode = Opcode::MovRegMem;
                     instruction.operands.push_back(RegisterOperand{reg, operandWidth});
                     instruction.operands.push_back(
-                        MemoryOperand{base, displacement, operandWidth, index, scale});
+                        MemoryOperand{
+                            base, displacement, operandWidth, index, scale,
+                            hasBase, false,
+                            hasGsOverride ? Segment::Gs : Segment::None});
                 }
             }
         } else if (opcode == 0x84U) {

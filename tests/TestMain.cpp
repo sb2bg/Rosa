@@ -3598,6 +3598,88 @@ void testMovGuestMemoryToRegister() {
                 "failed guest-memory load changed the destination register");
 }
 
+void testMovGuestGsMemoryTo32BitRegister() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x65, 0x8B, 0x0C, 0x25, 0x18, 0x00, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegMem,
+           "GS MOV r32, [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "GS MOV instruction length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 32,
+           "GS MOV destination differs");
+    expect(memory.segment == rosa::x86::Segment::Gs && !memory.hasBase &&
+               !memory.index && !memory.ripRelative && memory.width == 32 &&
+               memory.displacement == 0x18,
+           "GS MOV memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("mov ecx, [gs:0x18]") !=
+               std::string::npos,
+           "GS MOV dump differs");
+
+    constexpr rosa::guest::GuestAddress tsdBase{0x8000};
+    constexpr std::array threadSelfBytes{
+        std::uint8_t{0x78}, std::uint8_t{0x56}, std::uint8_t{0x34},
+        std::uint8_t{0x12}};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(tsdBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(rosa::guest::GuestAddress{tsdBase.value + 0x18},
+                            threadSelfBytes);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("read_guest_gs_base.i64") !=
+               std::string::npos,
+           "GS MOV did not lower the guest segment base through IR");
+    rosa::x86::X86State state;
+    state.gsBase = tsdBase.value;
+    state.rcx = UINT64_MAX;
+    state.rdi = 0x1111111111111111ULL;
+    state.rsp = 0x2222222222222222ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rcx, std::uint64_t{0x12345678},
+                "GS MOV did not zero-extend the guest dword");
+    expectEqual(state.gsBase, tsdBase.value, "GS MOV changed the guest GS base");
+    expectEqual(state.rdi, std::uint64_t{0x1111111111111111ULL},
+                "GS MOV used an unrelated GPR as its address base");
+    expectEqual(state.rsp, std::uint64_t{0x2222222222222222ULL},
+                "GS MOV used the host or guest stack");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "GS MOV changed flags");
+
+    rosa::guest::AddressSpace nonReadableAddressSpace;
+    nonReadableAddressSpace.mapAnonymous(
+        tsdBase, rosa::guest::guestPageSize, rosa::guest::Permission::Write);
+    rosa::x86::X86State faultState;
+    faultState.gsBase = tsdBase.value;
+    faultState.rcx = 0xAAAAAAAA55555555ULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &nonReadableAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "GS MOV from non-readable guest memory did not fault");
+    expectEqual(faultState.rcx, std::uint64_t{0xAAAAAAAA55555555ULL},
+                "failed GS MOV changed the destination");
+    expectEqual(faultState.gsBase, tsdBase.value,
+                "failed GS MOV changed the guest GS base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed GS MOV changed flags");
+}
+
 void testMovGuestMemoryToRegisterWithNoIndexSib() {
     constexpr std::array<std::uint8_t, 6> code{
         0x49, 0x8B, 0x74, 0x24, 0xE0, 0xC3};
@@ -8046,6 +8128,8 @@ int main() {
         {"MOV word immediate to guest memory", testMovWordImmediateToGuestMemory},
         {"MOV word register to guest memory", testMovWordRegisterToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
+        {"MOV guest GS memory to 32-bit register",
+         testMovGuestGsMemoryTo32BitRegister},
         {"MOV guest memory to register with no-index SIB",
          testMovGuestMemoryToRegisterWithNoIndexSib},
         {"MOV guest memory to 32-bit register with scaled index",
