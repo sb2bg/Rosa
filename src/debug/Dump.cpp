@@ -989,6 +989,26 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               instruction.operands[1])
                               .reg);
             break;
+        case x86::Opcode::MovdqaMemReg: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "movdqa [" << x86::registerName(memory.base);
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
+        }
         case x86::Opcode::MovdqaRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << "movdqa "
