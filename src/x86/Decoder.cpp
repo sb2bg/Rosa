@@ -3622,10 +3622,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 (extension != 0x0U && extension != 0x2U &&
                  extension != 0x3U &&
                  extension != 0x4U) ||
-                ((extension == 0x3U || extension == 0x4U) && !rexW) ||
+                (extension == 0x4U && !rexW) ||
                 (extension != 0x0U && (rexR || rexX))) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct TEST /0, NOT /2, and r64 NEG /3 or MUL /4 from opcode F7 are supported");
+                                  "only register-direct TEST /0, NOT /2, r32/r64 NEG /3, and r64 MUL /4 from opcode F7 are supported");
             }
             instruction.opcode = extension == 0x0U   ? Opcode::TestRegImm
                                  : extension == 0x2U ? Opcode::NotReg

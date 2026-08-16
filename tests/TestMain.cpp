@@ -1310,6 +1310,18 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("neg32_zero_extend", CaseId::neg32_zero_extend,
+                             differentialBytes_neg32_zero_extend);
+        testCase.request.state.rcx = 0xAAAAAAAA00000001ULL;
+        run(testCase);
+    }
+    {
+        auto testCase = make("neg32_overflow", CaseId::neg32_overflow,
+                             differentialBytes_neg32_overflow);
+        testCase.request.state.rcx = 0xBBBBBBBB80000000ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("shrd64_many", CaseId::shrd64_many,
                              differentialBytes_shrd64_many);
         testCase.request.state.rax = 0x0123456789ABCDEFULL;
@@ -9090,6 +9102,42 @@ void testNeg64GeneratedExecution() {
                 "NEG minimum result differs");
     expectEqual(overflow.rflags, std::uint64_t{0x887},
                 "NEG minimum flags differ");
+
+    constexpr std::array<std::uint8_t, 3> code32{0xF7, 0xD9, 0xC3};
+    const auto decoded32 =
+        decoder.decodeBlock(code32, rosa::guest::GuestAddress{0x2000});
+    expect(decoded32[0].opcode == rosa::x86::Opcode::NegReg,
+           "NEG r32 opcode differs");
+    expectEqual(decoded32[0].length, std::uint8_t{2},
+                "NEG r32 length differs");
+    const auto operand32 =
+        std::get<rosa::x86::RegisterOperand>(decoded32[0].operands[0]);
+    expect(operand32.reg == rosa::x86::Register::Rcx &&
+               operand32.width == 32,
+           "NEG ecx operand differs");
+    expect(rosa::debug::dumpX86(decoded32).find("neg ecx") !=
+               std::string::npos,
+           "NEG ecx dump differs");
+
+    const auto block32 =
+        translator.translate(code32, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State one32;
+    one32.rcx = 0xAAAAAAAA00000001ULL;
+    one32.rflags = 0;
+    static_cast<void>(block32.execute(one32));
+    expectEqual(one32.rcx, std::uint64_t{UINT32_MAX},
+                "NEG r32 result or zero extension differs");
+    expectEqual(one32.rflags, std::uint64_t{0x97},
+                "NEG r32 one flags differ");
+
+    rosa::x86::X86State overflow32;
+    overflow32.rcx = 0xBBBBBBBB80000000ULL;
+    overflow32.rflags = 0;
+    static_cast<void>(block32.execute(overflow32));
+    expectEqual(overflow32.rcx, std::uint64_t{0x80000000},
+                "NEG r32 minimum result or zero extension differs");
+    expectEqual(overflow32.rflags, std::uint64_t{0x887},
+                "NEG r32 minimum flags differ");
 }
 
 void testUnsignedMultiplyGeneratedExecution() {

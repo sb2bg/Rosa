@@ -2577,14 +2577,16 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 throw std::runtime_error("internal decoder error: neg operand count");
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
-            const auto zero = builder.constant(0, ir::Width::I64, instruction.address);
+            const auto width = reg.width == 32 ? ir::Width::I32
+                                               : ir::Width::I64;
+            const auto zero = builder.constant(0, width, instruction.address);
             const auto original = builder.readGuestRegister(
-                reg.reg, ir::Width::I64, instruction.address);
-            const auto result = builder.sub(zero, original, ir::Width::I64,
+                reg.reg, width, instruction.address);
+            const auto result = builder.sub(zero, original, width,
                                             instruction.address);
-            builder.writeGuestRegister(reg.reg, result, ir::Width::I64,
+            builder.writeGuestRegister(reg.reg, result, width,
                                        instruction.address);
-            builder.updateSubFlags(zero, original, result, ir::Width::I64,
+            builder.updateSubFlags(zero, original, result, width,
                                    instruction.address);
             break;
         }
