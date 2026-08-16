@@ -21,6 +21,7 @@ constexpr std::uint64_t flagAuxiliaryCarry = 1U << 4U;
 constexpr std::uint64_t flagZero = 1U << 6U;
 constexpr std::uint64_t flagSign = 1U << 7U;
 constexpr std::uint64_t flagOverflow = 1U << 11U;
+constexpr std::uint64_t flagDirection = 1U << 10U;
 constexpr std::uint64_t arithmeticFlagMask =
     flagCarry | flagParity | flagAuxiliaryCarry | flagZero | flagSign | flagOverflow;
 
@@ -430,6 +431,38 @@ loadGuest8(GuestExecutionContext *context, x86::X86State *state, std::uint64_t a
         if (context != nullptr) {
             context->fault = std::current_exception();
             context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint8_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+repeatMoveByte(GuestExecutionContext *context, x86::X86State *state) noexcept {
+    std::uint64_t currentAddress = state != nullptr ? state->rsi : 0;
+    try {
+        if (context == nullptr || context->addressSpace == nullptr ||
+            state == nullptr) {
+            throw std::runtime_error(
+                "generated REP MOVSB has no guest execution context");
+        }
+        const auto decrement = (state->rflags & flagDirection) != 0;
+        while (state->rcx != 0) {
+            currentAddress = state->rsi;
+            const auto value = context->addressSpace->readBytes(
+                guest::GuestAddress{currentAddress}, 1);
+            currentAddress = state->rdi;
+            context->addressSpace->writeBytes(
+                guest::GuestAddress{currentAddress}, value);
+            state->rsi = decrement ? state->rsi - 1U : state->rsi + 1U;
+            state->rdi = decrement ? state->rdi - 1U : state->rdi + 1U;
+            --state->rcx;
+        }
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{currentAddress};
             context->faultSize = sizeof(std::uint8_t);
         }
         return nullptr;
@@ -3334,6 +3367,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
         case x86::Opcode::Lfence:
             builder.loadFence(instruction.address);
             break;
+        case x86::Opcode::RepMovsb:
+            builder.repeatMoveByte(instruction.address);
+            break;
         case x86::Opcode::Rdtsc:
             builder.readTimestampCounter(instruction.address);
             break;
@@ -3456,6 +3492,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::ShuffleXmmDwords ||
                          operation.opcode == ir::Opcode::BitScanForward ||
                          operation.opcode == ir::Opcode::BitScanReverse ||
+                         operation.opcode == ir::Opcode::RepeatMoveByte ||
                          operation.opcode == ir::Opcode::LoadGuest ||
                          operation.opcode == ir::Opcode::ReadTimestampCounter;
         hasExecutionContextCall |= operation.opcode == ir::Opcode::Push ||
@@ -3472,6 +3509,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    operation.opcode == ir::Opcode::StoreGuestXmm ||
                                    operation.opcode == ir::Opcode::LoadGuestXmm ||
                                    operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
+                                   operation.opcode == ir::Opcode::RepeatMoveByte ||
                                    operation.opcode == ir::Opcode::LoadGuest ||
                                    operation.opcode == ir::Opcode::ReadTimestampCounter;
     }
@@ -3730,6 +3768,24 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    static_cast<std::uint64_t>(BlockExit::MemoryFault));
             assembler.ret();
             assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::RepeatMoveByte: {
+            const auto fault = assembler.makeLabel();
+            const auto completed = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&repeatMoveByte));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(completed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(
+                arm64::x0,
+                static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(completed);
             break;
         }
         case ir::Opcode::AddGuestMemory: {

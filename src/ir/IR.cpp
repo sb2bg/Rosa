@@ -438,6 +438,14 @@ void Builder::bitScanReverse(x86::Register destination, x86::Register source,
     });
 }
 
+void Builder::repeatMoveByte(guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::RepeatMoveByte,
+        .width = Width::I8,
+        .guestRip = rip,
+    });
+}
+
 void Builder::push(ValueId newStackPointer, ValueId value, Width width,
                    guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -874,6 +882,11 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::EvaluateCondition:
             if (!operation.condition) {
                 errors.emplace_back("evaluate_condition has no condition");
+            }
+            break;
+        case Opcode::RepeatMoveByte:
+            if (operation.width != Width::I8) {
+                errors.emplace_back("repeat_move_byte requires i8");
             }
             break;
         case Opcode::Push:

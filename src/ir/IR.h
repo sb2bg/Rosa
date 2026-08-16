@@ -56,6 +56,7 @@ enum class Opcode {
     ShuffleXmmDwords,
     BitScanForward,
     BitScanReverse,
+    RepeatMoveByte,
     Push,
     AddGuestMemory,
     ShiftLeftGuestMemory,
@@ -173,6 +174,7 @@ class Builder {
                         Width width, guest::GuestAddress rip);
     void bitScanReverse(x86::Register destination, x86::Register source,
                         Width width, guest::GuestAddress rip);
+    void repeatMoveByte(guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void addGuestMemory(ValueId address, ValueId source, Width width,
                         guest::GuestAddress rip);

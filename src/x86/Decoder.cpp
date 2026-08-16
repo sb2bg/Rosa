@@ -1617,6 +1617,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0xF3U && code.size() - cursor >= 2 &&
+            code[cursor + 1] == 0xA4U) {
+            instruction.opcode = Opcode::RepMovsb;
+            instruction.length = 2;
+            instruction.bytes[0] = code[cursor];
+            instruction.bytes[1] = code[cursor + 1];
+            result.push_back(std::move(instruction));
+            cursor += 2;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0xF3U && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x7FU) {
             if (code.size() - cursor < 4) {

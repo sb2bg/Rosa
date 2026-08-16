@@ -81,6 +81,7 @@ Lcapture:
     movq %r15, _rosa_oracle_output+120(%rip)
     pushfq
     popq _rosa_oracle_output+136(%rip)
+    cld
     movdqu %xmm0, _rosa_oracle_output+144(%rip)
     movdqu %xmm1, _rosa_oracle_output+160(%rip)
     movdqu %xmm2, _rosa_oracle_output+176(%rip)

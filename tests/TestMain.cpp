@@ -75,6 +75,7 @@ constexpr std::uint64_t auxiliaryFlag = 1U << 4U;
 constexpr std::uint64_t zeroFlag = 1U << 6U;
 constexpr std::uint64_t signFlag = 1U << 7U;
 constexpr std::uint64_t overflowFlag = 1U << 11U;
+constexpr std::uint64_t directionFlag = 1U << 10U;
 constexpr std::uint64_t arithmeticFlags =
     carryFlag | parityFlag | auxiliaryFlag | zeroFlag | signFlag | overflowFlag;
 constexpr std::uint64_t logicDefinedFlags =
@@ -212,6 +213,14 @@ rosa::differential::Result runRosaDifferential(const DifferentialCase &testCase)
             static_cast<rosa::x86::Register>(testCase.request.memoryBaseRegister),
             memoryBase.value + testCase.request.memoryBaseOffset);
     }
+    if (testCase.request.memorySecondBaseRegister !=
+        rosa::differential::noRegister) {
+        setRegisterValue(
+            state,
+            static_cast<rosa::x86::Register>(
+                testCase.request.memorySecondBaseRegister),
+            memoryBase.value + testCase.request.memorySecondBaseOffset);
+    }
     if (testCase.request.codePointerMemoryOffset != rosa::differential::noOffset) {
         addressSpace.writeU64(
             rosa::guest::GuestAddress{memoryBase.value +
@@ -254,6 +263,30 @@ void compareDifferentialResult(const DifferentialCase &testCase,
                 hexadecimal(expected) + " but Rosa produced " + hexadecimal(actual));
         }
     }
+
+    const auto compareBoundRegisterDelta =
+        [&](std::uint8_t encoded, std::string_view role) {
+            if (encoded == rosa::differential::noRegister) {
+                return;
+            }
+            const auto reg = static_cast<rosa::x86::Register>(encoded);
+            const auto expected = registerValue(oracle.final, reg) -
+                                  registerValue(oracle.initial, reg);
+            const auto actual = registerValue(rosaResult.final, reg) -
+                                registerValue(rosaResult.initial, reg);
+            if (actual != expected) {
+                throw std::runtime_error(
+                    std::string(testCase.name) + ": normalized " +
+                    std::string(role) + " delta for " +
+                    std::string(rosa::x86::registerName(reg)) + " expected " +
+                    hexadecimal(expected) + " but Rosa produced " +
+                    hexadecimal(actual));
+            }
+        };
+    compareBoundRegisterDelta(testCase.request.memoryBaseRegister,
+                              "memory base");
+    compareBoundRegisterDelta(testCase.request.memorySecondBaseRegister,
+                              "second memory base");
 
     const auto expectedFlags = oracle.final.rflags & testCase.flagMask;
     const auto actualFlags = rosaResult.final.rflags & testCase.flagMask;
@@ -332,6 +365,15 @@ void testRosettaDifferentialSemantics() {
                                std::uint32_t offset) {
         testCase.request.memoryBaseRegister = static_cast<std::uint8_t>(reg);
         testCase.request.memoryBaseOffset = offset;
+        testCase.gprMask = static_cast<std::uint16_t>(
+            testCase.gprMask & ~(1U << static_cast<unsigned>(reg)));
+    };
+    const auto bindSecondMemory = [](DifferentialCase &testCase,
+                                     rosa::x86::Register reg,
+                                     std::uint16_t offset) {
+        testCase.request.memorySecondBaseRegister =
+            static_cast<std::uint8_t>(reg);
+        testCase.request.memorySecondBaseOffset = offset;
         testCase.gprMask = static_cast<std::uint16_t>(
             testCase.gprMask & ~(1U << static_cast<unsigned>(reg)));
     };
@@ -1319,6 +1361,46 @@ void testRosettaDifferentialSemantics() {
         auto testCase = make("neg32_overflow", CaseId::neg32_overflow,
                              differentialBytes_neg32_overflow);
         testCase.request.state.rcx = 0xBBBBBBBB80000000ULL;
+        run(testCase);
+    }
+    {
+        auto testCase = make("rep_movsb_forward", CaseId::rep_movsb_forward,
+                             differentialBytes_rep_movsb_forward);
+        bindMemory(testCase, rosa::x86::Register::Rsi, 0x10);
+        bindSecondMemory(testCase, rosa::x86::Register::Rdi, 0x40);
+        testCase.request.state.rcx = 6;
+        constexpr std::array<std::uint8_t, 6> value{1, 2, 3, 4, 5, 6};
+        std::ranges::copy(value, testCase.request.memory.begin() + 0x10);
+        testCase.memoryCompareOffset = 0x40;
+        testCase.memoryCompareSize = value.size();
+        testCase.flagMask = arithmeticFlags | directionFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("rep_movsb_backward", CaseId::rep_movsb_backward,
+                             differentialBytes_rep_movsb_backward);
+        bindMemory(testCase, rosa::x86::Register::Rsi, 0x15);
+        bindSecondMemory(testCase, rosa::x86::Register::Rdi, 0x45);
+        testCase.request.state.rcx = 6;
+        testCase.request.state.rflags |= directionFlag;
+        constexpr std::array<std::uint8_t, 6> value{7, 8, 9, 10, 11, 12};
+        std::ranges::copy(value, testCase.request.memory.begin() + 0x10);
+        testCase.memoryCompareOffset = 0x40;
+        testCase.memoryCompareSize = value.size();
+        testCase.flagMask = arithmeticFlags | directionFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("rep_movsb_overlap", CaseId::rep_movsb_overlap,
+                             differentialBytes_rep_movsb_overlap);
+        bindMemory(testCase, rosa::x86::Register::Rsi, 0x10);
+        bindSecondMemory(testCase, rosa::x86::Register::Rdi, 0x12);
+        testCase.request.state.rcx = 6;
+        constexpr std::array<std::uint8_t, 8> value{1, 2, 3, 4, 5, 6, 7, 8};
+        std::ranges::copy(value, testCase.request.memory.begin() + 0x10);
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = value.size();
+        testCase.flagMask = arithmeticFlags | directionFlag;
         run(testCase);
     }
     {
@@ -9140,6 +9222,144 @@ void testNeg64GeneratedExecution() {
                 "NEG r32 minimum flags differ");
 }
 
+void testRepMovsbGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0xF3, 0xA4, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded =
+        decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::RepMovsb,
+           "REP MOVSB opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2},
+                "REP MOVSB length differs");
+    expect(rosa::debug::dumpX86(decoded).find("rep movsb") !=
+               std::string::npos,
+           "REP MOVSB x86 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block =
+        translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "repeat_move_byte") != std::string::npos,
+           "REP MOVSB IR dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryPage{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 6> forwardBytes{1, 2, 3, 4, 5, 6};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8010}, forwardBytes);
+    rosa::x86::X86State forward;
+    forward.rsi = 0x8010;
+    forward.rdi = 0x8040;
+    forward.rcx = forwardBytes.size();
+    forward.rflags = 0x8D7;
+    static_cast<void>(block.execute(forward, &addressSpace));
+    expect(addressSpace.readBytes(rosa::guest::GuestAddress{0x8040},
+                                  forwardBytes.size()) ==
+               std::vector<std::uint8_t>(forwardBytes.begin(),
+                                         forwardBytes.end()),
+           "REP MOVSB forward bytes differ");
+    expectEqual(forward.rsi, std::uint64_t{0x8016},
+                "REP MOVSB forward RSI differs");
+    expectEqual(forward.rdi, std::uint64_t{0x8046},
+                "REP MOVSB forward RDI differs");
+    expectEqual(forward.rcx, std::uint64_t{0},
+                "REP MOVSB forward count differs");
+    expectEqual(forward.rflags, std::uint64_t{0x8D7},
+                "REP MOVSB forward changed flags");
+
+    constexpr std::array<std::uint8_t, 6> backwardBytes{7, 8, 9, 10, 11, 12};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8050}, backwardBytes);
+    rosa::x86::X86State backward;
+    backward.rsi = 0x8055;
+    backward.rdi = 0x8085;
+    backward.rcx = backwardBytes.size();
+    backward.rflags = 0xCD7;
+    static_cast<void>(block.execute(backward, &addressSpace));
+    expect(addressSpace.readBytes(rosa::guest::GuestAddress{0x8080},
+                                  backwardBytes.size()) ==
+               std::vector<std::uint8_t>(backwardBytes.begin(),
+                                         backwardBytes.end()),
+           "REP MOVSB backward bytes differ");
+    expectEqual(backward.rsi, std::uint64_t{0x804F},
+                "REP MOVSB backward RSI differs");
+    expectEqual(backward.rdi, std::uint64_t{0x807F},
+                "REP MOVSB backward RDI differs");
+    expectEqual(backward.rcx, std::uint64_t{0},
+                "REP MOVSB backward count differs");
+    expectEqual(backward.rflags, std::uint64_t{0xCD7},
+                "REP MOVSB backward changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State zeroCount;
+    zeroCount.rsi = 1;
+    zeroCount.rdi = 2;
+    zeroCount.rcx = 0;
+    zeroCount.rflags = 0x8D7;
+    static_cast<void>(block.execute(zeroCount, &unmappedAddressSpace));
+    expectEqual(zeroCount.rsi, std::uint64_t{1},
+                "zero-count REP MOVSB changed RSI");
+    expectEqual(zeroCount.rdi, std::uint64_t{2},
+                "zero-count REP MOVSB changed RDI");
+    expectEqual(zeroCount.rflags, std::uint64_t{0x8D7},
+                "zero-count REP MOVSB changed flags");
+
+    rosa::x86::X86State sourceFaultState;
+    sourceFaultState.rsi = 0xB000;
+    sourceFaultState.rdi = 0x8040;
+    sourceFaultState.rcx = 1;
+    sourceFaultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(sourceFaultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "REP MOVSB did not report a source read fault");
+    expectEqual(sourceFaultState.rsi, std::uint64_t{0xB000},
+                "source-faulted REP MOVSB changed RSI");
+    expectEqual(sourceFaultState.rdi, std::uint64_t{0x8040},
+                "source-faulted REP MOVSB changed RDI");
+    expectEqual(sourceFaultState.rcx, std::uint64_t{1},
+                "source-faulted REP MOVSB changed RCX");
+    expectEqual(sourceFaultState.rflags, std::uint64_t{0xAD7},
+                "source-faulted REP MOVSB changed flags");
+
+    constexpr rosa::guest::GuestAddress destinationPage{0xA000};
+    addressSpace.mapAnonymous(destinationPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> faultSource{0xAA, 0xBB};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x80F0}, faultSource);
+    rosa::x86::X86State faultState;
+    faultState.rsi = 0x80F0;
+    faultState.rdi = 0xAFFF;
+    faultState.rcx = 2;
+    faultState.rflags = 0x8D7;
+    rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "REP MOVSB did not report its second-byte write fault");
+    expectEqual(addressSpace.readBytes(rosa::guest::GuestAddress{0xAFFF}, 1)
+                    .front(),
+                std::uint8_t{0xAA},
+                "faulted REP MOVSB lost its committed prefix");
+    expectEqual(faultState.rsi, std::uint64_t{0x80F1},
+                "faulted REP MOVSB RSI progress differs");
+    expectEqual(faultState.rdi, std::uint64_t{0xB000},
+                "faulted REP MOVSB RDI progress differs");
+    expectEqual(faultState.rcx, std::uint64_t{1},
+                "faulted REP MOVSB RCX progress differs");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "faulted REP MOVSB changed flags");
+}
+
 void testUnsignedMultiplyGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0xF7, 0xE1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -15237,6 +15457,7 @@ int main() {
         {"SHR CL generated execution", testShiftRightClGeneratedExecution},
         {"NOT 32-bit generated execution", testNot32GeneratedExecution},
         {"NEG 64-bit generated execution", testNeg64GeneratedExecution},
+        {"REP MOVSB generated execution", testRepMovsbGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},

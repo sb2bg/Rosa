@@ -1020,6 +1020,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
+        case x86::Opcode::RepMovsb:
+            stream << "rep movsb";
+            break;
         case x86::Opcode::MovqMemXmm: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << "movq [" << x86::registerName(memory.base);
@@ -1214,6 +1217,9 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::EvaluateCondition:
             stream << "condition." << conditionName(*operation.condition);
+            break;
+        case ir::Opcode::RepeatMoveByte:
+            stream << "repeat_move_byte";
             break;
         case ir::Opcode::Push:
             stream << "push." << widthName(operation.width) << ' ' << valueName(*operation.rhs)

@@ -87,6 +87,7 @@ enum class Opcode {
     MovdquRegMem,
     MovdquMemReg,
     MovqMemXmm,
+    RepMovsb,
     Push,
     Pop,
     Lfence,

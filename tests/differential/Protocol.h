@@ -28,8 +28,8 @@ struct Request {
     x86::X86State state{};
     std::array<std::uint8_t, memorySize> memory{};
     std::uint8_t memoryBaseRegister{noRegister};
-    std::uint8_t reserved0{};
-    std::uint16_t reserved1{};
+    std::uint8_t memorySecondBaseRegister{noRegister};
+    std::uint16_t memorySecondBaseOffset{};
     std::uint32_t memoryBaseOffset{};
     std::uint32_t codePointerMemoryOffset{noOffset};
     std::uint32_t codePointerTargetOffset{};
