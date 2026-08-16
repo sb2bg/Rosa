@@ -49,6 +49,7 @@ enum class Opcode {
     ImulRegRegImm,
     ShrdRegRegImm,
     OrRegReg,
+    OrRegMem,
     OrMemReg,
     OrMemImm,
     OrRegImm,
