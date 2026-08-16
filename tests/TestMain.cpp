@@ -742,6 +742,14 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "nop_multi_byte_disp32", CaseId::nop_multi_byte_disp32,
+            differentialBytes_nop_multi_byte_disp32);
+        testCase.request.state.rax = UINT64_MAX;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
         auto testCase = make("and32_mask", CaseId::and32_mask,
                              differentialBytes_and32_mask);
         testCase.request.state.r15 = 0xFFFFFFFF80000800ULL;
@@ -9259,6 +9267,73 @@ void testLfenceGeneratedExecution() {
            "LFENCE did not emit an ARM64 instruction barrier");
 }
 
+void testMultiByteNopGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF700002C09ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::Nop,
+           "multi-byte NOP opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "multi-byte NOP disp32 length differs");
+    expect(rosa::debug::dumpX86(decoded).find("nop") != std::string::npos,
+           "multi-byte NOP dump differs");
+
+    constexpr std::array<std::uint8_t, 4> registerCode{
+        0x0F, 0x1F, 0xC0, 0xC3};
+    const auto registerDecoded = decoder.decodeBlock(
+        registerCode, rosa::guest::GuestAddress{0x2000});
+    expect(registerDecoded[0].opcode == rosa::x86::Opcode::Nop &&
+               registerDecoded[0].length == 3,
+           "register-encoded multi-byte NOP differs");
+
+    constexpr std::array<std::uint8_t, 6> sibCode{
+        0x0F, 0x1F, 0x44, 0x00, 0x00, 0xC3};
+    const auto sibDecoded = decoder.decodeBlock(
+        sibCode, rosa::guest::GuestAddress{0x3000});
+    expect(sibDecoded[0].opcode == rosa::x86::Opcode::Nop &&
+               sibDecoded[0].length == 5,
+           "SIB disp8 multi-byte NOP length differs");
+
+    constexpr std::array<std::uint8_t, 3> invalidExtension{
+        0x0F, 0x1F, 0xC8};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            invalidExtension, rosa::guest::GuestAddress{0x4000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected, "multi-byte NOP accepted a nonzero ModRM extension");
+
+    constexpr std::array<std::uint8_t, 5> truncated{
+        0x0F, 0x1F, 0x80, 0x00, 0x00};
+    rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            truncated, rosa::guest::GuestAddress{0x5000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected, "truncated multi-byte NOP was accepted");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF700002C09ULL});
+    rosa::x86::X86State state;
+    state.rax = UINT64_MAX;
+    state.rbx = 0x0123456789ABCDEFULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, UINT64_MAX,
+                "multi-byte NOP evaluated its unmapped address");
+    expectEqual(state.rbx, std::uint64_t{0x0123456789ABCDEFULL},
+                "multi-byte NOP changed a guest register");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "multi-byte NOP changed guest flags");
+}
+
 void testRdtscGeneratedExecution() {
     constexpr std::array<std::uint8_t, 3> code{0x0F, 0x31, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -17337,6 +17412,8 @@ int main() {
         {"TEST guest byte immediate generated execution",
          testTestGuestByteImmediateGeneratedExecution},
         {"LFENCE generated execution", testLfenceGeneratedExecution},
+        {"multi-byte NOP generated execution",
+         testMultiByteNopGeneratedExecution},
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},
         {"SHL qword guest memory immediate",

@@ -3962,6 +3962,8 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::Nop:
+            break;
         case x86::Opcode::Lfence:
             builder.loadFence(instruction.address);
             break;

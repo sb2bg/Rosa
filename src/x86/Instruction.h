@@ -101,6 +101,7 @@ enum class Opcode {
     RepMovsb,
     Push,
     Pop,
+    Nop,
     Lfence,
     Rdtsc,
     JmpRelative,

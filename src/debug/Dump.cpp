@@ -1240,6 +1240,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::registerName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
             break;
+        case x86::Opcode::Nop:
+            stream << "nop";
+            break;
         case x86::Opcode::Lfence:
             stream << "lfence";
             break;

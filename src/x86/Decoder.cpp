@@ -451,6 +451,58 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             return result;
         }
 
+        const bool nopHasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+        const auto nopOpcodeOffset = cursor + (nopHasRex ? 1U : 0U);
+        if (code.size() - nopOpcodeOffset >= 2 &&
+            code[nopOpcodeOffset] == 0x0FU &&
+            code[nopOpcodeOffset + 1] == 0x1FU) {
+            auto nopCursor = nopOpcodeOffset + 2;
+            if (nopCursor >= code.size()) {
+                throw DecodeError(address, remaining, "truncated multi-byte NOP");
+            }
+            const auto modrm = code[nopCursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (extension != 0) {
+                throw DecodeError(address, remaining,
+                                  "multi-byte NOP requires ModRM /0");
+            }
+            bool requiresDisp32 = mode == 0 && rmEncoding == 0x5U;
+            if (mode != 0x3U && rmEncoding == 0x4U) {
+                if (nopCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated multi-byte NOP SIB");
+                }
+                const auto sib = code[nopCursor++];
+                requiresDisp32 =
+                    mode == 0 && static_cast<std::uint8_t>(sib & 0x7U) == 0x5U;
+            }
+            const auto displacementSize =
+                mode == 0x1U ? std::size_t{1}
+                : (mode == 0x2U || requiresDisp32) ? std::size_t{4}
+                                                   : std::size_t{0};
+            if (code.size() - nopCursor < displacementSize) {
+                throw DecodeError(address, remaining,
+                                  "truncated multi-byte NOP displacement");
+            }
+            nopCursor += displacementSize;
+            instruction.opcode = Opcode::Nop;
+            const auto length = nopCursor - instructionStart;
+            static_cast<void>(relativeTarget(address, length, 0));
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(
+                code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            cursor = nopCursor;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x0FU && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0xAEU && code[cursor + 2] == 0xE8U) {
             instruction.opcode = Opcode::Lfence;
