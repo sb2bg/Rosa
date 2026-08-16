@@ -26,6 +26,7 @@ constexpr std::uint64_t syscallExit = unixSyscallClass | 1U;
 constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
 constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
+constexpr std::uint64_t syscallProcInfo = unixSyscallClass | 336U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
 constexpr std::uint64_t syscallFsgetpath = unixSyscallClass | 427U;
 constexpr std::uint64_t syscallCsrctl = unixSyscallClass | 483U;
@@ -41,6 +42,7 @@ constexpr std::uint64_t x86MaximumUserPageAddress = 0x00007FFFFFFFF000ULL;
 // Rosa currently executes exactly one guest thread. Keep its identity in the
 // guest namespace rather than exposing a host pthread or Mach identifier.
 constexpr std::uint64_t initialGuestThreadId = 1;
+constexpr std::int32_t procInfoCallSetDyldImages = 0x0F;
 constexpr std::uint64_t carryFlag = 1U << 0U;
 constexpr std::uint64_t reservedOneFlag = 1U << 1U;
 constexpr std::size_t maximumControlledWrite = 16U * 1024U * 1024U;
@@ -138,6 +140,46 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         setSuccess(state, 0);
         return {};
     }
+    if (number == syscallProcInfo) {
+        const auto callNumber = std::bit_cast<std::int32_t>(
+            static_cast<std::uint32_t>(state.rdi));
+        if (callNumber != procInfoCallSetDyldImages) {
+            throw unsupported(
+                state, syscallRip,
+                "only the observed PROC_INFO_CALL_SET_DYLD_IMAGES operation is implemented");
+        }
+
+        const auto pid = std::bit_cast<std::int32_t>(
+            static_cast<std::uint32_t>(state.rsi));
+        const auto hostPid = static_cast<std::int32_t>(::getpid());
+        if (pid != hostPid || state.r8 == 0) {
+            setError(state, EINVAL);
+            return {};
+        }
+
+        // XNU registers this userspace address range as TASK_DYLD_INFO. It
+        // neither copies the buffer nor passes it to another kernel API. Keep
+        // the same metadata in the guest task namespace. The address need not
+        // currently be mapped, but the range must not wrap.
+        const auto signedSize = std::bit_cast<std::int32_t>(
+            static_cast<std::uint32_t>(state.r9));
+        const auto size = static_cast<std::uint64_t>(signedSize);
+        std::uint64_t end = 0;
+        if (__builtin_add_overflow(state.r8, size, &end) || dyldInfoFinal_) {
+            setError(state, EINVAL);
+            return {};
+        }
+        dyldInfo_ = GuestDyldInfo{
+            .address = guest::GuestAddress{state.r8},
+            .size = size,
+        };
+        // In a real dynamic process, the kernel loader has already installed
+        // dyld's initial __all_image_info range. This dyld-issued update is the
+        // one permitted nonzero-to-nonzero transition, which finalizes it.
+        dyldInfoFinal_ = true;
+        setSuccess(state, 0);
+        return {};
+    }
     if (number == syscallGetentropy) {
         constexpr std::size_t maximumEntropySize = 256;
         if (state.rsi > maximumEntropySize) {
@@ -224,7 +266,7 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
     if (number != syscallWrite) {
         throw unsupported(state, syscallRip,
                           "only BSD write(2), exit(2), getpid(2), "
-                          "shared_region_check_np(2), thread_selfid(2), "
+                          "shared_region_check_np(2), proc_info(2), thread_selfid(2), "
                           "fsgetpath(2), csrctl(2), and getentropy(2) are "
                           "implemented");
     }

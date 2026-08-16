@@ -13608,6 +13608,100 @@ void testDarwinGetpid() {
                 "getpid changed an ignored argument register");
 }
 
+void testDarwinProcInfoSetDyldImages() {
+    constexpr auto procInfoNumber = UINT64_C(0x02000150);
+    constexpr std::uint64_t allImageInfoAddress = 0x7FF8436AF040ULL;
+    constexpr std::uint64_t allImageInfoSize = 0x170;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = procInfoNumber;
+    state.rdi = 0x0F;
+    state.rsi = static_cast<std::uint64_t>(::getpid());
+    state.rdx = 0xA5A5A5A5;
+    state.r10 = UINT64_MAX;
+    state.r8 = allImageInfoAddress;
+    state.r9 = allImageInfoSize;
+    state.rflags = 0x8D7;
+
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF7000648A8ULL});
+    expect(!outcome.exited, "PROC_INFO_CALL_SET_DYLD_IMAGES terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "PROC_INFO_CALL_SET_DYLD_IMAGES did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "PROC_INFO_CALL_SET_DYLD_IMAGES did not clear BSD carry");
+    expect(dispatcher.dyldInfo().has_value(),
+           "PROC_INFO_CALL_SET_DYLD_IMAGES did not register guest metadata");
+    expectEqual(dispatcher.dyldInfo()->address.value, allImageInfoAddress,
+                "PROC_INFO_CALL_SET_DYLD_IMAGES registered the wrong address");
+    expectEqual(dispatcher.dyldInfo()->size, allImageInfoSize,
+                "PROC_INFO_CALL_SET_DYLD_IMAGES registered the wrong size");
+
+    // XNU records this task-relative range without copying from it. An
+    // unmapped, non-null guest address therefore succeeds and never reaches
+    // the host kernel as a pointer.
+    bool guestAddressWasRead = false;
+    try {
+        static_cast<void>(addressSpace.readBytes(
+            rosa::guest::GuestAddress{allImageInfoAddress}, 1));
+        guestAddressWasRead = true;
+    } catch (const std::runtime_error &) {
+    }
+    expect(!guestAddressWasRead,
+           "PROC_INFO_CALL_SET_DYLD_IMAGES test address unexpectedly mapped");
+
+    state.rax = procInfoNumber;
+    state.rflags = 0x8D6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "finalized dyld metadata update returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "finalized dyld metadata update did not set BSD carry");
+    expectEqual(dispatcher.dyldInfo()->address.value, allImageInfoAddress,
+                "rejected dyld metadata update changed the registered address");
+}
+
+void testDarwinProcInfoRejectsInvalidDyldImages() {
+    constexpr auto procInfoNumber = UINT64_C(0x02000150);
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = procInfoNumber;
+    state.rdi = 0x0F;
+    state.rsi = static_cast<std::uint64_t>(::getpid()) + 1;
+    state.r8 = 0x1000;
+    state.r9 = 0x170;
+    state.rflags = 0x8D6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "foreign-pid dyld metadata returned the wrong errno");
+    expect(!dispatcher.dyldInfo().has_value(),
+           "foreign-pid dyld metadata was registered");
+
+    state.rax = procInfoNumber;
+    state.rsi = static_cast<std::uint64_t>(::getpid());
+    state.r8 = 0;
+    state.rflags = 0x8D6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "null dyld metadata address returned the wrong errno");
+
+    state.rax = procInfoNumber;
+    state.r8 = UINT64_MAX - 0x10;
+    state.r9 = 0x20;
+    state.rflags = 0x8D6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "overflowing dyld metadata range returned the wrong errno");
+    expect(!dispatcher.dyldInfo().has_value(),
+           "invalid dyld metadata range was registered");
+}
+
 void testGeneratedDarwinGetpid() {
     constexpr rosa::guest::GuestAddress codeBase{0x1000};
     constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
@@ -17903,6 +17997,9 @@ int main() {
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin getpid", testDarwinGetpid},
+        {"Darwin proc_info set dyld images", testDarwinProcInfoSetDyldImages},
+        {"Darwin proc_info rejects invalid dyld images",
+         testDarwinProcInfoRejectsInvalidDyldImages},
         {"generated Darwin getpid", testGeneratedDarwinGetpid},
         {"Darwin thread_selfid", testDarwinThreadSelfid},
         {"generated Darwin thread_selfid", testGeneratedDarwinThreadSelfid},
