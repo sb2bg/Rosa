@@ -1243,6 +1243,33 @@ updateShiftLeftFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t re
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+shiftLeftGuest64(GuestExecutionContext *context, x86::X86State *state,
+                 std::uint64_t address, std::uint64_t countValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated 64-bit guest memory shift has no address space");
+        }
+        context->addressSpace->validateAccess(
+            guest::GuestAddress{address}, sizeof(std::uint64_t),
+            guest::Permission::Read | guest::Permission::Write);
+        const auto original =
+            context->addressSpace->readU64(guest::GuestAddress{address});
+        const auto count = static_cast<std::uint8_t>(countValue & 0x3FU);
+        const auto result = count == 0 ? original : original << count;
+        context->addressSpace->writeU64(guest::GuestAddress{address}, result);
+        return updateShiftLeftFlags64(state, original, result, count);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint64_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateShiftLeftFlags32(x86::X86State *state, std::uint64_t lhsValue,
                        std::uint64_t resultValue, std::uint64_t unmaskedCount) {
     const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x1FU);
@@ -2346,6 +2373,32 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                          instruction.address);
             break;
         }
+        case x86::Opcode::ShlMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: shl memory operand count");
+            }
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto immediate =
+                std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (memory.width != 64) {
+                throw std::runtime_error(
+                    "internal decoder error: SHL memory width");
+            }
+            const auto base = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            const auto displacement = builder.constant(
+                static_cast<std::uint64_t>(memory.displacement),
+                ir::Width::I64, instruction.address);
+            const auto address = builder.add(
+                base, displacement, ir::Width::I64, instruction.address);
+            const auto count =
+                static_cast<std::uint8_t>(immediate.value & 0x3FU);
+            builder.shiftLeftGuestMemory(address, count, ir::Width::I64,
+                                         instruction.address);
+            break;
+        }
         case x86::Opcode::ShlRegCl: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: shl cl operand count");
@@ -3378,6 +3431,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::UpdateShiftRightDoubleFlags ||
                          operation.opcode == ir::Opcode::Push ||
                          operation.opcode == ir::Opcode::AddGuestMemory ||
+                         operation.opcode == ir::Opcode::ShiftLeftGuestMemory ||
                          operation.opcode == ir::Opcode::IncrementGuestMemory ||
                          operation.opcode == ir::Opcode::DecrementGuestMemory ||
                          operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
@@ -3399,6 +3453,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::ReadTimestampCounter;
         hasExecutionContextCall |= operation.opcode == ir::Opcode::Push ||
                                    operation.opcode == ir::Opcode::AddGuestMemory ||
+                                   operation.opcode == ir::Opcode::ShiftLeftGuestMemory ||
                                    operation.opcode == ir::Opcode::IncrementGuestMemory ||
                                    operation.opcode == ir::Opcode::DecrementGuestMemory ||
                                    operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
@@ -3690,6 +3745,27 @@ arm64::Program compileToArm64(const ir::Block &block) {
             emitEpilogue();
             assembler.movImmediate(
                 arm64::x0, static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::ShiftLeftGuestMemory: {
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x3, operation.immediate);
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&shiftLeftGuest64));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(
+                arm64::x0,
+                static_cast<std::uint64_t>(BlockExit::MemoryFault));
             assembler.ret();
             assembler.bind(committed);
             break;

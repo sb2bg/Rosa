@@ -1049,6 +1049,32 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("shl64_memory_three",
+                             CaseId::shl64_memory_three,
+                             differentialBytes_shl64_memory_three);
+        bindMemory(testCase, rosa::x86::Register::Rbp, 0x80);
+        const std::uint64_t value = 0x2000000000000001ULL;
+        std::memcpy(testCase.request.memory.data() + 0x48, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x48;
+        testCase.memoryCompareSize = sizeof(value);
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shl64_memory_one", CaseId::shl64_memory_one,
+                             differentialBytes_shl64_memory_one);
+        bindMemory(testCase, rosa::x86::Register::Rbp, 0x80);
+        const std::uint64_t value = 0x4000000000000001ULL;
+        std::memcpy(testCase.request.memory.data() + 0x48, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x48;
+        testCase.memoryCompareSize = sizeof(value);
+        testCase.flagMask =
+            carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("shl32_immediate_masked_zero",
                              CaseId::shl32_immediate_masked_zero,
                              differentialBytes_shl32_immediate_masked_zero);
@@ -8269,6 +8295,87 @@ void testShiftLeftImmediateGeneratedExecution() {
                 "SHL EDX masked-zero count changed flags");
 }
 
+void testShiftLeft64GuestMemoryImmediate() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x48, 0xC1, 0x65, 0xC8, 0x03, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF700052BA8ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShlMemImm,
+           "SHL qword memory opcode differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rbp &&
+               memory.displacement == -0x38 && memory.width == 64,
+           "SHL qword memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "shl qword [rbp-0x38], 0x3") != std::string::npos,
+           "SHL qword memory dump differs");
+
+    constexpr rosa::guest::GuestAddress mappingBase{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x80C8};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        mappingBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0x2000000000000001ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF700052BA8ULL});
+    rosa::x86::X86State state;
+    state.rbp = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{8},
+                "SHL qword memory result differs");
+    constexpr std::uint64_t definedFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U);
+    expectEqual(state.rflags & definedFlags, std::uint64_t{1},
+                "SHL qword memory defined flags differ");
+    expectEqual(state.rbp, std::uint64_t{0x8100},
+                "SHL qword memory changed its base register");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rbp = 0x8100;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SHL from unmapped guest memory did not fault");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed SHL guest load changed flags");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(
+        mappingBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    readOnlyAddressSpace.writeU64(target, 0x2000000000000001ULL);
+    expectEqual(readOnlyAddressSpace.protect(
+                    mappingBase, rosa::guest::guestPageSize,
+                    rosa::guest::Permission::Read),
+                rosa::guest::ProtectResult::Success,
+                "could not make SHL test memory read-only");
+    faultState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SHL to read-only guest memory did not fault");
+    expectEqual(readOnlyAddressSpace.readU64(target),
+                std::uint64_t{0x2000000000000001ULL},
+                "failed SHL store changed guest memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed SHL guest store changed flags");
+}
+
 void testShiftLeftClGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0xD3, 0xE0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -14826,6 +14933,8 @@ int main() {
         {"LFENCE generated execution", testLfenceGeneratedExecution},
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},
+        {"SHL qword guest memory immediate",
+         testShiftLeft64GuestMemoryImmediate},
         {"SHL CL generated execution", testShiftLeftClGeneratedExecution},
         {"SHL 32-bit CL generated execution", testShiftLeft32ClGeneratedExecution},
         {"SHR low-byte immediate generated execution",

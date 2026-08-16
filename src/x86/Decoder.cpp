@@ -3446,20 +3446,58 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const bool observedSar = rexW && extension == 0x7U;
-            if (mode != 0x3U ||
-                (!observedSar &&
-                 (rexR || rexX ||
-                  (extension != 0x4U && extension != 0x5U)))) {
-                throw DecodeError(address, remaining,
-                                  "only SHL/SHR r32/r64 and SAR r64 register forms from opcode C1 are supported");
+            if (mode != 0x3U && rexW && extension == 0x4U) {
+                const auto rmEncoding =
+                    static_cast<std::uint8_t>(modrm & 0x7U);
+                if (rexX || rmEncoding == 0x4U ||
+                    (mode == 0 && rmEncoding == 0x5U)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only SHL qword [base+disp8/disp32], imm8 is supported for memory opcode C1 /4");
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated SHL memory disp8");
+                    }
+                    displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated SHL memory disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated SHL memory immediate");
+                }
+                instruction.opcode = Opcode::ShlMemImm;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, rexB), displacement, 64});
+                instruction.operands.push_back(
+                    ImmediateOperand{code[cursor++], 8});
+            } else {
+                if (mode != 0x3U ||
+                    (!observedSar &&
+                     (rexR || rexX ||
+                      (extension != 0x4U && extension != 0x5U)))) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only SHL/SHR r32/r64 and SAR r64 register forms from opcode C1 are supported");
+                }
+                instruction.opcode = extension == 0x4U   ? Opcode::ShlRegImm
+                                     : extension == 0x5U ? Opcode::ShrRegImm
+                                                         : Opcode::SarRegImm;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U),
+                                   rexB),
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                instruction.operands.push_back(
+                    ImmediateOperand{code[cursor++], 8});
             }
-            instruction.opcode = extension == 0x4U   ? Opcode::ShlRegImm
-                                 : extension == 0x5U ? Opcode::ShrRegImm
-                                                     : Opcode::SarRegImm;
-            instruction.operands.push_back(RegisterOperand{
-                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
-                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
-            instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
         } else if (opcode == 0xD0U) {
             if (cursor >= code.size()) {
                 throw DecodeError(address, remaining,

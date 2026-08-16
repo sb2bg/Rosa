@@ -58,6 +58,7 @@ enum class Opcode {
     BitScanReverse,
     Push,
     AddGuestMemory,
+    ShiftLeftGuestMemory,
     IncrementGuestMemory,
     DecrementGuestMemory,
     CompareExchangeGuestMemory,
@@ -175,6 +176,8 @@ class Builder {
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void addGuestMemory(ValueId address, ValueId source, Width width,
                         guest::GuestAddress rip);
+    void shiftLeftGuestMemory(ValueId address, std::uint8_t count, Width width,
+                              guest::GuestAddress rip);
     void incrementGuestMemory(ValueId address, Width width,
                               guest::GuestAddress rip);
     void decrementGuestMemory(ValueId address, Width width,

@@ -460,6 +460,17 @@ void Builder::addGuestMemory(ValueId address, ValueId source, Width width,
     });
 }
 
+void Builder::shiftLeftGuestMemory(ValueId address, std::uint8_t count,
+                                   Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShiftLeftGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+        .immediate = count,
+    });
+}
+
 void Builder::incrementGuestMemory(ValueId address, Width width,
                                    guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -874,6 +885,13 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.rhs, "source");
             if (operation.width != Width::I64) {
                 errors.emplace_back("add_guest_memory currently requires i64");
+            }
+            break;
+        case Opcode::ShiftLeftGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            if (operation.width != Width::I64) {
+                errors.emplace_back(
+                    "shift_left_guest_memory currently requires i64");
             }
             break;
         case Opcode::IncrementGuestMemory:
