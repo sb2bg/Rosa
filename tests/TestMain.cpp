@@ -12828,6 +12828,151 @@ void testMachReplyPortTrap() {
            "mach_reply_port lost a previously allocated receive right");
 }
 
+void testMachVmDeallocateTrap() {
+    constexpr rosa::guest::GuestAddress mappingBase{0x4000};
+    constexpr auto pageSize = rosa::guest::guestPageSize;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        mappingBase, pageSize * 3,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "mach deallocate test");
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x4000},
+                          0x1111111111111111ULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x5000},
+                          0x2222222222222222ULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x6000},
+                          0x3333333333333333ULL);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::vmDeallocateTrapNumber;
+    state.rdi = 0x103;
+    state.rsi = 0x5001;
+    state.rdx = 1;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF7000014D8ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "mach_vm_deallocate did not return KERN_SUCCESS");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_vm_deallocate applied BSD carry semantics");
+    expectEqual(state.rsi, std::uint64_t{0x5001},
+                "mach_vm_deallocate changed its address argument");
+    expectEqual(state.rdx, std::uint64_t{1},
+                "mach_vm_deallocate changed its size argument");
+    const auto mappings = addressSpace.mappingInfos();
+    expectEqual(mappings.size(), std::size_t{2},
+                "mach_vm_deallocate did not split the surrounding mapping");
+    expectEqual(mappings[0].base.value, std::uint64_t{0x4000},
+                "mach_vm_deallocate prefix base differs");
+    expectEqual(mappings[0].size, pageSize,
+                "mach_vm_deallocate prefix size differs");
+    expectEqual(mappings[1].base.value, std::uint64_t{0x6000},
+                "mach_vm_deallocate suffix base differs");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x4000}),
+                std::uint64_t{0x1111111111111111ULL},
+                "mach_vm_deallocate changed prefix bytes");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x6000}),
+                std::uint64_t{0x3333333333333333ULL},
+                "mach_vm_deallocate changed suffix bytes");
+    bool middleUnmapped = false;
+    try {
+        static_cast<void>(
+            addressSpace.readU64(rosa::guest::GuestAddress{0x5000}));
+    } catch (const std::runtime_error &error) {
+        middleUnmapped = std::string_view(error.what()).find("unmapped") !=
+                         std::string_view::npos;
+    }
+    expect(middleUnmapped,
+           "mach_vm_deallocate left the rounded middle page mapped");
+
+    const auto countAfterRemoval = addressSpace.mappingCount();
+    state.rax = rosa::darwin::MachDispatcher::vmDeallocateTrapNumber;
+    state.rsi = 0x5000;
+    state.rdx = pageSize;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "mach_vm_deallocate did not accept a guest mapping hole");
+    expectEqual(addressSpace.mappingCount(), countAfterRemoval,
+                "deallocating a hole changed neighboring mappings");
+
+    state.rax = rosa::darwin::MachDispatcher::vmDeallocateTrapNumber;
+    state.rsi = 0x4001;
+    state.rdx = 0;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "zero-size mach_vm_deallocate did not succeed");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x4000}),
+                std::uint64_t{0x1111111111111111ULL},
+                "zero-size mach_vm_deallocate removed guest memory");
+
+    state.rax = rosa::darwin::MachDispatcher::vmDeallocateTrapNumber;
+    state.rdi = 0xDEAD;
+    state.rdx = pageSize;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0x10000003},
+                "mach_vm_deallocate invalid task result differs");
+
+    state.rax = rosa::darwin::MachDispatcher::vmDeallocateTrapNumber;
+    state.rdi = 0x103;
+    state.rsi = UINT64_MAX - 0x7FF;
+    state.rdx = 0x1000;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{4},
+                "overflowing mach_vm_deallocate result differs");
+}
+
+void testGeneratedMachVmDeallocateTrap() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress target{0x8000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0x0C, 0x00, 0x00, 0x01, // mov eax, 0x100000c
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(target, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rdi = 0x103;
+    state.rsi = target.value;
+    state.rdx = rosa::guest::guestPageSize;
+    state.rflags = 0x8D7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated mach_vm_deallocate terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "generated mach_vm_deallocate result differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "generated mach_vm_deallocate changed flags");
+    bool targetUnmapped = false;
+    try {
+        static_cast<void>(addressSpace.readU64(target));
+    } catch (const std::runtime_error &error) {
+        targetUnmapped = std::string_view(error.what()).find("unmapped") !=
+                         std::string_view::npos;
+    }
+    expect(targetUnmapped,
+           "generated mach_vm_deallocate left its target mapped");
+}
+
 void testMachVmProtectTrap() {
     constexpr rosa::guest::GuestAddress mappingBase{0x4000};
     constexpr auto pageSize = rosa::guest::guestPageSize;
@@ -16294,6 +16439,9 @@ int main() {
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
         {"Mach port mod-refs trap", testMachPortModRefsTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
+        {"Mach VM deallocate trap", testMachVmDeallocateTrap},
+        {"generated Mach VM deallocate trap",
+         testGeneratedMachVmDeallocateTrap},
         {"Mach VM protect trap", testMachVmProtectTrap},
         {"Mach VM map trap", testMachVmMapTrap},
         {"generated Mach VM map trap", testGeneratedMachVmMapTrap},

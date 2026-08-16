@@ -115,6 +115,25 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
     // XNU's x86_64 mach_call_munger64 writes only the trap result to saved RAX. In particular,
     // Mach traps do not use the BSD carry-flag error convention.
     switch (trapNumber(state.rax)) {
+    case 12U: {
+        // XNU trap 12 is _kernelrpc_mach_vm_deallocate_trap. The operation
+        // removes the page-rounded address range from the target task's map;
+        // ranges containing holes still succeed.
+        if (state.rdi != taskSelfPortName_.value) {
+            state.rax = machSendInvalidDestination;
+            return;
+        }
+        switch (addressSpace.deallocate(guest::GuestAddress{state.rsi},
+                                        state.rdx)) {
+        case guest::DeallocateResult::Success:
+            state.rax = kernSuccess;
+            return;
+        case guest::DeallocateResult::InvalidArgument:
+            state.rax = kernInvalidArgument;
+            return;
+        }
+        throw std::runtime_error("unreachable guest deallocation result");
+    }
     case 14U: {
         // XNU trap 14 is _kernelrpc_mach_vm_protect_trap. Its five x86_64
         // arguments are target, address, size, set_maximum, and new_protection.

@@ -248,6 +248,76 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
     return ProtectResult::Success;
 }
 
+DeallocateResult AddressSpace::deallocate(GuestAddress address,
+                                          std::uint64_t size) {
+    if (size == 0) {
+        return DeallocateResult::Success;
+    }
+    if (address.value > std::numeric_limits<std::uint64_t>::max() - size) {
+        return DeallocateResult::InvalidArgument;
+    }
+    const auto unroundedEnd = address.value + size;
+    if (unroundedEnd > std::numeric_limits<std::uint64_t>::max() -
+                           (guestPageSize - 1U)) {
+        return DeallocateResult::InvalidArgument;
+    }
+    const auto start =
+        address.value & ~(static_cast<std::uint64_t>(guestPageSize) - 1U);
+    const auto end =
+        (unroundedEnd + guestPageSize - 1U) &
+        ~(static_cast<std::uint64_t>(guestPageSize) - 1U);
+
+    const auto slice = [](const Mapping &source, std::uint64_t sliceStart,
+                          std::uint64_t sliceEnd) {
+        const auto offset =
+            static_cast<std::size_t>(sliceStart - source.base.value);
+        const auto sliceSize =
+            static_cast<std::size_t>(sliceEnd - sliceStart);
+        Mapping result{
+            .base = GuestAddress{sliceStart},
+            .size = sliceSize,
+            .permissions = source.permissions,
+            .maximumPermissions = source.maximumPermissions,
+            .fileBytes = source.fileBytes,
+            .fileDataOffset = source.fileDataOffset + offset,
+            .label = source.label,
+        };
+        if (!source.bytes.empty()) {
+            result.bytes.assign(
+                source.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+                source.bytes.begin() +
+                    static_cast<std::ptrdiff_t>(offset + sliceSize));
+        }
+        if (!source.readableBytes.empty()) {
+            result.readableBytes.assign(
+                source.readableBytes.begin() +
+                    static_cast<std::ptrdiff_t>(offset),
+                source.readableBytes.begin() +
+                    static_cast<std::ptrdiff_t>(offset + sliceSize));
+        }
+        return result;
+    };
+
+    std::vector<Mapping> updated;
+    updated.reserve(mappings_.size() + 1);
+    for (auto &mapping : mappings_) {
+        const auto mappingStart = mapping.base.value;
+        const auto mappingEnd = mappingStart + mapping.size;
+        if (mappingEnd <= start || mappingStart >= end) {
+            updated.push_back(std::move(mapping));
+            continue;
+        }
+        if (mappingStart < start) {
+            updated.push_back(slice(mapping, mappingStart, start));
+        }
+        if (end < mappingEnd) {
+            updated.push_back(slice(mapping, end, mappingEnd));
+        }
+    }
+    mappings_ = std::move(updated);
+    return DeallocateResult::Success;
+}
+
 void AddressSpace::addMapping(GuestAddress base, std::size_t size,
                               Permission permissions,
                               Permission maximumPermissions,

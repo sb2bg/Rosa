@@ -47,6 +47,11 @@ enum class ProtectResult : std::uint8_t {
     InvalidArgument,
 };
 
+enum class DeallocateResult : std::uint8_t {
+    Success,
+    InvalidArgument,
+};
+
 class AddressSpace {
   public:
     void mapAnonymous(GuestAddress base, std::size_t size, Permission permissions,
@@ -66,6 +71,8 @@ class AddressSpace {
     void populateSparseReadOnly(GuestAddress address, std::span<const std::uint8_t> data);
     [[nodiscard]] ProtectResult protect(GuestAddress address, std::uint64_t size,
                                         Permission permissions);
+    [[nodiscard]] DeallocateResult deallocate(GuestAddress address,
+                                              std::uint64_t size);
 
     [[nodiscard]] std::uint64_t readU64(GuestAddress address) const;
     [[nodiscard]] std::uint32_t readU32(GuestAddress address) const;
