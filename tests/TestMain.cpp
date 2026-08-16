@@ -4,6 +4,7 @@
 #include "dbt/Translator.h"
 #include "darwin/Commpage.h"
 #include "darwin/Mach.h"
+#include "darwin/SharedCache.h"
 #include "darwin/Syscall.h"
 #include "debug/Dump.h"
 #include "guest/Address.h"
@@ -23,6 +24,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <fcntl.h>
 #include <iomanip>
@@ -32,6 +34,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <utility>
@@ -11936,6 +11939,256 @@ void testGuestFileBackedAddressSpace() {
     ::unlink(pathTemplate.data());
 }
 
+void storeFixtureU32(std::span<std::uint8_t> bytes, std::size_t offset,
+                     std::uint32_t value) {
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        bytes[offset + index] = static_cast<std::uint8_t>(value >> (index * 8U));
+    }
+}
+
+void storeFixtureU64(std::span<std::uint8_t> bytes, std::size_t offset,
+                     std::uint64_t value) {
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        bytes[offset + index] = static_cast<std::uint8_t>(value >> (index * 8U));
+    }
+}
+
+void writeFixtureFile(const std::filesystem::path &path,
+                      std::span<const std::uint8_t> bytes) {
+    const auto descriptor = ::open(path.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC,
+                                   S_IRUSR | S_IWUSR);
+    if (descriptor < 0) {
+        throw std::runtime_error("could not create shared-cache fixture");
+    }
+    std::size_t written = 0;
+    while (written < bytes.size()) {
+        const auto count = ::write(descriptor, bytes.data() + written,
+                                   bytes.size() - written);
+        if (count <= 0) {
+            ::close(descriptor);
+            throw std::runtime_error("could not write shared-cache fixture");
+        }
+        written += static_cast<std::size_t>(count);
+    }
+    ::close(descriptor);
+}
+
+std::vector<std::uint8_t>
+makeSharedCacheFixtureFile(std::uint64_t mappingAddress,
+                           std::array<std::uint8_t, 16> uuid,
+                           std::uint64_t sharedRegionStart,
+                           std::uint64_t sharedRegionSize,
+                           std::uint32_t initialProtection,
+                           std::uint32_t maximumProtection,
+                           bool includeSubcache) {
+    constexpr std::size_t fileSize = rosa::guest::guestPageSize;
+    constexpr std::size_t mappingOffset = 0x228;
+    constexpr std::size_t mappingWithSlideOffset = 0x248;
+    constexpr std::size_t subcacheOffset = 0x280;
+    std::vector<std::uint8_t> bytes(fileSize);
+    constexpr std::string_view magic = "dyld_v1  x86_64";
+    std::copy(magic.begin(), magic.end(), bytes.begin());
+    storeFixtureU32(bytes, 0x10, mappingOffset);
+    storeFixtureU32(bytes, 0x14, 1);
+    std::copy(uuid.begin(), uuid.end(), bytes.begin() + 0x58);
+    storeFixtureU32(bytes, 0xD8, 1);
+    storeFixtureU64(bytes, 0xE0, sharedRegionStart);
+    storeFixtureU64(bytes, 0xE8, sharedRegionSize);
+    storeFixtureU64(bytes, 0xF0, 0x4000);
+    storeFixtureU32(bytes, 0x138, mappingWithSlideOffset);
+    storeFixtureU32(bytes, 0x13C, 1);
+    storeFixtureU32(bytes, 0x16C, 0x1A0500);
+    storeFixtureU32(bytes, 0x188, includeSubcache ? subcacheOffset : 0);
+    storeFixtureU32(bytes, 0x18C, includeSubcache ? 1 : 0);
+
+    storeFixtureU64(bytes, mappingOffset, mappingAddress);
+    storeFixtureU64(bytes, mappingOffset + 8, fileSize);
+    storeFixtureU64(bytes, mappingOffset + 16, 0);
+    storeFixtureU32(bytes, mappingOffset + 24, maximumProtection);
+    storeFixtureU32(bytes, mappingOffset + 28, initialProtection);
+
+    storeFixtureU64(bytes, mappingWithSlideOffset, mappingAddress);
+    storeFixtureU64(bytes, mappingWithSlideOffset + 8, fileSize);
+    storeFixtureU64(bytes, mappingWithSlideOffset + 16, 0);
+    storeFixtureU64(bytes, mappingWithSlideOffset + 40, 4);
+    storeFixtureU32(bytes, mappingWithSlideOffset + 48, maximumProtection);
+    storeFixtureU32(bytes, mappingWithSlideOffset + 52, initialProtection);
+    return bytes;
+}
+
+class SharedCacheFixture {
+  public:
+    SharedCacheFixture() {
+        std::array<char, 34> directoryTemplate{};
+        constexpr std::string_view pattern = "/tmp/rosa-shared-cache-XXXXXX";
+        std::copy(pattern.begin(), pattern.end(), directoryTemplate.begin());
+        const auto *directory = ::mkdtemp(directoryTemplate.data());
+        if (directory == nullptr) {
+            throw std::runtime_error("could not create shared-cache fixture directory");
+        }
+        mainPath_ = std::filesystem::path(directory) / "dyld_shared_cache_x86_64";
+        subcachePath_ = mainPath_;
+        subcachePath_ += ".01";
+
+        for (std::size_t index = 0; index < mainUuid_.size(); ++index) {
+            mainUuid_[index] = static_cast<std::uint8_t>(index + 1U);
+            subcacheUuid_[index] = static_cast<std::uint8_t>(0x80U + index);
+        }
+        auto main = makeSharedCacheFixtureFile(
+            regionStart, mainUuid_, regionStart, regionSize, 5, 5, true);
+        std::copy(subcacheUuid_.begin(), subcacheUuid_.end(), main.begin() + 0x280);
+        storeFixtureU64(main, 0x290, subcacheVmOffset);
+        constexpr std::string_view suffix = ".01";
+        std::copy(suffix.begin(), suffix.end(), main.begin() + 0x298);
+        auto subcache = makeSharedCacheFixtureFile(
+            regionStart + subcacheVmOffset, subcacheUuid_,
+            regionStart + subcacheVmOffset, 0, 3, 3, false);
+        writeFixtureFile(mainPath_, main);
+        writeFixtureFile(subcachePath_, subcache);
+    }
+
+    SharedCacheFixture(const SharedCacheFixture &) = delete;
+    SharedCacheFixture &operator=(const SharedCacheFixture &) = delete;
+
+    ~SharedCacheFixture() {
+        ::unlink(subcachePath_.c_str());
+        ::unlink(mainPath_.c_str());
+        ::rmdir(mainPath_.parent_path().c_str());
+    }
+
+    [[nodiscard]] const std::filesystem::path &mainPath() const noexcept {
+        return mainPath_;
+    }
+    [[nodiscard]] const std::filesystem::path &subcachePath() const noexcept {
+        return subcachePath_;
+    }
+
+    void overwriteU32(const std::filesystem::path &path, std::uint64_t offset,
+                      std::uint32_t value) const {
+        std::array<std::uint8_t, 4> bytes{};
+        storeFixtureU32(bytes, 0, value);
+        overwrite(path, offset, bytes);
+    }
+
+    void overwrite(const std::filesystem::path &path, std::uint64_t offset,
+                   std::span<const std::uint8_t> bytes) const {
+        const auto descriptor = ::open(path.c_str(), O_WRONLY | O_CLOEXEC);
+        expect(descriptor >= 0, "could not open shared-cache fixture for mutation");
+        const auto count = ::pwrite(descriptor, bytes.data(), bytes.size(),
+                                    static_cast<off_t>(offset));
+        ::close(descriptor);
+        expectEqual(count, static_cast<ssize_t>(bytes.size()),
+                    "could not mutate shared-cache fixture");
+    }
+
+    static constexpr std::uint64_t regionStart = 0x100000;
+    static constexpr std::uint64_t regionSize = 0x20000;
+    static constexpr std::uint64_t subcacheVmOffset = 0x10000;
+
+  private:
+    std::filesystem::path mainPath_;
+    std::filesystem::path subcachePath_;
+    std::array<std::uint8_t, 16> mainUuid_{};
+    std::array<std::uint8_t, 16> subcacheUuid_{};
+};
+
+void expectSharedCacheRejected(const std::filesystem::path &path,
+                               std::string_view expectedReason) {
+    bool rejected = false;
+    try {
+        static_cast<void>(rosa::darwin::GuestSharedCache::open(path));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find(expectedReason) !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "malformed shared cache was not rejected diagnostically");
+}
+
+void testGuestSharedCacheParsingAndMapping() {
+    SharedCacheFixture fixture;
+    const auto cache = rosa::darwin::GuestSharedCache::open(fixture.mainPath());
+    expect(cache.architecture() == rosa::darwin::SharedCacheArchitecture::X86_64,
+           "shared-cache architecture differs");
+    expectEqual(cache.regionStart().value, SharedCacheFixture::regionStart,
+                "shared-cache region start differs");
+    expectEqual(cache.regionSize(), SharedCacheFixture::regionSize,
+                "shared-cache region size differs");
+    expectEqual(cache.maximumSlide(), std::uint64_t{0x4000},
+                "shared-cache maximum slide differs");
+    expectEqual(cache.slide(), std::uint64_t{0},
+                "shared-cache guest slide differs");
+    expectEqual(cache.files().size(), std::size_t{2},
+                "shared-cache file count differs");
+    expectEqual(cache.files()[1].suffix, std::string(".01"),
+                "shared-cache suffix differs");
+    expectEqual(cache.files()[1].cacheVmOffset,
+                SharedCacheFixture::subcacheVmOffset,
+                "shared-cache VM offset differs");
+    expectEqual(cache.mappings().size(), std::size_t{2},
+                "shared-cache mapping count differs");
+    expectEqual(cache.mappings()[0].flags, std::uint64_t{4},
+                "shared-cache mapping-with-slide flags differ");
+
+    rosa::guest::AddressSpace addressSpace;
+    cache.mapInto(addressSpace);
+    expectEqual(addressSpace.mappingCount(), std::size_t{2},
+                "shared-cache guest mapping count differs");
+    const auto magic = addressSpace.readBytes(cache.regionStart(), 7);
+    expectEqual(std::string(magic.begin(), magic.end()), std::string("dyld_v1"),
+                "shared-cache guest bytes differ");
+    bool textWriteRejected = false;
+    try {
+        addressSpace.writeBytes(cache.regionStart(), std::array<std::uint8_t, 1>{0});
+    } catch (const std::runtime_error &) {
+        textWriteRejected = true;
+    }
+    expect(textWriteRejected, "shared-cache executable mapping accepted a write");
+    constexpr rosa::guest::GuestAddress subcacheAddress{
+        SharedCacheFixture::regionStart + SharedCacheFixture::subcacheVmOffset};
+    addressSpace.writeU64(subcacheAddress, 0x0123456789ABCDEFULL);
+    expectEqual(addressSpace.readU64(subcacheAddress),
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "shared-cache writable mapping rejected a private write");
+    expect(addressSpace.protect(subcacheAddress, rosa::guest::guestPageSize,
+                                rosa::guest::Permission::Execute) ==
+               rosa::guest::ProtectResult::ProtectionFailure,
+           "shared-cache mapping exceeded maximum protections");
+}
+
+void testGuestSharedCacheRejectsMalformedFiles() {
+    {
+        SharedCacheFixture fixture;
+        constexpr std::array<std::uint8_t, 16> armMagic{
+            'd', 'y', 'l', 'd', '_', 'v', '1', ' ', ' ', ' ', 'a', 'r', 'm', '6', '4', 'e'};
+        fixture.overwrite(fixture.mainPath(), 0, armMagic);
+        expectSharedCacheRejected(fixture.mainPath(), "not x86_64");
+    }
+    {
+        SharedCacheFixture fixture;
+        fixture.overwriteU32(fixture.mainPath(), 0x230, 0x2000);
+        expectSharedCacheRejected(fixture.mainPath(), "mapping exceeds source file");
+    }
+    {
+        SharedCacheFixture fixture;
+        fixture.overwriteU32(fixture.mainPath(), 0x240, 1);
+        fixture.overwriteU32(fixture.mainPath(), 0x244, 3);
+        expectSharedCacheRejected(fixture.mainPath(),
+                                  "initial permissions exceed maximum");
+    }
+    {
+        SharedCacheFixture fixture;
+        std::array<std::uint8_t, 16> wrongUuid{};
+        fixture.overwrite(fixture.subcachePath(), 0x58, wrongUuid);
+        expectSharedCacheRejected(fixture.mainPath(), "subcache UUID differs");
+    }
+    {
+        SharedCacheFixture fixture;
+        constexpr std::array<std::uint8_t, 4> unsafeSuffix{'/', 'b', 'a', 'd'};
+        fixture.overwrite(fixture.mainPath(), 0x298, unsafeSuffix);
+        expectSharedCacheRejected(fixture.mainPath(), "suffix is unsafe");
+    }
+}
+
 void testGuestFailureReport() {
     constexpr std::array<std::uint8_t, 12> code{
         0x48, 0xB8, 0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x0B,
@@ -13583,6 +13836,8 @@ int main() {
         {"AND 32-bit register immediate", testAnd32BitRegisterImmediate},
         {"guest address space", testGuestAddressSpace},
         {"guest file-backed address space", testGuestFileBackedAddressSpace},
+        {"guest shared-cache parsing and mapping", testGuestSharedCacheParsingAndMapping},
+        {"guest shared-cache malformed files", testGuestSharedCacheRejectsMalformedFiles},
         {"guest failure report", testGuestFailureReport},
         {"hot guest block diagnostics", testHotGuestBlockDiagnostics},
         {"x86 commpage", testX86Commpage},
