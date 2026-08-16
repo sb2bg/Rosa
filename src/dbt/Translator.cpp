@@ -2996,6 +2996,30 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                               instruction.address);
             break;
         }
+        case x86::Opcode::ImulRegRegImm: {
+            if (instruction.operands.size() != 3) {
+                throw std::runtime_error(
+                    "internal decoder error: immediate imul operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto immediate =
+                std::get<x86::ImmediateOperand>(instruction.operands[2]);
+            const auto lhs = builder.readGuestRegister(
+                source.reg, ir::Width::I64, instruction.address);
+            const auto rhs = builder.constant(
+                immediate.value, ir::Width::I64, instruction.address);
+            const auto result = builder.multiplyLow(
+                lhs, rhs, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(destination.reg, result,
+                                       ir::Width::I64,
+                                       instruction.address);
+            builder.updateSignedMultiplyFlags(lhs, rhs, ir::Width::I64,
+                                              instruction.address);
+            break;
+        }
         case x86::Opcode::ShrdRegRegImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error("internal decoder error: shrd operand count");

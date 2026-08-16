@@ -1550,6 +1550,31 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("imul64_imm8_positive",
+                             CaseId::imul64_imm8_positive,
+                             differentialBytes_imul64_imm8_positive);
+        testCase.request.state.rcx = 6;
+        testCase.request.state.rbx = UINT64_MAX;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("imul64_imm8_negative",
+                             CaseId::imul64_imm8_negative,
+                             differentialBytes_imul64_imm8_negative);
+        testCase.request.state.rcx = 7;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("imul64_imm8_overflow",
+                             CaseId::imul64_imm8_overflow,
+                             differentialBytes_imul64_imm8_overflow);
+        testCase.request.state.rcx = INT64_MAX;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("bsf64_nonzero", CaseId::bsf64_nonzero,
                              differentialBytes_bsf64_nonzero);
         testCase.request.state.rdx = UINT64_MAX;
@@ -10138,6 +10163,86 @@ void testSignedMultiply64GeneratedExecution() {
                 "minimum-times-negative-one IMUL flags differ");
 }
 
+void testSignedMultiply64ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x48, 0x6B, 0xD9, 0x38, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ImulRegRegImm,
+           "IMUL r64, r64, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "IMUL r64, r64, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::Register::Rbx &&
+               destination.width == 64 &&
+               source.reg == rosa::x86::Register::Rcx &&
+               source.width == 64 && immediate.value == 0x38 &&
+               immediate.width == 8,
+           "IMUL rbx, rcx, imm8 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "imul rbx, rcx, 0x38") != std::string::npos,
+           "IMUL rbx, rcx, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbx = UINT64_MAX;
+    state.rcx = 6;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rbx, std::uint64_t{0x150},
+                "positive immediate IMUL result differs");
+    expectEqual(state.rcx, std::uint64_t{6},
+                "immediate IMUL changed its source");
+    expectEqual(state.rflags & std::uint64_t{0x801}, std::uint64_t{0},
+                "non-overflowing immediate IMUL defined flags differ");
+
+    constexpr std::array<std::uint8_t, 5> negativeCode{
+        0x48, 0x6B, 0xD9, 0xF8, 0xC3};
+    const auto negativeDecoded = decoder.decodeBlock(
+        negativeCode, rosa::guest::GuestAddress{0x2000});
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(
+                    negativeDecoded[0].operands[2]).value,
+                std::uint64_t{0xFFFFFFFFFFFFFFF8ULL},
+                "IMUL imm8 was not sign-extended");
+    const auto negativeBlock = translator.translate(
+        negativeCode, rosa::guest::GuestAddress{0x2000});
+    state.rcx = 7;
+    state.rflags = 0;
+    static_cast<void>(negativeBlock.execute(state));
+    expectEqual(state.rbx, std::uint64_t{0xFFFFFFFFFFFFFFC8ULL},
+                "negative immediate IMUL result differs");
+    expectEqual(state.rflags & std::uint64_t{0x801}, std::uint64_t{0},
+                "negative non-overflowing IMUL defined flags differ");
+
+    state.rcx = static_cast<std::uint64_t>(INT64_MAX);
+    state.rflags = 0;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rbx,
+                static_cast<std::uint64_t>(INT64_MAX) * std::uint64_t{0x38},
+                "overflowing immediate IMUL low result differs");
+    expectEqual(state.rflags & std::uint64_t{0x801},
+                std::uint64_t{0x801},
+                "overflowing immediate IMUL did not set CF and OF");
+
+    constexpr std::array<std::uint8_t, 5> aliasCode{
+        0x48, 0x6B, 0xC9, 0x38, 0xC3};
+    const auto aliasBlock = translator.translate(
+        aliasCode, rosa::guest::GuestAddress{0x3000});
+    state.rcx = 3;
+    state.rflags = 0x8D7;
+    static_cast<void>(aliasBlock.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xA8},
+                "aliased immediate IMUL did not use the original source");
+}
+
 void testShiftRightDoubleGeneratedExecution() {
     constexpr std::array<std::uint8_t, 6> code{0x48, 0x0F, 0xAC, 0xD0, 0x20, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -16809,6 +16914,8 @@ int main() {
         {"REP MOVSB generated execution", testRepMovsbGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
+        {"signed IMUL 64-bit immediate generated execution",
+         testSignedMultiply64ImmediateGeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"OR 8-bit registers generated execution", testOr8BitRegistersGeneratedExecution},

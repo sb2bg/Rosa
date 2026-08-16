@@ -2584,6 +2584,33 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<std::uint64_t>(
                     static_cast<std::int64_t>(immediate)),
                 32});
+        } else if (opcode == 0x6BU && rexW) {
+            if (code.size() - cursor < 2) {
+                throw DecodeError(address, remaining,
+                                  "truncated imul r64, r64, imm8");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode =
+                static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U) {
+                throw DecodeError(
+                    address, remaining,
+                    "only register-direct IMUL r64, r64, imm8 is supported");
+            }
+            const auto immediate =
+                std::bit_cast<std::int8_t>(code[cursor++]);
+            instruction.opcode = Opcode::ImulRegRegImm;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR),
+                64});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                64});
+            instruction.operands.push_back(ImmediateOperand{
+                static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(immediate)),
+                8});
         } else if (opcode == 0x0FU) {
             if (cursor >= code.size()) {
                 throw DecodeError(address, remaining, "truncated 0F opcode");
