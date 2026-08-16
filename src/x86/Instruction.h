@@ -100,6 +100,7 @@ enum class Opcode {
     JmpReg,
     JccRelative,
     CallRelative,
+    CallReg,
     CallMem,
     Syscall,
     Ret,

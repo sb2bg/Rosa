@@ -110,6 +110,15 @@ int main() {
                 oracleMemory.data() + request.memorySecondBaseOffset);
     }
     const auto function = oracleCases[static_cast<std::size_t>(request.caseId)];
+    if (request.codePointerRegister != rosa::differential::noRegister) {
+        if (request.codePointerRegister >
+            static_cast<std::uint8_t>(rosa::x86::Register::R15)) {
+            return 3;
+        }
+        registerValue(rosa_oracle_input, request.codePointerRegister) =
+            reinterpret_cast<std::uint64_t>(function) +
+            request.codePointerTargetOffset;
+    }
     if (request.codePointerMemoryOffset != rosa::differential::noOffset) {
         if (request.codePointerMemoryOffset > oracleMemory.size() - sizeof(std::uint64_t)) {
             return 3;

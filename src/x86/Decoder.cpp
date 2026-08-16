@@ -4403,11 +4403,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.opcode = Opcode::JmpReg;
                 instruction.operands.push_back(RegisterOperand{
                     decodeRegister(rmEncoding, rexB), 64});
+            } else if (extension == 0x2U && mode == 0x3U && !rexR && !rexX) {
+                instruction.opcode = Opcode::CallReg;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, rexB), 64});
+                instruction.fallthrough = guest::GuestAddress{
+                    address.value + (cursor - instructionStart)};
             } else if (extension != 0x2U || mode > 0x2U || rexR || rexX ||
                        (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register INC /0, qword memory INC /0, register/qword memory DEC /1, CALL memory /2, and register JMP /4 are supported from opcode FF");
+                    "only register INC /0, qword memory INC /0, register/qword memory DEC /1, register/memory CALL /2, and register JMP /4 are supported from opcode FF");
             } else {
                 auto baseEncoding = rmEncoding;
                 if (rmEncoding == 0x4U) {
@@ -4544,7 +4550,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         instruction.length = static_cast<std::uint8_t>(length);
         std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,
                     instruction.bytes.begin());
-        const auto terminatesBlock = instruction.opcode == Opcode::CallMem ||
+        const auto terminatesBlock = instruction.opcode == Opcode::CallReg ||
+                                     instruction.opcode == Opcode::CallMem ||
                                      instruction.opcode == Opcode::JmpReg;
         result.push_back(std::move(instruction));
         if (terminatesBlock) {

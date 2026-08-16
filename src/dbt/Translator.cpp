@@ -3531,6 +3531,18 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.exitCall(*instruction.branchTarget, *instruction.fallthrough,
                              instruction.address);
             break;
+        case x86::Opcode::CallReg: {
+            if (instruction.operands.size() != 1 || !instruction.fallthrough) {
+                throw std::runtime_error(
+                    "internal decoder error: register-indirect call operands");
+            }
+            const auto target = builder.readGuestRegister(
+                std::get<x86::RegisterOperand>(instruction.operands[0]).reg,
+                ir::Width::I64, instruction.address);
+            builder.exitCall(target, *instruction.fallthrough,
+                             instruction.address);
+            break;
+        }
         case x86::Opcode::CallMem: {
             if (instruction.operands.size() != 1 || !instruction.fallthrough) {
                 throw std::runtime_error("internal decoder error: indirect call operands");
@@ -3562,6 +3574,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                lastOpcode == x86::Opcode::JmpReg ||
                                lastOpcode == x86::Opcode::JccRelative ||
                                lastOpcode == x86::Opcode::CallRelative ||
+                               lastOpcode == x86::Opcode::CallReg ||
                                lastOpcode == x86::Opcode::CallMem ||
                                lastOpcode == x86::Opcode::Syscall || lastOpcode == x86::Opcode::Ret;
     if (!hasTerminator) {

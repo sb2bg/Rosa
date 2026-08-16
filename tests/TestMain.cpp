@@ -227,6 +227,14 @@ rosa::differential::Result runRosaDifferential(const DifferentialCase &testCase)
                                       testCase.request.codePointerMemoryOffset},
             codeBase.value + testCase.request.codePointerTargetOffset);
     }
+    if (testCase.request.codePointerRegister !=
+        rosa::differential::noRegister) {
+        setRegisterValue(
+            state,
+            static_cast<rosa::x86::Register>(
+                testCase.request.codePointerRegister),
+            codeBase.value + testCase.request.codePointerTargetOffset);
+    }
 
     rosa::differential::Result result;
     result.initial = state;
@@ -287,6 +295,8 @@ void compareDifferentialResult(const DifferentialCase &testCase,
                               "memory base");
     compareBoundRegisterDelta(testCase.request.memorySecondBaseRegister,
                               "second memory base");
+    compareBoundRegisterDelta(testCase.request.codePointerRegister,
+                              "code pointer");
 
     const auto expectedFlags = oracle.final.rflags & testCase.flagMask;
     const auto actualFlags = rosaResult.final.rflags & testCase.flagMask;
@@ -1877,6 +1887,18 @@ void testRosettaDifferentialSemantics() {
         bindMemory(testCase, rosa::x86::Register::R12, 0);
         testCase.request.codePointerMemoryOffset = 0x10;
         testCase.request.codePointerTargetOffset = 6;
+        run(testCase);
+    }
+    {
+        auto testCase = make("indirect_call_register",
+                             CaseId::indirect_call_register,
+                             differentialBytes_indirect_call_register);
+        testCase.request.state.rbx = 41;
+        testCase.request.codePointerRegister =
+            static_cast<std::uint8_t>(rosa::x86::Register::Rax);
+        testCase.request.codePointerTargetOffset = 4;
+        testCase.gprMask &= static_cast<std::uint16_t>(
+            ~(1U << static_cast<unsigned>(rosa::x86::Register::Rax)));
         run(testCase);
     }
     {
@@ -14617,6 +14639,59 @@ void testIndirectGuestMemoryCallFault() {
                 "failed indirect call changed RSP");
 }
 
+void testIndirectGuestRegisterCall() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 9> code{
+        0xFF, 0xD0,       // call rax
+        0xEB, 0x04,       // skip the target after it returns
+        0x83, 0xC3, 0x01, // add ebx, 1
+        0xC3,             // return from target
+        0xC3,             // return to dispatcher sentinel
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeBase);
+    expectEqual(decoded.size(), std::size_t{1},
+                "register-indirect CALL did not terminate its block");
+    expect(decoded[0].opcode == rosa::x86::Opcode::CallReg,
+           "register-indirect CALL opcode differs");
+    const auto target =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(target.reg == rosa::x86::Register::Rax && target.width == 64,
+           "register-indirect CALL target differs");
+    expectEqual(decoded[0].fallthrough->value, std::uint64_t{0x1002},
+                "register-indirect CALL fallthrough differs");
+    expect(rosa::debug::dumpX86(decoded).find("call rax") != std::string::npos,
+           "register-indirect CALL dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rax = codeBase.value + 4;
+    state.rbx = 0xAAAAAAAA00000029ULL;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    const auto initialRsp = state.rsp;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expectEqual(state.rbx, std::uint64_t{42},
+                "register-indirect CALL did not execute its target");
+    expectEqual(state.rax, codeBase.value + 4,
+                "register-indirect CALL changed its target register");
+    expectEqual(state.rsp, initialRsp + 8,
+                "register-indirect CALL did not restore the guest stack");
+    expectEqual(result.executedBlocks, std::size_t{4},
+                "register-indirect CALL block count differs");
+}
+
 void testUnsignedBelowConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x72, 0x02}; // jb 0x1004
     const rosa::x86::Decoder decoder;
@@ -15980,6 +16055,7 @@ int main() {
         {"R2 taken conditional", testR2TakenConditional},
         {"indirect guest-memory call", testIndirectGuestMemoryCall},
         {"indirect guest-memory call fault", testIndirectGuestMemoryCallFault},
+        {"indirect guest-register call", testIndirectGuestRegisterCall},
         {"unsigned-below conditional", testUnsignedBelowConditional},
         {"unsigned-below long conditional", testUnsignedBelowLongConditional},
         {"register-indirect jump", testRegisterIndirectJump},

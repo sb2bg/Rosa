@@ -33,6 +33,8 @@ struct Request {
     std::uint32_t memoryBaseOffset{};
     std::uint32_t codePointerMemoryOffset{noOffset};
     std::uint32_t codePointerTargetOffset{};
+    std::uint8_t codePointerRegister{noRegister};
+    std::array<std::uint8_t, 3> reserved{};
 };
 
 struct Result {

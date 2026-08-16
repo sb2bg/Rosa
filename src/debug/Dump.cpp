@@ -1146,6 +1146,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::CallRelative:
             stream << "call 0x" << instruction.branchTarget->value;
             break;
+        case x86::Opcode::CallReg:
+            stream << "call "
+                   << x86::registerName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
+            break;
         case x86::Opcode::CallMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << "call [" << x86::registerName(memory.base);
