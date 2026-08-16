@@ -3283,12 +3283,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            if (mode != 0x3U || rexR || rexX ||
-                (extension != 0x4U && extension != 0x5U)) {
+            const bool observedSar = rexW && extension == 0x7U;
+            if (mode != 0x3U ||
+                (!observedSar &&
+                 (rexR || rexX ||
+                  (extension != 0x4U && extension != 0x5U)))) {
                 throw DecodeError(address, remaining,
-                                  "only SHL/SHR r32/r64 register forms from opcode C1 are supported");
+                                  "only SHL/SHR r32/r64 and SAR r64 register forms from opcode C1 are supported");
             }
-            instruction.opcode = extension == 0x4U ? Opcode::ShlRegImm : Opcode::ShrRegImm;
+            instruction.opcode = extension == 0x4U   ? Opcode::ShlRegImm
+                                 : extension == 0x5U ? Opcode::ShrRegImm
+                                                     : Opcode::SarRegImm;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
                 static_cast<std::uint8_t>(rexW ? 64U : 32U)});

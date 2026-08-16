@@ -175,6 +175,21 @@ ValueId Builder::shiftRightLogical(ValueId value, ValueId count, Width width,
     return result;
 }
 
+ValueId Builder::shiftRightArithmetic(ValueId value, std::uint8_t count,
+                                      Width width,
+                                      guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShiftRightArithmetic,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = value,
+        .immediate = count,
+    });
+    return result;
+}
+
 ValueId Builder::multiplyLow(ValueId lhs, ValueId rhs, Width width,
                              guest::GuestAddress rip) {
     const auto result = nextValue();
@@ -593,6 +608,19 @@ void Builder::updateShiftRightFlags(ValueId lhs, ValueId result, ValueId count,
     });
 }
 
+void Builder::updateShiftRightArithmeticFlags(ValueId lhs, ValueId result,
+                                              std::uint8_t count, Width width,
+                                              guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateShiftRightArithmeticFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = lhs,
+        .rhs = result,
+        .immediate = count,
+    });
+}
+
 void Builder::updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::UpdateMultiplyFlags,
@@ -769,6 +797,7 @@ std::vector<std::string> verify(const Block &block) {
             }
             break;
         case Opcode::ShiftRightLogical:
+        case Opcode::ShiftRightArithmetic:
             checkUse(operation.lhs, "shifted");
             if (operation.rhs) {
                 checkUse(operation.rhs, "shift count");
@@ -915,6 +944,7 @@ std::vector<std::string> verify(const Block &block) {
             }
             break;
         case Opcode::UpdateShiftRightFlags:
+        case Opcode::UpdateShiftRightArithmeticFlags:
             checkUse(operation.lhs, "original");
             checkUse(operation.rhs, "result");
             if (operation.third) {

@@ -117,6 +117,25 @@ void Assembler::lsrImmediate(XRegister destination, XRegister source, std::uint8
                    std::to_string(shift));
 }
 
+void Assembler::asrImmediate(XRegister destination, XRegister source,
+                             std::uint8_t shift) {
+    requireRegister(destination);
+    requireRegister(source);
+    if (shift >= 64U) {
+        throw std::invalid_argument("64-bit ASR immediate must be less than 64");
+    }
+    if (shift == 0) {
+        mov(destination, source);
+        return;
+    }
+    const auto word =
+        0x9340FC00U | (static_cast<std::uint32_t>(shift) << 16U) |
+        (static_cast<std::uint32_t>(source.encoding) << 5U) |
+        static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "asr " + regName(destination) + ", " + regName(source) +
+                   ", #" + std::to_string(shift));
+}
+
 void Assembler::signExtend32(XRegister destination, XRegister source) {
     requireRegister(destination);
     requireRegister(source);
