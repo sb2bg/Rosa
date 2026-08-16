@@ -2057,7 +2057,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const bool hasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         if (!hasRex && code[cursor] != 0x05U &&
             code[cursor] != 0x24U && code[cursor] != 0x34U &&
-            code[cursor] != 0x00U && code[cursor] != 0x02U &&
+            code[cursor] != 0x00U && code[cursor] != 0x01U &&
+            code[cursor] != 0x02U &&
             code[cursor] != 0x88U &&
             code[cursor] != 0x89U &&
             code[cursor] != 0x8AU && code[cursor] != 0x8BU &&
@@ -2104,7 +2105,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                               "GS segment override is only supported for MOV r32, r/m32");
         }
         if (!rexW && opcode != 0x05U && opcode != 0x24U && opcode != 0x34U &&
-            opcode != 0x00U && opcode != 0x02U &&
+            opcode != 0x00U && opcode != 0x01U && opcode != 0x02U &&
             opcode != 0x88U && opcode != 0x89U &&
             opcode != 0x8AU &&
             opcode != 0x8BU && opcode != 0x85U &&
@@ -2388,15 +2389,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto source = decodeRegister(
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             if (mode == 0x3U) {
-                if (!rexW || rexX) {
-                    throw DecodeError(
-                        address, remaining,
-                        "only 64-bit register-direct ADD from opcode 01 is supported");
-                }
                 const auto destination = decodeRegister(rmEncoding, rexB);
+                const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
                 instruction.opcode = Opcode::AddRegReg;
-                instruction.operands.push_back(RegisterOperand{destination, 64});
-                instruction.operands.push_back(RegisterOperand{source, 64});
+                instruction.operands.push_back(RegisterOperand{destination, width});
+                instruction.operands.push_back(RegisterOperand{source, width});
             } else {
                 if (!rexW || rexX || rmEncoding == 0x4U ||
                     (mode == 0 && rmEncoding == 0x5U)) {

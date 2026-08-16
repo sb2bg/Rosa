@@ -366,6 +366,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("add32_register_zero_extend",
+                             CaseId::add32_register_zero_extend,
+                             differentialBytes_add32_register_zero_extend);
+        testCase.request.state.rax = UINT64_MAX;
+        testCase.request.state.rcx = 1;
+        run(testCase);
+    }
+    {
+        auto testCase = make("add32_register_overflow",
+                             CaseId::add32_register_overflow,
+                             differentialBytes_add32_register_overflow);
+        testCase.request.state.rax = 0xAAAAAAAA7FFFFFFFULL;
+        testCase.request.state.rcx = 1;
+        run(testCase);
+    }
+    {
         auto testCase = make("add64_memory_destination",
                              CaseId::add64_memory_destination,
                              differentialBytes_add64_memory_destination);
@@ -3023,6 +3039,50 @@ void testAddRegisterToRegister() {
     expectEqual(state.r13, std::uint64_t{1}, "ADD r64, r64 result differs");
     expectEqual(state.rbx, std::uint64_t{2}, "ADD r64, r64 changed its source");
     expectEqual(state.rflags, std::uint64_t{0x13}, "ADD r64, r64 flags differ");
+
+    constexpr std::array<std::uint8_t, 3> code32{0x01, 0xC8, 0xC3};
+    const auto decoded32 =
+        decoder.decodeBlock(code32, rosa::guest::GuestAddress{0x2000});
+    expect(decoded32[0].opcode == rosa::x86::Opcode::AddRegReg,
+           "ADD r32, r32 opcode differs");
+    expectEqual(decoded32[0].length, std::uint8_t{2},
+                "ADD r32, r32 length differs");
+    const auto destination32 =
+        std::get<rosa::x86::RegisterOperand>(decoded32[0].operands[0]);
+    const auto source32 =
+        std::get<rosa::x86::RegisterOperand>(decoded32[0].operands[1]);
+    expect(destination32.reg == rosa::x86::Register::Rax &&
+               destination32.width == 32 &&
+               source32.reg == rosa::x86::Register::Rcx &&
+               source32.width == 32,
+           "ADD r32, r32 operands differ");
+    expect(rosa::debug::dumpX86(decoded32).find("add eax, ecx") !=
+               std::string::npos,
+           "ADD r32, r32 dump differs");
+
+    const auto block32 =
+        translator.translate(code32, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State carryState;
+    carryState.rax = UINT64_MAX;
+    carryState.rcx = 1;
+    carryState.rflags = 0x8D7;
+    static_cast<void>(block32.execute(carryState));
+    expectEqual(carryState.rax, std::uint64_t{0},
+                "ADD r32, r32 did not zero-extend its destination");
+    expectEqual(carryState.rcx, std::uint64_t{1},
+                "ADD r32, r32 changed its source");
+    expectEqual(carryState.rflags, std::uint64_t{0x57},
+                "ADD r32, r32 carry/zero flags differ");
+
+    rosa::x86::X86State overflowState;
+    overflowState.rax = 0xAAAAAAAA7FFFFFFFULL;
+    overflowState.rcx = 1;
+    overflowState.rflags = 0;
+    static_cast<void>(block32.execute(overflowState));
+    expectEqual(overflowState.rax, std::uint64_t{0x80000000},
+                "ADD r32, r32 overflow result differs");
+    expectEqual(overflowState.rflags, std::uint64_t{0x896},
+                "ADD r32, r32 overflow flags differ");
 }
 
 void testAddLowByteRegisters() {

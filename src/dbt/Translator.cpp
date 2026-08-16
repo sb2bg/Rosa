@@ -1985,12 +1985,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
             if (destination.width != source.width ||
-                (destination.width != 8 && destination.width != 64)) {
+                (destination.width != 8 && destination.width != 32 &&
+                 destination.width != 64)) {
                 throw std::runtime_error(
-                    "only 8-bit and 64-bit register ADD are implemented");
+                    "only 8-, 32-, and 64-bit register ADD are implemented");
             }
-            const auto width = destination.width == 8 ? ir::Width::I8
-                                                       : ir::Width::I64;
+            const auto width = destination.width == 8    ? ir::Width::I8
+                               : destination.width == 32 ? ir::Width::I32
+                                                         : ir::Width::I64;
             const auto lhs = builder.readGuestRegister(
                 destination.reg, width, instruction.address);
             const auto rhs = builder.readGuestRegister(
