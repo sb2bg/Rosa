@@ -830,6 +830,19 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("or8_indexed_memory",
+                             CaseId::or8_indexed_memory,
+                             differentialBytes_or8_indexed_memory);
+        bindMemory(testCase, rosa::x86::Register::Rax, 0x20);
+        testCase.request.state.rdx = 8;
+        testCase.request.state.rdi = 0x1122334455667701ULL;
+        testCase.request.memory[0x28] = 0x80;
+        testCase.memoryCompareOffset = 0x28;
+        testCase.memoryCompareSize = 1;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("xor32_register", CaseId::xor32_register,
                              differentialBytes_xor32_register);
         testCase.request.state.rsi = UINT64_MAX;
@@ -10467,6 +10480,109 @@ void testOr8BitRegistersGeneratedExecution() {
     expect(rejected, "OR AL, AH was silently treated as a low-byte register form");
 }
 
+void testOr8BitRegisterIntoIndexedGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x40, 0x08, 0x3C, 0x10, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF70004DB43ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrMemReg,
+           "OR byte [memory], r8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "OR byte [memory], r8 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rax && memory.index &&
+               *memory.index == rosa::x86::Register::Rdx &&
+               memory.scale == 1 && memory.displacement == 0 &&
+               memory.width == 8 && source.reg == rosa::x86::Register::Rdi &&
+               source.width == 8,
+           "OR byte [rax+rdx], dil operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "or byte [rax+rdx], dil") != std::string::npos,
+           "OR byte [rax+rdx], dil dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8128};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array initialByte{std::uint8_t{0x80}};
+    addressSpace.writeBytes(target, initialByte);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF70004DB43ULL});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("or_guest_memory.i8") != std::string::npos,
+           "OR byte memory did not lower through guest-memory IR");
+    rosa::x86::X86State state;
+    state.rax = 0x8100;
+    state.rdx = 0x28;
+    state.rdi = 0x1122334455667701ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readBytes(target, 1).front(),
+                std::uint8_t{0x81},
+                "OR byte memory result differs");
+    expectEqual(state.rax, std::uint64_t{0x8100},
+                "OR byte memory changed its base");
+    expectEqual(state.rdx, std::uint64_t{0x28},
+                "OR byte memory changed its index");
+    expectEqual(state.rdi, std::uint64_t{0x1122334455667701ULL},
+                "OR byte memory changed its source");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0x84},
+                "OR byte memory defined flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    auto faultState = state;
+    faultState.rax = target.value - 8;
+    faultState.rdx = 8;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "OR byte unmapped guest memory did not fault");
+    expectEqual(faultState.rdi, state.rdi,
+                "faulted OR byte memory changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted OR byte memory changed flags");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    readOnlyAddressSpace.writeBytes(target, initialByte);
+    expectEqual(readOnlyAddressSpace.protect(
+                    page, rosa::guest::guestPageSize,
+                    rosa::guest::Permission::Read),
+                rosa::guest::ProtectResult::Success,
+                "could not make OR byte test memory read-only");
+    faultState.rflags = 0xBD7;
+    rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "OR byte read-only guest memory did not fault");
+    expectEqual(readOnlyAddressSpace.readBytes(target, 1).front(),
+                std::uint8_t{0x80},
+                "faulted OR byte memory changed read-only memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "read-only OR byte memory changed flags");
+}
+
 void testOrShortImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x83, 0xC8, 0xFF, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -17035,6 +17151,8 @@ int main() {
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"OR 8-bit registers generated execution", testOr8BitRegistersGeneratedExecution},
+        {"OR 8-bit register into indexed guest memory",
+         testOr8BitRegisterIntoIndexedGuestMemory},
         {"OR short immediate generated execution", testOrShortImmediateGeneratedExecution},
         {"OR 32-bit registers generated execution", testOr32BitRegistersGeneratedExecution},
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},

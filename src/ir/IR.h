@@ -62,6 +62,7 @@ enum class Opcode {
     RepeatMoveByte,
     Push,
     AddGuestMemory,
+    OrGuestMemory,
     ShiftLeftGuestMemory,
     IncrementGuestMemory,
     DecrementGuestMemory,
@@ -191,6 +192,8 @@ class Builder {
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void addGuestMemory(ValueId address, ValueId source, Width width,
                         guest::GuestAddress rip);
+    void orGuestMemory(ValueId address, ValueId source, Width width,
+                       guest::GuestAddress rip);
     void shiftLeftGuestMemory(ValueId address, std::uint8_t count, Width width,
                               guest::GuestAddress rip);
     void incrementGuestMemory(ValueId address, Width width,

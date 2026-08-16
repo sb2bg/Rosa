@@ -35,6 +35,9 @@ struct GuestExecutionContext {
     TimestampCounterReader timestampCounterReader{};
 };
 
+extern "C" x86::X86State *
+updateLogicFlags8(x86::X86State *state, std::uint64_t result);
+
 extern "C" __attribute__((noinline)) x86::X86State *
 commitPush64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t newStackPointer,
              std::uint64_t value) noexcept {
@@ -806,6 +809,35 @@ addGuest64(GuestExecutionContext *context, x86::X86State *state,
             context->fault = std::current_exception();
             context->faultAddress = guest::GuestAddress{address};
             context->faultSize = sizeof(std::uint64_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+orGuest8(GuestExecutionContext *context, x86::X86State *state,
+         std::uint64_t address, std::uint64_t sourceValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated 8-bit guest OR has no address space");
+        }
+        context->addressSpace->validateAccess(
+            guest::GuestAddress{address}, 1,
+            guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace
+                                  ->readBytes(guest::GuestAddress{address}, 1)
+                                  .front();
+        const auto result = static_cast<std::uint8_t>(
+            original | static_cast<std::uint8_t>(sourceValue));
+        const std::array bytes{result};
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+        return updateLogicFlags8(state, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = 1;
         }
         return nullptr;
     }
@@ -3111,6 +3143,44 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateLogicFlags(result, width, instruction.address);
             break;
         }
+        case x86::Opcode::OrMemReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: memory or operand count");
+            }
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            auto address = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(
+                            std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64,
+                                      instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement,
+                                      ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto sourceValue = builder.readGuestRegister(
+                source.reg, ir::Width::I64, instruction.address);
+            builder.orGuestMemory(address, sourceValue, ir::Width::I8,
+                                  instruction.address);
+            break;
+        }
         case x86::Opcode::OrRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: or immediate operand count");
@@ -3944,6 +4014,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::UpdateShiftRightDoubleFlags ||
                          operation.opcode == ir::Opcode::Push ||
                          operation.opcode == ir::Opcode::AddGuestMemory ||
+                         operation.opcode == ir::Opcode::OrGuestMemory ||
                          operation.opcode == ir::Opcode::ShiftLeftGuestMemory ||
                          operation.opcode == ir::Opcode::IncrementGuestMemory ||
                          operation.opcode == ir::Opcode::DecrementGuestMemory ||
@@ -3974,6 +4045,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::ReadTimestampCounter;
         hasExecutionContextCall |= operation.opcode == ir::Opcode::Push ||
                                    operation.opcode == ir::Opcode::AddGuestMemory ||
+                                   operation.opcode == ir::Opcode::OrGuestMemory ||
                                    operation.opcode == ir::Opcode::ShiftLeftGuestMemory ||
                                    operation.opcode == ir::Opcode::IncrementGuestMemory ||
                                    operation.opcode == ir::Opcode::DecrementGuestMemory ||
@@ -4286,6 +4358,30 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x3, hostRegister(*operation.rhs));
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(arm64::x16, pointerBits(&addGuest64));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(
+                arm64::x0, static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::OrGuestMemory: {
+            if (operation.width != ir::Width::I8) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 8-bit guest memory OR");
+            }
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x4, arm64::x0);
+            assembler.mov(arm64::x1, arm64::x4);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x3, hostRegister(*operation.rhs));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&orGuest8));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

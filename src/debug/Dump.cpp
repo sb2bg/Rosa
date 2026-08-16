@@ -665,6 +665,27 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
+        case x86::Opcode::OrMemReg: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "or byte [" << x86::registerName(memory.base);
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[1]));
+            break;
+        }
         case x86::Opcode::OrRegImm:
             stream << "or "
                    << registerOperandName(
@@ -1368,6 +1389,11 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::AddGuestMemory:
             stream << "add_guest_memory." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", "
+                   << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::OrGuestMemory:
+            stream << "or_guest_memory." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", "
                    << valueName(*operation.rhs);
             break;
