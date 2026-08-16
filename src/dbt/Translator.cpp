@@ -1017,6 +1017,35 @@ decrementGuest64(GuestExecutionContext *context, x86::X86State *state,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+decrementGuest8(GuestExecutionContext *context, x86::X86State *state,
+                std::uint64_t address) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated 8-bit guest decrement has no address space");
+        }
+        context->addressSpace->validateAccess(
+            guest::GuestAddress{address}, 1,
+            guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace
+                                  ->readBytes(guest::GuestAddress{address}, 1)
+                                  .front();
+        const auto result = static_cast<std::uint8_t>(original - 1U);
+        const std::array resultBytes{result};
+        context->addressSpace->writeBytes(guest::GuestAddress{address},
+                                          resultBytes);
+        return updateDecFlags8(state, original, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint8_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateSubFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std::uint64_t result) {
     auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
     if (lhs < rhs) {
@@ -2502,14 +2531,31 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 throw std::runtime_error("internal decoder error: memory decrement operand");
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            const auto base = builder.readGuestRegister(
+            auto address = builder.readGuestRegister(
                 memory.base, ir::Width::I64, instruction.address);
-            const auto displacement = builder.constant(
-                static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
-                instruction.address);
-            const auto address = builder.add(base, displacement, ir::Width::I64,
-                                             instruction.address);
-            builder.decrementGuestMemory(address, ir::Width::I64,
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(
+                            std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64,
+                                      instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            builder.decrementGuestMemory(address,
+                                         memory.width == 8 ? ir::Width::I8
+                                                           : ir::Width::I64,
                                          instruction.address);
             break;
         }
@@ -4474,9 +4520,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
             break;
         }
         case ir::Opcode::DecrementGuestMemory: {
-            if (operation.width != ir::Width::I64) {
+            if (operation.width != ir::Width::I8 &&
+                operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 64-bit guest memory decrement");
+                    "ARM64 backend only implements 8- and 64-bit guest memory decrement");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -4484,7 +4531,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x1, arm64::x4);
             assembler.mov(arm64::x2, hostRegister(*operation.lhs));
             assembler.mov(arm64::x0, arm64::x19);
-            assembler.movImmediate(arm64::x16, pointerBits(&decrementGuest64));
+            assembler.movImmediate(
+                arm64::x16,
+                operation.width == ir::Width::I8
+                    ? pointerBits(&decrementGuest8)
+                    : pointerBits(&decrementGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

@@ -4634,7 +4634,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                                      : Opcode::DecReg;
                 instruction.operands.push_back(RegisterOperand{
                     decodeRegister(rmEncoding, rexB), 8});
-            } else if (mode <= 0x2U && extension == 0 && !rexR &&
+            } else if (mode <= 0x2U && extension <= 1 && !rexR &&
                        (!rexX || rmEncoding == 0x4U) &&
                        !(mode == 0 && rmEncoding == 0x5U)) {
                 auto base = decodeRegister(rmEncoding, rexB);
@@ -4643,7 +4643,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 if (rmEncoding == 0x4U) {
                     if (cursor >= code.size()) {
                         throw DecodeError(address, remaining,
-                                          "truncated INC byte SIB");
+                                          "truncated INC/DEC byte SIB");
                     }
                     const auto sib = code[cursor++];
                     const auto scaleBits =
@@ -4655,7 +4655,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     if (mode == 0 && baseEncoding == 0x5U) {
                         throw DecodeError(
                             address, remaining,
-                            "no-base INC byte SIB is not supported");
+                            "no-base INC/DEC byte SIB is not supported");
                     }
                     base = decodeRegister(baseEncoding, rexB);
                     if (indexEncoding != 0x4U || rexX) {
@@ -4667,24 +4667,25 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 if (mode == 0x1U) {
                     if (cursor >= code.size()) {
                         throw DecodeError(address, remaining,
-                                          "truncated INC byte disp8");
+                                          "truncated INC/DEC byte disp8");
                     }
                     displacement = std::bit_cast<std::int8_t>(code[cursor++]);
                 } else if (mode == 0x2U) {
                     if (code.size() - cursor < 4) {
                         throw DecodeError(address, remaining,
-                                          "truncated INC byte disp32");
+                                          "truncated INC/DEC byte disp32");
                     }
                     displacement = readI32(code.subspan(cursor, 4));
                     cursor += 4;
                 }
-                instruction.opcode = Opcode::IncMem;
+                instruction.opcode = extension == 0 ? Opcode::IncMem
+                                                     : Opcode::DecMem;
                 instruction.operands.push_back(
                     MemoryOperand{base, displacement, 8, index, scale});
             } else {
                 throw DecodeError(
                     address, remaining,
-                    "only representable register-direct INC/DEC r8 and based INC byte memory are supported");
+                    "only representable register-direct INC/DEC r8 and based INC/DEC byte memory are supported");
             }
         } else if (opcode == 0xFFU) {
             if (code.size() - cursor < 1) {

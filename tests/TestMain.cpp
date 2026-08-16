@@ -706,6 +706,31 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "dec8_scaled_memory_overflow",
+            CaseId::dec8_scaled_memory_overflow,
+            differentialBytes_dec8_scaled_memory_overflow);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.state.rax = 0x20;
+        testCase.request.state.rflags |= carryFlag;
+        testCase.request.memory[0x78] = 0x80;
+        testCase.memoryCompareOffset = 0x78;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "dec8_scaled_memory_zero", CaseId::dec8_scaled_memory_zero,
+            differentialBytes_dec8_scaled_memory_zero);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.state.rax = 0x20;
+        testCase.request.state.rflags &= ~carryFlag;
+        testCase.request.memory[0x78] = 1;
+        testCase.memoryCompareOffset = 0x78;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
         auto testCase = make("dec64_memory", CaseId::dec64_memory,
                              differentialBytes_dec64_memory);
         bindMemory(testCase, rosa::x86::Register::Rbx, 0);
@@ -4366,6 +4391,98 @@ void testDecrement64BitGuestMemory() {
                 "failed DEC qword changed its base register");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "failed DEC qword changed flags");
+}
+
+void testDecrement8BitScaledGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0xFE, 0x4C, 0x03, 0x58, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF70004F924ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::DecMem,
+           "DEC byte [scaled memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "DEC byte [scaled memory] length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rbx && memory.index &&
+               *memory.index == rosa::x86::Register::Rax &&
+               memory.scale == 1 && memory.displacement == 0x58 &&
+               memory.width == 8,
+           "DEC byte [rbx+rax+disp8] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "dec byte [rbx+rax*1+0x58]") != std::string::npos,
+           "DEC byte [scaled memory] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8078};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF70004F924ULL});
+
+    constexpr std::array overflowBytes{std::uint8_t{0x11},
+                                       std::uint8_t{0x80},
+                                       std::uint8_t{0x22}};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{target.value - 1},
+                            overflowBytes);
+    rosa::x86::X86State overflowState;
+    overflowState.rbx = page.value;
+    overflowState.rax = 0x20;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(block.execute(overflowState, &addressSpace));
+    expect(addressSpace.readBytes(
+               rosa::guest::GuestAddress{target.value - 1}, 3) ==
+               std::vector<std::uint8_t>({0x11, 0x7F, 0x22}),
+           "DEC byte changed bytes outside its operand");
+    expectEqual(overflowState.rbx, page.value,
+                "DEC byte changed its base register");
+    expectEqual(overflowState.rax, std::uint64_t{0x20},
+                "DEC byte changed its index register");
+    expectEqual(overflowState.rflags, std::uint64_t{0x813},
+                "DEC byte overflow flags differ or CF changed");
+
+    addressSpace.writeBytes(target, std::array{std::uint8_t{1}});
+    rosa::x86::X86State zeroState;
+    zeroState.rbx = page.value;
+    zeroState.rax = 0x20;
+    zeroState.rflags = 0x8D6;
+    static_cast<void>(block.execute(zeroState, &addressSpace));
+    expectEqual(addressSpace.readBytes(target, 1).front(), std::uint8_t{0},
+                "DEC byte zero result differs");
+    expectEqual(zeroState.rflags, std::uint64_t{0x46},
+                "DEC byte zero flags differ or CF changed");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[0x78] = 0x80;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        page, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        readOnlyBytes, "read-only byte decrement target");
+    rosa::x86::X86State faultState;
+    faultState.rbx = page.value;
+    faultState.rax = 0x20;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "DEC byte accepted read-only guest memory");
+    expectEqual(readOnlyAddressSpace.readBytes(target, 1).front(),
+                std::uint8_t{0x80},
+                "faulted DEC byte changed guest memory");
+    expectEqual(faultState.rbx, page.value,
+                "faulted DEC byte changed its base register");
+    expectEqual(faultState.rax, std::uint64_t{0x20},
+                "faulted DEC byte changed its index register");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted DEC byte changed flags");
 }
 
 void testCompare32BitRegisterWithGuestMemory() {
@@ -17108,6 +17225,8 @@ int main() {
         {"INC 32-bit guest memory", testIncrement32BitGuestMemory},
         {"INC 64-bit guest memory", testIncrement64BitGuestMemory},
         {"DEC 64-bit guest memory", testDecrement64BitGuestMemory},
+        {"DEC 8-bit scaled guest memory",
+         testDecrement8BitScaledGuestMemory},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
         {"CMP byte register with scaled guest memory",
          testCompareByteRegisterWithScaledGuestMemory},
