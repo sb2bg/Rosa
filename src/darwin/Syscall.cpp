@@ -28,7 +28,13 @@ constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
 constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
 constexpr std::uint64_t syscallFsgetpath = unixSyscallClass | 427U;
+constexpr std::uint64_t syscallCsrctl = unixSyscallClass | 483U;
 constexpr std::uint64_t syscallGetentropy = unixSyscallClass | 500U;
+constexpr std::uint64_t csrSyscallCheck = 0;
+// Rosa exposes a fully restrictive guest System Integrity Protection
+// configuration. This is guest policy state, not a host kernel pointer or
+// an assertion about the host's current configuration.
+constexpr std::uint32_t guestCsrActiveConfig = 0;
 constexpr std::uint64_t machdepThreadFastSetCthreadSelf = 3U;
 constexpr std::uint64_t x86UserCthreadSelector = 0x0FU;
 constexpr std::uint64_t x86MaximumUserPageAddress = 0x00007FFFFFFFF000ULL;
@@ -190,11 +196,36 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
             state, syscallRip,
             "fsgetpath requires a guest VFS identity resolver for a nonempty fsid/object ID");
     }
+    if (number == syscallCsrctl) {
+        if (state.rdi != csrSyscallCheck) {
+            throw unsupported(
+                state, syscallRip,
+                "only the observed csrctl CSR_SYSCALL_CHECK operation is implemented");
+        }
+        if (state.rsi == 0 || state.rdx != sizeof(std::uint32_t)) {
+            setError(state, EINVAL);
+            return {};
+        }
+        std::uint32_t requestedMask = 0;
+        try {
+            requestedMask = addressSpace.readU32(
+                guest::GuestAddress{state.rsi});
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        if ((guestCsrActiveConfig & requestedMask) == requestedMask) {
+            setSuccess(state, 0);
+        } else {
+            setError(state, EPERM);
+        }
+        return {};
+    }
     if (number != syscallWrite) {
         throw unsupported(state, syscallRip,
                           "only BSD write(2), exit(2), getpid(2), "
                           "shared_region_check_np(2), thread_selfid(2), "
-                          "fsgetpath(2), and getentropy(2) are "
+                          "fsgetpath(2), csrctl(2), and getentropy(2) are "
                           "implemented");
     }
     if (state.rdi != STDOUT_FILENO && state.rdi != STDERR_FILENO) {

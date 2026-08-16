@@ -12846,6 +12846,120 @@ void testDarwinFsgetpath() {
            "nonempty fsgetpath identity did not stop at the guest VFS boundary");
 }
 
+void testDarwinCsrCheck() {
+    constexpr auto callNumber = UINT64_C(0x020001E3);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress maskAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 4> appleInternalMask{0x10, 0, 0, 0};
+    addressSpace.writeBytes(maskAddress, appleInternalMask);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = callNumber;
+    state.rdi = 0;
+    state.rsi = maskAddress.value;
+    state.rdx = sizeof(std::uint32_t);
+    state.rflags = 0xAD6;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF7000051E8ULL});
+    expect(!outcome.exited, "csrctl check terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(EPERM),
+                "restrictive guest csrctl accepted AppleInternal");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "failed csrctl check did not set BSD carry");
+    expectEqual(addressSpace.readBytes(maskAddress, appleInternalMask.size()),
+                std::vector<std::uint8_t>(appleInternalMask.begin(),
+                                          appleInternalMask.end()),
+                "csrctl check changed its input mask");
+
+    constexpr std::array<std::uint8_t, 4> zeroMask{};
+    addressSpace.writeBytes(maskAddress, zeroMask);
+    state.rax = callNumber;
+    state.rdi = 0;
+    state.rsi = maskAddress.value;
+    state.rdx = sizeof(std::uint32_t);
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "zero-mask csrctl check failed");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "successful csrctl check did not clear BSD carry");
+
+    state.rax = callNumber;
+    state.rdi = 0;
+    state.rsi = UINT64_MAX;
+    state.rdx = 8;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "wrong-size csrctl check inspected its guest pointer");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "wrong-size csrctl check did not set BSD carry");
+
+    state.rax = callNumber;
+    state.rdi = 0;
+    state.rsi = 0x9000;
+    state.rdx = sizeof(std::uint32_t);
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "csrctl invalid guest pointer returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "csrctl invalid guest pointer did not set BSD carry");
+}
+
+void testGeneratedDarwinCsrCheck() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress maskAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0xE3, 0x01, 0x00, 0x02, // mov eax, 0x20001e3
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(maskAddress, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 4> appleInternalMask{0x10, 0, 0, 0};
+    addressSpace.writeBytes(maskAddress, appleInternalMask);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rdi = 0;
+    state.rsi = maskAddress.value;
+    state.rdx = sizeof(std::uint32_t);
+    state.rflags = 0x8D6;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated csrctl check terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(EPERM),
+                "generated csrctl check returned the wrong errno");
+    expectEqual(state.rcx, std::uint64_t{0x1007},
+                "generated csrctl check lost SYSCALL fallthrough");
+    expectEqual(state.r11, std::uint64_t{0x8D6},
+                "generated csrctl check did not save input flags");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "generated csrctl check did not set BSD carry");
+}
+
 void testDarwinSharedRegionCheck() {
     constexpr auto callNumber = UINT64_C(0x02000126);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -16754,6 +16868,8 @@ int main() {
         {"generated Darwin thread_selfid", testGeneratedDarwinThreadSelfid},
         {"Darwin getentropy", testDarwinGetentropy},
         {"Darwin fsgetpath", testDarwinFsgetpath},
+        {"Darwin csrctl check", testDarwinCsrCheck},
+        {"generated Darwin csrctl check", testGeneratedDarwinCsrCheck},
         {"Darwin shared-region check", testDarwinSharedRegionCheck},
         {"generated Darwin getentropy", testGeneratedDarwinGetentropy},
         {"Darwin thread_fast_set_cthread_self",
