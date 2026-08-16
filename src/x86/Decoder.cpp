@@ -3023,11 +3023,40 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (rexX || mode > 0x2U || rmEncoding == 0x4U ||
+            if (!rexW || mode > 0x2U ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only ADD r64, [base+disp8/disp32] memory operands are supported");
+                    "only ADD r64, [base+index*scale+disp8/disp32] memory operands are supported");
+            }
+            auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated ADD qword memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding =
+                    static_cast<std::uint8_t>(sib & 0x7U);
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "no-base ADD qword memory SIB is not supported");
+                }
+                base = decodeRegister(baseEncoding, rexB);
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            } else if (rexX) {
+                throw DecodeError(address, remaining,
+                                  "REX.X requires an ADD qword memory SIB");
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -3044,10 +3073,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto destination =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
-            const auto base = decodeRegister(rmEncoding, rexB);
             instruction.opcode = Opcode::AddRegMem;
             instruction.operands.push_back(RegisterOperand{destination, 64});
-            instruction.operands.push_back(MemoryOperand{base, displacement, 64});
+            instruction.operands.push_back(
+                MemoryOperand{base, displacement, 64, index, scale});
         } else if (opcode == 0x08U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated or r8, r8");
