@@ -2228,6 +2228,27 @@ void testRosettaDifferentialSemantics() {
             .high = 0xAAAAAAAA55555555ULL};
         run(testCase);
     }
+    const auto runPalignr = [&](std::string_view name, CaseId id,
+                                std::span<const std::uint8_t> bytes) {
+        auto testCase = make(name, id, bytes);
+        testCase.request.state.xmm[3] = {
+            .low = 0x0706050403020100ULL,
+            .high = 0x0F0E0D0C0B0A0908ULL};
+        testCase.request.state.xmm[4] = {
+            .low = 0x1716151413121110ULL,
+            .high = 0x1F1E1D1C1B1A1918ULL};
+        run(testCase);
+    };
+    runPalignr("palignr_count_0", CaseId::palignr_count_0,
+               differentialBytes_palignr_count_0);
+    runPalignr("palignr_count_6", CaseId::palignr_count_6,
+               differentialBytes_palignr_count_6);
+    runPalignr("palignr_count_16", CaseId::palignr_count_16,
+               differentialBytes_palignr_count_16);
+    runPalignr("palignr_count_31", CaseId::palignr_count_31,
+               differentialBytes_palignr_count_31);
+    runPalignr("palignr_count_32", CaseId::palignr_count_32,
+               differentialBytes_palignr_count_32);
     {
         auto testCase = make("movdqa_load", CaseId::movdqa_load,
                              differentialBytes_movdqa_load);
@@ -10412,6 +10433,56 @@ void testPshufdRegisterExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "PSHUFD changed flags");
 }
 
+void testPalignrRegisterExecution() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x66, 0x0F, 0x3A, 0x0F, 0xE3, 0x06, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded =
+        decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PalignrRegRegImm,
+           "PALIGNR opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6},
+                "PALIGNR length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm4 &&
+               source.reg == rosa::x86::XmmRegister::Xmm3 &&
+               immediate.value == 6,
+           "PALIGNR operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "palignr xmm4, xmm3, 0x6") != std::string::npos,
+           "PALIGNR x86 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block =
+        translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "align_right_xmm_bytes xmm4, xmm3, 6") !=
+               std::string::npos,
+           "PALIGNR IR dump differs");
+    rosa::x86::X86State state;
+    state.xmm[3] = {
+        .low = 0x0706050403020100ULL,
+        .high = 0x0F0E0D0C0B0A0908ULL};
+    state.xmm[4] = {
+        .low = 0x1716151413121110ULL,
+        .high = 0x1F1E1D1C1B1A1918ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[4].low, std::uint64_t{0x0D0C0B0A09080706ULL},
+                "PALIGNR low lane differs");
+    expectEqual(state.xmm[4].high, std::uint64_t{0x1514131211100F0EULL},
+                "PALIGNR high lane differs");
+    expectEqual(state.xmm[3].low, std::uint64_t{0x0706050403020100ULL},
+                "PALIGNR changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PALIGNR changed flags");
+}
+
 void testMovapsRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 8> code{
         0x0F, 0x29, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, 0xC3,
@@ -15545,6 +15616,7 @@ int main() {
         {"PANDN register generated execution", testPandnRegisterGeneratedExecution},
         {"PMOVMSKB generated execution", testPmovmskbGeneratedExecution},
         {"PSHUFD register execution", testPshufdRegisterExecution},
+        {"PALIGNR register execution", testPalignrRegisterExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVAPS register to RIP-relative guest memory",
          testMovapsRegisterToRipRelativeGuestMemory},

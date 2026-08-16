@@ -416,6 +416,20 @@ void Builder::shuffleXmmDwords(x86::XmmRegister destination,
     });
 }
 
+void Builder::alignRightXmmBytes(x86::XmmRegister destination,
+                                 x86::XmmRegister source,
+                                 std::uint8_t count,
+                                 guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::AlignRightXmmBytes,
+        .width = Width::I8,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+        .immediate = count,
+    });
+}
+
 void Builder::bitScanForward(x86::Register destination, x86::Register source,
                              Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -990,6 +1004,13 @@ std::vector<std::string> verify(const Block &block) {
             if (!operation.guestXmmRegister ||
                 !operation.sourceGuestXmmRegister || operation.immediate > 0xFFU) {
                 errors.emplace_back("shuffle_xmm_dwords is incomplete");
+            }
+            break;
+        case Opcode::AlignRightXmmBytes:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister ||
+                operation.immediate > 0xFFU) {
+                errors.emplace_back("align_right_xmm_bytes is incomplete");
             }
             break;
         case Opcode::BitScanForward:

@@ -54,6 +54,7 @@ enum class Opcode {
     AndNotXmm,
     MoveXmmByteMask,
     ShuffleXmmDwords,
+    AlignRightXmmBytes,
     BitScanForward,
     BitScanReverse,
     RepeatMoveByte,
@@ -170,6 +171,9 @@ class Builder {
     void shuffleXmmDwords(x86::XmmRegister destination,
                           x86::XmmRegister source, std::uint8_t control,
                           guest::GuestAddress rip);
+    void alignRightXmmBytes(x86::XmmRegister destination,
+                            x86::XmmRegister source, std::uint8_t count,
+                            guest::GuestAddress rip);
     void bitScanForward(x86::Register destination, x86::Register source,
                         Width width, guest::GuestAddress rip);
     void bitScanReverse(x86::Register destination, x86::Register source,

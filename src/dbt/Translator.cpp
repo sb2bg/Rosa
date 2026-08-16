@@ -1,5 +1,6 @@
 #include "dbt/Translator.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -397,6 +398,31 @@ shuffleXmmDwords(x86::X86State *state, std::uint64_t destinationIndex,
         .high = static_cast<std::uint64_t>(result[2]) |
                 (static_cast<std::uint64_t>(result[3]) << 32U),
     };
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+alignRightXmmBytes(x86::X86State *state, std::uint64_t destinationIndex,
+                   std::uint64_t sourceIndex, std::uint64_t count) {
+    if (destinationIndex >= state->xmm.size() ||
+        sourceIndex >= state->xmm.size() || count > 0xFFU) {
+        return state;
+    }
+    const auto destination = state->xmm[destinationIndex];
+    const auto source = state->xmm[sourceIndex];
+    std::array<std::uint8_t, 32> concatenated{};
+    std::memcpy(concatenated.data(), &source, sizeof(source));
+    std::memcpy(concatenated.data() + sizeof(source), &destination,
+                sizeof(destination));
+    std::array<std::uint8_t, 16> result{};
+    if (count < concatenated.size()) {
+        const auto available = std::min<std::size_t>(
+            result.size(), concatenated.size() - count);
+        std::copy_n(
+            concatenated.begin() + static_cast<std::ptrdiff_t>(count),
+            available, result.begin());
+    }
+    std::memcpy(&state->xmm[destinationIndex], result.data(), result.size());
     return state;
 }
 
@@ -3001,6 +3027,20 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             break;
         }
+        case x86::Opcode::PalignrRegRegImm: {
+            if (instruction.operands.size() != 3) {
+                throw std::runtime_error(
+                    "internal decoder error: palignr operand count");
+            }
+            builder.alignRightXmmBytes(
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg,
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg,
+                static_cast<std::uint8_t>(
+                    std::get<x86::ImmediateOperand>(instruction.operands[2])
+                        .value),
+                instruction.address);
+            break;
+        }
         case x86::Opcode::AndRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: and operand count");
@@ -3509,6 +3549,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::AndNotXmm ||
                          operation.opcode == ir::Opcode::MoveXmmByteMask ||
                          operation.opcode == ir::Opcode::ShuffleXmmDwords ||
+                         operation.opcode == ir::Opcode::AlignRightXmmBytes ||
                          operation.opcode == ir::Opcode::BitScanForward ||
                          operation.opcode == ir::Opcode::BitScanReverse ||
                          operation.opcode == ir::Opcode::RepeatMoveByte ||
@@ -4146,6 +4187,19 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
             assembler.movImmediate(arm64::x3, operation.immediate);
             assembler.movImmediate(arm64::x16, pointerBits(&shuffleXmmDwords));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::AlignRightXmmBytes:
+            assembler.movImmediate(
+                arm64::x1,
+                static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(
+                arm64::x2,
+                static_cast<std::uint64_t>(
+                    *operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x3, operation.immediate);
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&alignRightXmmBytes));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::BitScanForward:
