@@ -275,6 +275,22 @@ compareEqualXmmBytes128(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+andNotXmm128(x86::X86State *state, std::uint64_t destinationIndex,
+             std::uint64_t sourceIndex) noexcept {
+    if (destinationIndex >= state->xmm.size() ||
+        sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    const auto destination = state->xmm[destinationIndex];
+    const auto source = state->xmm[sourceIndex];
+    state->xmm[destinationIndex] = {
+        .low = ~destination.low & source.low,
+        .high = ~destination.high & source.high,
+    };
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 moveXmmByteMask32(x86::X86State *state, std::uint64_t destinationIndex,
                   std::uint64_t sourceIndex) {
     if (destinationIndex >= 16 || sourceIndex >= state->xmm.size()) {
@@ -2760,6 +2776,18 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                          instruction.address);
             break;
         }
+        case x86::Opcode::PandnRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: pandn register operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            builder.andNotXmm(destination, source, instruction.address);
+            break;
+        }
         case x86::Opcode::PmovmskbRegXmm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: pmovmskb operand count");
@@ -3283,6 +3311,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
                          operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
                          operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
+                         operation.opcode == ir::Opcode::AndNotXmm ||
                          operation.opcode == ir::Opcode::MoveXmmByteMask ||
                          operation.opcode == ir::Opcode::ShuffleXmmDwords ||
                          operation.opcode == ir::Opcode::BitScanForward ||
@@ -3838,6 +3867,16 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
             assembler.movImmediate(arm64::x16,
                                    pointerBits(&compareEqualXmmBytes128));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::AndNotXmm:
+            assembler.movImmediate(
+                arm64::x1,
+                static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(
+                arm64::x2,
+                static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x16, pointerBits(&andNotXmm128));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::MoveXmmByteMask:

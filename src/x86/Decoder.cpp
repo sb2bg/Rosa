@@ -1027,6 +1027,33 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if (code[cursor] == 0x66U && code.size() - cursor >= 3 &&
+            code[cursor + 1] == 0x0FU && code[cursor + 2] == 0xDFU) {
+            if (code.size() - cursor < 4) {
+                throw DecodeError(address, remaining, "truncated pandn xmm, xmm");
+            }
+            const auto modrm = code[cursor + 3];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U) {
+                throw DecodeError(address, remaining,
+                                  "only register-direct PANDN is supported");
+            }
+            instruction.opcode = Opcode::PandnRegReg;
+            instruction.length = 4;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 4,
+                        instruction.bytes.begin());
+            instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
+            instruction.operands.push_back(XmmRegisterOperand{
+                static_cast<XmmRegister>(static_cast<std::uint8_t>(modrm & 0x7U))});
+            result.push_back(std::move(instruction));
+            cursor += 4;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
+        if (code[cursor] == 0x66U && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x74U) {
             if (code.size() - cursor < 4) {
                 throw DecodeError(address, remaining, "truncated pcmpeqb xmm, xmm/m128");
