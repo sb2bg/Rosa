@@ -1184,6 +1184,16 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "cmp32_sib_memory_short_equal",
+            CaseId::cmp32_sib_memory_short_equal,
+            differentialBytes_cmp32_sib_memory_short_equal);
+        bindMemory(testCase, rosa::x86::Register::R12, 0);
+        testCase.memoryCompareOffset = 0x20;
+        testCase.memoryCompareSize = sizeof(std::uint32_t);
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp8_scaled_memory_register",
                              CaseId::cmp8_scaled_memory_register,
                              differentialBytes_cmp8_scaled_memory_register);
@@ -6066,6 +6076,71 @@ void testCompareGuestMemoryWithShortImmediate() {
                 "CMP dword short immediate changed base");
     expectEqual(state.rflags, std::uint64_t{0x46},
                 "CMP dword short immediate flags differ");
+}
+
+void testCompareGuestSibMemoryWithShortImmediate() {
+    constexpr std::array<std::uint8_t, 10> code{
+        0x41, 0x83, 0xBC, 0x24, 0x04, 0x02, 0x00, 0x00, 0x00, 0xC3,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AE2D83ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "SIB CMP dword [memory], imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9},
+                "SIB CMP dword [memory], imm8 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R12 && !memory.index &&
+               memory.scale == 1 && memory.displacement == 0x204 &&
+               memory.width == 32,
+           "SIB CMP dword [r12+0x204], imm8 memory operand differs");
+    expect(immediate.value == 0 && immediate.width == 8,
+           "SIB CMP dword [memory], imm8 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "cmp dword [r12+0x204], 0x0") != std::string::npos,
+           "SIB CMP dword [memory], imm8 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8204};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::uint64_t original = 0xDEADBEEF00000000ULL;
+    addressSpace.writeU64(target, original);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AE2D83ULL}, 1);
+    rosa::x86::X86State state;
+    state.r12 = page.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r12, page.value,
+                "SIB CMP dword [memory], imm8 changed its base");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "SIB CMP dword [memory], imm8 equal flags differ");
+    expectEqual(addressSpace.readU64(target), original,
+                "SIB CMP dword [memory], imm8 changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.r12 = page.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SIB CMP dword short immediate accepted unmapped memory");
+    expectEqual(faultState.r12, page.value,
+                "faulted SIB CMP dword short immediate changed its base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted SIB CMP dword short immediate changed flags");
 }
 
 void testCompareRipRelativeGuestDwordWithShortImmediate() {
@@ -17914,6 +17989,8 @@ int main() {
          testCompareGuestSibMemoryWith32BitImmediate},
         {"CMP guest qword with 32-bit immediate", testCompareGuestQwordWith32BitImmediate},
         {"CMP guest memory with short immediate", testCompareGuestMemoryWithShortImmediate},
+        {"CMP SIB guest memory with short immediate",
+         testCompareGuestSibMemoryWithShortImmediate},
         {"CMP RIP-relative guest dword with short immediate",
          testCompareRipRelativeGuestDwordWithShortImmediate},
         {"CMP guest qword with short immediate", testCompareGuestQwordWithShortImmediate},
