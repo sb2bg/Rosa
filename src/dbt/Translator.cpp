@@ -4147,6 +4147,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     assembler.tbz(arm64::x16, zeroFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::Sign) {
                     assembler.tbz(arm64::x16, signFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::NotSign) {
+                    assembler.tbnz(arm64::x16, signFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::Less) {
                     // OF is bit 11, so shifting it down by four aligns it with SF.
                     assembler.lsrImmediate(arm64::x17, arm64::x16, 4);

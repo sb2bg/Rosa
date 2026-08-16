@@ -105,6 +105,7 @@ enum class Condition {
     Above,
     BelowOrEqual,
     Sign,
+    NotSign,
     Less,
     GreaterOrEqual,
     LessOrEqual,

@@ -1517,6 +1517,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("branch_not_sign_taken",
+                             CaseId::branch_not_sign_taken,
+                             differentialBytes_branch_not_sign_taken);
+        testCase.request.state.rflags = 0x2;
+        run(testCase);
+    }
+    {
+        auto testCase = make("branch_not_sign_not_taken",
+                             CaseId::branch_not_sign_not_taken,
+                             differentialBytes_branch_not_sign_not_taken);
+        testCase.request.state.rflags = signFlag | 0x2;
+        run(testCase);
+    }
+    {
         auto testCase = make("branch_less_taken", CaseId::branch_less_taken,
                              differentialBytes_branch_less_taken);
         testCase.request.state.rflags = signFlag | 0x2;
@@ -14284,6 +14298,36 @@ void testSignShortConditional() {
                 "not-taken short JS changed flags");
 }
 
+void testNotSignShortConditional() {
+    constexpr std::array<std::uint8_t, 2> code{0x79, 0x02};
+    const rosa::x86::Decoder decoder;
+    const auto decoded =
+        decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].condition == rosa::x86::Condition::NotSign,
+           "JNS rel8 condition differs");
+    expect(rosa::debug::dumpX86(decoded).find("jns 0x1004") !=
+               std::string::npos,
+           "JNS dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block =
+        translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State taken;
+    taken.rflags = 0x2;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rip, std::uint64_t{0x1004},
+                "JNS did not take with SF clear");
+    expectEqual(taken.rflags, std::uint64_t{0x2}, "taken JNS changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rflags = 0x82;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rip, std::uint64_t{0x1002},
+                "JNS took with SF set");
+    expectEqual(notTaken.rflags, std::uint64_t{0x82},
+                "not-taken JNS changed flags");
+}
+
 void testUnsignedAboveOrEqualShortConditional() {
     constexpr std::array<std::uint8_t, 2> code{0x73, 0x02};
     const rosa::x86::Decoder decoder;
@@ -14708,6 +14752,7 @@ int main() {
         {"signed-less-or-equal conditional", testSignedLessOrEqualConditional},
         {"sign long conditional", testSignLongConditional},
         {"sign short conditional", testSignShortConditional},
+        {"not-sign short conditional", testNotSignShortConditional},
         {"unsigned-above-or-equal short conditional",
          testUnsignedAboveOrEqualShortConditional},
         {"controlled Mach-O parsing", testControlledMachOParsing},

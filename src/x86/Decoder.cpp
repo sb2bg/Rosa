@@ -1687,7 +1687,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         if (code[cursor] == 0xEBU || code[cursor] == 0x72U || code[cursor] == 0x73U ||
             code[cursor] == 0x74U ||
             code[cursor] == 0x75U || code[cursor] == 0x76U || code[cursor] == 0x77U ||
-            code[cursor] == 0x78U || code[cursor] == 0x7CU ||
+            code[cursor] == 0x78U || code[cursor] == 0x79U || code[cursor] == 0x7CU ||
             code[cursor] == 0x7DU || code[cursor] == 0x7EU ||
             code[cursor] == 0x7FU) {
             if (code.size() - cursor < 2) {
@@ -1708,6 +1708,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                         : opcode == 0x75U ? Condition::NotEqual
                                         : opcode == 0x76U ? Condition::BelowOrEqual
                                         : opcode == 0x78U ? Condition::Sign
+                                        : opcode == 0x79U ? Condition::NotSign
                                         : opcode == 0x7CU ? Condition::Less
                                         : opcode == 0x7DU ? Condition::GreaterOrEqual
                                         : opcode == 0x7EU ? Condition::LessOrEqual
