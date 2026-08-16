@@ -70,7 +70,8 @@ class AddressSpace {
                            std::span<const std::uint8_t> data, std::string_view label);
     void populateSparseReadOnly(GuestAddress address, std::span<const std::uint8_t> data);
     [[nodiscard]] ProtectResult protect(GuestAddress address, std::uint64_t size,
-                                        Permission permissions);
+                                        Permission permissions,
+                                        bool makePrivateCopy = false);
     [[nodiscard]] DeallocateResult deallocate(GuestAddress address,
                                               std::uint64_t size);
 

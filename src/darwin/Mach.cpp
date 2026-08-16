@@ -22,6 +22,7 @@ constexpr std::uint64_t kernInvalidValue = 18;
 constexpr std::uint64_t kernUrefsOverflow = 19;
 constexpr std::uint64_t machSendInvalidDestination = 0x10000003U;
 constexpr std::uint64_t vmProtectionMask = 0x7U;
+constexpr std::uint64_t vmProtectionCopy = 0x10U;
 constexpr std::uint64_t vmFlagsAnywhere = 0x1U;
 constexpr std::uint64_t vmFlagsAliasMask = 0xFF000000U;
 constexpr std::uint64_t minimumAnywhereAddress = 0x0000000100000000ULL;
@@ -144,12 +145,13 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         if (state.r10 != 0) {
             throw unsupported(state, syscallRip);
         }
-        if ((state.r8 & ~vmProtectionMask) != 0) {
+        if ((state.r8 & ~(vmProtectionMask | vmProtectionCopy)) != 0) {
             throw unsupported(state, syscallRip);
         }
         const auto permissions = permissionsFromProtection(state.r8);
+        const auto makePrivateCopy = (state.r8 & vmProtectionCopy) != 0;
         switch (addressSpace.protect(guest::GuestAddress{state.rsi}, state.rdx,
-                                     permissions)) {
+                                     permissions, makePrivateCopy)) {
         case guest::ProtectResult::Success:
             state.rax = kernSuccess;
             return;

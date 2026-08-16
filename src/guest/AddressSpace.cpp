@@ -167,7 +167,8 @@ void AddressSpace::populateSparseReadOnly(GuestAddress address,
 }
 
 ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
-                                    Permission permissions) {
+                                    Permission permissions,
+                                    bool makePrivateCopy) {
     if (size == 0) {
         return ProtectResult::Success;
     }
@@ -192,21 +193,23 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
         if (mapping == mappings_.end()) {
             return ProtectResult::InvalidAddress;
         }
-        if (!hasPermission(mapping->maximumPermissions, permissions)) {
+        if (!makePrivateCopy &&
+            !hasPermission(mapping->maximumPermissions, permissions)) {
             return ProtectResult::ProtectionFailure;
         }
         cursor = std::min(end, mapping->base.value + mapping->size);
     }
 
     const auto slice = [](const Mapping &source, std::uint64_t sliceStart,
-                          std::uint64_t sliceEnd, Permission currentPermissions) {
+                          std::uint64_t sliceEnd, Permission currentPermissions,
+                          Permission maximumPermissions) {
         const auto offset = static_cast<std::size_t>(sliceStart - source.base.value);
         const auto sliceSize = static_cast<std::size_t>(sliceEnd - sliceStart);
         Mapping result{
             .base = GuestAddress{sliceStart},
             .size = sliceSize,
             .permissions = currentPermissions,
-            .maximumPermissions = source.maximumPermissions,
+            .maximumPermissions = maximumPermissions,
             .fileBytes = source.fileBytes,
             .fileDataOffset = source.fileDataOffset + offset,
             .label = source.label,
@@ -235,13 +238,19 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
             continue;
         }
         if (currentStart < start) {
-            updated.push_back(slice(mapping, currentStart, start, mapping.permissions));
+            updated.push_back(slice(mapping, currentStart, start,
+                                    mapping.permissions,
+                                    mapping.maximumPermissions));
         }
         const auto protectedStart = std::max(currentStart, start);
         const auto protectedEnd = std::min(currentEnd, end);
-        updated.push_back(slice(mapping, protectedStart, protectedEnd, permissions));
+        updated.push_back(slice(
+            mapping, protectedStart, protectedEnd, permissions,
+            makePrivateCopy ? permissions : mapping.maximumPermissions));
         if (protectedEnd < currentEnd) {
-            updated.push_back(slice(mapping, protectedEnd, currentEnd, mapping.permissions));
+            updated.push_back(slice(mapping, protectedEnd, currentEnd,
+                                    mapping.permissions,
+                                    mapping.maximumPermissions));
         }
     }
     mappings_ = std::move(updated);

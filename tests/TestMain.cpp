@@ -14899,6 +14899,31 @@ void testMachVmProtectTrap() {
     expectEqual(state.rax, std::uint64_t{2},
                 "mach_vm_protect maximum violation did not return KERN_PROTECTION_FAILURE");
 
+    state.rax = rosa::darwin::MachDispatcher::vmProtectTrapNumber;
+    state.r8 = 0x13; // VM_PROT_COPY | VM_PROT_READ | VM_PROT_WRITE
+    state.rflags = 0xAD7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "mach_vm_protect VM_PROT_COPY did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "mach_vm_protect VM_PROT_COPY changed guest flags");
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8000},
+                          0xA5A5A5A5A5A5A5A5ULL);
+    const auto copiedMappings = addressSpace.mappingInfos();
+    const auto copied = std::ranges::find_if(
+        copiedMappings, [](const rosa::guest::MappingInfo &mapping) {
+            return mapping.base.value == 0x8000;
+        });
+    expect(copied != copiedMappings.end() &&
+               copied->permissions ==
+                   (rosa::guest::Permission::Read |
+                    rosa::guest::Permission::Write) &&
+               copied->maximumPermissions ==
+                   (rosa::guest::Permission::Read |
+                    rosa::guest::Permission::Write),
+           "mach_vm_protect VM_PROT_COPY did not install private RW permissions");
+
     for (const auto [setMaximum, protection] :
          std::array<std::pair<std::uint64_t, std::uint64_t>, 2>{
              std::pair{std::uint64_t{1}, std::uint64_t{1}},
