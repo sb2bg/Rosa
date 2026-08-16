@@ -859,6 +859,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
+        case x86::Opcode::PcmpeqbRegReg:
+            stream << "pcmpeqb "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
+            break;
         case x86::Opcode::PmovmskbRegXmm:
             stream << "pmovmskb "
                    << registerOperandName(
@@ -1220,6 +1228,11 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::CompareEqualGuestBytesXmm:
             stream << "compare_equal_guest_bytes_xmm " << valueName(*operation.lhs)
                    << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::CompareEqualXmmBytes:
+            stream << "compare_equal_xmm_bytes "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
+                   << x86::xmmRegisterName(*operation.sourceGuestXmmRegister);
             break;
         case ir::Opcode::MoveXmmByteMask:
             stream << "move_xmm_byte_mask "

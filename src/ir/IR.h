@@ -49,6 +49,7 @@ enum class Opcode {
     StoreGuestXmm,
     LoadGuestXmm,
     CompareEqualGuestBytesXmm,
+    CompareEqualXmmBytes,
     MoveXmmByteMask,
     ShuffleXmmDwords,
     BitScanForward,
@@ -153,6 +154,9 @@ class Builder {
                       guest::GuestAddress rip);
     void compareEqualGuestBytesXmm(ValueId address, x86::XmmRegister reg,
                                    guest::GuestAddress rip);
+    void compareEqualXmmBytes(x86::XmmRegister destination,
+                              x86::XmmRegister source,
+                              guest::GuestAddress rip);
     void moveXmmByteMask(x86::Register destination, x86::XmmRegister source,
                          guest::GuestAddress rip);
     void shuffleXmmDwords(x86::XmmRegister destination,

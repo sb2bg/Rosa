@@ -1945,6 +1945,17 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("pcmpeqb_register", CaseId::pcmpeqb_register,
+                             differentialBytes_pcmpeqb_register);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0102030405060708ULL,
+            .high = 0xFEDCBA9876543210ULL};
+        testCase.request.state.xmm[1] = {
+            .low = 0x0102030405060709ULL,
+            .high = 0xFEDCBA9876543210ULL};
+        run(testCase);
+    }
+    {
         auto testCase = make("movdqa_load", CaseId::movdqa_load,
                              differentialBytes_movdqa_load);
         bindMemory(testCase, rosa::x86::Register::Rbp, 32);
@@ -9603,6 +9614,52 @@ void testPcmpeqbGuestMemoryGeneratedExecution() {
                 "failed PCMPEQB changed high lane");
 }
 
+void testPcmpeqbRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x0F, 0x74, 0xC1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded =
+        decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PcmpeqbRegReg,
+           "PCMPEQB xmm, xmm opcode differs");
+    expect(rosa::debug::dumpX86(decoded).find("pcmpeqb xmm0, xmm1") !=
+               std::string::npos,
+           "PCMPEQB xmm, xmm dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block =
+        translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x0102030405060708ULL,
+                    .high = 0xFEDCBA9876543210ULL};
+    state.xmm[1] = {.low = 0x0102030405060709ULL,
+                    .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0xFFFFFFFFFFFFFF00ULL},
+                "PCMPEQB register low lane differs");
+    expectEqual(state.xmm[0].high, UINT64_MAX,
+                "PCMPEQB register high lane differs");
+    expectEqual(state.xmm[1].low, std::uint64_t{0x0102030405060709ULL},
+                "PCMPEQB changed its source low lane");
+    expectEqual(state.xmm[1].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "PCMPEQB changed its source high lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PCMPEQB register changed flags");
+
+    constexpr std::array<std::uint8_t, 5> aliasCode{
+        0x66, 0x0F, 0x74, 0xC0, 0xC3};
+    const auto aliasBlock =
+        translator.translate(aliasCode, rosa::guest::GuestAddress{0x2000});
+    state.xmm[0] = {.low = 0x0123456789ABCDEFULL,
+                    .high = 0xFEDCBA9876543210ULL};
+    static_cast<void>(aliasBlock.execute(state));
+    expectEqual(state.xmm[0].low, UINT64_MAX,
+                "aliased PCMPEQB low lane differs");
+    expectEqual(state.xmm[0].high, UINT64_MAX,
+                "aliased PCMPEQB high lane differs");
+}
+
 void testPmovmskbGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0xD7, 0xF0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -14480,6 +14537,8 @@ int main() {
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PCMPEQB guest memory generated execution",
          testPcmpeqbGuestMemoryGeneratedExecution},
+        {"PCMPEQB register generated execution",
+         testPcmpeqbRegisterGeneratedExecution},
         {"PMOVMSKB generated execution", testPmovmskbGeneratedExecution},
         {"PSHUFD register execution", testPshufdRegisterExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},

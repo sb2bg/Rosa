@@ -246,6 +246,35 @@ compareEqualGuestBytesXmm128(GuestExecutionContext *context, x86::X86State *stat
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+compareEqualXmmBytes128(x86::X86State *state, std::uint64_t destinationIndex,
+                        std::uint64_t sourceIndex) noexcept {
+    if (destinationIndex >= state->xmm.size() ||
+        sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    const auto destination = state->xmm[destinationIndex];
+    const auto source = state->xmm[sourceIndex];
+    x86::X86State::XmmValue result;
+    for (std::size_t index = 0; index < 16; ++index) {
+        const auto destinationLane =
+            index < sizeof(std::uint64_t) ? destination.low : destination.high;
+        const auto sourceLane =
+            index < sizeof(std::uint64_t) ? source.low : source.high;
+        const auto shift = (index % sizeof(std::uint64_t)) * 8U;
+        const auto destinationByte =
+            static_cast<std::uint8_t>(destinationLane >> shift);
+        const auto sourceByte = static_cast<std::uint8_t>(sourceLane >> shift);
+        if (destinationByte == sourceByte) {
+            auto &resultLane =
+                index < sizeof(std::uint64_t) ? result.low : result.high;
+            resultLane |= std::uint64_t{0xFF} << shift;
+        }
+    }
+    state->xmm[destinationIndex] = result;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 moveXmmByteMask32(x86::X86State *state, std::uint64_t destinationIndex,
                   std::uint64_t sourceIndex) {
     if (destinationIndex >= 16 || sourceIndex >= state->xmm.size()) {
@@ -2718,6 +2747,19 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                               instruction.address);
             break;
         }
+        case x86::Opcode::PcmpeqbRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: pcmpeqb register operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            builder.compareEqualXmmBytes(destination, source,
+                                         instruction.address);
+            break;
+        }
         case x86::Opcode::PmovmskbRegXmm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: pmovmskb operand count");
@@ -3240,6 +3282,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::StoreGuestXmm ||
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
                          operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
+                         operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
                          operation.opcode == ir::Opcode::MoveXmmByteMask ||
                          operation.opcode == ir::Opcode::ShuffleXmmDwords ||
                          operation.opcode == ir::Opcode::BitScanForward ||
@@ -3786,6 +3829,17 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.bind(compared);
             break;
         }
+        case ir::Opcode::CompareEqualXmmBytes:
+            assembler.movImmediate(
+                arm64::x1,
+                static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(
+                arm64::x2,
+                static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&compareEqualXmmBytes128));
+            assembler.blr(arm64::x16);
+            break;
         case ir::Opcode::MoveXmmByteMask:
             assembler.movImmediate(
                 arm64::x1, static_cast<std::uint64_t>(*operation.guestRegister));
