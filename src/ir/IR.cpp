@@ -93,6 +93,18 @@ void Builder::writeGuestXmmLane(x86::XmmRegister reg, bool high, ValueId value,
     });
 }
 
+void Builder::writeGuestXmmDword(x86::XmmRegister reg, std::uint8_t lane,
+                                 ValueId value, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::WriteGuestXmmDword,
+        .width = Width::I32,
+        .guestRip = rip,
+        .lhs = value,
+        .guestXmmRegister = reg,
+        .immediate = lane,
+    });
+}
+
 ValueId Builder::add(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -925,6 +937,13 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "source");
             if (!operation.guestXmmRegister) {
                 errors.emplace_back("write_guest_xmm_lane has no register");
+            }
+            break;
+        case Opcode::WriteGuestXmmDword:
+            checkUse(operation.lhs, "source");
+            if (!operation.guestXmmRegister || operation.width != Width::I32 ||
+                operation.immediate >= 4) {
+                errors.emplace_back("write_guest_xmm_dword is incomplete");
             }
             break;
         case Opcode::Add:

@@ -1069,6 +1069,24 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << ", 0x"
                    << std::get<x86::ImmediateOperand>(instruction.operands[2]).value;
             break;
+        case x86::Opcode::PinsrdXmmMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "pinsrd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0]).reg)
+                   << ", dword [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[2]).value;
+            break;
+        }
         case x86::Opcode::PalignrRegRegImm:
             stream << "palignr "
                    << x86::xmmRegisterName(
@@ -1370,6 +1388,12 @@ std::string dumpIr(const ir::Block &block) {
             stream << "write_guest_xmm_lane.i64 "
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << '.'
                    << (operation.immediate == 0 ? "low" : "high") << ", "
+                   << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::WriteGuestXmmDword:
+            stream << "write_guest_xmm_dword.i32 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister) << '.'
+                   << std::dec << operation.immediate << ", "
                    << valueName(*operation.lhs);
             break;
         case ir::Opcode::Add:

@@ -3641,6 +3641,33 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             break;
         }
+        case x86::Opcode::PinsrdXmmMem: {
+            if (instruction.operands.size() != 3) {
+                throw std::runtime_error(
+                    "internal decoder error: PINSRD operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            const auto immediate =
+                std::get<x86::ImmediateOperand>(instruction.operands[2]);
+            auto address = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto value = builder.loadGuest(
+                address, ir::Width::I32, instruction.address);
+            builder.writeGuestXmmDword(
+                destination, static_cast<std::uint8_t>(immediate.value & 3U),
+                value, instruction.address);
+            break;
+        }
         case x86::Opcode::PalignrRegRegImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error(
@@ -4350,6 +4377,25 @@ arm64::Program compileToArm64(const ir::Block &block) {
                           static_cast<std::uint32_t>(x86::xmmLaneOffset(
                               *operation.guestXmmRegister, operation.immediate != 0)));
             break;
+        case ir::Opcode::WriteGuestXmmDword: {
+            const auto lane = static_cast<std::uint8_t>(operation.immediate);
+            const auto offset = static_cast<std::uint32_t>(
+                x86::xmmLaneOffset(*operation.guestXmmRegister, lane >= 2));
+            assembler.ldr(arm64::x16, arm64::x0, offset);
+            assembler.movImmediate(
+                arm64::x17,
+                (lane & 1U) == 0 ? 0xFFFFFFFF00000000ULL : UINT32_MAX);
+            assembler.bitAnd(arm64::x16, arm64::x16, arm64::x17);
+            assembler.movImmediate(arm64::x17, UINT32_MAX);
+            assembler.bitAnd(arm64::x17, hostRegister(*operation.lhs),
+                             arm64::x17);
+            if ((lane & 1U) != 0) {
+                assembler.lslImmediate(arm64::x17, arm64::x17, 32);
+            }
+            assembler.bitOr(arm64::x16, arm64::x16, arm64::x17);
+            assembler.str(arm64::x16, arm64::x0, offset);
+            break;
+        }
         case ir::Opcode::Add:
             assembler.add(hostRegister(*operation.result), hostRegister(*operation.lhs),
                           hostRegister(*operation.rhs));

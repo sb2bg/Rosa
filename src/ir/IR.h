@@ -31,6 +31,7 @@ enum class Opcode {
     ConditionalMoveGuestReg,
     ReadGuestXmmLane,
     WriteGuestXmmLane,
+    WriteGuestXmmDword,
     Add,
     Sub,
     ShiftLeft,
@@ -137,6 +138,8 @@ class Builder {
     ValueId readGuestXmmLane(x86::XmmRegister reg, bool high, guest::GuestAddress rip);
     void writeGuestXmmLane(x86::XmmRegister reg, bool high, ValueId value,
                            guest::GuestAddress rip);
+    void writeGuestXmmDword(x86::XmmRegister reg, std::uint8_t lane,
+                            ValueId value, guest::GuestAddress rip);
     ValueId add(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId sub(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId shiftLeft(ValueId value, std::uint8_t count, Width width,

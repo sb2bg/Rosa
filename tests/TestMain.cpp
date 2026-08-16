@@ -2586,6 +2586,28 @@ void testRosettaDifferentialSemantics() {
                differentialBytes_palignr_count_31);
     runPalignr("palignr_count_32", CaseId::palignr_count_32,
                differentialBytes_palignr_count_32);
+    const auto runPinsrd = [&](std::string_view name, CaseId id,
+                               std::span<const std::uint8_t> code) {
+        auto testCase = make(name, id, code);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0x20);
+        constexpr std::uint32_t value = 0xAABBCCDDU;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value,
+                    sizeof(value));
+        testCase.request.state.xmm[1] = {
+            .low = 0x2222222211111111ULL,
+            .high = 0x4444444433333333ULL};
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    };
+    runPinsrd("pinsrd_lane0", CaseId::pinsrd_lane0,
+              differentialBytes_pinsrd_lane0);
+    runPinsrd("pinsrd_lane1", CaseId::pinsrd_lane1,
+              differentialBytes_pinsrd_lane1);
+    runPinsrd("pinsrd_lane2", CaseId::pinsrd_lane2,
+              differentialBytes_pinsrd_lane2);
+    runPinsrd("pinsrd_lane3", CaseId::pinsrd_lane3,
+              differentialBytes_pinsrd_lane3);
     {
         auto testCase = make("movdqa_load", CaseId::movdqa_load,
                              differentialBytes_movdqa_load);
@@ -13171,6 +13193,91 @@ void testMovqGuestMemoryToXmm() {
                 "faulted MOVQ load changed flags");
 }
 
+void testPinsrdGuestMemoryToXmm() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x66, 0x0F, 0x3A, 0x22, 0x4B, 0xF0, 0x02, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF700081A49ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PinsrdXmmMem,
+           "PINSRD xmm, [mem], imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "PINSRD xmm, [mem], imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               memory.base == rosa::x86::Register::Rbx &&
+               memory.displacement == -0x10 && memory.width == 32 &&
+               immediate.value == 2 && immediate.width == 8,
+           "PINSRD xmm1, [rbx-0x10], 2 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "pinsrd xmm1, dword [rbx-0x10], 0x2") !=
+               std::string::npos,
+           "PINSRD dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr std::uint32_t value = 0xAABBCCDDU;
+    std::array<std::uint8_t, rosa::guest::guestPageSize> bytes{};
+    std::memcpy(bytes.data() + 0xF0, &value, sizeof(value));
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(page, bytes.size(), rosa::guest::Permission::Read,
+                            bytes, "read-only PINSRD source");
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF700081A49ULL});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("write_guest_xmm_dword.i32 xmm1.2") !=
+               std::string::npos,
+           "PINSRD did not lower through partial-XMM-write IR");
+    rosa::x86::X86State state;
+    state.rbx = 0x8100;
+    state.xmm[1] = {
+        .low = 0x2222222211111111ULL,
+        .high = 0x4444444433333333ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[1].low,
+                std::uint64_t{0x2222222211111111ULL},
+                "PINSRD changed an unselected XMM lane");
+    expectEqual(state.xmm[1].high,
+                std::uint64_t{0x44444444AABBCCDDULL},
+                "PINSRD inserted the dword into the wrong lane");
+    expectEqual(state.rbx, std::uint64_t{0x8100},
+                "PINSRD changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PINSRD changed flags");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{0x80F0}),
+                value, "PINSRD changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rbx = 0x8100;
+    faultState.xmm[1] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL};
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "PINSRD accepted unmapped guest memory");
+    expectEqual(faultState.xmm[1].low,
+                std::uint64_t{0x8877665544332211ULL},
+                "faulted PINSRD changed its low XMM lane");
+    expectEqual(faultState.xmm[1].high,
+                std::uint64_t{0x1020304050607080ULL},
+                "faulted PINSRD changed its high XMM lane");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted PINSRD changed flags");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -17689,6 +17796,7 @@ int main() {
         {"MOVDQU guest memory to register", testMovdquGuestMemoryToRegister},
         {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
+        {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},
         {"register move execution", testRegisterMoveExecution},
         {"LEA base displacement execution", testLeaBaseDisplacementExecution},
         {"LEA 32-bit base displacement execution", testLea32BitBaseDisplacementExecution},
