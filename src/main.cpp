@@ -13,6 +13,7 @@
 #include "x86/Registers.h"
 
 #include <array>
+#include <charconv>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -35,6 +36,7 @@ struct RunOptions {
     std::filesystem::path executable;
     std::optional<std::filesystem::path> dyld;
     std::optional<std::filesystem::path> sharedCache;
+    std::optional<std::size_t> maximumBlocks;
     DumpOptions dumps;
 };
 
@@ -47,6 +49,7 @@ void printUsage(std::ostream &stream) {
               "  rosa cache inspect <dyld_shared_cache_x86_64>\n"
               "  rosa run <controlled-x86_64-mach-o> [--dump-x86] [--dump-ir] [--dump-arm64]\n"
               "  rosa run [--dyld <x86_64-dyld>] [--shared-cache <cache>] "
+              "[--max-blocks <count>] "
               "<x86_64-mach-o> [dump options]\n";
 }
 
@@ -82,6 +85,21 @@ RunOptions parseRunOptions(int argc, char **argv) {
                 throw std::invalid_argument("--shared-cache requires exactly one path");
             }
             options.sharedCache = std::filesystem::path(argv[index]);
+        } else if (argument == "--max-blocks") {
+            if (++index >= argc || options.maximumBlocks) {
+                throw std::invalid_argument(
+                    "--max-blocks requires exactly one positive count");
+            }
+            const std::string_view value(argv[index]);
+            std::size_t parsed = 0;
+            const auto [end, error] = std::from_chars(
+                value.data(), value.data() + value.size(), parsed);
+            if (error != std::errc{} || end != value.data() + value.size() ||
+                parsed == 0) {
+                throw std::invalid_argument(
+                    "--max-blocks requires a positive decimal count");
+            }
+            options.maximumBlocks = parsed;
         } else if (argument == "--dump-x86") {
             options.dumps.x86 = true;
         } else if (argument == "--dump-ir") {
@@ -321,7 +339,8 @@ void inspectMachO(int argc, char **argv) {
     }
 }
 
-int runMachO(const std::filesystem::path &path, const DumpOptions &options) {
+int runMachO(const std::filesystem::path &path, const DumpOptions &options,
+             std::size_t maximumBlocks) {
     const rosa::macho::Loader loader;
     constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
     constexpr std::size_t stackSize = 1024U * 1024U;
@@ -340,7 +359,7 @@ int runMachO(const std::filesystem::path &path, const DumpOptions &options) {
     rosa::dbt::Dispatcher dispatcher(addressSpace);
     rosa::dbt::DispatchResult result;
     try {
-        result = dispatcher.run(state, 1'000);
+        result = dispatcher.run(state, maximumBlocks);
     } catch (const std::exception &error) {
         std::cerr << rosa::debug::dumpGuestFailure(path.string(), error, state, addressSpace,
                                                    dispatcher);
@@ -359,13 +378,13 @@ int runMachO(const std::filesystem::path &path, const DumpOptions &options) {
 int runDyldExperiment(const std::filesystem::path &executablePath,
                       const std::optional<std::filesystem::path> &dyldPath,
                       const std::optional<std::filesystem::path> &sharedCachePath,
-                      const DumpOptions &options) {
+                      const DumpOptions &options,
+                      std::size_t maximumProbeBlocks) {
     constexpr std::uint64_t standaloneDyldSlide = 0x00007FF800000000ULL;
     constexpr std::uint64_t cacheAwareStandaloneDyldSlide =
         0x00007FF700000000ULL;
     constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
     constexpr std::size_t stackSize = 1024U * 1024U;
-    constexpr std::size_t maximumProbeBlocks = 1000000;
 
     const auto executableFile = rosa::macho::MachOFile::open(executablePath);
     std::optional<rosa::macho::MachOFile> dyldFile;
@@ -471,9 +490,11 @@ int main(int argc, char **argv) {
             const auto options = parseRunOptions(argc, argv);
             if (options.dyld || options.sharedCache) {
                 return runDyldExperiment(options.executable, options.dyld,
-                                         options.sharedCache, options.dumps);
+                                         options.sharedCache, options.dumps,
+                                         options.maximumBlocks.value_or(1'000'000));
             }
-            return runMachO(options.executable, options.dumps);
+            return runMachO(options.executable, options.dumps,
+                            options.maximumBlocks.value_or(1'000));
         }
         if (command != "selftest" || argc < 3) {
             printUsage(std::cerr);
