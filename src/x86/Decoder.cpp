@@ -1070,24 +1070,52 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         if (code[cursor] == 0x66U && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0xEFU) {
             if (code.size() - cursor < 4) {
-                throw DecodeError(address, remaining, "truncated pxor xmm, xmm");
+                throw DecodeError(address, remaining,
+                                  "truncated pxor xmm, xmm/m128");
             }
             const auto modrm = code[cursor + 3];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-            if (mode != 0x3U) {
-                throw DecodeError(address, remaining,
-                                  "only register-direct PXOR is supported");
-            }
-            instruction.opcode = Opcode::PxorRegReg;
-            instruction.length = 4;
-            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 4,
-                        instruction.bytes.begin());
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
             instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
-            instruction.operands.push_back(XmmRegisterOperand{
-                static_cast<XmmRegister>(static_cast<std::uint8_t>(modrm & 0x7U))});
-            result.push_back(std::move(instruction));
             cursor += 4;
+            if (mode == 0x3U) {
+                instruction.opcode = Opcode::PxorRegReg;
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(rmEncoding)});
+            } else {
+                if (rmEncoding == 0x4U ||
+                    (mode == 0 && rmEncoding == 0x5U)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only PXOR xmm, [base+disp8/disp32] memory operands are supported");
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated PXOR memory disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated PXOR memory disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                instruction.opcode = Opcode::PxorRegMem;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, false), displacement, 128});
+            }
+            const auto length = cursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(
+                code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
             if (result.size() == maximumInstructions) {
                 return result;
             }

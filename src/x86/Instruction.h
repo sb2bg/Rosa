@@ -77,6 +77,7 @@ enum class Opcode {
     CmovccReg,
     XorpsRegReg,
     PxorRegReg,
+    PxorRegMem,
     PcmpeqbRegReg,
     PcmpeqbRegMem,
     PandnRegReg,

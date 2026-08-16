@@ -2002,6 +2002,38 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("pxor_memory_aligned",
+                             CaseId::pxor_memory_aligned,
+                             differentialBytes_pxor_memory_aligned);
+        bindMemory(testCase, rosa::x86::Register::Rbp, 0xA0);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        constexpr std::array<std::uint8_t, 16> value{
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+        std::ranges::copy(value, testCase.request.memory.begin() + 0x10);
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = value.size();
+        run(testCase);
+    }
+    {
+        auto testCase = make("pxor_memory_unaligned",
+                             CaseId::pxor_memory_unaligned,
+                             differentialBytes_pxor_memory_unaligned);
+        bindMemory(testCase, rosa::x86::Register::Rbp, 0xA1);
+        testCase.request.state.xmm[0] = {
+            .low = UINT64_MAX,
+            .high = 0x0123456789ABCDEFULL};
+        constexpr std::array<std::uint8_t, 16> value{
+            0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+            0x98, 0xA9, 0xBA, 0xCB, 0xDC, 0xED, 0xFE, 0x0F};
+        std::ranges::copy(value, testCase.request.memory.begin() + 0x11);
+        testCase.memoryCompareOffset = 0x11;
+        testCase.memoryCompareSize = value.size();
+        run(testCase);
+    }
+    {
         auto testCase = make("pmovmskb", CaseId::pmovmskb,
                              differentialBytes_pmovmskb);
         testCase.request.state.rsi = UINT64_MAX;
@@ -10834,6 +10866,100 @@ void testPxorRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "PXOR changed flags");
 }
 
+void testPxorGuestMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x66, 0x0F, 0xEF, 0x85, 0x70, 0xFF, 0xFF, 0xFF, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PxorRegMem,
+           "PXOR xmm, [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "PXOR xmm, [memory] length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(
+               decoded[0].operands[0]).reg == rosa::x86::XmmRegister::Xmm0,
+           "PXOR memory destination differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbp &&
+               memory.displacement == -0x90 && memory.width == 128,
+           "PXOR memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "pxor xmm0, [rbp-0x90]") != std::string::npos,
+           "PXOR memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress alignedTarget{0x8100};
+    constexpr std::array<std::uint8_t, 16> sourceBytes{
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(alignedTarget, sourceBytes);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("xor_guest_memory_xmm.i128") != std::string::npos,
+           "PXOR memory did not lower through its guest-memory IR");
+    rosa::x86::X86State state;
+    state.rbp = alignedTarget.value + 0x90;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low,
+                std::uint64_t{0x76451023BA89DCEF},
+                "PXOR memory low lane differs");
+    expectEqual(state.xmm[0].high,
+                std::uint64_t{0x01326754CDFEAB98},
+                "PXOR memory high lane differs");
+    expect(addressSpace.readBytes(alignedTarget, sourceBytes.size()) ==
+               std::vector<std::uint8_t>(sourceBytes.begin(),
+                                         sourceBytes.end()),
+           "PXOR changed guest memory");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PXOR memory changed flags");
+
+    constexpr rosa::guest::GuestAddress unalignedTarget{0x8111};
+    addressSpace.writeBytes(unalignedTarget, sourceBytes);
+    state.rbp = unalignedTarget.value + 0x90;
+    state.xmm[0] = {};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low,
+                std::uint64_t{0x7766554433221100ULL},
+                "unaligned PXOR memory low lane differs");
+    expectEqual(state.xmm[0].high,
+                std::uint64_t{0xFFEEDDCCBBAA9988ULL},
+                "unaligned PXOR memory high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "unaligned PXOR changed flags");
+
+    constexpr rosa::guest::GuestAddress crossPageTarget{0x8FF8};
+    state.rbp = crossPageTarget.value + 0x90;
+    state.xmm[0] = {.low = 0x1111111111111111ULL,
+                    .high = 0x2222222222222222ULL};
+    state.rflags = 0xBD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page PXOR memory did not fault");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x1111111111111111ULL},
+                "faulted PXOR changed its low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x2222222222222222ULL},
+                "faulted PXOR changed its high lane");
+    expectEqual(state.rflags, std::uint64_t{0xBD7},
+                "faulted PXOR changed flags");
+}
+
 void testPcmpeqbGuestMemoryGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x74, 0x07, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -16492,6 +16618,8 @@ int main() {
         {"XOR 8-bit accumulator immediate", testXor8BitAccumulatorImmediate},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
+        {"PXOR guest memory generated execution",
+         testPxorGuestMemoryGeneratedExecution},
         {"PCMPEQB guest memory generated execution",
          testPcmpeqbGuestMemoryGeneratedExecution},
         {"PCMPEQB register generated execution",

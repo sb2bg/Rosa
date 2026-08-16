@@ -248,6 +248,42 @@ compareEqualGuestBytesXmm128(GuestExecutionContext *context, x86::X86State *stat
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+xorGuestMemoryXmm128(GuestExecutionContext *context, x86::X86State *state,
+                     std::uint64_t address,
+                     std::uint64_t registerIndex) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated PXOR has no guest address space");
+        }
+        if (registerIndex >= state->xmm.size()) {
+            throw std::runtime_error(
+                "generated PXOR has an invalid XMM register");
+        }
+        const auto bytes = context->addressSpace->readBytes(
+            guest::GuestAddress{address}, 16);
+        std::uint64_t sourceLow = 0;
+        std::uint64_t sourceHigh = 0;
+        std::memcpy(&sourceLow, bytes.data(), sizeof(sourceLow));
+        std::memcpy(&sourceHigh, bytes.data() + sizeof(sourceLow),
+                    sizeof(sourceHigh));
+        const auto original = state->xmm[registerIndex];
+        state->xmm[registerIndex] = {
+            .low = original.low ^ sourceLow,
+            .high = original.high ^ sourceHigh,
+        };
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = 16;
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 compareEqualXmmBytes128(x86::X86State *state, std::uint64_t destinationIndex,
                         std::uint64_t sourceIndex) noexcept {
     if (destinationIndex >= state->xmm.size() ||
@@ -3189,6 +3225,29 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.writeGuestXmmLane(destination, true, high, instruction.address);
             break;
         }
+        case x86::Opcode::PxorRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: PXOR memory operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            auto address = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement,
+                                      ir::Width::I64,
+                                      instruction.address);
+            }
+            builder.xorGuestMemoryXmm(address, destination,
+                                      instruction.address);
+            break;
+        }
         case x86::Opcode::PcmpeqbRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: pcmpeqb operand count");
@@ -3789,6 +3848,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::StoreGuest ||
                          operation.opcode == ir::Opcode::StoreGuestXmm ||
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
+                         operation.opcode == ir::Opcode::XorGuestMemoryXmm ||
                          operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
                          operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
                          operation.opcode == ir::Opcode::AndNotXmm ||
@@ -3819,6 +3879,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    operation.opcode == ir::Opcode::StoreGuest ||
                                    operation.opcode == ir::Opcode::StoreGuestXmm ||
                                    operation.opcode == ir::Opcode::LoadGuestXmm ||
+                                   operation.opcode ==
+                                       ir::Opcode::XorGuestMemoryXmm ||
                                    operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
                                    operation.opcode == ir::Opcode::RepeatMoveByte ||
                                    operation.opcode == ir::Opcode::LoadGuest ||
@@ -4473,6 +4535,29 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    static_cast<std::uint64_t>(BlockExit::MemoryFault));
             assembler.ret();
             assembler.bind(compared);
+            break;
+        }
+        case ir::Opcode::XorGuestMemoryXmm: {
+            const auto fault = assembler.makeLabel();
+            const auto completed = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(
+                arm64::x3,
+                static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&xorGuestMemoryXmm128));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(completed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(
+                arm64::x0,
+                static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(completed);
             break;
         }
         case ir::Opcode::CompareEqualXmmBytes:
