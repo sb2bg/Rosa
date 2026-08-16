@@ -25,6 +25,7 @@ constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
 constexpr std::uint64_t syscallExit = unixSyscallClass | 1U;
 constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
+constexpr std::uint64_t syscallMunmap = unixSyscallClass | 73U;
 constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 constexpr std::uint64_t syscallProcInfo = unixSyscallClass | 336U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
@@ -122,6 +123,25 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         // the host PID is also its externally observable guest process ID.
         setSuccess(state, static_cast<std::uint64_t>(::getpid()));
         return {};
+    }
+    if (number == syscallMunmap) {
+        // XNU's BSD munmap requires a page-aligned start and nonzero size,
+        // rounds the end up, and accepts holes in the range. Keep the entire
+        // operation inside Rosa's guest map.
+        if ((state.rdi % guest::guestPageSize) != 0 || state.rsi == 0) {
+            setError(state, EINVAL);
+            return {};
+        }
+        switch (addressSpace.deallocate(guest::GuestAddress{state.rdi},
+                                        state.rsi)) {
+        case guest::DeallocateResult::Success:
+            setSuccess(state, 0);
+            return {};
+        case guest::DeallocateResult::InvalidArgument:
+            setError(state, EINVAL);
+            return {};
+        }
+        throw std::runtime_error("unreachable guest munmap result");
     }
     if (number == syscallSharedRegionCheck) {
         if (sharedCache_ == nullptr) {
@@ -265,7 +285,7 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
     }
     if (number != syscallWrite) {
         throw unsupported(state, syscallRip,
-                          "only BSD write(2), exit(2), getpid(2), "
+                          "only BSD write(2), exit(2), getpid(2), munmap(2), "
                           "shared_region_check_np(2), proc_info(2), thread_selfid(2), "
                           "fsgetpath(2), csrctl(2), and getentropy(2) are "
                           "implemented");

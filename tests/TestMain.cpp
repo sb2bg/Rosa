@@ -13973,6 +13973,120 @@ void testDarwinProcInfoRejectsInvalidDyldImages() {
            "invalid dyld metadata range was registered");
 }
 
+void testDarwinMunmap() {
+    constexpr auto munmapNumber = UINT64_C(0x02000049);
+    constexpr rosa::guest::GuestAddress mappingBase{0x4000};
+    constexpr auto pageSize = rosa::guest::guestPageSize;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        mappingBase, pageSize * 3,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "BSD munmap test");
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x5000},
+                          0x0123456789ABCDEFULL);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = munmapNumber;
+    state.rdi = 0x5000;
+    state.rsi = 8;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802A8E6F0ULL}));
+    expectEqual(state.rax, std::uint64_t{0}, "munmap did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "munmap did not clear BSD carry");
+    expectEqual(addressSpace.mappingCount(), std::size_t{2},
+                "munmap did not split its guest mapping");
+    bool targetUnmapped = false;
+    try {
+        static_cast<void>(addressSpace.readU64(
+            rosa::guest::GuestAddress{0x5000}));
+    } catch (const std::runtime_error &error) {
+        targetUnmapped = std::string_view(error.what()).find("unmapped") !=
+                         std::string_view::npos;
+    }
+    expect(targetUnmapped, "munmap left its rounded guest page mapped");
+
+    const auto beforeInvalid = addressSpace.mappingInfos();
+    for (const auto [address, size] :
+         std::array<std::pair<std::uint64_t, std::uint64_t>, 3>{
+             std::pair{std::uint64_t{0x4001}, std::uint64_t{pageSize}},
+             std::pair{std::uint64_t{0x4000}, std::uint64_t{0}},
+             std::pair{UINT64_MAX - pageSize + 1,
+                       std::uint64_t{pageSize}}}) {
+        state.rax = munmapNumber;
+        state.rdi = address;
+        state.rsi = size;
+        state.rflags = 0x8D6;
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+        expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                    "invalid munmap returned the wrong errno");
+        expectEqual(state.rflags, std::uint64_t{0x8D7},
+                    "invalid munmap did not set BSD carry");
+    }
+    expectEqual(addressSpace.mappingInfos().size(), beforeInvalid.size(),
+                "invalid munmap changed guest mappings");
+
+    addressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{0x8000}, pageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "BSD munmap hole test");
+    state.rax = munmapNumber;
+    state.rdi = 0x8000;
+    state.rsi = pageSize * 3;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "munmap range containing holes did not succeed");
+}
+
+void testGeneratedDarwinMunmap() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress target{0x8000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0x49, 0x00, 0x00, 0x02, // mov eax, 0x2000049
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(
+        codeBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Execute,
+        code);
+    addressSpace.mapAnonymous(
+        target, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(
+        stackBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rdi = target.value;
+    state.rsi = 1;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rflags = 0xAD7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated munmap terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "generated munmap did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "generated munmap did not clear BSD carry");
+    bool targetUnmapped = false;
+    try {
+        static_cast<void>(addressSpace.readBytes(target, 1));
+    } catch (const std::runtime_error &error) {
+        targetUnmapped = std::string_view(error.what()).find("unmapped") !=
+                         std::string_view::npos;
+    }
+    expect(targetUnmapped, "generated munmap left guest memory mapped");
+}
+
 void testGeneratedDarwinGetpid() {
     constexpr rosa::guest::GuestAddress codeBase{0x1000};
     constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
@@ -18302,6 +18416,8 @@ int main() {
         {"Darwin proc_info set dyld images", testDarwinProcInfoSetDyldImages},
         {"Darwin proc_info rejects invalid dyld images",
          testDarwinProcInfoRejectsInvalidDyldImages},
+        {"Darwin munmap", testDarwinMunmap},
+        {"generated Darwin munmap", testGeneratedDarwinMunmap},
         {"generated Darwin getpid", testGeneratedDarwinGetpid},
         {"Darwin thread_selfid", testDarwinThreadSelfid},
         {"generated Darwin thread_selfid", testGeneratedDarwinThreadSelfid},
