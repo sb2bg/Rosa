@@ -447,6 +447,32 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("lock_add64_memory_carry",
+                             CaseId::lock_add64_memory_carry,
+                             differentialBytes_lock_add64_memory_carry);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 1;
+        const std::uint64_t value = UINT64_MAX;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("lock_add64_memory_overflow",
+                             CaseId::lock_add64_memory_overflow,
+                             differentialBytes_lock_add64_memory_overflow);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 1;
+        const std::uint64_t value = INT64_MAX;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("add8_register_overflow",
                              CaseId::add8_register_overflow,
                              differentialBytes_add8_register_overflow);
@@ -4853,6 +4879,128 @@ void testExchangeGuestQwordWithRegister() {
                 "cross-page XCHG qword changed RCX");
     expectEqual(faultState.rflags, std::uint64_t{0xBD7},
                 "cross-page XCHG qword changed flags");
+}
+
+void testLockedAddGuestQwordRegister() {
+    constexpr rosa::guest::GuestAddress instructionAddress{0x7FF7000249E1ULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF7000A5330ULL};
+    constexpr rosa::guest::GuestAddress targetPage{0x7FF7000A5000ULL};
+    constexpr std::array<std::uint8_t, 9> observed{
+        0xF0, 0x48, 0x01, 0x05, 0x47, 0x09, 0x08, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observed, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockAddMemReg,
+           "LOCK ADD qword opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "LOCK ADD qword length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 64 &&
+               memory.displacement == 0x80947,
+           "LOCK ADD qword RIP-relative operand differs");
+    expect(source.reg == rosa::x86::Register::Rax && source.width == 64,
+           "LOCK ADD qword source differs");
+    expectEqual(instructionAddress.value + decoded[0].length +
+                    static_cast<std::uint64_t>(memory.displacement),
+                target.value, "LOCK ADD qword target differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "lock add qword [rip+0x80947], rax") != std::string::npos,
+           "LOCK ADD qword dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observed, instructionAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("locked_add_guest_memory.i64") != std::string::npos,
+           "LOCK ADD did not lower through locked guest-memory IR");
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, UINT64_MAX);
+    rosa::x86::X86State state;
+    state.rax = 1;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0},
+                "LOCK ADD qword result differs");
+    expectEqual(state.rax, std::uint64_t{1},
+                "LOCK ADD changed its source register");
+    expectEqual(state.rflags, std::uint64_t{0x57},
+                "LOCK ADD carry/zero flags differ");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    constexpr std::uint64_t readOnlySentinel = 0xAABBCCDDEEFF0011ULL;
+    std::memcpy(readOnlyBytes.data() + (target.value - targetPage.value),
+                &readOnlySentinel, sizeof(readOnlySentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(targetPage, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes,
+                                    "read-only LOCK ADD target");
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x1122334455667788ULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "LOCK ADD accepted a read-only guest qword");
+    expectEqual(readOnlyAddressSpace.readU64(target), readOnlySentinel,
+                "faulted LOCK ADD changed read-only guest memory");
+    expectEqual(faultState.rax, std::uint64_t{0x1122334455667788ULL},
+                "faulted LOCK ADD changed its source register");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted LOCK ADD changed flags");
+
+    constexpr std::array<std::uint8_t, 6> based{
+        0xF0, 0x48, 0x01, 0x47, 0x10, 0xC3};
+    const auto basedBlock = translator.translate(
+        based, rosa::guest::GuestAddress{0x1000});
+    constexpr rosa::guest::GuestAddress crossPageTarget{0x8FFC};
+    constexpr std::array crossPageBytes{
+        std::uint8_t{0x11}, std::uint8_t{0x22},
+        std::uint8_t{0x33}, std::uint8_t{0x44}};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    crossPageAddressSpace.writeBytes(crossPageTarget, crossPageBytes);
+    faultState.rdi = crossPageTarget.value - 0x10;
+    faultState.rax = 1;
+    faultState.rflags = 0xBD7;
+    rejected = false;
+    try {
+        static_cast<void>(basedBlock.execute(faultState,
+                                             &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page LOCK ADD did not fault");
+    expect(crossPageAddressSpace.readBytes(crossPageTarget, 4) ==
+               std::vector<std::uint8_t>(crossPageBytes.begin(),
+                                         crossPageBytes.end()),
+           "cross-page LOCK ADD partially changed guest memory");
+    expectEqual(faultState.rax, std::uint64_t{1},
+                "cross-page LOCK ADD changed its source register");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "cross-page LOCK ADD changed flags");
+
+    constexpr std::array<std::uint8_t, 8> rexBIgnored{
+        0xF0, 0x4D, 0x01, 0x2D, 0x00, 0x00, 0x00, 0x00};
+    const auto rexDecoded = decoder.decodeBlock(
+        rexBIgnored, rosa::guest::GuestAddress{0x2000}, 1);
+    const auto rexMemory =
+        std::get<rosa::x86::MemoryOperand>(rexDecoded[0].operands[0]);
+    const auto rexSource =
+        std::get<rosa::x86::RegisterOperand>(rexDecoded[0].operands[1]);
+    expect(rexMemory.ripRelative && rexSource.reg == rosa::x86::Register::R13,
+           "REX.B incorrectly changed the RIP-relative LOCK ADD destination");
 }
 
 void testLockedOrGuestDwordImmediate() {
@@ -15832,6 +15980,7 @@ int main() {
         {"XCHG guest dword with register", testExchangeGuestDwordWithRegister},
         {"XCHG guest qword with register", testExchangeGuestQwordWithRegister},
         {"LOCK OR guest dword immediate", testLockedOrGuestDwordImmediate},
+        {"LOCK ADD guest qword register", testLockedAddGuestQwordRegister},
         {"LOCK INC guest dword", testLockedIncrementGuestDword},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP guest qword with 32-bit immediate", testCompareGuestQwordWith32BitImmediate},

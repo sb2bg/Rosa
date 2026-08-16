@@ -9,6 +9,9 @@ ROSA_DIFFERENTIAL_CASE(add32_accumulator_zero_extend, 0x05, 0x01, 0x00,
 ROSA_DIFFERENTIAL_CASE(add32_register_zero_extend, 0x01, 0xC8)
 ROSA_DIFFERENTIAL_CASE(add32_register_overflow, 0x01, 0xC8)
 ROSA_DIFFERENTIAL_CASE(add64_memory_destination, 0x4C, 0x01, 0x73, 0x10)
+ROSA_DIFFERENTIAL_CASE(lock_add64_memory_carry, 0xF0, 0x48, 0x01, 0x47, 0x10)
+ROSA_DIFFERENTIAL_CASE(lock_add64_memory_overflow, 0xF0, 0x48, 0x01, 0x47,
+                       0x10)
 ROSA_DIFFERENTIAL_CASE(add8_register_overflow, 0x44, 0x00, 0xCE)
 ROSA_DIFFERENTIAL_CASE(add8_scaled_memory, 0x41, 0x02, 0x34, 0x3A)
 ROSA_DIFFERENTIAL_CASE(add8_immediate, 0x80, 0xC2, 0x04)

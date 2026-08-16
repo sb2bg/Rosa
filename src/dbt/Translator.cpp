@@ -1289,6 +1289,36 @@ lockedOrGuest32(GuestExecutionContext *context, x86::X86State *state,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+lockedAddGuest64(GuestExecutionContext *context, x86::X86State *state,
+                 std::uint64_t address, std::uint64_t source) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated LOCK ADD has no guest address space");
+        }
+        constexpr auto width = sizeof(std::uint64_t);
+        context->addressSpace->validateAccess(
+            guest::GuestAddress{address}, width,
+            guest::Permission::Read | guest::Permission::Write);
+        const auto original =
+            context->addressSpace->readU64(guest::GuestAddress{address});
+        const auto result = original + source;
+        context->addressSpace->writeU64(guest::GuestAddress{address}, result);
+        // Rosa currently has one guest thread. Keep the LOCK ordering boundary
+        // explicit without claiming host-thread atomicity for guest mappings.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return updateAddFlags64(state, original, source, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint64_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateLogicFlags16(x86::X86State *state, std::uint64_t result) {
     const auto result16 = static_cast<std::uint16_t>(result);
     auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
@@ -2389,6 +2419,41 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.exchangeGuestMemory(address, sourceValue, source.reg,
                                         width,
                                         instruction.address);
+            break;
+        }
+        case x86::Opcode::LockAddMemReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: LOCK ADD operand count");
+            }
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            if (memory.width != 64 || source.width != 64) {
+                throw std::runtime_error(
+                    "only LOCK ADD qword [base/RIP+disp], r64 is implemented");
+            }
+            auto address = memory.ripRelative
+                               ? builder.constant(
+                                     instruction.address.value +
+                                         instruction.length,
+                                     ir::Width::I64, instruction.address)
+                               : builder.readGuestRegister(
+                                     memory.base, ir::Width::I64,
+                                     instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto sourceValue = builder.readGuestRegister(
+                source.reg, ir::Width::I64, instruction.address);
+            builder.lockedAddGuestMemory(address, sourceValue,
+                                         ir::Width::I64,
+                                         instruction.address);
             break;
         }
         case x86::Opcode::LockOrMemImm: {
@@ -3630,6 +3695,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
                          operation.opcode == ir::Opcode::CompareExchangeGuestPair ||
                          operation.opcode == ir::Opcode::ExchangeGuestMemory ||
+                         operation.opcode == ir::Opcode::LockedAddGuestMemory ||
                          operation.opcode ==
                              ir::Opcode::LockedIncrementGuestMemory ||
                          operation.opcode == ir::Opcode::LockedOrGuestMemory ||
@@ -3656,6 +3722,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    operation.opcode ==
                                        ir::Opcode::CompareExchangeGuestPair ||
                                    operation.opcode == ir::Opcode::ExchangeGuestMemory ||
+                                   operation.opcode ==
+                                       ir::Opcode::LockedAddGuestMemory ||
                                    operation.opcode ==
                                        ir::Opcode::LockedIncrementGuestMemory ||
                                    operation.opcode == ir::Opcode::LockedOrGuestMemory ||
@@ -4111,6 +4179,32 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 operation.width == ir::Width::I32
                     ? pointerBits(&exchangeGuest32)
                     : pointerBits(&exchangeGuest64));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(
+                arm64::x0,
+                static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::LockedAddGuestMemory: {
+            if (operation.width != ir::Width::I64) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 64-bit guest-memory LOCK ADD");
+            }
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x4, arm64::x0);
+            assembler.mov(arm64::x1, arm64::x4);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x3, hostRegister(*operation.rhs));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&lockedAddGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);
