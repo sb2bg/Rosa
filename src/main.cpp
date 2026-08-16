@@ -132,6 +132,8 @@ void inspectSharedCache(int argc, char **argv) {
               << "chosen guest slide: 0x" << cache.slide() << '\n'
               << "dyld Mach-O: 0x" << cache.dyldMachHeader().value << '\n'
               << "dyld entry: 0x" << cache.dyldEntryPoint().value << std::dec << '\n'
+              << "dynamic data: 0x" << std::hex << cache.dynamicDataAddress().value
+              << "+0x" << cache.dynamicDataSize() << std::dec << '\n'
               << "cached images: " << cache.imageCount() << '\n'
               << "files: " << cache.files().size() << '\n';
     for (const auto &file : cache.files()) {

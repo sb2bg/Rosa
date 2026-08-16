@@ -48,6 +48,8 @@ constexpr std::size_t subcacheCountField = 0x18C;
 constexpr std::size_t imageOffsetField = 0x1C0;
 constexpr std::size_t imageCountField = 0x1C4;
 constexpr std::size_t cacheSubtypeField = 0x1C8;
+constexpr std::size_t dynamicDataOffsetField = 0x1F0;
+constexpr std::size_t dynamicDataSizeField = 0x1F8;
 
 constexpr std::uint32_t machHeader64Magic = 0xFEEDFACFU;
 constexpr std::uint32_t x86_64CpuType = 0x01000007U;
@@ -141,6 +143,20 @@ std::uint64_t readU64(std::span<const std::uint8_t> bytes, std::size_t offset) {
     return result;
 }
 
+void writeU32(std::span<std::uint8_t> bytes, std::size_t offset,
+              std::uint32_t value) {
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        bytes[offset + index] = static_cast<std::uint8_t>(value >> (index * 8U));
+    }
+}
+
+void writeU64(std::span<std::uint8_t> bytes, std::size_t offset,
+              std::uint64_t value) {
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        bytes[offset + index] = static_cast<std::uint8_t>(value >> (index * 8U));
+    }
+}
+
 std::array<std::uint8_t, 16> readUuid(std::span<const std::uint8_t> bytes,
                                       std::size_t offset) {
     if (offset > bytes.size() || 16 > bytes.size() - offset) {
@@ -218,6 +234,8 @@ struct ParsedFile {
     std::uint32_t subcacheOffset{};
     std::uint32_t subcacheCount{};
     bool hasModernSubcaches{};
+    std::uint64_t dynamicDataOffset{};
+    std::uint64_t dynamicDataSize{};
     std::vector<SharedCacheMapping> mappings;
 };
 
@@ -266,6 +284,21 @@ ParsedFile parseFile(const std::filesystem::path &path, std::string_view suffix)
             result.imageCount, imageRecordSize, 1'000'000, "image");
         if (imageOffset > reader.size() || imageTableSize > reader.size() - imageOffset) {
             throw std::runtime_error("dyld shared cache image table exceeds source file");
+        }
+    }
+    if (mappingOffset > dynamicDataSizeField + sizeof(std::uint64_t) - 1U) {
+        result.dynamicDataOffset = readU64(header, dynamicDataOffsetField);
+        result.dynamicDataSize = readU64(header, dynamicDataSizeField);
+        if ((result.dynamicDataOffset == 0) != (result.dynamicDataSize == 0)) {
+            throw std::runtime_error(
+                "dyld shared cache dynamic-data reservation is incomplete");
+        }
+        if (result.dynamicDataSize != 0 &&
+            (result.dynamicDataSize < 0x4000 ||
+             (result.dynamicDataOffset % guest::guestPageSize) != 0 ||
+             (result.dynamicDataSize % guest::guestPageSize) != 0)) {
+            throw std::runtime_error(
+                "dyld shared cache dynamic-data reservation is invalid");
         }
     }
 
@@ -421,6 +454,16 @@ GuestSharedCache GuestSharedCache::open(const std::filesystem::path &path) {
     result.platform_ = main.platform;
     result.osVersion_ = main.osVersion;
     result.imageCount_ = main.imageCount;
+    if (main.dynamicDataSize != 0) {
+        if (main.dynamicDataOffset > main.sharedRegionSize ||
+            main.dynamicDataSize > main.sharedRegionSize - main.dynamicDataOffset) {
+            throw std::runtime_error(
+                "dyld shared cache dynamic data lies outside shared region");
+        }
+        result.dynamicDataAddress_ = guest::GuestAddress{
+            main.sharedRegionStart.value + main.dynamicDataOffset};
+        result.dynamicDataSize_ = main.dynamicDataSize;
+    }
     result.files_.push_back(SharedCacheFile{
         .path = path,
         .uuid = main.uuid,
@@ -495,6 +538,18 @@ GuestSharedCache GuestSharedCache::open(const std::filesystem::path &path) {
             }
         }
     }
+    if (result.dynamicDataSize_ != 0) {
+        for (const auto &mapping : result.mappings_) {
+            const auto dynamicEnd = result.dynamicDataAddress_.value +
+                                    result.dynamicDataSize_;
+            const auto mappingEnd = mapping.address.value + mapping.size;
+            if (result.dynamicDataAddress_.value < mappingEnd &&
+                mapping.address.value < dynamicEnd) {
+                throw std::runtime_error(
+                    "dyld shared cache dynamic data overlaps a file mapping");
+            }
+        }
+    }
 
     if (result.dyldMachHeader_.value != 0 || result.dyldEntryPoint_.value != 0) {
         const auto headerLocation = locate(result.mappings_, result.dyldMachHeader_, 8);
@@ -525,6 +580,38 @@ void GuestSharedCache::mapInto(guest::AddressSpace &addressSpace) const {
             "dyld-cache" + mapping.sourceSuffix + ":mapping-" +
                 std::to_string(index));
     }
+    if (dynamicDataSize_ == 0) {
+        return;
+    }
+
+    // Apple constructs this page outside the cache files before asking XNU to
+    // install it. Keep the guest structure explicit and independent of the
+    // host ABI. Zero function-variant masks select baseline cache functions.
+    std::vector<std::uint8_t> dynamicData(static_cast<std::size_t>(dynamicDataSize_));
+    constexpr std::string_view dynamicMagic = "dyld_data    v3";
+    std::copy(dynamicMagic.begin(), dynamicMagic.end(), dynamicData.begin());
+
+    struct stat information {};
+    if (::stat(files_.front().path.c_str(), &information) != 0) {
+        throw std::runtime_error("cannot inspect guest shared-cache identity: " +
+                                 std::string(std::strerror(errno)));
+    }
+    // Guest FileIdTuple: fsid_t (two 32-bit words), then fsobj_id_t (8 bytes).
+    writeU32(dynamicData, 16, static_cast<std::uint32_t>(information.st_dev));
+    writeU32(dynamicData, 20, 0);
+    writeU64(dynamicData, 24, static_cast<std::uint64_t>(information.st_ino));
+    constexpr std::uint32_t dynamicRegionStructureSize = 80;
+    writeU32(dynamicData, 32, 0); // no OS cryptex prefix
+    writeU32(dynamicData, 36, dynamicRegionStructureSize);
+    const auto cachePath = std::filesystem::canonical(files_.front().path).string();
+    if (cachePath.size() + 1U > dynamicData.size() - dynamicRegionStructureSize) {
+        throw std::runtime_error("guest shared-cache path exceeds dynamic-data page");
+    }
+    std::copy(cachePath.begin(), cachePath.end(),
+              dynamicData.begin() + dynamicRegionStructureSize);
+    addressSpace.mapSegment(dynamicDataAddress_, static_cast<std::size_t>(dynamicDataSize_),
+                            guest::Permission::Read, dynamicData,
+                            "dyld-cache:dynamic-data");
 }
 
 std::string_view GuestSharedCache::architectureName() const noexcept {

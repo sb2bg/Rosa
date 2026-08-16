@@ -12000,6 +12000,10 @@ makeSharedCacheFixtureFile(std::uint64_t mappingAddress,
     storeFixtureU32(bytes, 0x16C, 0x1A0500);
     storeFixtureU32(bytes, 0x188, includeSubcache ? subcacheOffset : 0);
     storeFixtureU32(bytes, 0x18C, includeSubcache ? 1 : 0);
+    if (includeSubcache) {
+        storeFixtureU64(bytes, 0x1F0, 0x1C000);
+        storeFixtureU64(bytes, 0x1F8, 0x4000);
+    }
 
     storeFixtureU64(bytes, mappingOffset, mappingAddress);
     storeFixtureU64(bytes, mappingOffset + 8, fileSize);
@@ -12131,7 +12135,7 @@ void testGuestSharedCacheParsingAndMapping() {
 
     rosa::guest::AddressSpace addressSpace;
     cache.mapInto(addressSpace);
-    expectEqual(addressSpace.mappingCount(), std::size_t{2},
+    expectEqual(addressSpace.mappingCount(), std::size_t{3},
                 "shared-cache guest mapping count differs");
     const auto magic = addressSpace.readBytes(cache.regionStart(), 7);
     expectEqual(std::string(magic.begin(), magic.end()), std::string("dyld_v1"),
@@ -12153,6 +12157,23 @@ void testGuestSharedCacheParsingAndMapping() {
                                 rosa::guest::Permission::Execute) ==
                rosa::guest::ProtectResult::ProtectionFailure,
            "shared-cache mapping exceeded maximum protections");
+    constexpr rosa::guest::GuestAddress dynamicAddress{
+        SharedCacheFixture::regionStart + 0x1C000};
+    const auto dynamicMagic = addressSpace.readBytes(dynamicAddress, 15);
+    expectEqual(std::string(dynamicMagic.begin(), dynamicMagic.end()),
+                std::string("dyld_data    v3"),
+                "shared-cache dynamic-data magic differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{dynamicAddress.value + 36}),
+                std::uint32_t{80},
+                "shared-cache dynamic-data path offset differs");
+    bool dynamicWriteRejected = false;
+    try {
+        addressSpace.writeBytes(dynamicAddress, std::array<std::uint8_t, 1>{0});
+    } catch (const std::runtime_error &) {
+        dynamicWriteRejected = true;
+    }
+    expect(dynamicWriteRejected, "shared-cache dynamic data accepted a guest write");
 }
 
 void testGuestSharedCacheRejectsMalformedFiles() {

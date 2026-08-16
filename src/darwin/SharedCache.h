@@ -67,6 +67,12 @@ class GuestSharedCache {
     [[nodiscard]] std::uint32_t platform() const noexcept { return platform_; }
     [[nodiscard]] std::uint32_t osVersion() const noexcept { return osVersion_; }
     [[nodiscard]] std::uint32_t imageCount() const noexcept { return imageCount_; }
+    [[nodiscard]] guest::GuestAddress dynamicDataAddress() const noexcept {
+        return dynamicDataAddress_;
+    }
+    [[nodiscard]] std::uint64_t dynamicDataSize() const noexcept {
+        return dynamicDataSize_;
+    }
     [[nodiscard]] const std::vector<SharedCacheFile> &files() const noexcept {
         return files_;
     }
@@ -86,6 +92,8 @@ class GuestSharedCache {
     std::uint32_t platform_{};
     std::uint32_t osVersion_{};
     std::uint32_t imageCount_{};
+    guest::GuestAddress dynamicDataAddress_{};
+    std::uint64_t dynamicDataSize_{};
     std::vector<SharedCacheFile> files_;
     std::vector<SharedCacheMapping> mappings_;
 };
