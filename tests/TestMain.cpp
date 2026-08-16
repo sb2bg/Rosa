@@ -1198,6 +1198,31 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("rol16_eight", CaseId::rol16_eight,
+                             differentialBytes_rol16_eight);
+        testCase.request.state.rsi = 0x11223344556612A5ULL;
+        testCase.request.state.rflags = 0xAD7;
+        testCase.flagMask = carryFlag | parityFlag | auxiliaryFlag | zeroFlag |
+                            signFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("rol16_one", CaseId::rol16_one,
+                             differentialBytes_rol16_one);
+        testCase.request.state.rsi = 0x1122334455668000ULL;
+        testCase.request.state.rflags = 0x2;
+        testCase.flagMask = arithmeticFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make("rol16_zero_effective",
+                             CaseId::rol16_zero_effective,
+                             differentialBytes_rol16_zero_effective);
+        testCase.request.state.rsi = 0x11223344556612A5ULL;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
         auto testCase = make("not32_accumulator", CaseId::not32_accumulator,
                              differentialBytes_not32_accumulator);
         testCase.request.state.rax = 0xAABBCCDD10203040ULL;
@@ -8624,6 +8649,70 @@ void testShiftRightArithmetic64ImmediateGeneratedExecution() {
                 "SAR masked-zero changed flags");
 }
 
+void testRotateLeft16ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0xC1, 0xC6, 0x08, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF7000355FDULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::RolRegImm,
+           "ROL r16, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "ROL r16, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rsi &&
+               destination.width == 16 && immediate.value == 8,
+           "ROL si, 8 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("rol si, 0x8") !=
+               std::string::npos,
+           "ROL si, 8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF7000355FDULL});
+    rosa::x86::X86State state;
+    state.rsi = 0x11223344556612A5ULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rsi, std::uint64_t{0x112233445566A512ULL},
+                "ROL si, 8 result or upper-register preservation differs");
+    constexpr std::uint64_t unaffectedFlags =
+        (1U << 2U) | (1U << 4U) | (1U << 6U) | (1U << 7U);
+    expectEqual(state.rflags & unaffectedFlags, std::uint64_t{0xD4},
+                "ROL si, 8 changed unaffected flags");
+    expect((state.rflags & 1U) == 0, "ROL si, 8 carry differs");
+
+    constexpr std::array<std::uint8_t, 5> countOne{
+        0x66, 0xC1, 0xC6, 0x01, 0xC3};
+    const auto oneBlock = translator.translate(
+        countOne, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State oneState;
+    oneState.rsi = 0x1122334455668000ULL;
+    oneState.rflags = 0x2;
+    static_cast<void>(oneBlock.execute(oneState));
+    expectEqual(oneState.rsi, std::uint64_t{0x1122334455660001ULL},
+                "ROL si, 1 result differs");
+    expectEqual(oneState.rflags & ((1U << 0U) | (1U << 11U)),
+                std::uint64_t{(1U << 0U) | (1U << 11U)},
+                "ROL si, 1 CF/OF differ");
+
+    constexpr std::array<std::uint8_t, 5> zeroEffective{
+        0x66, 0xC1, 0xC6, 0x10, 0xC3};
+    const auto zeroBlock = translator.translate(
+        zeroEffective, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State zeroState;
+    zeroState.rsi = 0x11223344556612A5ULL;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(zeroBlock.execute(zeroState));
+    expectEqual(zeroState.rsi, std::uint64_t{0x11223344556612A5ULL},
+                "ROL si, 16 changed its destination");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "ROL si, 16 changed flags");
+}
+
 void testShiftRightClGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{
         0x49, 0xD3, 0xEC, 0xC3};
@@ -14660,6 +14749,8 @@ int main() {
         {"SHR 64-bit immediate generated execution", testShiftRight64ImmediateGeneratedExecution},
         {"SAR 64-bit immediate generated execution",
          testShiftRightArithmetic64ImmediateGeneratedExecution},
+        {"ROL 16-bit immediate generated execution",
+         testRotateLeft16ImmediateGeneratedExecution},
         {"SHR CL generated execution", testShiftRightClGeneratedExecution},
         {"NOT 32-bit generated execution", testNot32GeneratedExecution},
         {"NEG 64-bit generated execution", testNeg64GeneratedExecution},

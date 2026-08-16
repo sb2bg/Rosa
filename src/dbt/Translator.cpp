@@ -1275,6 +1275,30 @@ updateShiftLeftFlags32(x86::X86State *state, std::uint64_t lhsValue,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateRotateLeftFlags16(x86::X86State *state, std::uint64_t resultValue,
+                        std::uint64_t unmaskedCount) {
+    const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x1FU);
+    const auto effectiveCount = static_cast<std::uint8_t>(count % 16U);
+    if (effectiveCount == 0) {
+        return state;
+    }
+    const auto result = static_cast<std::uint16_t>(resultValue);
+    auto replacedFlags = flagCarry;
+    if (effectiveCount == 1) {
+        replacedFlags |= flagOverflow;
+    }
+    auto flags = (state->rflags & ~replacedFlags) | flagReservedOne;
+    const auto carry = static_cast<std::uint64_t>(result & 1U);
+    flags |= carry;
+    if (effectiveCount == 1 &&
+        ((((result >> 15U) & 1U) ^ carry) != 0)) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateShiftRightFlags8(x86::X86State *state, std::uint64_t lhsValue,
                        std::uint64_t resultValue,
                        std::uint64_t unmaskedCount) {
@@ -2420,6 +2444,41 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 lhs, result, count, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::RolRegImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: rol operands");
+            }
+            const auto reg =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto immediate =
+                std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (reg.width != 16) {
+                throw std::runtime_error("internal decoder error: ROL width");
+            }
+            const auto count =
+                static_cast<std::uint8_t>((immediate.value & 0x1FU) % 16U);
+            if (count == 0) {
+                break;
+            }
+            const auto unmasked = builder.readGuestRegister(
+                reg.reg, ir::Width::I16, instruction.address);
+            const auto mask = builder.constant(
+                0xFFFF, ir::Width::I16, instruction.address);
+            const auto original = builder.bitAnd(
+                unmasked, mask, ir::Width::I16, instruction.address);
+            const auto left = builder.shiftLeft(
+                original, count, ir::Width::I16, instruction.address);
+            const auto right = builder.shiftRightLogical(
+                original, static_cast<std::uint8_t>(16U - count),
+                ir::Width::I16, instruction.address);
+            const auto combined = builder.bitOr(
+                left, right, ir::Width::I16, instruction.address);
+            builder.writeGuestRegister(reg.reg, combined, ir::Width::I16,
+                                       instruction.address);
+            builder.updateRotateLeftFlags(combined, count, ir::Width::I16,
+                                          instruction.address);
+            break;
+        }
         case x86::Opcode::NotReg: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: not operand count");
@@ -3294,6 +3353,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::UpdateShiftRightFlags ||
                          operation.opcode ==
                              ir::Opcode::UpdateShiftRightArithmeticFlags ||
+                         operation.opcode == ir::Opcode::UpdateRotateLeftFlags ||
                          operation.opcode == ir::Opcode::UpdateMultiplyFlags ||
                          operation.opcode == ir::Opcode::UpdateSignedMultiplyFlags ||
                          operation.opcode == ir::Opcode::UpdateShiftRightDoubleFlags ||
@@ -3378,13 +3438,17 @@ arm64::Program compileToArm64(const ir::Block &block) {
                               *operation.guestXmmRegister, operation.immediate != 0)));
             break;
         case ir::Opcode::WriteGuestReg:
-            if (operation.width == ir::Width::I8) {
+            if (operation.width == ir::Width::I8 ||
+                operation.width == ir::Width::I16) {
                 const auto offset = static_cast<std::uint32_t>(
                     x86::registerOffset(*operation.guestRegister));
                 assembler.ldr(arm64::x16, arm64::x0, offset);
-                assembler.movImmediate(arm64::x17, ~std::uint64_t{0xFF});
+                const auto valueMask = operation.width == ir::Width::I8
+                                           ? std::uint64_t{0xFF}
+                                           : std::uint64_t{0xFFFF};
+                assembler.movImmediate(arm64::x17, ~valueMask);
                 assembler.bitAnd(arm64::x16, arm64::x16, arm64::x17);
-                assembler.movImmediate(arm64::x17, 0xFF);
+                assembler.movImmediate(arm64::x17, valueMask);
                 assembler.bitAnd(arm64::x17,
                                  hostRegister(*operation.lhs), arm64::x17);
                 assembler.bitOr(arm64::x16, arm64::x16, arm64::x17);
@@ -4069,6 +4133,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(
                 arm64::x16,
                 pointerBits(&updateShiftRightArithmeticFlags64));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::UpdateRotateLeftFlags:
+            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x2, operation.immediate);
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&updateRotateLeftFlags16));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateMultiplyFlags:

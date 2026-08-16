@@ -537,6 +537,13 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << ", 0x"
                    << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::RolRegImm:
+            stream << "rol "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
+            break;
         case x86::Opcode::NotReg:
             stream << "not "
                    << registerOperandName(
@@ -1328,6 +1335,11 @@ std::string dumpIr(const ir::Block &block) {
                    << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", "
                    << valueName(*operation.rhs) << ", " << std::dec
+                   << operation.immediate;
+            break;
+        case ir::Opcode::UpdateRotateLeftFlags:
+            stream << "update_rotate_left_flags." << widthName(operation.width)
+                   << ' ' << valueName(*operation.lhs) << ", " << std::dec
                    << operation.immediate;
             break;
         case ir::Opcode::UpdateMultiplyFlags:

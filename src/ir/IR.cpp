@@ -644,6 +644,17 @@ void Builder::updateShiftRightArithmeticFlags(ValueId lhs, ValueId result,
     });
 }
 
+void Builder::updateRotateLeftFlags(ValueId result, std::uint8_t count,
+                                    Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateRotateLeftFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = result,
+        .immediate = count,
+    });
+}
+
 void Builder::updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::UpdateMultiplyFlags,
@@ -984,6 +995,13 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.rhs, "result");
             if (operation.third) {
                 checkUse(operation.third, "shift count");
+            }
+            break;
+        case Opcode::UpdateRotateLeftFlags:
+            checkUse(operation.lhs, "result");
+            if (operation.width != Width::I16) {
+                errors.emplace_back(
+                    "update_rotate_left_flags currently requires i16");
             }
             break;
         case Opcode::ExitBlock:
