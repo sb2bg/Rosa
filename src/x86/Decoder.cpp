@@ -2042,7 +2042,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x84U && code[cursor] != 0x31U &&
             code[cursor] != 0x32U &&
             code[cursor] != 0x20U && code[cursor] != 0x21U &&
-            code[cursor] != 0x22U &&
+            code[cursor] != 0x22U && code[cursor] != 0x23U &&
             code[cursor] != 0x08U &&
             code[cursor] != 0x09U &&
             code[cursor] != 0x87U &&
@@ -3307,6 +3307,42 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                     std::nullopt, 1, false, true}
                     : MemoryOperand{decodeRegister(rmEncoding, rexB),
                                     displacement, 8});
+        } else if (opcode == 0x23U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining,
+                                  "truncated and register, [memory]");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto regEncoding =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (!rexW || mode > 0x2U || rmEncoding == 0x4U ||
+                (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only AND r64, qword [base+disp8/disp32] is supported from opcode 23");
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated qword AND disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated qword AND disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::AndRegMem;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(regEncoding, rexR), 64});
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(rmEncoding, rexB), displacement, 64});
         } else if (opcode == 0x84U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated test r8, r8");

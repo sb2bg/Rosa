@@ -2795,10 +2795,13 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);
-            if (destination.width != 8 || memory.width != 8) {
+            if (destination.width != memory.width ||
+                (destination.width != 8 && destination.width != 64)) {
                 throw std::runtime_error(
-                    "only byte register-from-memory AND is implemented");
+                    "only byte and qword register-from-memory AND are implemented");
             }
+            const auto width = destination.width == 8 ? ir::Width::I8
+                                                      : ir::Width::I64;
             const auto base = memory.ripRelative
                                   ? builder.constant(
                                         instruction.address.value +
@@ -2813,14 +2816,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto address = builder.add(
                 base, displacement, ir::Width::I64, instruction.address);
             const auto rhs = builder.loadGuest(
-                address, ir::Width::I8, instruction.address);
+                address, width, instruction.address);
             const auto lhs = builder.readGuestRegister(
-                destination.reg, ir::Width::I8, instruction.address);
+                destination.reg, width, instruction.address);
             const auto result = builder.bitAnd(
-                lhs, rhs, ir::Width::I8, instruction.address);
-            builder.writeGuestRegister(destination.reg, result, ir::Width::I8,
+                lhs, rhs, width, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, width,
                                        instruction.address);
-            builder.updateLogicFlags(result, ir::Width::I8,
+            builder.updateLogicFlags(result, width,
                                      instruction.address);
             break;
         }
