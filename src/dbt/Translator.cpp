@@ -490,6 +490,30 @@ alignRightXmmBytes(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+blendXmmWords(x86::X86State *state, std::uint64_t destinationIndex,
+              std::uint64_t sourceIndex, std::uint64_t mask) {
+    if (destinationIndex >= state->xmm.size() ||
+        sourceIndex >= state->xmm.size() || mask > 0xFFU) {
+        return state;
+    }
+    const auto source = state->xmm[sourceIndex];
+    auto result = state->xmm[destinationIndex];
+    for (std::uint8_t index = 0; index < 8; ++index) {
+        if (((mask >> index) & 1U) == 0) {
+            continue;
+        }
+        const auto shift = static_cast<std::uint8_t>((index & 3U) * 16U);
+        const auto sourceLane = index < 4 ? source.low : source.high;
+        auto &resultLane = index < 4 ? result.low : result.high;
+        const auto word = (sourceLane >> shift) & 0xFFFFU;
+        const auto wordMask = std::uint64_t{0xFFFF} << shift;
+        resultLane = (resultLane & ~wordMask) | (word << shift);
+    }
+    state->xmm[destinationIndex] = result;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 loadGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address) noexcept {
     try {
         if (context == nullptr || context->addressSpace == nullptr) {
@@ -3668,6 +3692,23 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 value, instruction.address);
             break;
         }
+        case x86::Opcode::PblendwRegRegImm: {
+            if (instruction.operands.size() != 3) {
+                throw std::runtime_error(
+                    "internal decoder error: PBLENDW operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto immediate =
+                std::get<x86::ImmediateOperand>(instruction.operands[2]);
+            builder.blendXmmWords(
+                destination, source,
+                static_cast<std::uint8_t>(immediate.value),
+                instruction.address);
+            break;
+        }
         case x86::Opcode::PalignrRegRegImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error(
@@ -4213,6 +4254,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::MoveXmmByteMask ||
                          operation.opcode == ir::Opcode::ShuffleXmmDwords ||
                          operation.opcode == ir::Opcode::AlignRightXmmBytes ||
+                         operation.opcode == ir::Opcode::BlendXmmWords ||
                          operation.opcode == ir::Opcode::BitScanForward ||
                          operation.opcode == ir::Opcode::BitScanReverse ||
                          operation.opcode == ir::Opcode::RepeatMoveByte ||
@@ -5028,6 +5070,19 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(arm64::x3, operation.immediate);
             assembler.movImmediate(arm64::x16,
                                    pointerBits(&alignRightXmmBytes));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::BlendXmmWords:
+            assembler.movImmediate(
+                arm64::x1,
+                static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(
+                arm64::x2,
+                static_cast<std::uint64_t>(
+                    *operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x3, operation.immediate);
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&blendXmmWords));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::BitScanForward:

@@ -2608,6 +2608,27 @@ void testRosettaDifferentialSemantics() {
               differentialBytes_pinsrd_lane2);
     runPinsrd("pinsrd_lane3", CaseId::pinsrd_lane3,
               differentialBytes_pinsrd_lane3);
+    const auto runPblendw = [&](std::string_view name, CaseId id,
+                                std::span<const std::uint8_t> code) {
+        auto testCase = make(name, id, code);
+        testCase.request.state.xmm[0] = {
+            .low = 0x4444333322221111ULL,
+            .high = 0x8888777766665555ULL};
+        testCase.request.state.xmm[1] = {
+            .low = 0xDDDDCCCCBBBBAAAAULL,
+            .high = 0x11110000FFFFEEEEULL};
+        run(testCase);
+    };
+    runPblendw("pblendw_mask00", CaseId::pblendw_mask00,
+               differentialBytes_pblendw_mask00);
+    runPblendw("pblendw_mask0f", CaseId::pblendw_mask0f,
+               differentialBytes_pblendw_mask0f);
+    runPblendw("pblendw_maskaa", CaseId::pblendw_maskaa,
+               differentialBytes_pblendw_maskaa);
+    runPblendw("pblendw_maskff", CaseId::pblendw_maskff,
+               differentialBytes_pblendw_maskff);
+    runPblendw("pblendw_alias", CaseId::pblendw_alias,
+               differentialBytes_pblendw_alias);
     {
         auto testCase = make("movdqa_load", CaseId::movdqa_load,
                              differentialBytes_movdqa_load);
@@ -13278,6 +13299,81 @@ void testPinsrdGuestMemoryToXmm() {
                 "faulted PINSRD changed flags");
 }
 
+void testPblendwRegisters() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x66, 0x0F, 0x3A, 0x0E, 0xC8, 0x0F, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF700081A57ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PblendwRegRegImm,
+           "PBLENDW opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6},
+                "PBLENDW length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0 &&
+               immediate.value == 0x0F && immediate.width == 8,
+           "PBLENDW xmm1, xmm0, 0x0f operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "pblendw xmm1, xmm0, 0xf") != std::string::npos,
+           "PBLENDW dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF700081A57ULL});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("blend_xmm_words.i16 xmm1, xmm0, 0xf") !=
+               std::string::npos,
+           "PBLENDW did not lower through word-blend IR");
+    rosa::x86::X86State state;
+    state.rax = 0x0123456789ABCDEFULL;
+    state.xmm[0] = {
+        .low = 0x4444333322221111ULL,
+        .high = 0x8888777766665555ULL};
+    state.xmm[1] = {
+        .low = 0xDDDDCCCCBBBBAAAAULL,
+        .high = 0x11110000FFFFEEEEULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[1].low,
+                std::uint64_t{0x4444333322221111ULL},
+                "PBLENDW did not select source words 0-3");
+    expectEqual(state.xmm[1].high,
+                std::uint64_t{0x11110000FFFFEEEEULL},
+                "PBLENDW did not preserve destination words 4-7");
+    expectEqual(state.xmm[0].low,
+                std::uint64_t{0x4444333322221111ULL},
+                "PBLENDW changed its source");
+    expectEqual(state.rax, std::uint64_t{0x0123456789ABCDEFULL},
+                "PBLENDW changed a GPR");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "PBLENDW changed flags");
+
+    constexpr std::array<std::uint8_t, 7> aliasCode{
+        0x66, 0x0F, 0x3A, 0x0E, 0xC0, 0x5A, 0xC3};
+    const auto aliasBlock = translator.translate(
+        aliasCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State aliasState;
+    aliasState.xmm[0] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL};
+    aliasState.rflags = 0x8D7;
+    static_cast<void>(aliasBlock.execute(aliasState));
+    expectEqual(aliasState.xmm[0].low,
+                std::uint64_t{0x8877665544332211ULL},
+                "aliased PBLENDW changed its low lane");
+    expectEqual(aliasState.xmm[0].high,
+                std::uint64_t{0x1020304050607080ULL},
+                "aliased PBLENDW changed its high lane");
+    expectEqual(aliasState.rflags, std::uint64_t{0x8D7},
+                "aliased PBLENDW changed flags");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -17797,6 +17893,7 @@ int main() {
         {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},
+        {"PBLENDW registers", testPblendwRegisters},
         {"register move execution", testRegisterMoveExecution},
         {"LEA base displacement execution", testLeaBaseDisplacementExecution},
         {"LEA 32-bit base displacement execution", testLea32BitBaseDisplacementExecution},

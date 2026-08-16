@@ -89,6 +89,7 @@ enum class Opcode {
     PmovmskbRegXmm,
     PshufdRegRegImm,
     PalignrRegRegImm,
+    PblendwRegRegImm,
     PinsrdXmmMem,
     MovapsMemReg,
     MovapsRegMem,
