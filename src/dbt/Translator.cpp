@@ -3250,10 +3250,13 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);
-            if (destination.width != 8 || memory.width != 8) {
+            if (destination.width != memory.width ||
+                (destination.width != 8 && destination.width != 32)) {
                 throw std::runtime_error(
-                    "only byte register-from-memory OR is implemented");
+                    "only byte/dword register-from-memory OR is implemented");
             }
+            const auto width = destination.width == 8 ? ir::Width::I8
+                                                       : ir::Width::I32;
             auto address = builder.readGuestRegister(
                 memory.base, ir::Width::I64, instruction.address);
             if (memory.index) {
@@ -3277,14 +3280,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                       instruction.address);
             }
             const auto rhs = builder.loadGuest(
-                address, ir::Width::I8, instruction.address);
+                address, width, instruction.address);
             const auto lhs = builder.readGuestRegister(
-                destination.reg, ir::Width::I8, instruction.address);
+                destination.reg, width, instruction.address);
             const auto result = builder.bitOr(
-                lhs, rhs, ir::Width::I8, instruction.address);
+                lhs, rhs, width, instruction.address);
             builder.writeGuestRegister(destination.reg, result,
-                                       ir::Width::I8, instruction.address);
-            builder.updateLogicFlags(result, ir::Width::I8,
+                                       width, instruction.address);
+            builder.updateLogicFlags(result, width,
                                      instruction.address);
             break;
         }
