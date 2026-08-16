@@ -4352,6 +4352,46 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 continue;
             }
+            if (extension == 0x1U && mode <= 0x2U && rmEncoding != 0x4U &&
+                !(mode == 0 && rmEncoding == 0x5U)) {
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated byte OR disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated byte OR disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated byte OR immediate");
+                }
+                const auto immediate = code[cursor++];
+                instruction.opcode = Opcode::OrMemImm;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, rexB), displacement, 8});
+                instruction.operands.push_back(
+                    ImmediateOperand{immediate, 8});
+                const auto length = cursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(
+                    code.begin() +
+                        static_cast<std::ptrdiff_t>(instructionStart),
+                    length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
             if (extension == 0x4U && mode == 0x3U && !rexW && !rexR &&
                 !rexX && (hasRex || rmEncoding < 0x4U)) {
                 const auto immediate = code[cursor++];

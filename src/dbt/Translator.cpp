@@ -3181,6 +3181,31 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                   instruction.address);
             break;
         }
+        case x86::Opcode::OrMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: memory immediate or operand count");
+            }
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto immediate =
+                std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            auto address = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement,
+                                      ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto sourceValue = builder.constant(
+                immediate.value, ir::Width::I8, instruction.address);
+            builder.orGuestMemory(address, sourceValue, ir::Width::I8,
+                                  instruction.address);
+            break;
+        }
         case x86::Opcode::OrRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: or immediate operand count");

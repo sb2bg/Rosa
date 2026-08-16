@@ -843,6 +843,17 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("or8_memory_immediate",
+                             CaseId::or8_memory_immediate,
+                             differentialBytes_or8_memory_immediate);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.memory[0xD8] = 0x80;
+        testCase.memoryCompareOffset = 0xD8;
+        testCase.memoryCompareSize = 1;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("xor32_register", CaseId::xor32_register,
                              differentialBytes_xor32_register);
         testCase.request.state.rsi = UINT64_MAX;
@@ -10583,6 +10594,88 @@ void testOr8BitRegisterIntoIndexedGuestMemory() {
                 "read-only OR byte memory changed flags");
 }
 
+void testOrImmediateIntoGuestByteMemory() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x41, 0x80, 0x8E, 0xD8, 0x00, 0x00, 0x00, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF70004E0F9ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrMemImm,
+           "OR byte [memory], imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "OR byte [memory], imm8 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R14 &&
+               memory.displacement == 0xD8 && memory.width == 8 &&
+               immediate.value == 1 && immediate.width == 8,
+           "OR byte [r14+0xd8], 1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "or byte [r14+0xd8], 0x1") != std::string::npos,
+           "OR byte [r14+0xd8], 1 dump differs");
+    constexpr std::array<std::uint8_t, 6> negativeDisplacementCode{
+        0x41, 0x80, 0x4E, 0xF8, 0x01, 0xC3};
+    const auto negativeDecoded = decoder.decodeBlock(
+        negativeDisplacementCode, rosa::guest::GuestAddress{0x2000});
+    expectEqual(std::get<rosa::x86::MemoryOperand>(
+                    negativeDecoded[0].operands[0]).displacement,
+                std::int64_t{-8},
+                "OR byte immediate disp8 was not sign-extended");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x80D8};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array initialByte{std::uint8_t{0x40}};
+    addressSpace.writeBytes(target, initialByte);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF70004E0F9ULL});
+    rosa::x86::X86State state;
+    state.r14 = page.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readBytes(target, 1).front(),
+                std::uint8_t{0x41},
+                "OR byte immediate memory result differs");
+    expectEqual(state.r14, page.value,
+                "OR byte immediate changed its base");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0x4},
+                "OR byte immediate defined flags differ");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    readOnlyAddressSpace.writeBytes(target, initialByte);
+    expectEqual(readOnlyAddressSpace.protect(
+                    page, rosa::guest::guestPageSize,
+                    rosa::guest::Permission::Read),
+                rosa::guest::ProtectResult::Success,
+                "could not make immediate OR memory read-only");
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "OR byte immediate read-only memory did not fault");
+    expectEqual(readOnlyAddressSpace.readBytes(target, 1).front(),
+                std::uint8_t{0x40},
+                "faulted immediate OR changed guest memory");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "faulted immediate OR changed flags");
+}
+
 void testOrShortImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x83, 0xC8, 0xFF, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -17153,6 +17246,8 @@ int main() {
         {"OR 8-bit registers generated execution", testOr8BitRegistersGeneratedExecution},
         {"OR 8-bit register into indexed guest memory",
          testOr8BitRegisterIntoIndexedGuestMemory},
+        {"OR immediate into guest byte memory",
+         testOrImmediateIntoGuestByteMemory},
         {"OR short immediate generated execution", testOrShortImmediateGeneratedExecution},
         {"OR 32-bit registers generated execution", testOr32BitRegistersGeneratedExecution},
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
