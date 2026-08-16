@@ -1158,6 +1158,32 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "cmp32_sib_memory_immediate_equal",
+            CaseId::cmp32_sib_memory_immediate_equal,
+            differentialBytes_cmp32_sib_memory_immediate_equal);
+        bindMemory(testCase, rosa::x86::Register::R12, 0);
+        constexpr std::uint32_t value = 0x205;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "cmp32_sib_memory_immediate_borrow",
+            CaseId::cmp32_sib_memory_immediate_borrow,
+            differentialBytes_cmp32_sib_memory_immediate_borrow);
+        bindMemory(testCase, rosa::x86::Register::R12, 0);
+        constexpr std::uint32_t value = 0x204;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("cmp8_scaled_memory_register",
                              CaseId::cmp8_scaled_memory_register,
                              differentialBytes_cmp8_scaled_memory_register);
@@ -5857,6 +5883,72 @@ void testCompareGuestMemoryWith32BitImmediate() {
     expect(rejected, "CMP immediate from unmapped guest memory did not fail");
     expectEqual(faultState.rflags, std::uint64_t{0x8D7},
                 "failed memory-immediate CMP changed flags");
+}
+
+void testCompareGuestSibMemoryWith32BitImmediate() {
+    constexpr std::array<std::uint8_t, 10> code{
+        0x41, 0x81, 0x7C, 0x24, 0x10, 0x05, 0x02, 0x00, 0x00, 0xC3,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AE2D78ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "SIB CMP dword [memory], imm32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9},
+                "SIB CMP dword [memory], imm32 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R12 && !memory.index &&
+               memory.scale == 1 && memory.displacement == 0x10 &&
+               memory.width == 32,
+           "SIB CMP dword [r12+0x10], imm32 memory operand differs");
+    expect(immediate.value == 0x205 && immediate.width == 32,
+           "SIB CMP dword [memory], imm32 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "cmp dword [r12+0x10], 0x205") != std::string::npos,
+           "SIB CMP dword [memory], imm32 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress base{0x8100};
+    constexpr rosa::guest::GuestAddress target{0x8110};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::uint64_t original = 0xDEADBEEF00000205ULL;
+    addressSpace.writeU64(target, original);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AE2D78ULL}, 1);
+    rosa::x86::X86State state;
+    state.r12 = base.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r12, base.value,
+                "SIB CMP dword [memory], imm32 changed its base");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "SIB CMP dword [memory], imm32 equal flags differ");
+    expectEqual(addressSpace.readU64(target), original,
+                "SIB CMP dword [memory], imm32 changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.r12 = base.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SIB CMP dword immediate accepted unmapped guest memory");
+    expectEqual(faultState.r12, base.value,
+                "faulted SIB CMP dword immediate changed its base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted SIB CMP dword immediate changed flags");
 }
 
 void testCompareGuestQwordWith32BitImmediate() {
@@ -17818,6 +17910,8 @@ int main() {
          testLockedExchangeAddGuestDwordRegister},
         {"LOCK INC guest dword", testLockedIncrementGuestDword},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
+        {"CMP SIB guest memory with 32-bit immediate",
+         testCompareGuestSibMemoryWith32BitImmediate},
         {"CMP guest qword with 32-bit immediate", testCompareGuestQwordWith32BitImmediate},
         {"CMP guest memory with short immediate", testCompareGuestMemoryWithShortImmediate},
         {"CMP RIP-relative guest dword with short immediate",

@@ -4837,12 +4837,38 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                          : static_cast<std::uint64_t>(
                                static_cast<std::uint32_t>(immediate)),
                     32});
-            } else if (mode <= 0x2U && extension == 0x7U && !rexR && !rexX) {
+            } else if (mode <= 0x2U && extension == 0x7U && !rexR) {
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-                if (rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
+                if (mode == 0 && rmEncoding == 0x5U) {
                     throw DecodeError(
                         address, remaining,
-                        "only CMP [base+disp8/disp32], imm32 memory operands are supported");
+                        "RIP-relative CMP [memory], imm32 is not supported");
+                }
+                auto base = decodeRegister(rmEncoding, rexB);
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
+                if (rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated CMP memory SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    const auto baseEncoding =
+                        static_cast<std::uint8_t>(sib & 0x7U);
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(
+                            address, remaining,
+                            "no-base CMP [memory], imm32 SIB is not supported");
+                    }
+                    base = decodeRegister(baseEncoding, rexB);
+                    if (indexEncoding != 0x4U || rexX) {
+                        index = decodeRegister(indexEncoding, rexX);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
                 }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
@@ -4866,8 +4892,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 cursor += 4;
                 instruction.opcode = Opcode::CmpMemImm;
                 instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(rmEncoding, rexB), displacement,
-                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                    base, displacement,
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U), index,
+                    scale});
                 instruction.operands.push_back(ImmediateOperand{
                     rexW ? static_cast<std::uint64_t>(
                                static_cast<std::int64_t>(immediate))
