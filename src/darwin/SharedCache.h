@@ -28,6 +28,7 @@ struct SharedCacheMapping {
     guest::Permission initialPermissions{guest::Permission::None};
     std::filesystem::path sourcePath;
     std::string sourceSuffix;
+    std::vector<std::uint8_t> slideInfo;
 };
 
 struct SharedCacheFile {

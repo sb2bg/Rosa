@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cerrno>
 #include <cctype>
 #include <cstring>
@@ -53,6 +54,11 @@ constexpr std::size_t dynamicDataSizeField = 0x1F8;
 
 constexpr std::uint32_t machHeader64Magic = 0xFEEDFACFU;
 constexpr std::uint32_t x86_64CpuType = 0x01000007U;
+constexpr std::uint16_t slidePageAttributes = 0xC000;
+constexpr std::uint16_t slidePageExtra = 0x8000;
+constexpr std::uint16_t slidePageNoRebase = 0x4000;
+constexpr std::uint16_t slidePageEnd = 0x8000;
+constexpr std::uint16_t slidePageIndexMask = 0x3FFF;
 
 class FileReader {
   public:
@@ -132,6 +138,16 @@ std::uint32_t readU32(std::span<const std::uint8_t> bytes, std::size_t offset) {
     return result;
 }
 
+std::uint16_t readU16(std::span<const std::uint8_t> bytes,
+                      std::size_t offset) {
+    if (offset > bytes.size() || sizeof(std::uint16_t) > bytes.size() - offset) {
+        throw std::runtime_error("dyld shared cache slide field is truncated");
+    }
+    return static_cast<std::uint16_t>(bytes[offset]) |
+           static_cast<std::uint16_t>(
+               static_cast<std::uint16_t>(bytes[offset + 1]) << 8U);
+}
+
 std::uint64_t readU64(std::span<const std::uint8_t> bytes, std::size_t offset) {
     if (offset > bytes.size() || sizeof(std::uint64_t) > bytes.size() - offset) {
         throw std::runtime_error("dyld shared cache header field is truncated");
@@ -157,6 +173,195 @@ void writeU64(std::span<std::uint8_t> bytes, std::size_t offset,
     }
 }
 
+struct SlideInfo2 {
+    std::uint32_t pageSize{};
+    std::uint32_t pageStartsOffset{};
+    std::uint32_t pageStartsCount{};
+    std::uint32_t pageExtrasOffset{};
+    std::uint32_t pageExtrasCount{};
+    std::uint64_t deltaMask{};
+    std::uint64_t valueAdd{};
+};
+
+std::size_t checkedTableSize(std::uint32_t count, std::size_t recordSize,
+                             std::uint32_t maximumCount,
+                             std::string_view description);
+
+SlideInfo2 parseSlideInfo2(std::span<const std::uint8_t> bytes,
+                           const SharedCacheMapping &mapping) {
+    constexpr std::size_t headerSize = 40;
+    if (bytes.size() < headerSize || readU32(bytes, 0) != 2) {
+        throw std::runtime_error(
+            "x86_64 dyld shared cache requires slide-info version 2");
+    }
+    const SlideInfo2 result{
+        .pageSize = readU32(bytes, 4),
+        .pageStartsOffset = readU32(bytes, 8),
+        .pageStartsCount = readU32(bytes, 12),
+        .pageExtrasOffset = readU32(bytes, 16),
+        .pageExtrasCount = readU32(bytes, 20),
+        .deltaMask = readU64(bytes, 24),
+        .valueAdd = readU64(bytes, 32),
+    };
+    if (result.pageSize != guest::guestPageSize ||
+        mapping.size / result.pageSize != result.pageStartsCount ||
+        (mapping.size % result.pageSize) != 0) {
+        throw std::runtime_error(
+            "dyld shared cache slide page geometry differs from its mapping");
+    }
+    const auto startsSize = checkedTableSize(
+        result.pageStartsCount, sizeof(std::uint16_t),
+        std::numeric_limits<std::uint32_t>::max(), "slide page-start");
+    const auto extrasSize = checkedTableSize(
+        result.pageExtrasCount, sizeof(std::uint16_t),
+        std::numeric_limits<std::uint32_t>::max(), "slide page-extra");
+    if (result.pageStartsOffset > bytes.size() ||
+        startsSize > bytes.size() - result.pageStartsOffset ||
+        result.pageExtrasOffset > bytes.size() ||
+        extrasSize > bytes.size() - result.pageExtrasOffset) {
+        throw std::runtime_error("dyld shared cache slide tables are truncated");
+    }
+    if (result.deltaMask == 0) {
+        throw std::runtime_error("dyld shared cache slide delta mask is empty");
+    }
+    const auto trailingZeros = std::countr_zero(result.deltaMask);
+    const auto normalizedMask = result.deltaMask >> trailingZeros;
+    if (trailingZeros < 2 ||
+        (normalizedMask & (normalizedMask + 1U)) != 0) {
+        throw std::runtime_error(
+            "dyld shared cache slide delta mask is not contiguous");
+    }
+
+    for (std::uint32_t page = 0; page < result.pageStartsCount; ++page) {
+        const auto start = readU16(
+            bytes, result.pageStartsOffset +
+                       static_cast<std::size_t>(page) * sizeof(std::uint16_t));
+        const auto attributes = static_cast<std::uint16_t>(
+            start & slidePageAttributes);
+        if (attributes == slidePageNoRebase) {
+            continue;
+        }
+        if (attributes == 0) {
+            const auto offset = static_cast<std::uint64_t>(start) * 4U;
+            if (offset > result.pageSize - sizeof(std::uint64_t)) {
+                throw std::runtime_error(
+                    "dyld shared cache slide chain starts outside its page");
+            }
+            continue;
+        }
+        if (attributes != slidePageExtra) {
+            throw std::runtime_error(
+                "dyld shared cache slide page has invalid attributes");
+        }
+        auto extraIndex = static_cast<std::uint32_t>(
+            start & slidePageIndexMask);
+        bool sawEnd = false;
+        while (extraIndex < result.pageExtrasCount) {
+            const auto extra = readU16(
+                bytes, result.pageExtrasOffset +
+                           static_cast<std::size_t>(extraIndex) *
+                               sizeof(std::uint16_t));
+            if ((extra & 0x4000U) != 0) {
+                throw std::runtime_error(
+                    "dyld shared cache slide extra has invalid attributes");
+            }
+            const auto offset = static_cast<std::uint64_t>(
+                                    extra & slidePageIndexMask) *
+                                4U;
+            if (offset > result.pageSize - sizeof(std::uint64_t)) {
+                throw std::runtime_error(
+                    "dyld shared cache extra slide chain starts outside its page");
+            }
+            ++extraIndex;
+            if ((extra & slidePageEnd) != 0) {
+                sawEnd = true;
+                break;
+            }
+        }
+        if (!sawEnd) {
+            throw std::runtime_error(
+                "dyld shared cache extra slide chains are unterminated");
+        }
+    }
+    return result;
+}
+
+void applySlideInfo2(std::span<std::uint8_t> mappingBytes,
+                     const SharedCacheMapping &mapping, std::uint64_t slide) {
+    const auto info = parseSlideInfo2(mapping.slideInfo, mapping);
+    const auto valueMask = ~info.deltaMask;
+    const auto deltaShift =
+        static_cast<unsigned>(std::countr_zero(info.deltaMask)) - 2U;
+    const auto applyChain = [&](std::uint32_t pageIndex,
+                                std::uint16_t start) {
+        auto pageOffset = static_cast<std::uint64_t>(
+                              start & slidePageIndexMask) *
+                          4U;
+        const auto pageBase = static_cast<std::size_t>(pageIndex) *
+                              info.pageSize;
+        while (true) {
+            if (pageOffset > info.pageSize - sizeof(std::uint64_t)) {
+                throw std::runtime_error(
+                    "dyld shared cache slide chain leaves its page");
+            }
+            const auto location = pageBase +
+                                  static_cast<std::size_t>(pageOffset);
+            const auto raw = readU64(mappingBytes, location);
+            const auto delta = (raw & info.deltaMask) >> deltaShift;
+            auto value = raw & valueMask;
+            if (value != 0) {
+                if (value > std::numeric_limits<std::uint64_t>::max() -
+                                info.valueAdd ||
+                    value + info.valueAdd >
+                        std::numeric_limits<std::uint64_t>::max() - slide) {
+                    throw std::runtime_error(
+                        "dyld shared cache rebased pointer overflows");
+                }
+                value += info.valueAdd + slide;
+            }
+            writeU64(mappingBytes, location, value);
+            if (delta == 0) {
+                break;
+            }
+            if (pageOffset > info.pageSize - delta) {
+                throw std::runtime_error(
+                    "dyld shared cache slide delta leaves its page");
+            }
+            pageOffset += delta;
+        }
+    };
+
+    for (std::uint32_t page = 0; page < info.pageStartsCount; ++page) {
+        const auto start = readU16(
+            mapping.slideInfo,
+            info.pageStartsOffset +
+                static_cast<std::size_t>(page) * sizeof(std::uint16_t));
+        const auto attributes = static_cast<std::uint16_t>(
+            start & slidePageAttributes);
+        if (attributes == slidePageNoRebase) {
+            continue;
+        }
+        if (attributes == 0) {
+            applyChain(page, start);
+            continue;
+        }
+        auto extraIndex = static_cast<std::uint32_t>(
+            start & slidePageIndexMask);
+        while (true) {
+            const auto extra = readU16(
+                mapping.slideInfo,
+                info.pageExtrasOffset +
+                    static_cast<std::size_t>(extraIndex) *
+                        sizeof(std::uint16_t));
+            applyChain(page, extra);
+            ++extraIndex;
+            if ((extra & slidePageEnd) != 0) {
+                break;
+            }
+        }
+    }
+}
+
 std::array<std::uint8_t, 16> readUuid(std::span<const std::uint8_t> bytes,
                                       std::size_t offset) {
     if (offset > bytes.size() || 16 > bytes.size() - offset) {
@@ -169,7 +374,8 @@ std::array<std::uint8_t, 16> readUuid(std::span<const std::uint8_t> bytes,
 }
 
 std::size_t checkedTableSize(std::uint32_t count, std::size_t recordSize,
-                             std::uint32_t maximumCount, std::string_view description) {
+                             std::uint32_t maximumCount,
+                             std::string_view description) {
     if (count > maximumCount) {
         throw std::runtime_error("dyld shared cache " + std::string(description) +
                                  " count is unreasonable");
@@ -382,6 +588,18 @@ ParsedFile parseFile(const std::filesystem::path &path, std::string_view suffix)
                     throw std::runtime_error(
                         "dyld shared cache slide metadata exceeds source file");
                 }
+                if ((mapping.slideInfoFileOffset == 0) !=
+                    (mapping.slideInfoFileSize == 0)) {
+                    throw std::runtime_error(
+                        "dyld shared cache slide metadata range is incomplete");
+                }
+                if (mapping.slideInfoFileSize != 0) {
+                    mapping.slideInfo = reader.read(
+                        mapping.slideInfoFileOffset,
+                        static_cast<std::size_t>(mapping.slideInfoFileSize),
+                        "slide metadata");
+                    static_cast<void>(parseSlideInfo2(mapping.slideInfo, mapping));
+                }
             }
         }
     }
@@ -579,6 +797,13 @@ void GuestSharedCache::mapInto(guest::AddressSpace &addressSpace) const {
             mapping.maximumPermissions, mapping.sourcePath, mapping.fileOffset,
             "dyld-cache" + mapping.sourceSuffix + ":mapping-" +
                 std::to_string(index));
+    }
+    for (const auto &mapping : mappings_) {
+        if (!mapping.slideInfo.empty()) {
+            auto bytes = addressSpace.mutablePrivateFileMappingBytes(
+                guest::GuestAddress{mapping.address.value + slide()});
+            applySlideInfo2(bytes, mapping, slide());
+        }
     }
     if (dynamicDataSize_ == 0) {
         return;

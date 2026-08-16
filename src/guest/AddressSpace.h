@@ -11,6 +11,10 @@
 #include <string_view>
 #include <vector>
 
+namespace rosa::darwin {
+class GuestSharedCache;
+}
+
 namespace rosa::guest {
 
 class PrivateFileMapping;
@@ -76,6 +80,8 @@ class AddressSpace {
     [[nodiscard]] std::vector<MappingInfo> mappingInfos() const;
 
   private:
+    friend class darwin::GuestSharedCache;
+
     struct Mapping {
         GuestAddress base{};
         std::size_t size{};
@@ -99,6 +105,8 @@ class AddressSpace {
     void validateNewMapping(GuestAddress base, std::size_t size,
                             Permission permissions,
                             Permission maximumPermissions) const;
+    [[nodiscard]] std::span<std::uint8_t>
+    mutablePrivateFileMappingBytes(GuestAddress base);
 
     std::vector<Mapping> mappings_;
 };

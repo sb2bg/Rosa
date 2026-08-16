@@ -433,4 +433,18 @@ std::span<const std::uint8_t> AddressSpace::executableBytes(GuestAddress address
     return std::span<const std::uint8_t>(mapping.bytes).subspan(offset);
 }
 
+std::span<std::uint8_t>
+AddressSpace::mutablePrivateFileMappingBytes(GuestAddress base) {
+    const auto mapping = std::ranges::find_if(
+        mappings_, [base](const Mapping &candidate) {
+            return candidate.base == base;
+        });
+    if (mapping == mappings_.end() || !mapping->fileBytes) {
+        throw std::runtime_error(
+            "guest loader requested a non-file-backed mapping");
+    }
+    return {mapping->fileBytes->data() + mapping->fileDataOffset,
+            mapping->size};
+}
+
 } // namespace rosa::guest

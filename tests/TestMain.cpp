@@ -12148,9 +12148,25 @@ makeSharedCacheFixtureFile(std::uint64_t mappingAddress,
     storeFixtureU64(bytes, mappingWithSlideOffset, mappingAddress);
     storeFixtureU64(bytes, mappingWithSlideOffset + 8, fileSize);
     storeFixtureU64(bytes, mappingWithSlideOffset + 16, 0);
+    if (includeSubcache) {
+        storeFixtureU64(bytes, mappingWithSlideOffset + 24, 0x300);
+        storeFixtureU64(bytes, mappingWithSlideOffset + 32, 42);
+    }
     storeFixtureU64(bytes, mappingWithSlideOffset + 40, 4);
     storeFixtureU32(bytes, mappingWithSlideOffset + 48, maximumProtection);
     storeFixtureU32(bytes, mappingWithSlideOffset + 52, initialProtection);
+    if (includeSubcache) {
+        storeFixtureU32(bytes, 0x300, 2);
+        storeFixtureU32(bytes, 0x304, rosa::guest::guestPageSize);
+        storeFixtureU32(bytes, 0x308, 40);
+        storeFixtureU32(bytes, 0x30C, 1);
+        storeFixtureU64(bytes, 0x318, 0x00FFFF0000000000ULL);
+        storeFixtureU64(bytes, 0x320, sharedRegionStart);
+        bytes[0x328] = 0x00;
+        bytes[0x329] = 0x02; // chain starts at page offset 0x800
+        storeFixtureU64(bytes, 0x800, 0x0000020000000900ULL);
+        storeFixtureU64(bytes, 0x808, 0xA00);
+    }
     return bytes;
 }
 
@@ -12287,6 +12303,14 @@ void testGuestSharedCacheParsingAndMapping() {
     expectEqual(addressSpace.readU64(subcacheAddress),
                 std::uint64_t{0x0123456789ABCDEFULL},
                 "shared-cache writable mapping rejected a private write");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
+                    cache.regionStart().value + 0x800}),
+                cache.regionStart().value + 0x900,
+                "shared-cache first chained pointer was not rebased");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
+                    cache.regionStart().value + 0x808}),
+                cache.regionStart().value + 0xA00,
+                "shared-cache terminal chained pointer was not rebased");
     expect(addressSpace.protect(subcacheAddress, rosa::guest::guestPageSize,
                                 rosa::guest::Permission::Execute) ==
                rosa::guest::ProtectResult::ProtectionFailure,
@@ -12341,6 +12365,16 @@ void testGuestSharedCacheRejectsMalformedFiles() {
         constexpr std::array<std::uint8_t, 4> unsafeSuffix{'/', 'b', 'a', 'd'};
         fixture.overwrite(fixture.mainPath(), 0x298, unsafeSuffix);
         expectSharedCacheRejected(fixture.mainPath(), "suffix is unsafe");
+    }
+    {
+        SharedCacheFixture fixture;
+        fixture.overwriteU32(fixture.mainPath(), 0x300, 3);
+        expectSharedCacheRejected(fixture.mainPath(), "slide-info version 2");
+    }
+    {
+        SharedCacheFixture fixture;
+        fixture.overwriteU32(fixture.mainPath(), 0x30C, 2);
+        expectSharedCacheRejected(fixture.mainPath(), "slide page geometry");
     }
 }
 
