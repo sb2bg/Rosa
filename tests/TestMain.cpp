@@ -1799,6 +1799,19 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("xor64_indexed_disp8", CaseId::xor64_indexed_disp8,
+                             differentialBytes_xor64_indexed_disp8);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 0x20;
+        testCase.request.state.rsi = 0x0123456789ABCDEFULL;
+        const std::uint64_t value = 0xFEDCBA9876543210ULL;
+        std::memcpy(testCase.request.memory.data() + 0x26, &value, sizeof(value));
+        testCase.flagMask = logicDefinedFlags;
+        testCase.memoryCompareOffset = 0x26;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("hot_pointer_transform", CaseId::hot_pointer_transform,
                              differentialBytes_hot_pointer_transform);
         bindMemory(testCase, rosa::x86::Register::Rdi, 0);
@@ -9075,6 +9088,78 @@ void testXor64BitRegisterFromGuestMemory() {
                 "failed XOR r64 changed flags");
 }
 
+void testXor64BitRegisterFromIndexedGuestMemoryWithDisplacement() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x48, 0x33, 0x74, 0x07, 0x06, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AC2457ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegMem,
+           "indexed XOR r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "indexed XOR r64 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rsi &&
+               destination.width == 64 &&
+               memory.base == rosa::x86::Register::Rdi &&
+               memory.index == rosa::x86::Register::Rax &&
+               memory.scale == 1 && memory.displacement == 6 &&
+               memory.width == 64,
+           "XOR rsi, [rdi+rax+6] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "xor rsi, [rdi+rax+0x6]") != std::string::npos,
+           "indexed XOR r64 dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryPage{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8106};
+    constexpr std::uint64_t value = 0x0123456789ABCDEFULL;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, value);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AC2457ULL});
+    rosa::x86::X86State state;
+    state.rdi = memoryPage.value;
+    state.rax = 0x100;
+    state.rsi = value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rsi, std::uint64_t{0},
+                "indexed XOR r64 result differs");
+    expectEqual(state.rdi, memoryPage.value,
+                "indexed XOR r64 changed its base");
+    expectEqual(state.rax, std::uint64_t{0x100},
+                "indexed XOR r64 changed its index");
+    constexpr std::uint64_t definedLogicFlags =
+        0x1U | 0x4U | 0x40U | 0x80U | 0x800U;
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0x44},
+                "indexed XOR r64 defined flags differ");
+    expectEqual(addressSpace.readU64(target), value,
+                "indexed XOR r64 changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    state.rsi = 0x1122334455667788ULL;
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "indexed XOR r64 from unmapped memory did not fault");
+    expectEqual(state.rsi, std::uint64_t{0x1122334455667788ULL},
+                "failed indexed XOR r64 changed its destination");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "failed indexed XOR r64 changed flags");
+}
+
 void testXor32BitRegisterImmediate() {
     constexpr std::array<std::uint8_t, 7> code{
         0x81, 0xF1, 0x58, 0x54, 0x00, 0x00, 0xC3};
@@ -13868,6 +13953,8 @@ int main() {
          testXorByteRegisterFromScaledGuestMemory},
         {"XOR 64-bit register from guest memory",
          testXor64BitRegisterFromGuestMemory},
+        {"XOR 64-bit register from indexed guest memory with displacement",
+         testXor64BitRegisterFromIndexedGuestMemoryWithDisplacement},
         {"XOR 32-bit register immediate", testXor32BitRegisterImmediate},
         {"XOR 64-bit accumulator immediate", testXor64BitAccumulatorImmediate},
         {"XOR 8-bit accumulator immediate", testXor8BitAccumulatorImmediate},

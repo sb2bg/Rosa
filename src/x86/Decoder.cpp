@@ -2546,11 +2546,6 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                       "no-base SIB addressing is not supported for XOR");
                 }
                 if (indexEncoding != 0x4U || rexX) {
-                    if (mode != 0) {
-                        throw DecodeError(
-                            address, remaining,
-                            "indexed XOR memory currently requires zero displacement");
-                    }
                     index = decodeRegister(indexEncoding, rexX);
                     scale = static_cast<std::uint8_t>(1U << scaleBits);
                 }
