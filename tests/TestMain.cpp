@@ -1979,6 +1979,19 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movdqu_indexed_load", CaseId::movdqu_indexed_load,
+                             differentialBytes_movdqu_indexed_load);
+        bindMemory(testCase, rosa::x86::Register::Rsi, 3);
+        testCase.request.state.rcx = 0x20;
+        const std::array<std::uint64_t, 2> value{
+            0x8877665544332211ULL, 0x0123456789ABCDEFULL};
+        std::memcpy(testCase.request.memory.data() + 0x23, value.data(),
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x23;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("movq_store", CaseId::movq_store,
                              differentialBytes_movq_store);
         bindMemory(testCase, rosa::x86::Register::Rsi, 3);
@@ -10407,6 +10420,50 @@ void testMovdquGuestMemoryToRegister() {
                 "failed MOVDQU load changed low lane");
     expectEqual(state.xmm[0].high, std::uint64_t{6},
                 "failed MOVDQU load changed high lane");
+
+    constexpr std::array<std::uint8_t, 6> indexedCode{
+        0xF3, 0x0F, 0x6F, 0x0C, 0x0E, 0xC3,
+    };
+    const auto indexedDecoded =
+        decoder.decodeBlock(indexedCode, rosa::guest::GuestAddress{0x2000});
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::MovdquRegMem,
+           "indexed MOVDQU opcode differs");
+    expectEqual(indexedDecoded[0].length, std::uint8_t{5},
+                "indexed MOVDQU length differs");
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(indexedDecoded[0].operands[1]);
+    expect(indexedMemory.base == rosa::x86::Register::Rsi,
+           "indexed MOVDQU base differs");
+    expect(indexedMemory.index == rosa::x86::Register::Rcx,
+           "indexed MOVDQU index differs");
+    expectEqual(indexedMemory.scale, std::uint8_t{1},
+                "indexed MOVDQU scale differs");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "movdqu xmm1, [rsi+rcx*1]") != std::string::npos,
+           "indexed MOVDQU dump differs");
+
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8023},
+                          0x8877665544332211ULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x802B},
+                          0x0123456789ABCDEFULL);
+    const auto indexedBlock =
+        translator.translate(indexedCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State indexedState;
+    indexedState.rsi = 0x8003;
+    indexedState.rcx = 0x20;
+    indexedState.xmm[1] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    indexedState.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    expectEqual(indexedState.xmm[1].low, std::uint64_t{0x8877665544332211ULL},
+                "indexed MOVDQU loaded the wrong low lane");
+    expectEqual(indexedState.xmm[1].high, std::uint64_t{0x0123456789ABCDEFULL},
+                "indexed MOVDQU loaded the wrong high lane");
+    expectEqual(indexedState.rsi, std::uint64_t{0x8003},
+                "indexed MOVDQU changed its base register");
+    expectEqual(indexedState.rcx, std::uint64_t{0x20},
+                "indexed MOVDQU changed its index register");
+    expectEqual(indexedState.rflags, std::uint64_t{0x8D7},
+                "indexed MOVDQU changed flags");
 }
 
 void testMovqXmmToGuestMemory() {

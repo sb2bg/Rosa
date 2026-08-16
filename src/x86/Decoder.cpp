@@ -1555,13 +1555,36 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto modrm = code[opcodeOffset + 2];
                 const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-                if (mode > 0x2U || rexX || rmEncoding == 0x4U ||
-                    (mode == 0 && rmEncoding == 0x5U)) {
+                if (mode > 0x2U || (mode == 0 && rmEncoding == 0x5U)) {
                     throw DecodeError(
                         address, remaining,
-                        "only MOVDQU xmm, [base+disp8/disp32] memory operands are supported");
+                        "only MOVDQU xmm, [base+index*scale+disp] memory operands are supported");
                 }
                 auto operandCursor = opcodeOffset + 3;
+                auto baseEncoding = rmEncoding;
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
+                if (rmEncoding == 0x4U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated MOVDQU load SIB byte");
+                    }
+                    const auto sib = code[operandCursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(
+                            address, remaining,
+                            "no-base MOVDQU load SIB addressing is not supported");
+                    }
+                    if (indexEncoding != 0x4U || rexX) {
+                        index = decodeRegister(indexEncoding, rexX);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
                     if (operandCursor >= code.size()) {
@@ -1584,7 +1607,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) |
                                                   (rexR ? 0x8U : 0U)))});
                 instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(rmEncoding, rexB), displacement, 128});
+                    decodeRegister(baseEncoding, rexB), displacement, 128,
+                    index, scale});
                 const auto length = operandCursor - instructionStart;
                 instruction.length = static_cast<std::uint8_t>(length);
                 std::copy_n(
