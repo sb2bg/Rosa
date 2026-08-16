@@ -740,6 +740,23 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("test64_register_immediate",
+                             CaseId::test64_register_immediate,
+                             differentialBytes_test64_register_immediate);
+        testCase.request.state.rdi = 0x100002990ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "test64_register_sign_extended_immediate",
+            CaseId::test64_register_sign_extended_immediate,
+            differentialBytes_test64_register_sign_extended_immediate);
+        testCase.request.state.rdi = 0x8000000000000000ULL;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make(
             "test8_memory_immediate_zero",
             CaseId::test8_memory_immediate_zero,
@@ -7730,6 +7747,62 @@ void testTestAccumulatorImmediateGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x2}, "TEST AL, imm8 flags differ");
 }
 
+void testTestRegisterImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x48, 0xF7, 0xC7, 0x0F, 0x00, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF700002BCAULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestRegImm,
+           "TEST r64, imm32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "TEST r64, imm32 length differs");
+    const auto reg =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(reg.reg == rosa::x86::Register::Rdi && reg.width == 64 &&
+               immediate.value == 0x0F && immediate.width == 32,
+           "TEST rdi, 0xf operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("test rdi, 0xf") !=
+               std::string::npos,
+           "TEST rdi, 0xf dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rdi = 0x100002990ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0x100002990ULL},
+                "TEST rdi, imm32 changed RDI");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "TEST rdi, imm32 defined flags differ");
+
+    constexpr std::array<std::uint8_t, 8> signExtendedCode{
+        0x48, 0xF7, 0xC7, 0x00, 0x00, 0x00, 0x80, 0xC3};
+    const auto signDecoded = decoder.decodeBlock(
+        signExtendedCode, rosa::guest::GuestAddress{0x2000});
+    const auto signImmediate =
+        std::get<rosa::x86::ImmediateOperand>(signDecoded[0].operands[1]);
+    expectEqual(signImmediate.value, std::uint64_t{0xFFFFFFFF80000000ULL},
+                "TEST r64 immediate was not sign-extended");
+    const auto signBlock = translator.translate(
+        signExtendedCode, rosa::guest::GuestAddress{0x2000});
+    state.rdi = 0x8000000000000000ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(signBlock.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0x8000000000000000ULL},
+                "sign-extended TEST changed RDI");
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "sign-extended TEST defined flags differ");
+}
+
 void testTestLowByteRegisterImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0xF6, 0xC2, 0x01, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -14228,6 +14301,8 @@ int main() {
         {"legacy TEST low-byte generated execution", testLegacyTestLowByteGeneratedExecution},
         {"TEST accumulator immediate generated execution",
          testTestAccumulatorImmediateGeneratedExecution},
+        {"TEST register immediate generated execution",
+         testTestRegisterImmediateGeneratedExecution},
         {"TEST low-byte register immediate generated execution",
          testTestLowByteRegisterImmediateGeneratedExecution},
         {"TEST guest byte immediate generated execution",

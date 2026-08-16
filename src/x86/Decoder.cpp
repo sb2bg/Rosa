@@ -3362,19 +3362,34 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             if (mode != 0x3U ||
-                (extension != 0x2U && extension != 0x3U &&
+                (extension != 0x0U && extension != 0x2U &&
+                 extension != 0x3U &&
                  extension != 0x4U) ||
                 ((extension == 0x3U || extension == 0x4U) && !rexW) ||
-                rexR || rexX) {
+                (extension != 0x0U && (rexR || rexX))) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct NOT /2 and r64 NEG /3 or MUL /4 from opcode F7 are supported");
+                                  "only register-direct TEST /0, NOT /2, and r64 NEG /3 or MUL /4 from opcode F7 are supported");
             }
-            instruction.opcode = extension == 0x2U   ? Opcode::NotReg
+            instruction.opcode = extension == 0x0U   ? Opcode::TestRegImm
+                                 : extension == 0x2U ? Opcode::NotReg
                                  : extension == 0x3U ? Opcode::NegReg
                                                      : Opcode::MulReg;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
                 static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+            if (extension == 0x0U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated TEST r32/r64, imm32");
+                }
+                const auto immediate = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+                instruction.operands.push_back(ImmediateOperand{
+                    rexW ? static_cast<std::uint64_t>(
+                               static_cast<std::int64_t>(immediate))
+                         : static_cast<std::uint32_t>(immediate),
+                    32});
+            }
         } else if (opcode == 0xC6U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov byte opcode C6");

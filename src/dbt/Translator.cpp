@@ -2788,16 +2788,25 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            if (reg.width != 8 || immediate.width != 8) {
+            if ((reg.width == 8 && immediate.width != 8) ||
+                (reg.width == 32 && immediate.width != 32) ||
+                (reg.width == 64 && immediate.width != 32) ||
+                (reg.width != 8 && reg.width != 32 && reg.width != 64)) {
                 throw std::runtime_error("unsupported internal TEST immediate width");
             }
-            const auto value = builder.readGuestRegister(reg.reg, ir::Width::I64,
-                                                         instruction.address);
-            const auto mask = builder.constant(immediate.value, ir::Width::I64,
+            const auto width = reg.width == 8    ? ir::Width::I8
+                               : reg.width == 32 ? ir::Width::I32
+                                                 : ir::Width::I64;
+            const auto value = builder.readGuestRegister(
+                reg.reg, reg.width == 8 ? ir::Width::I64 : width,
+                instruction.address);
+            const auto mask = builder.constant(
+                immediate.value, reg.width == 8 ? ir::Width::I64 : width,
                                                instruction.address);
-            const auto result = builder.bitAnd(value, mask, ir::Width::I64,
+            const auto result = builder.bitAnd(
+                value, mask, reg.width == 8 ? ir::Width::I64 : width,
                                                instruction.address);
-            builder.updateLogicFlags(result, ir::Width::I8, instruction.address);
+            builder.updateLogicFlags(result, width, instruction.address);
             break;
         }
         case x86::Opcode::TestMemImm: {
