@@ -2740,6 +2740,59 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateLogicFlags(result, ir::Width::I8, instruction.address);
             break;
         }
+        case x86::Opcode::TestMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: test memory immediate operand count");
+            }
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto immediate =
+                std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (memory.width != 8 || immediate.width != 8) {
+                throw std::runtime_error(
+                    "unsupported internal TEST memory immediate width");
+            }
+            auto address = memory.ripRelative
+                               ? builder.constant(
+                                     instruction.address.value + instruction.length,
+                                     ir::Width::I64, instruction.address)
+                               : memory.hasBase
+                                     ? builder.readGuestRegister(
+                                           memory.base, ir::Width::I64,
+                                           instruction.address)
+                                     : builder.constant(0, ir::Width::I64,
+                                                        instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(
+                            std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64,
+                                      instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto value =
+                builder.loadGuest(address, ir::Width::I8, instruction.address);
+            const auto mask = builder.constant(
+                immediate.value, ir::Width::I8, instruction.address);
+            const auto result = builder.bitAnd(
+                value, mask, ir::Width::I8, instruction.address);
+            builder.updateLogicFlags(result, ir::Width::I8,
+                                     instruction.address);
+            break;
+        }
         case x86::Opcode::CmpRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: cmp operand count");

@@ -142,34 +142,93 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         if (testImmediateOpcodeOffset < code.size() &&
             code[testImmediateOpcodeOffset] == 0xF6U) {
             if (code.size() - testImmediateOpcodeOffset < 3) {
-                throw DecodeError(address, remaining, "truncated test r8, imm8");
+                throw DecodeError(address, remaining, "truncated test r/m8, imm8");
             }
             const auto rex = testImmediateHasRex ? code[cursor] : 0U;
-            const bool rexW = (rex & 0x8U) != 0;
-            const bool rexR = (rex & 0x4U) != 0;
             const bool rexX = (rex & 0x2U) != 0;
             const bool rexB = (rex & 0x1U) != 0;
             const auto modrm = code[testImmediateOpcodeOffset + 1];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            const auto registerEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode != 0x3U || extension != 0 || rexW || rexR || rexX ||
-                (!testImmediateHasRex && registerEncoding >= 0x4U)) {
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (extension != 0 ||
+                (mode == 0x3U && !testImmediateHasRex && rmEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct representable low-byte TEST from opcode F6 /0 is supported");
+                    "only representable-byte register/memory TEST from opcode F6 /0 is supported");
             }
-            instruction.opcode = Opcode::TestRegImm;
-            const auto length = static_cast<std::uint8_t>(
-                3U + (testImmediateHasRex ? 1U : 0U));
-            instruction.length = length;
+            auto operandCursor = testImmediateOpcodeOffset + 2;
+            auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            bool hasBase = true;
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
+            if (mode != 0x3U && rmEncoding == 0x4U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated TEST byte SIB");
+                }
+                const auto sib = code[operandCursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                hasBase = !(mode == 0 && baseEncoding == 0x5U);
+                if (hasBase) {
+                    base = decodeRegister(baseEncoding, rexB);
+                }
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            }
+            std::int64_t displacement = 0;
+            if (ripRelative || (!hasBase && mode == 0) || mode == 0x2U) {
+                if (code.size() - operandCursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated TEST byte disp32");
+                }
+                displacement = readI32(code.subspan(operandCursor, 4));
+                operandCursor += 4;
+            } else if (mode == 0x1U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated TEST byte disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[operandCursor++]);
+            }
+            if (operandCursor >= code.size()) {
+                throw DecodeError(address, remaining,
+                                  "truncated TEST byte immediate");
+            }
+            const auto immediate = code[operandCursor++];
+            const auto length = operandCursor - instructionStart;
+            if (length > instruction.bytes.size()) {
+                throw DecodeError(address, remaining,
+                                  "TEST byte instruction is too long");
+            }
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(address, length, displacement));
+            }
+            instruction.opcode = mode == 0x3U ? Opcode::TestRegImm
+                                               : Opcode::TestMemImm;
+            instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor),
                         instruction.length,
                         instruction.bytes.begin());
-            instruction.operands.push_back(RegisterOperand{
-                decodeRegister(registerEncoding, rexB), 8});
-            instruction.operands.push_back(
-                ImmediateOperand{code[testImmediateOpcodeOffset + 2], 8});
+            if (mode == 0x3U) {
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, rexB), 8});
+            } else {
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement, 8,
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{base, displacement, 8, index, scale,
+                                        hasBase, false});
+            }
+            instruction.operands.push_back(ImmediateOperand{immediate, 8});
             result.push_back(std::move(instruction));
             cursor += length;
             if (result.size() == maximumInstructions) {

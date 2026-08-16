@@ -736,6 +736,30 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "test8_memory_immediate_zero",
+            CaseId::test8_memory_immediate_zero,
+            differentialBytes_test8_memory_immediate_zero);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.memory[8] = 0;
+        testCase.memoryCompareOffset = 8;
+        testCase.memoryCompareSize = 1;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make(
+            "test8_memory_immediate_sign",
+            CaseId::test8_memory_immediate_sign,
+            differentialBytes_test8_memory_immediate_sign);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.memory[8] = 0x80;
+        testCase.memoryCompareOffset = 8;
+        testCase.memoryCompareSize = 1;
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make("test8_extended_registers",
                              CaseId::test8_extended_registers,
                              differentialBytes_test8_extended_registers);
@@ -7733,6 +7757,113 @@ void testTestLowByteRegisterImmediateGeneratedExecution() {
     expect(rejected, "TEST DH, imm8 was silently treated as a low-byte register form");
 }
 
+void testTestGuestByteImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x41, 0xF6, 0x46, 0x08, 0x01, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF8000598AAULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestMemImm,
+           "TEST byte [memory], imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "TEST byte [memory], imm8 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R14 && memory.hasBase &&
+               !memory.ripRelative && !memory.index &&
+               memory.displacement == 8 && memory.width == 8,
+           "TEST byte [r14+8] memory operand differs");
+    expect(immediate.value == 1 && immediate.width == 8,
+           "TEST byte [r14+8] immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "test byte [r14+0x8], 0x1") != std::string::npos,
+           "TEST byte [r14+8] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    std::array<std::uint8_t, rosa::guest::guestPageSize> bytes{};
+    bytes[8] = 1;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(page, bytes.size(), rosa::guest::Permission::Read,
+                            bytes, "read-only TEST byte");
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667788ULL;
+    state.r14 = page.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0},
+                "TEST byte nonzero-result defined flags differ");
+    expectEqual(state.rax, std::uint64_t{0x1122334455667788ULL},
+                "TEST byte changed an unrelated register");
+    expectEqual(state.r14, page.value, "TEST byte changed its base register");
+    expectEqual(addressSpace.readBytes(rosa::guest::GuestAddress{page.value + 8}, 1)
+                    .front(),
+                std::uint8_t{1}, "TEST byte changed guest memory");
+
+    bytes[8] = 0;
+    rosa::guest::AddressSpace zeroAddressSpace;
+    zeroAddressSpace.mapSegment(page, bytes.size(), rosa::guest::Permission::Read,
+                                bytes, "zero TEST byte");
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &zeroAddressSpace));
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "TEST byte zero-result defined flags differ");
+
+    constexpr std::array<std::uint8_t, 6> signCode{
+        0x41, 0xF6, 0x46, 0x08, 0x80, 0xC3};
+    bytes[8] = 0x80;
+    rosa::guest::AddressSpace signAddressSpace;
+    signAddressSpace.mapSegment(page, bytes.size(), rosa::guest::Permission::Read,
+                                bytes, "sign TEST byte");
+    const auto signBlock = translator.translate(signCode, codeAddress);
+    state.rflags = 0x8D7;
+    static_cast<void>(signBlock.execute(state, &signAddressSpace));
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 7U},
+                "TEST byte sign-result defined flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0xAABBCCDDEEFF0011ULL;
+    faultState.r14 = page.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "TEST byte accepted unmapped guest memory");
+    expectEqual(faultState.rax, std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                "faulted TEST byte changed a register");
+    expectEqual(faultState.r14, page.value,
+                "faulted TEST byte changed its base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted TEST byte changed flags");
+
+    rosa::guest::AddressSpace inaccessibleAddressSpace;
+    inaccessibleAddressSpace.mapSegment(
+        page, bytes.size(), rosa::guest::Permission::None, bytes,
+        "inaccessible TEST byte");
+    faultState.rflags = 0xBD7;
+    rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &inaccessibleAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "TEST byte accepted non-readable guest memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "permission-faulted TEST byte changed flags");
+}
+
 void testLfenceGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0xAE, 0xE8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -13288,6 +13419,8 @@ int main() {
          testTestAccumulatorImmediateGeneratedExecution},
         {"TEST low-byte register immediate generated execution",
          testTestLowByteRegisterImmediateGeneratedExecution},
+        {"TEST guest byte immediate generated execution",
+         testTestGuestByteImmediateGeneratedExecution},
         {"LFENCE generated execution", testLfenceGeneratedExecution},
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},

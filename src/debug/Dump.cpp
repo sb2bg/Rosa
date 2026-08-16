@@ -661,6 +661,37 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::TestMemImm: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "test byte [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                if (memory.hasBase || memory.ripRelative || memory.index) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
+            }
+            stream << "], 0x"
+                   << std::get<x86::ImmediateOperand>(instruction.operands[1])
+                          .value;
+            break;
+        }
         case x86::Opcode::CmpRegImm:
             stream << "cmp "
                    << registerOperandName(
