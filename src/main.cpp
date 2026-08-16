@@ -360,7 +360,9 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
                       const std::optional<std::filesystem::path> &dyldPath,
                       const std::optional<std::filesystem::path> &sharedCachePath,
                       const DumpOptions &options) {
-    constexpr std::uint64_t dyldSlide = 0x00007FF800000000ULL;
+    constexpr std::uint64_t standaloneDyldSlide = 0x00007FF800000000ULL;
+    constexpr std::uint64_t cacheAwareStandaloneDyldSlide =
+        0x00007FF700000000ULL;
     constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
     constexpr std::size_t stackSize = 1024U * 1024U;
     constexpr std::size_t maximumProbeBlocks = 1000000;
@@ -380,23 +382,26 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
             throw std::runtime_error("guest shared cache has no dyld-in-cache entry point");
         }
     }
-    if (!dyldFile && !sharedCache) {
-        throw std::invalid_argument("dyld experiment requires --dyld or --shared-cache");
+    if (!dyldFile) {
+        throw std::invalid_argument(
+            "dyld experiment requires a manually supplied --dyld; cache dyld "
+            "cannot be entered before standalone dyld prepares its transition state");
     }
 
     rosa::guest::AddressSpace addressSpace;
     const rosa::macho::Loader loader;
     const auto executableString = executablePath.string();
-    const auto dyldString = sharedCachePath ? sharedCachePath->string()
-                                            : dyldPath->string();
+    const auto dyldString = dyldPath->string();
     const auto executable =
         loader.mapImage(executableFile, addressSpace, 0, executableString);
     std::optional<rosa::macho::LoadedImage> dyld;
     if (sharedCache) {
         sharedCache->mapInto(addressSpace);
-    } else {
-        dyld.emplace(loader.mapImage(*dyldFile, addressSpace, dyldSlide, dyldString));
     }
+    dyld.emplace(loader.mapImage(
+        *dyldFile, addressSpace,
+        sharedCache ? cacheAwareStandaloneDyldSlide : standaloneDyldSlide,
+        dyldString));
     rosa::darwin::mapX86Commpage(
         addressSpace, rosa::darwin::sampleHostContinuousTimebase());
     const std::vector<std::string> arguments{executableString};
@@ -411,8 +416,7 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
                            environment, apple, executable.loadAddress);
 
     rosa::x86::X86State state;
-    state.rip = sharedCache ? sharedCache->dyldEntryPoint().value
-                            : dyld->entryPoint.value;
+    state.rip = dyld->entryPoint.value;
     state.rsp = stack.stackPointer.value;
     std::cout << "dyld experiment: app-entry=0x" << std::hex << executable.entryPoint.value
               << " dyld-entry=0x" << state.rip << " initial-rsp=0x" << state.rsp;
