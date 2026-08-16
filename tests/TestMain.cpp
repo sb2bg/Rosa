@@ -473,6 +473,28 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("lock_xadd32_memory_carry",
+                             CaseId::lock_xadd32_memory_carry,
+                             differentialBytes_lock_xadd32_memory_carry);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 0xAAAAAAAA00000001ULL;
+        const std::uint64_t value = 0xDEADBEEFFFFFFFFFULL;
+        std::memcpy(testCase.request.memory.data(), &value, sizeof(value));
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("lock_xadd32_memory_overflow",
+                             CaseId::lock_xadd32_memory_overflow,
+                             differentialBytes_lock_xadd32_memory_overflow);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 0xBBBBBBBB00000001ULL;
+        const std::uint64_t value = 0xCAFEBABE7FFFFFFFULL;
+        std::memcpy(testCase.request.memory.data(), &value, sizeof(value));
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("add8_register_overflow",
                              CaseId::add8_register_overflow,
                              differentialBytes_add8_register_overflow);
@@ -5001,6 +5023,116 @@ void testLockedAddGuestQwordRegister() {
         std::get<rosa::x86::RegisterOperand>(rexDecoded[0].operands[1]);
     expect(rexMemory.ripRelative && rexSource.reg == rosa::x86::Register::R13,
            "REX.B incorrectly changed the RIP-relative LOCK ADD destination");
+}
+
+void testLockedExchangeAddGuestDwordRegister() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0xF0, 0x0F, 0xC1, 0x07, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockXaddMemReg,
+           "LOCK XADD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "LOCK XADD length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rdi && memory.width == 32 &&
+               memory.displacement == 0,
+           "LOCK XADD memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rax && source.width == 32,
+           "LOCK XADD source operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "lock xadd dword [rdi], eax") != std::string::npos,
+           "LOCK XADD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("locked_exchange_add_guest_memory.i32") !=
+               std::string::npos,
+           "LOCK XADD did not lower through locked guest-memory IR");
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0xDEADBEEFFFFFFFFFULL);
+    rosa::x86::X86State state;
+    state.rax = 0xAAAAAAAA00000001ULL;
+    state.rdi = target.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target),
+                std::uint64_t{0xDEADBEEF00000000ULL},
+                "LOCK XADD did not perform an exact dword write");
+    expectEqual(state.rax, std::uint64_t{UINT32_MAX},
+                "LOCK XADD did not return and zero-extend the old dword");
+    expectEqual(state.rdi, target.value,
+                "LOCK XADD changed its address register");
+    expectEqual(state.rflags, std::uint64_t{0x57},
+                "LOCK XADD carry/zero flags differ");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    constexpr std::uint64_t readOnlySentinel = 0xAABBCCDD7FFFFFFFULL;
+    std::memcpy(readOnlyBytes.data() + 0x100, &readOnlySentinel,
+                sizeof(readOnlySentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(page, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes,
+                                    "read-only LOCK XADD target");
+    rosa::x86::X86State faultState;
+    faultState.rax = 0xBBBBBBBB00000001ULL;
+    faultState.rdi = target.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "LOCK XADD accepted a read-only guest dword");
+    expectEqual(readOnlyAddressSpace.readU64(target), readOnlySentinel,
+                "faulted LOCK XADD changed read-only memory");
+    expectEqual(faultState.rax, std::uint64_t{0xBBBBBBBB00000001ULL},
+                "faulted LOCK XADD changed its source register");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted LOCK XADD changed flags");
+
+    constexpr rosa::guest::GuestAddress crossPageTarget{0x8FFE};
+    constexpr std::array crossPageBytes{
+        std::uint8_t{0x55}, std::uint8_t{0xAA}};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    crossPageAddressSpace.writeBytes(crossPageTarget, crossPageBytes);
+    faultState.rax = 1;
+    faultState.rdi = crossPageTarget.value;
+    faultState.rflags = 0xBD7;
+    rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState,
+                                        &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page LOCK XADD did not fault");
+    expect(crossPageAddressSpace.readBytes(crossPageTarget, 2) ==
+               std::vector<std::uint8_t>(crossPageBytes.begin(),
+                                         crossPageBytes.end()),
+           "cross-page LOCK XADD partially changed memory");
+    expectEqual(faultState.rax, std::uint64_t{1},
+                "cross-page LOCK XADD changed its source register");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "cross-page LOCK XADD changed flags");
 }
 
 void testLockedOrGuestDwordImmediate() {
@@ -15981,6 +16113,8 @@ int main() {
         {"XCHG guest qword with register", testExchangeGuestQwordWithRegister},
         {"LOCK OR guest dword immediate", testLockedOrGuestDwordImmediate},
         {"LOCK ADD guest qword register", testLockedAddGuestQwordRegister},
+        {"LOCK XADD guest dword register",
+         testLockedExchangeAddGuestDwordRegister},
         {"LOCK INC guest dword", testLockedIncrementGuestDword},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP guest qword with 32-bit immediate", testCompareGuestQwordWith32BitImmediate},

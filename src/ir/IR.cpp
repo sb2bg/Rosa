@@ -558,6 +558,19 @@ void Builder::lockedAddGuestMemory(ValueId address, ValueId source,
     });
 }
 
+void Builder::lockedExchangeAddGuestMemory(
+    ValueId address, ValueId source, x86::Register sourceRegister,
+    Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LockedExchangeAddGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+        .rhs = source,
+        .guestRegister = sourceRegister,
+    });
+}
+
 void Builder::lockedIncrementGuestMemory(ValueId address, Width width,
                                          guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -980,6 +993,18 @@ std::vector<std::string> verify(const Block &block) {
             if (operation.width != Width::I64) {
                 errors.emplace_back(
                     "locked_add_guest_memory currently requires i64");
+            }
+            break;
+        case Opcode::LockedExchangeAddGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            checkUse(operation.rhs, "source");
+            if (!operation.guestRegister) {
+                errors.emplace_back(
+                    "locked_exchange_add_guest_memory lacks a source register");
+            }
+            if (operation.width != Width::I32) {
+                errors.emplace_back(
+                    "locked_exchange_add_guest_memory currently requires i32");
             }
             break;
         case Opcode::LockedIncrementGuestMemory:
