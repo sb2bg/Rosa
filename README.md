@@ -33,9 +33,12 @@ ctest --preset debug
   ./build/debug/test-fixtures/hello-darwin-x86_64
 ./build/debug/rosa run ./build/debug/test-fixtures/hello-darwin-x86_64
 
-# Manually supplied dyld experiment; failure is currently expected and diagnostic.
-./build/debug/rosa run --dyld /usr/lib/dyld \
-  ./build/debug/test-fixtures/hello-darwin-x86_64 --dump-x86 --dump-ir
+# Apple binaries remain outside the repository. This uses a local Intel cache.
+./build/debug/rosa cache inspect /path/to/dyld_shared_cache_x86_64
+./build/debug/rosa run --max-blocks 5000000 \
+  --dyld /usr/lib/dyld \
+  --shared-cache /path/to/dyld_shared_cache_x86_64 \
+  ./build/debug/test-fixtures/hello-darwin-x86_64
 ```
 
 The R1 self-test decodes and lowers this exact block:
@@ -64,18 +67,20 @@ Coverage is encoding-specific and failure-driven. The generated ARM64 path curre
 - integer movement: selected 8/16/32/64-bit `mov`, `lea`, `push`, `pop`, `movzx`, and `movsxd` register, immediate, base/displacement, RIP-relative, and scaled-SIB forms;
 - integer/flags: selected 8/16/32/64-bit `add`, `sub`, `inc`, `dec`, `not`, `neg`, `and`, `or`, `xor`, `test`, `cmp`, `shl`, `shr`, `shrd`, unsigned `mul`, signed two-register `imul`, `bsf`, and `bsr` forms;
 - control: relative `jmp`/`call`, register `jmp`, indirect guest-memory `call`, `ret`, selected register `cmovcc` and `setcc` forms, and the observed short/long unsigned and signed conditional branches;
-- SIMD used by dyld: register `xorps`/`pxor`, memory `pcmpeqb`, `pmovmskb`, `pshufd`, aligned/unaligned `movaps`/`movups`/`movdqa`/`movdqu`, and low-qword `movq` store;
+- SIMD used by dyld: selected register/memory `xorps`/`pxor`, `pcmpeqb`, `pmovmskb`, `pshufd`, `pblendw`, `pinsrd`, aligned/unaligned `movaps`/`movups`/`movdqa`/`movdqu`, and low-qword `movq` load/store forms;
 - ordering/time/system: `lfence`, `rdtsc`, and semantic x86_64 Darwin `syscall` exits to the compatibility dispatcher.
 
 Guest loads and stores are permission-checked at 8, 16, 32, 64, and 128 bits. Unsupported encodings still fail with the guest RIP, bytes, register state, nearby mappings, recent instruction history, and translation counters rather than falling back to interpretation.
 
-The semantic differential corpus currently runs 176 controlled instruction cases both through Rosa and through a standalone x86_64 oracle under Apple Rosetta, comparing only architecturally defined registers, flags, and memory. Rosetta is used only by that test oracle; it is never used to execute the dyld probe.
+The semantic differential corpus currently runs 265 controlled instruction cases both through Rosa and through a standalone x86_64 oracle under Apple Rosetta, comparing only architecturally defined registers, flags, XMM lanes, and memory. Rosetta is used only by that test oracle; it is never used to execute the dyld probe.
 
-Mach-O inspection accepts thin x86_64 files and selects x86_64 slices from universal binaries. Loading maps every segment with its initial permissions, copies the file-backed portion, zero-fills the virtual tail, and represents inaccessible segments such as `__PAGEZERO` without allocating their full size. Rosa does not yet apply rebases, bindings, chained fixups, or shared-cache mappings.
+Mach-O inspection accepts thin x86_64 files and selects x86_64 slices from universal binaries. Loading maps every segment with its initial permissions, copies the file-backed portion, zero-fills the virtual tail, and represents inaccessible segments such as `__PAGEZERO` without allocating their full size.
 
-The manual dyld experiment maps the app and all six x86_64 dyld segments, enters the slid `LC_UNIXTHREAD` RIP, and runs unmodified dyld in diagnostic one-instruction translations. The current probe reaches 179,745 executed blocks and 5,745 unique translations. Its first failure is `test byte [r14+0x8], 1` (`41 f6 46 08 01`) at guest RIP `0x7ff8000598aa`.
+`GuestSharedCache` validates a manually supplied x86_64/x86_64h cache and its subcaches, maps file-backed regions at the preferred unslid guest addresses, applies mapping permissions and version-2 slide fixups, and constructs the cache dynamic-data page. `rosa cache inspect` reports its identity, preferred region, dyld entry, files, mappings, protections, and slide metadata. No Apple cache file is copied into the repository.
 
-The trace has crossed real environment boundaries: BSD `thread_selfid`, `getentropy`, the empty-tuple `fsgetpath` probe, and `shared_region_check_np`; the x86 machdep thread-self setup call; Mach task-self, reply-port, `mach_vm_protect`, and anonymous `mach_vm_map` traps; and an anonymous `VM_MEMORY_DYLD` allocation. `shared_region_check_np` currently reports `EINVAL` because Rosa has no provisioned Intel shared region. No x86 shared-cache image has been mapped or resolved, no x86 system library has loaded, and `libSystem`, application initialization, and guest `main` have not begun.
+The current unmodified-dyld probe uses a local seven-file x86_64 cache with 28 mappings at guest slide zero. `shared_region_check_np` succeeds, dyld recognizes and accesses the cache, registers its all-image-info range with `proc_info`, enters dyld-in-cache, applies `VM_PROT_COPY` to guest cache data, and unmaps the standalone dyld image. It reaches 1,058,265 executed blocks and 21,776 translations before the next loud boundary: `_kernelrpc_mach_port_construct_trap` (Mach trap 24).
+
+No non-dyld cached system image resolution has yet been verified. `libSystem` initialization, application initialization, and guest `main` have not begun.
 
 The diagnostic mode changes translation granularity only; every supported guest instruction still executes as generated ARM64. Apple binaries are never modified or launched with `exec`, and there is no interpreter fallback.
 

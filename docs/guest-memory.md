@@ -5,10 +5,12 @@ Rosa currently exposes a 4 KiB guest-page contract through `guest::AddressSpace`
 Implemented behavior is intentionally small:
 
 - page-aligned anonymous mappings;
+- private file-backed mappings used for intact shared-cache/subcache files;
 - complete Mach-O segment mappings with file bytes and zero-filled virtual tails;
 - sparse no-access mappings such as the 4 GiB `__PAGEZERO`;
 - overlap and integer-overflow rejection;
 - explicit read/write/execute permission metadata;
+- guest-only protect/deallocate operations with page rounding, mapping splitting, maximum permissions, and observed `VM_PROT_COPY` behavior;
 - bounds-checked cross-mapping byte copies and little-endian 8/16/32/64-bit generated loads/stores;
 - guarded 128-bit XMM loads/stores with aligned and unaligned forms;
 - fault-atomic stack pushes, loads, stores, and the observed 16-bit increment read/modify/write;
@@ -20,4 +22,6 @@ R2 uses a small read/write mapping as the x86 test stack. R3/R4 and the dyld pro
 
 `write(2)` copies its guest buffer through the mapping table before invoking the host API. No guest address becomes a host pointer.
 
-Not implemented: 4 KiB subpage protection within a 16 KiB host page, `mmap`/`mprotect`/`munmap`, dirty tracking, identity-map experiments, direct host-pointer memory fast paths, shared-cache mappings, or shared writable mappings.
+The current x86_64 shared cache uses seven local cache/subcache files and 28 guest mappings at preferred slide zero. Cache writes remain private to Rosa's guest view.
+
+Not implemented: a general BSD `mmap`/`mprotect` surface, dirty tracking, identity-map experiments, direct host-pointer memory fast paths, or shared writable mappings between guest processes.

@@ -50,7 +50,7 @@ The parser accepts little-endian, 64-bit x86 executables and dynamic linkers and
 
 The loader maps every nonempty segment at its guest virtual address plus an optional slide. File bytes are copied, the remaining virtual size is zero-filled, and `initprot` becomes guest permissions. No-access `__PAGEZERO` is represented sparsely. The startup builder creates a 16-byte-aligned stack containing `argc`, `argv`, `envp`, `apple[]`, their null terminators, and strings.
 
-Rosa currently relies on dyld guest code to interpret the application structures. The dyld probe can request anonymous guest VM and change guest mapping permissions through narrow Mach trap semantics, but Intel shared-cache mapping, code-signature services, and most additional kernel contracts are not implemented.
+Rosa relies on dyld guest code to interpret application and cache structures. A manually supplied Intel shared cache is validated with all declared subcaches, mapped as private file-backed guest regions at slide zero, fixed up from version-2 slide metadata, and accompanied by a guest dynamic-data page. `shared_region_check_np` returns its guest base; no cache pointer is passed to the host kernel.
 
 ## Darwin syscall boundary
 
@@ -65,9 +65,9 @@ Generated code recognizes x86 `0F 05`, records `RCX`, `R11`, and the next guest 
 - arm64 macOS only;
 - eight temporary SSA values before the intentionally simple allocator rejects a block;
 - one host thread and one guest thread;
-- no general guest `mmap`/`munmap` or direct host-pointer memory fast path;
+- no general guest `mmap` or direct host-pointer memory fast path; the observed BSD `munmap` and Mach VM operations are semantic guest-map operations;
 - only the failure-driven BSD, Mach, and x86 machdep operations listed in `darwin-boundary.md`;
-- no dyld fixups or shared cache;
+- only version-2 x86 shared-cache slide fixups; no general Mach-O binding/rebase engine;
 - instruction encodings remain deliberately incomplete and are added only after an observed failure.
 
-The current dyld experiment reaches 179,745 executed blocks and 5,745 unique translations. The first failure is `test byte [r14+0x8], 1` at `0x7ff8000598aa`. The probe has reached BSD syscalls, x86 machdep thread setup, Mach traps, a failed Intel shared-region check, and an anonymous `VM_MEMORY_DYLD` allocation. It has not mapped or resolved an x86 shared-cache image, loaded an x86 system library, or begun `libSystem` or application initialization. The next slice is the observed memory form of `TEST r/m8, imm8`.
+The current dyld experiment reaches 1,058,265 executed blocks and 21,776 unique translations. It has recognized the mapped Intel cache, entered dyld-in-cache, made guest cache data privately writable with `VM_PROT_COPY`, and unmapped standalone dyld. The first failure is Mach trap 24 (`_kernelrpc_mach_port_construct_trap`). No non-dyld cached system image resolution, `libSystem` initialization, application initialization, or guest `main` has been verified.
