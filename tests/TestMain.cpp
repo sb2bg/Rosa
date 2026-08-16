@@ -2074,6 +2074,19 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movups_indexed_load", CaseId::movups_indexed_load,
+                             differentialBytes_movups_indexed_load);
+        bindMemory(testCase, rosa::x86::Register::R12, 0);
+        testCase.request.state.r13 = 0x20;
+        const std::array<std::uint64_t, 2> value{
+            0x8877665544332211ULL, 0x0123456789ABCDEFULL};
+        std::memcpy(testCase.request.memory.data() + 0x20, value.data(),
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x20;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("pcmpeqb_memory", CaseId::pcmpeqb_memory,
                              differentialBytes_pcmpeqb_memory);
         bindMemory(testCase, rosa::x86::Register::Rdi, 0);
@@ -10624,6 +10637,76 @@ void testMovupsGuestMemoryToRegister() {
                 "failed MOVUPS load changed low lane");
     expectEqual(state.xmm[0].high, std::uint64_t{4},
                 "failed MOVUPS load changed high lane");
+
+    constexpr std::array<std::uint8_t, 6> indexedCode{
+        0x43, 0x0F, 0x10, 0x04, 0x2C, 0xC3};
+    const auto indexedDecoded =
+        decoder.decodeBlock(indexedCode, rosa::guest::GuestAddress{0x2000});
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::MovupsRegMem,
+           "indexed MOVUPS opcode differs");
+    expectEqual(indexedDecoded[0].length, std::uint8_t{5},
+                "indexed MOVUPS length differs");
+    const auto indexedDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            indexedDecoded[0].operands[0]);
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(indexedDecoded[0].operands[1]);
+    expect(indexedDestination.reg == rosa::x86::XmmRegister::Xmm0,
+           "indexed MOVUPS destination differs");
+    expect(indexedMemory.base == rosa::x86::Register::R12 &&
+               indexedMemory.index == rosa::x86::Register::R13 &&
+               indexedMemory.scale == 1 &&
+               indexedMemory.displacement == 0,
+           "indexed MOVUPS effective-address operands differ");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "movups xmm0, [r12+r13*1]") != std::string::npos,
+           "indexed MOVUPS dump differs");
+
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8023},
+                          0x8877665544332211ULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x802B},
+                          0x0123456789ABCDEFULL);
+    const auto indexedBlock = translator.translate(
+        indexedCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State indexedState;
+    indexedState.r12 = 0x8003;
+    indexedState.r13 = 0x20;
+    indexedState.xmm[0] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    indexedState.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    expectEqual(indexedState.xmm[0].low,
+                std::uint64_t{0x8877665544332211ULL},
+                "indexed MOVUPS loaded the wrong low lane");
+    expectEqual(indexedState.xmm[0].high,
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "indexed MOVUPS loaded the wrong high lane");
+    expectEqual(indexedState.r12, std::uint64_t{0x8003},
+                "indexed MOVUPS changed its base");
+    expectEqual(indexedState.r13, std::uint64_t{0x20},
+                "indexed MOVUPS changed its index");
+    expectEqual(indexedState.rflags, std::uint64_t{0x8D7},
+                "indexed MOVUPS changed flags");
+
+    rosa::x86::X86State indexedFaultState;
+    indexedFaultState.r12 = 0xA003;
+    indexedFaultState.r13 = 0x20;
+    indexedFaultState.xmm[0] = {.low = 0x55, .high = 0xAA};
+    indexedFaultState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(indexedBlock.execute(indexedFaultState,
+                                               &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "indexed MOVUPS from unmapped guest memory did not fault");
+    expectEqual(indexedFaultState.xmm[0].low, std::uint64_t{0x55},
+                "failed indexed MOVUPS changed the low lane");
+    expectEqual(indexedFaultState.xmm[0].high, std::uint64_t{0xAA},
+                "failed indexed MOVUPS changed the high lane");
+    expectEqual(indexedFaultState.rflags, std::uint64_t{0xAD7},
+                "failed indexed MOVUPS changed flags");
 }
 
 void testMovdqaGuestMemoryToRegister() {
