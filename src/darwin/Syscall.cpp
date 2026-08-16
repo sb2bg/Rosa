@@ -24,6 +24,7 @@ constexpr std::uint64_t syscallClassMask = 0xFF000000U;
 constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
 constexpr std::uint64_t syscallExit = unixSyscallClass | 1U;
 constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
+constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
 constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
 constexpr std::uint64_t syscallFsgetpath = unixSyscallClass | 427U;
@@ -108,6 +109,12 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         setSuccess(state, initialGuestThreadId);
         return {};
     }
+    if (number == syscallGetpid) {
+        // Rosa currently has one guest process hosted by one Rosa process, so
+        // the host PID is also its externally observable guest process ID.
+        setSuccess(state, static_cast<std::uint64_t>(::getpid()));
+        return {};
+    }
     if (number == syscallSharedRegionCheck) {
         if (sharedCache_ == nullptr) {
             // Preserve XNU's no-cache result without touching the guest pointer.
@@ -185,8 +192,9 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
     }
     if (number != syscallWrite) {
         throw unsupported(state, syscallRip,
-                          "only BSD write(2), exit(2), shared_region_check_np(2), "
-                          "thread_selfid(2), fsgetpath(2), and getentropy(2) are "
+                          "only BSD write(2), exit(2), getpid(2), "
+                          "shared_region_check_np(2), thread_selfid(2), "
+                          "fsgetpath(2), and getentropy(2) are "
                           "implemented");
     }
     if (state.rdi != STDOUT_FILENO && state.rdi != STDERR_FILENO) {

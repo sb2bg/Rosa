@@ -10348,6 +10348,65 @@ void testDarwinThreadSelfid() {
                 "repeated thread_selfid changed guest identity");
 }
 
+void testDarwinGetpid() {
+    constexpr auto getpidNumber = UINT64_C(0x02000014);
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = getpidNumber;
+    state.rdi = 0x0123456789ABCDEFULL;
+    state.r9 = 0xFEDCBA9876543210ULL;
+    state.rflags = 0x8D7;
+
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF700005487ULL});
+    expect(!outcome.exited, "getpid terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(::getpid()),
+                "getpid returned the wrong process identity");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "getpid did not apply successful BSD carry semantics");
+    expectEqual(state.rdi, std::uint64_t{0x0123456789ABCDEFULL},
+                "getpid changed an ignored argument register");
+    expectEqual(state.r9, std::uint64_t{0xFEDCBA9876543210ULL},
+                "getpid changed an ignored argument register");
+}
+
+void testGeneratedDarwinGetpid() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0x14, 0x00, 0x00, 0x02, // mov eax, 0x2000014
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rflags = 0x8D7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated getpid terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(::getpid()),
+                "generated getpid returned the wrong process identity");
+    expectEqual(state.rcx, std::uint64_t{0x1007},
+                "generated getpid did not preserve SYSCALL fallthrough");
+    expectEqual(state.r11, std::uint64_t{0x8D7},
+                "generated getpid did not save input flags in R11");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "generated getpid did not clear the BSD error flag");
+}
+
 void testGeneratedDarwinThreadSelfid() {
     constexpr rosa::guest::GuestAddress codeBase{0x1000};
     constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
@@ -14067,6 +14126,8 @@ int main() {
         {"legacy 32-bit register move execution", testLegacyRegisterMove32Execution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
+        {"Darwin getpid", testDarwinGetpid},
+        {"generated Darwin getpid", testGeneratedDarwinGetpid},
         {"Darwin thread_selfid", testDarwinThreadSelfid},
         {"generated Darwin thread_selfid", testGeneratedDarwinThreadSelfid},
         {"Darwin getentropy", testDarwinGetentropy},
