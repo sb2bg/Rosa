@@ -1294,6 +1294,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("bswap32", CaseId::bswap32,
+                             differentialBytes_bswap32);
+        testCase.request.state.rsi = 0xAABBCCDD12345678ULL;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
+        auto testCase = make("bswap32_zero", CaseId::bswap32_zero,
+                             differentialBytes_bswap32_zero);
+        testCase.request.state.rsi = 0xAABBCCDD00000000ULL;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
         auto testCase = make("bsr64_nonzero", CaseId::bsr64_nonzero,
                              differentialBytes_bsr64_nonzero);
         testCase.request.state.rax = UINT64_MAX;
@@ -2105,6 +2119,7 @@ void testAssemblerEncodings() {
     assembler.bitAnd(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.bitOr(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.bitXor(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
+    assembler.reverseBytes32(rosa::arm64::x10, rosa::arm64::x9);
     assembler.signExtend32(rosa::arm64::x10, rosa::arm64::x9);
     assembler.ldr(rosa::arm64::x9, rosa::arm64::x0, 0);
     assembler.ldr32(rosa::arm64::x9, rosa::arm64::x0, 0);
@@ -2116,11 +2131,12 @@ void testAssemblerEncodings() {
     assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 23> expected{
+    const std::array<std::uint32_t, 24> expected{
         0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0xD35FFD2AU, 0x9343FD2AU,
         0x9ACB212AU,
         0x9ACB252AU, 0x9B0A7D2BU, 0x9BCA7D2CU, 0x93C9814BU, 0x8A0B012AU, 0xAA0B012AU,
-        0xCA0B012AU, 0x93407D2AU, 0xF9400009U, 0xB9400009U, 0xF9000009U, 0xD63F0200U,
+        0xCA0B012AU, 0x5AC0092AU, 0x93407D2AU, 0xF9400009U, 0xB9400009U,
+        0xF9000009U, 0xD63F0200U,
         0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU, 0xD5033FDFU, 0xD65F03C0U,
     };
     expectEqual(assembler.words().size(), expected.size(), "assembler word count differs");
@@ -12403,6 +12419,38 @@ void testBitScanForward64() {
                 "BSF r64 zero-source ZF semantics differ");
 }
 
+void testByteSwap32() {
+    constexpr std::array<std::uint8_t, 3> code{0x0F, 0xCE, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF700052E5CULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::BswapReg,
+           "BSWAP r32 opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rsi &&
+               destination.width == 32,
+           "BSWAP esi operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("bswap esi") !=
+               std::string::npos,
+           "BSWAP esi dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF700052E5CULL});
+    rosa::x86::X86State state;
+    state.rsi = 0xAABBCCDD12345678ULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rsi, std::uint64_t{0x78563412},
+                "BSWAP esi result or zero extension differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "BSWAP changed flags");
+
+    state.rsi = 0xAABBCCDD00000000ULL;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rsi, std::uint64_t{0}, "BSWAP zero result differs");
+}
+
 void testBitScanReverse64() {
     constexpr std::array<std::uint8_t, 5> code{
         0x48, 0x0F, 0xBD, 0xC7, 0xC3};
@@ -14840,6 +14888,7 @@ int main() {
          testAnd8BitRegisterWithRipRelativeGuestMemory},
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},
+        {"BSWAP 32-bit register", testByteSwap32},
         {"BSR 64-bit registers", testBitScanReverse64},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
         {"AND 8-bit accumulator immediate", testAnd8BitAccumulatorImmediate},

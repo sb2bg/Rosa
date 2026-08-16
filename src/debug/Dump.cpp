@@ -544,6 +544,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << ", 0x"
                    << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::BswapReg:
+            stream << "bswap "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]));
+            break;
         case x86::Opcode::NotReg:
             stream << "not "
                    << registerOperandName(
@@ -1184,6 +1189,10 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::SignExtend32:
             stream << "sign_extend_32 " << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::ByteSwap:
+            stream << "byte_swap." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs);
             break;
         case ir::Opcode::EvaluateCondition:
             stream << "condition." << conditionName(*operation.condition);

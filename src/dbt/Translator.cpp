@@ -2479,6 +2479,23 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                           instruction.address);
             break;
         }
+        case x86::Opcode::BswapReg: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: bswap operand");
+            }
+            const auto reg =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            if (reg.width != 32) {
+                throw std::runtime_error("internal decoder error: BSWAP width");
+            }
+            const auto original = builder.readGuestRegister(
+                reg.reg, ir::Width::I32, instruction.address);
+            const auto result = builder.byteSwap(
+                original, ir::Width::I32, instruction.address);
+            builder.writeGuestRegister(reg.reg, result, ir::Width::I32,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::NotReg: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: not operand count");
@@ -3592,6 +3609,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::SignExtend32:
             assembler.signExtend32(hostRegister(*operation.result),
                                    hostRegister(*operation.lhs));
+            break;
+        case ir::Opcode::ByteSwap:
+            assembler.reverseBytes32(hostRegister(*operation.result),
+                                     hostRegister(*operation.lhs));
             break;
         case ir::Opcode::EvaluateCondition: {
             if (*operation.condition != x86::Condition::Equal &&

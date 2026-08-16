@@ -136,6 +136,16 @@ void Assembler::asrImmediate(XRegister destination, XRegister source,
                    ", #" + std::to_string(shift));
 }
 
+void Assembler::reverseBytes32(XRegister destination, XRegister source) {
+    requireRegister(destination);
+    requireRegister(source);
+    const auto word = 0x5AC00800U |
+                      (static_cast<std::uint32_t>(source.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "rev w" + std::to_string(destination.encoding) + ", w" +
+                   std::to_string(source.encoding));
+}
+
 void Assembler::signExtend32(XRegister destination, XRegister source) {
     requireRegister(destination);
     requireRegister(source);

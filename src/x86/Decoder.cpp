@@ -727,6 +727,24 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if (code[cursor] == 0x0FU && code.size() - cursor >= 2 &&
+            code[cursor + 1] >= 0xC8U && code[cursor + 1] <= 0xCFU) {
+            instruction.opcode = Opcode::BswapReg;
+            instruction.length = 2;
+            instruction.bytes[0] = code[cursor];
+            instruction.bytes[1] = code[cursor + 1];
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(code[cursor + 1] - 0xC8U),
+                               false),
+                32});
+            result.push_back(std::move(instruction));
+            cursor += 2;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
+        if (code[cursor] == 0x0FU && code.size() - cursor >= 2 &&
             code[cursor + 1] == 0x57U) {
             if (code.size() - cursor < 3) {
                 throw DecodeError(address, remaining, "truncated xorps xmm, xmm");

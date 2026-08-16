@@ -272,6 +272,19 @@ ValueId Builder::bitXor(ValueId lhs, ValueId rhs, Width width, guest::GuestAddre
     return result;
 }
 
+ValueId Builder::byteSwap(ValueId value, Width width,
+                          guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ByteSwap,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = value,
+    });
+    return result;
+}
+
 ValueId Builder::signExtend32(ValueId value, guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -839,6 +852,12 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::SignExtend32:
             checkUse(operation.lhs, "source");
+            break;
+        case Opcode::ByteSwap:
+            checkUse(operation.lhs, "source");
+            if (operation.width != Width::I32) {
+                errors.emplace_back("byte_swap currently requires i32");
+            }
             break;
         case Opcode::EvaluateCondition:
             if (!operation.condition) {

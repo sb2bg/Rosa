@@ -43,6 +43,7 @@ enum class Opcode {
     Or,
     Xor,
     SignExtend32,
+    ByteSwap,
     EvaluateCondition,
     LoadGuest,
     StoreGuest,
@@ -146,6 +147,7 @@ class Builder {
     ValueId bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId bitOr(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId bitXor(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
+    ValueId byteSwap(ValueId value, Width width, guest::GuestAddress rip);
     ValueId signExtend32(ValueId value, guest::GuestAddress rip);
     ValueId evaluateCondition(x86::Condition condition, guest::GuestAddress rip);
     ValueId loadGuest(ValueId address, Width width, guest::GuestAddress rip);
