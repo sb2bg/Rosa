@@ -2034,6 +2034,38 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("ptest_xmm_self_zero",
+                             CaseId::ptest_xmm_self_zero,
+                             differentialBytes_ptest_xmm_self_zero);
+        testCase.request.state.rflags = arithmeticFlags | directionFlag | 0x2;
+        // Apple Rosetta currently leaves PTEST's defined arithmetic flags
+        // unchanged. Keep it as an operand/non-mutation oracle while the
+        // generated-execution test below checks architectural flag semantics.
+        testCase.flagMask = 0;
+        run(testCase);
+    }
+    {
+        auto testCase = make("ptest_xmm_self_nonzero",
+                             CaseId::ptest_xmm_self_nonzero,
+                             differentialBytes_ptest_xmm_self_nonzero);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        testCase.request.state.rflags = arithmeticFlags | directionFlag | 0x2;
+        testCase.flagMask = 0;
+        run(testCase);
+    }
+    {
+        auto testCase = make("ptest_xmm_distinct",
+                             CaseId::ptest_xmm_distinct,
+                             differentialBytes_ptest_xmm_distinct);
+        testCase.request.state.xmm[0] = {.low = 0x0FULL, .high = 0};
+        testCase.request.state.xmm[1] = {.low = 0xF0ULL, .high = 0};
+        testCase.request.state.rflags = arithmeticFlags | directionFlag | 0x2;
+        testCase.flagMask = 0;
+        run(testCase);
+    }
+    {
         auto testCase = make("pmovmskb", CaseId::pmovmskb,
                              differentialBytes_pmovmskb);
         testCase.request.state.rsi = UINT64_MAX;
@@ -10960,6 +10992,70 @@ void testPxorGuestMemoryGeneratedExecution() {
                 "faulted PXOR changed flags");
 }
 
+void testPtestRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> selfCode{
+        0x66, 0x0F, 0x38, 0x17, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        selfCode, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PtestRegReg,
+           "PTEST opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "PTEST length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(
+               decoded[0].operands[0]).reg == rosa::x86::XmmRegister::Xmm0 &&
+               std::get<rosa::x86::XmmRegisterOperand>(
+                   decoded[0].operands[1]).reg ==
+                   rosa::x86::XmmRegister::Xmm0,
+           "PTEST operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("ptest xmm0, xmm0") !=
+               std::string::npos,
+           "PTEST x86 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto selfBlock = translator.translate(
+        selfCode, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(selfBlock.intermediateRepresentation())
+                   .find("test_xmm_bits xmm0, xmm0") != std::string::npos,
+           "PTEST IR dump differs");
+
+    rosa::x86::X86State state;
+    state.rflags = 0xCD7;
+    static_cast<void>(selfBlock.execute(state));
+    expectEqual(state.rflags, std::uint64_t{0x443},
+                "zero self-PTEST flags differ");
+    expectEqual(state.xmm[0].low, std::uint64_t{0},
+                "zero self-PTEST changed low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0},
+                "zero self-PTEST changed high lane");
+
+    state.xmm[0] = {.low = 1, .high = 0x8000000000000000ULL};
+    const auto original = state.xmm[0];
+    state.rflags = 0xCD7;
+    static_cast<void>(selfBlock.execute(state));
+    expectEqual(state.rflags, std::uint64_t{0x403},
+                "nonzero self-PTEST flags differ");
+    expectEqual(state.xmm[0].low, original.low,
+                "nonzero self-PTEST changed low lane");
+    expectEqual(state.xmm[0].high, original.high,
+                "nonzero self-PTEST changed high lane");
+
+    constexpr std::array<std::uint8_t, 6> distinctCode{
+        0x66, 0x0F, 0x38, 0x17, 0xC1, 0xC3};
+    const auto distinctBlock = translator.translate(
+        distinctCode, rosa::guest::GuestAddress{0x2000});
+    state.xmm[0] = {.low = 0x0FULL, .high = 0};
+    state.xmm[1] = {.low = 0xF0ULL, .high = 0};
+    state.rflags = 0xCD7;
+    static_cast<void>(distinctBlock.execute(state));
+    expectEqual(state.rflags, std::uint64_t{0x442},
+                "distinct PTEST operand ordering or flags differ");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0F},
+                "distinct PTEST changed destination");
+    expectEqual(state.xmm[1].low, std::uint64_t{0xF0},
+                "distinct PTEST changed source");
+}
+
 void testPcmpeqbGuestMemoryGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x74, 0x07, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -16620,6 +16716,7 @@ int main() {
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PXOR guest memory generated execution",
          testPxorGuestMemoryGeneratedExecution},
+        {"PTEST register generated execution", testPtestRegisterGeneratedExecution},
         {"PCMPEQB guest memory generated execution",
          testPcmpeqbGuestMemoryGeneratedExecution},
         {"PCMPEQB register generated execution",

@@ -1067,6 +1067,36 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x66U && code.size() - cursor >= 4 &&
+            code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x38U &&
+            code[cursor + 3] == 0x17U) {
+            if (code.size() - cursor < 5) {
+                throw DecodeError(address, remaining,
+                                  "truncated ptest xmm, xmm");
+            }
+            const auto modrm = code[cursor + 4];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U) {
+                throw DecodeError(address, remaining,
+                                  "only register-direct PTEST is supported");
+            }
+            instruction.opcode = Opcode::PtestRegReg;
+            instruction.length = 5;
+            std::copy_n(
+                code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                instruction.length, instruction.bytes.begin());
+            instruction.operands.push_back(XmmRegisterOperand{
+                static_cast<XmmRegister>((modrm >> 3U) & 0x7U)});
+            instruction.operands.push_back(XmmRegisterOperand{
+                static_cast<XmmRegister>(modrm & 0x7U)});
+            result.push_back(std::move(instruction));
+            cursor += 5;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x66U && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0xEFU) {
             if (code.size() - cursor < 4) {

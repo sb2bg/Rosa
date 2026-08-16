@@ -284,6 +284,30 @@ xorGuestMemoryXmm128(GuestExecutionContext *context, x86::X86State *state,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+testXmmBits128(x86::X86State *state, std::uint64_t destinationIndex,
+               std::uint64_t sourceIndex) noexcept {
+    if (destinationIndex >= state->xmm.size() ||
+        sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    const auto destination = state->xmm[destinationIndex];
+    const auto source = state->xmm[sourceIndex];
+    const auto intersection = (destination.low & source.low) |
+                              (destination.high & source.high);
+    const auto sourceOutsideDestination = (~destination.low & source.low) |
+                                          (~destination.high & source.high);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (intersection == 0) {
+        flags |= flagZero;
+    }
+    if (sourceOutsideDestination == 0) {
+        flags |= flagCarry;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 compareEqualXmmBytes128(x86::X86State *state, std::uint64_t destinationIndex,
                         std::uint64_t sourceIndex) noexcept {
     if (destinationIndex >= state->xmm.size() ||
@@ -3248,6 +3272,18 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                       instruction.address);
             break;
         }
+        case x86::Opcode::PtestRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: PTEST operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            builder.testXmmBits(destination, source, instruction.address);
+            break;
+        }
         case x86::Opcode::PcmpeqbRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: pcmpeqb operand count");
@@ -3849,6 +3885,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::StoreGuestXmm ||
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
                          operation.opcode == ir::Opcode::XorGuestMemoryXmm ||
+                         operation.opcode == ir::Opcode::TestXmmBits ||
                          operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
                          operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
                          operation.opcode == ir::Opcode::AndNotXmm ||
@@ -4560,6 +4597,16 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.bind(completed);
             break;
         }
+        case ir::Opcode::TestXmmBits:
+            assembler.movImmediate(
+                arm64::x1,
+                static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(
+                arm64::x2,
+                static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x16, pointerBits(&testXmmBits128));
+            assembler.blr(arm64::x16);
+            break;
         case ir::Opcode::CompareEqualXmmBytes:
             assembler.movImmediate(
                 arm64::x1,

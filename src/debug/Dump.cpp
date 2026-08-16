@@ -940,6 +940,16 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
+        case x86::Opcode::PtestRegReg:
+            stream << "ptest "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0]).reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1]).reg);
+            break;
         case x86::Opcode::PcmpeqbRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << "pcmpeqb "
@@ -1421,6 +1431,12 @@ std::string dumpIr(const ir::Block &block) {
             stream << "xor_guest_memory_xmm.i128 "
                    << valueName(*operation.lhs) << ", "
                    << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::TestXmmBits:
+            stream << "test_xmm_bits "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
+                   << x86::xmmRegisterName(
+                          *operation.sourceGuestXmmRegister);
             break;
         case ir::Opcode::CompareEqualGuestBytesXmm:
             stream << "compare_equal_guest_bytes_xmm " << valueName(*operation.lhs)
