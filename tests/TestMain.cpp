@@ -2239,6 +2239,24 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movdqa_register", CaseId::movdqa_register,
+                             differentialBytes_movdqa_register);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        testCase.request.state.xmm[5] = {.low = 1, .high = 2};
+        run(testCase);
+    }
+    {
+        auto testCase = make("movdqa_register_alias",
+                             CaseId::movdqa_register_alias,
+                             differentialBytes_movdqa_register_alias);
+        testCase.request.state.xmm[0] = {
+            .low = 0x8877665544332211ULL,
+            .high = 0x1020304050607080ULL};
+        run(testCase);
+    }
+    {
         auto testCase = make("movdqa_indexed_load", CaseId::movdqa_indexed_load,
                              differentialBytes_movdqa_indexed_load);
         bindMemory(testCase, rosa::x86::Register::Rdi, 0);
@@ -11151,6 +11169,47 @@ void testMovdqaGuestMemoryToRegister() {
                 "failed indexed MOVDQA changed the high lane");
     expectEqual(indexedFaultState.rflags, std::uint64_t{0x8D7},
                 "failed indexed MOVDQA changed flags");
+
+    constexpr std::array<std::uint8_t, 5> registerCode{
+        0x66, 0x0F, 0x6F, 0xE8, 0xC3};
+    const auto registerDecoded = decoder.decodeBlock(
+        registerCode, rosa::guest::GuestAddress{0x3000});
+    expect(registerDecoded[0].opcode == rosa::x86::Opcode::MovdqaRegReg,
+           "register MOVDQA opcode differs");
+    expectEqual(registerDecoded[0].length, std::uint8_t{4},
+                "register MOVDQA length differs");
+    const auto registerDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            registerDecoded[0].operands[0]);
+    const auto registerSource = std::get<rosa::x86::XmmRegisterOperand>(
+        registerDecoded[0].operands[1]);
+    expect(registerDestination.reg == rosa::x86::XmmRegister::Xmm5 &&
+               registerSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "register MOVDQA operands differ");
+    expect(rosa::debug::dumpX86(registerDecoded).find(
+               "movdqa xmm5, xmm0") != std::string::npos,
+           "register MOVDQA dump differs");
+
+    const auto registerBlock = translator.translate(
+        registerCode, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State registerState;
+    registerState.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    registerState.xmm[5] = {.low = 1, .high = 2};
+    registerState.rflags = 0x8D7;
+    static_cast<void>(registerBlock.execute(registerState));
+    expectEqual(registerState.xmm[5].low,
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "register MOVDQA low lane differs");
+    expectEqual(registerState.xmm[5].high,
+                std::uint64_t{0xFEDCBA9876543210ULL},
+                "register MOVDQA high lane differs");
+    expectEqual(registerState.xmm[0].low,
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "register MOVDQA changed its source");
+    expectEqual(registerState.rflags, std::uint64_t{0x8D7},
+                "register MOVDQA changed flags");
 }
 
 void testMovdquRegisterToGuestMemory() {

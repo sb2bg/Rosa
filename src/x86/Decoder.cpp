@@ -1558,6 +1558,24 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor + 3];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode == 0x3U) {
+                instruction.opcode = Opcode::MovdqaRegReg;
+                instruction.length = 4;
+                std::copy_n(
+                    code.begin() + static_cast<std::ptrdiff_t>(cursor), 4,
+                    instruction.bytes.begin());
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(
+                        static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(rmEncoding)});
+                result.push_back(std::move(instruction));
+                cursor += 4;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
             if (mode > 0x2U || (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,

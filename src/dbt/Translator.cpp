@@ -1866,6 +1866,25 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                   instruction.address);
             break;
         }
+        case x86::Opcode::MovdqaRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: movdqa register operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto low = builder.readGuestXmmLane(
+                source, false, instruction.address);
+            const auto high = builder.readGuestXmmLane(
+                source, true, instruction.address);
+            builder.writeGuestXmmLane(destination, false, low,
+                                      instruction.address);
+            builder.writeGuestXmmLane(destination, true, high,
+                                      instruction.address);
+            break;
+        }
         case x86::Opcode::MovapsRegMem:
         case x86::Opcode::MovupsRegMem:
         case x86::Opcode::MovdquRegMem:
