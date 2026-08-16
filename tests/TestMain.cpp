@@ -1307,6 +1307,41 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("shl8_cl_one", CaseId::shl8_cl_one,
+                             differentialBytes_shl8_cl_one);
+        testCase.request.state.rdi = 0x1122334455667781ULL;
+        testCase.request.state.rcx = 1;
+        testCase.flagMask =
+            carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shl8_cl_many", CaseId::shl8_cl_many,
+                             differentialBytes_shl8_cl_many);
+        testCase.request.state.rdi = 0x1122334455667781ULL;
+        testCase.request.state.rcx = 7;
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shl8_cl_operand_width",
+                             CaseId::shl8_cl_operand_width,
+                             differentialBytes_shl8_cl_operand_width);
+        testCase.request.state.rdi = 0x1122334455667781ULL;
+        testCase.request.state.rcx = 8;
+        testCase.flagMask = parityFlag | zeroFlag | signFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("shl8_cl_masked_zero",
+                             CaseId::shl8_cl_masked_zero,
+                             differentialBytes_shl8_cl_masked_zero);
+        testCase.request.state.rdi = 0x1122334455667781ULL;
+        testCase.request.state.rcx = 0xABCDEF0000000020ULL;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
         auto testCase = make("shr32_many", CaseId::shr32_many,
                              differentialBytes_shr32_many);
         testCase.request.state.rax = 0xFFFFFFFF80000001ULL;
@@ -9371,6 +9406,86 @@ void testShiftLeft32ClGeneratedExecution() {
                 "SHL EAX, CL count-31 defined flags differ");
 }
 
+void testShiftLeft8ClGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x40, 0xD2, 0xE7, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF70004DB3CULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShlRegCl,
+           "SHL r8, CL opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "SHL r8, CL length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rdi &&
+               destination.width == 8,
+           "SHL DIL, CL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("shl dil, cl") !=
+               std::string::npos,
+           "SHL DIL, CL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF70004DB3CULL});
+    rosa::x86::X86State state;
+    state.rdi = 0x1122334455667741ULL;
+    state.rcx = 2;
+    state.rflags = 0x810;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0x1122334455667704ULL},
+                "SHL DIL, CL result or upper-register preservation differs");
+    expectEqual(state.rcx, std::uint64_t{2},
+                "SHL DIL, CL changed RCX");
+    constexpr std::uint64_t definedManyFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U);
+    expectEqual(state.rflags & definedManyFlags, std::uint64_t{1},
+                "SHL DIL, CL count-two defined flags differ");
+
+    state.rdi = 0x1122334455667781ULL;
+    state.rcx = 1;
+    state.rflags = 0x10;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0x1122334455667702ULL},
+                "SHL DIL, CL count-one result differs");
+    constexpr std::uint64_t definedOneFlags =
+        definedManyFlags | (1U << 11U);
+    expectEqual(state.rflags & definedOneFlags, std::uint64_t{0x801},
+                "SHL DIL, CL count-one defined flags differ");
+
+    state.rdi = 0x11223344556677A5ULL;
+    state.rcx = 0xABCDEF0000000020ULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0x11223344556677A5ULL},
+                "SHL DIL, CL masked-zero changed its destination");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "SHL DIL, CL masked-zero changed flags");
+
+    state.rdi = 0x1122334455667781ULL;
+    state.rcx = 8;
+    state.rflags = 0x811;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdi, std::uint64_t{0x1122334455667700ULL},
+                "SHL DIL, CL count-eight did not use byte width");
+    constexpr std::uint64_t widthDefinedFlags =
+        (1U << 2U) | (1U << 6U) | (1U << 7U);
+    expectEqual(state.rflags & widthDefinedFlags, std::uint64_t{0x44},
+                "SHL DIL, CL count-eight defined flags differ");
+
+    constexpr std::array<std::uint8_t, 3> highByteCode{
+        0xD2, 0xE7, 0xC3};
+    bool rejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            highByteCode, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejected = true;
+    }
+    expect(rejected,
+           "SHL BH, CL was silently treated as a representable low byte");
+}
+
 void testShiftRight8ImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{
         0x41, 0xC0, 0xE8, 0x03, 0xC3};
@@ -16900,6 +17015,7 @@ int main() {
          testShiftLeft64GuestMemoryImmediate},
         {"SHL CL generated execution", testShiftLeftClGeneratedExecution},
         {"SHL 32-bit CL generated execution", testShiftLeft32ClGeneratedExecution},
+        {"SHL 8-bit CL generated execution", testShiftLeft8ClGeneratedExecution},
         {"SHR low-byte immediate generated execution",
          testShiftRight8ImmediateGeneratedExecution},
         {"SHR 32-bit immediate generated execution", testShiftRight32ImmediateGeneratedExecution},

@@ -2450,6 +2450,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0xC1U &&
             code[cursor] != 0xC6U && code[cursor] != 0xC7U &&
             code[cursor] != 0xD0U && code[cursor] != 0xD1U &&
+            code[cursor] != 0xD2U &&
             code[cursor] != 0xD3U &&
             code[cursor] != 0xF7U &&
             code[cursor] != 0xFEU && code[cursor] != 0xFFU) {
@@ -2492,6 +2493,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x81U && opcode != 0xC0U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD0U &&
             opcode != 0xD1U &&
+            opcode != 0xD2U &&
             opcode != 0xD3U &&
             opcode != 0xF7U &&
             opcode != 0xFEU && opcode != 0xFFU &&
@@ -4013,6 +4015,27 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
                 static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             instruction.operands.push_back(ImmediateOperand{1, 8});
+        } else if (opcode == 0xD2U) {
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining,
+                                  "truncated byte shift register, cl");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode =
+                static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding =
+                static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode != 0x3U || extension != 0x4U || rexW ||
+                (!hasRex && rmEncoding >= 0x4U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only SHL representable-byte-register, CL from opcode D2 /4 is supported");
+            }
+            instruction.opcode = Opcode::ShlRegCl;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(rmEncoding, rexB), 8});
         } else if (opcode == 0xD3U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated shl register, cl");
