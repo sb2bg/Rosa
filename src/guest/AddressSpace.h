@@ -4,12 +4,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace rosa::guest {
+
+class PrivateFileMapping;
 
 inline constexpr std::size_t guestPageSize = 4096;
 
@@ -28,6 +32,7 @@ struct MappingInfo {
     GuestAddress base{};
     std::size_t size{};
     Permission permissions{Permission::None};
+    Permission maximumPermissions{Permission::None};
     std::string label;
 };
 
@@ -48,6 +53,10 @@ class AddressSpace {
                       std::string_view label = {});
     void mapSegment(GuestAddress base, std::size_t size, Permission permissions,
                     std::span<const std::uint8_t> fileBytes, std::string_view label = {});
+    void mapFileSegment(GuestAddress base, std::size_t size,
+                        Permission permissions, Permission maximumPermissions,
+                        const std::filesystem::path &path, std::uint64_t fileOffset,
+                        std::string_view label = {});
     void mapSparseReadOnly(GuestAddress base, std::size_t size, std::size_t dataOffset,
                            std::span<const std::uint8_t> data, std::string_view label);
     void populateSparseReadOnly(GuestAddress address, std::span<const std::uint8_t> data);
@@ -73,6 +82,8 @@ class AddressSpace {
         Permission permissions{Permission::None};
         Permission maximumPermissions{Permission::None};
         std::vector<std::uint8_t> bytes;
+        std::shared_ptr<PrivateFileMapping> fileBytes;
+        std::size_t fileDataOffset{};
         std::vector<std::uint8_t> readableBytes;
         std::string label;
     };
@@ -85,6 +96,9 @@ class AddressSpace {
                     Permission maximumPermissions,
                     std::span<const std::uint8_t> initialBytes,
                     std::string_view label);
+    void validateNewMapping(GuestAddress base, std::size_t size,
+                            Permission permissions,
+                            Permission maximumPermissions) const;
 
     std::vector<Mapping> mappings_;
 };

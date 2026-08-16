@@ -24,6 +24,7 @@
 #include <cstring>
 #include <exception>
 #include <functional>
+#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -11869,6 +11870,72 @@ void testGuestAddressSpace() {
                 "mapping summary label differs");
 }
 
+void testGuestFileBackedAddressSpace() {
+    std::array<char, 38> pathTemplate{};
+    constexpr std::string_view pathPattern = "/tmp/rosa-address-space-XXXXXX";
+    std::copy(pathPattern.begin(), pathPattern.end(), pathTemplate.begin());
+    const auto descriptor = ::mkstemp(pathTemplate.data());
+    expect(descriptor >= 0, "could not create file-backed mapping fixture");
+
+    constexpr auto sourceOffset = std::uint64_t{3};
+    constexpr auto sourceValue = UINT64_C(0x0123456789ABCDEF);
+    expect(::ftruncate(descriptor,
+                       static_cast<off_t>(rosa::guest::guestPageSize + sourceOffset)) == 0,
+           "could not size file-backed mapping fixture");
+    expect(::pwrite(descriptor, &sourceValue, sizeof(sourceValue),
+                    static_cast<off_t>(sourceOffset)) ==
+               static_cast<ssize_t>(sizeof(sourceValue)),
+           "could not populate file-backed mapping fixture");
+    ::close(descriptor);
+
+    constexpr rosa::guest::GuestAddress base{0x4000};
+    rosa::guest::AddressSpace addressSpace;
+    try {
+        addressSpace.mapFileSegment(
+            base, rosa::guest::guestPageSize,
+            rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+            rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+            pathTemplate.data(), sourceOffset, "private file mapping");
+        expectEqual(addressSpace.readU64(base), sourceValue,
+                    "file-backed guest bytes differ");
+
+        constexpr auto privateValue = UINT64_C(0xFEDCBA9876543210);
+        addressSpace.writeU64(base, privateValue);
+        expectEqual(addressSpace.readU64(base), privateValue,
+                    "private file-backed guest write differs");
+
+        const auto sourceDescriptor = ::open(pathTemplate.data(), O_RDONLY | O_CLOEXEC);
+        expect(sourceDescriptor >= 0, "could not reopen file-backed mapping fixture");
+        std::uint64_t unchangedSource = 0;
+        const auto readCount = ::pread(sourceDescriptor, &unchangedSource,
+                                       sizeof(unchangedSource),
+                                       static_cast<off_t>(sourceOffset));
+        ::close(sourceDescriptor);
+        expectEqual(readCount, static_cast<ssize_t>(sizeof(unchangedSource)),
+                    "could not reread file-backed mapping fixture");
+        expectEqual(unchangedSource, sourceValue,
+                    "private guest mapping modified its source file");
+
+        expect(addressSpace.protect(base, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read) ==
+                   rosa::guest::ProtectResult::Success,
+               "file-backed guest protection failed");
+        bool writeRejected = false;
+        try {
+            addressSpace.writeU64(base, 0);
+        } catch (const std::runtime_error &) {
+            writeRejected = true;
+        }
+        expect(writeRejected, "read-only file-backed guest mapping accepted a write");
+        expectEqual(addressSpace.readU64(base), privateValue,
+                    "protecting a file-backed mapping discarded private bytes");
+    } catch (...) {
+        ::unlink(pathTemplate.data());
+        throw;
+    }
+    ::unlink(pathTemplate.data());
+}
+
 void testGuestFailureReport() {
     constexpr std::array<std::uint8_t, 12> code{
         0x48, 0xB8, 0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x0B,
@@ -13515,6 +13582,7 @@ int main() {
         {"AND 8-bit register immediate", testAnd8BitRegisterImmediate},
         {"AND 32-bit register immediate", testAnd32BitRegisterImmediate},
         {"guest address space", testGuestAddressSpace},
+        {"guest file-backed address space", testGuestFileBackedAddressSpace},
         {"guest failure report", testGuestFailureReport},
         {"hot guest block diagnostics", testHotGuestBlockDiagnostics},
         {"x86 commpage", testX86Commpage},
