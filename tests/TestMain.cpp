@@ -1249,6 +1249,26 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("bsf32_extended", CaseId::bsf32_extended,
+                             differentialBytes_bsf32_extended);
+        testCase.request.state.r12 = UINT64_MAX;
+        testCase.request.state.r15 = 0x100;
+        testCase.flagMask = zeroFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("bsf32_extended_zero",
+                             CaseId::bsf32_extended_zero,
+                             differentialBytes_bsf32_extended_zero);
+        testCase.request.state.r12 = 0x1122334455667788ULL;
+        testCase.request.state.r15 = 0;
+        testCase.gprMask = static_cast<std::uint16_t>(
+            testCase.gprMask &
+            ~(1U << static_cast<unsigned>(rosa::x86::Register::R12)));
+        testCase.flagMask = zeroFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("bsr64_nonzero", CaseId::bsr64_nonzero,
                              differentialBytes_bsr64_nonzero);
         testCase.request.state.rax = UINT64_MAX;
@@ -12223,6 +12243,36 @@ void testBitScanForward32() {
                 "BSF zero-source deterministic destination differs");
     expectEqual(zeroState.rflags, std::uint64_t{0x8D7},
                 "BSF zero-source ZF semantics differ");
+
+    constexpr std::array<std::uint8_t, 5> extendedCode{
+        0x45, 0x0F, 0xBC, 0xE7, 0xC3};
+    const auto extendedDecoded =
+        decoder.decodeBlock(extendedCode, rosa::guest::GuestAddress{0x2000});
+    const auto extendedDestination =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[0]);
+    const auto extendedSource =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[1]);
+    expect(extendedDestination.reg == rosa::x86::Register::R12 &&
+               extendedDestination.width == 32 &&
+               extendedSource.reg == rosa::x86::Register::R15 &&
+               extendedSource.width == 32,
+           "extended BSF r32 operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find("bsf r12d, r15d") !=
+               std::string::npos,
+           "extended BSF r32 dump differs");
+    const auto extendedBlock =
+        translator.translate(extendedCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State extendedState;
+    extendedState.r12 = UINT64_MAX;
+    extendedState.r15 = 0x100;
+    extendedState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.r12, std::uint64_t{8},
+                "extended BSF r32 result or zero extension differs");
+    expectEqual(extendedState.r15, std::uint64_t{0x100},
+                "extended BSF r32 changed its source");
+    expect((extendedState.rflags & (1U << 6U)) == 0,
+           "extended BSF r32 did not clear ZF for a nonzero source");
 }
 
 void testBitScanForward64() {

@@ -2142,10 +2142,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 secondOpcode == 0x42U || secondOpcode == 0x43U ||
                 secondOpcode == 0x44U || secondOpcode == 0x45U ||
                 secondOpcode == 0x47U;
-            if (!rexW && !isConditionalMove) {
+            if (!rexW && !isConditionalMove && secondOpcode != 0xBCU) {
                 throw DecodeError(
                     address, remaining,
-                    "only 32-bit register CMOV is supported from non-W REX 0F");
+                    "only 32-bit register CMOV or BSF is supported from non-W REX 0F");
             }
             if (cursor >= code.size() ||
                 (secondOpcode == 0xACU && code.size() - cursor < 2)) {
@@ -2186,8 +2186,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     RegisterOperand{encodedRm, width});
             } else if (secondOpcode == 0xBCU) {
                 instruction.opcode = Opcode::BitScanForwardRegReg;
-                instruction.operands.push_back(RegisterOperand{encodedReg, 64});
-                instruction.operands.push_back(RegisterOperand{encodedRm, 64});
+                const auto width =
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U);
+                instruction.operands.push_back(RegisterOperand{encodedReg, width});
+                instruction.operands.push_back(RegisterOperand{encodedRm, width});
             } else if (secondOpcode == 0xBDU) {
                 instruction.opcode = Opcode::BitScanReverseRegReg;
                 instruction.operands.push_back(RegisterOperand{encodedReg, 64});
