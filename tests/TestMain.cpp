@@ -1832,6 +1832,14 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movaps_rip_load", CaseId::movaps_rip_load,
+                             differentialBytes_movaps_rip_load);
+        testCase.request.state.xmm[0] = {
+            .low = 0x1111111111111111ULL,
+            .high = 0x2222222222222222ULL};
+        run(testCase);
+    }
+    {
         auto testCase = make("movaps_store", CaseId::movaps_store,
                              differentialBytes_movaps_store);
         bindMemory(testCase, rosa::x86::Register::Rbp, 32);
@@ -9692,6 +9700,71 @@ void testMovapsGuestMemoryToRegister() {
                 "failed MOVAPS changed flags");
 }
 
+void testMovapsRipRelativeGuestMemoryToRegister() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x0F, 0x28, 0x05, 0x19, 0xD0, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF70007CEE0ULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF700089F00ULL};
+    constexpr rosa::guest::GuestAddress targetPage{0x7FF700089000ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovapsRegMem,
+           "RIP-relative MOVAPS load opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "RIP-relative MOVAPS load length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 128 &&
+               memory.displacement == 0xD019,
+           "RIP-relative MOVAPS load memory operand differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::XmmRegister::Xmm0,
+           "RIP-relative MOVAPS load destination differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movaps xmm0, [rip+0xd019]") != std::string::npos,
+           "RIP-relative MOVAPS load dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0x0123456789ABCDEFULL);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{target.value + sizeof(std::uint64_t)},
+        0xFEDCBA9876543210ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 1, .high = 2};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "RIP-relative MOVAPS loaded the wrong low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "RIP-relative MOVAPS loaded the wrong high lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative MOVAPS load changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.xmm[0] = {.low = 3, .high = 4};
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "unmapped RIP-relative MOVAPS load did not fault");
+    expectEqual(faultState.xmm[0].low, std::uint64_t{3},
+                "failed RIP-relative MOVAPS changed low lane");
+    expectEqual(faultState.xmm[0].high, std::uint64_t{4},
+                "failed RIP-relative MOVAPS changed high lane");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed RIP-relative MOVAPS changed flags");
+}
+
 void testMovupsRegisterToGuestMemoryWithSib() {
     constexpr std::array<std::uint8_t, 6> code{0x0F, 0x11, 0x44, 0x24, 0x10, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -14110,6 +14183,8 @@ int main() {
         {"MOVAPS register to RIP-relative guest memory",
          testMovapsRegisterToRipRelativeGuestMemory},
         {"MOVAPS guest memory to register", testMovapsGuestMemoryToRegister},
+        {"MOVAPS RIP-relative guest memory to register",
+         testMovapsRipRelativeGuestMemoryToRegister},
         {"MOVUPS register to guest memory with SIB", testMovupsRegisterToGuestMemoryWithSib},
         {"MOVUPS register to RIP-relative guest memory",
          testMovupsRegisterToRipRelativeGuestMemory},

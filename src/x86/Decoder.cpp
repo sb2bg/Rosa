@@ -1357,15 +1357,22 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[movupsLoadOpcodeOffset + 2];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode > 0x2U || rexX || rmEncoding == 0x4U ||
-                (mode == 0 && rmEncoding == 0x5U)) {
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
+            if (mode > 0x2U || (!ripRelative && rexX) || rmEncoding == 0x4U) {
                 throw DecodeError(
                     address, remaining,
-                    "only MOVAPS/MOVUPS xmm, [base+disp8/disp32] memory operands are supported");
+                    "only MOVAPS/MOVUPS xmm, [base/RIP+disp8/disp32] memory operands are supported");
             }
             auto operandCursor = movupsLoadOpcodeOffset + 3;
             std::int64_t displacement = 0;
-            if (mode == 0x1U) {
+            if (ripRelative) {
+                if (code.size() - operandCursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated RIP-relative XMM load disp32");
+                }
+                displacement = readI32(code.subspan(operandCursor, 4));
+                operandCursor += 4;
+            } else if (mode == 0x1U) {
                 if (operandCursor >= code.size()) {
                     throw DecodeError(address, remaining,
                                       "truncated MOVUPS load disp8");
@@ -1379,13 +1386,21 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 displacement = readI32(code.subspan(operandCursor, 4));
                 operandCursor += 4;
             }
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, operandCursor - instructionStart, displacement));
+            }
             instruction.opcode = aligned ? Opcode::MovapsRegMem
                                          : Opcode::MovupsRegMem;
             instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
                 static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) |
                                           (rexR ? 0x8U : 0U)))});
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, rexB), displacement, 128});
+            instruction.operands.push_back(
+                ripRelative
+                    ? MemoryOperand{Register::Rax, displacement, 128,
+                                    std::nullopt, 1, false, true}
+                    : MemoryOperand{decodeRegister(rmEncoding, rexB),
+                                    displacement, 128});
             const auto length = operandCursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
