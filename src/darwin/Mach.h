@@ -22,6 +22,7 @@ class MachDispatcher {
     static constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
     static constexpr std::uint64_t vmProtectTrapNumber = syscallClass | 14U;
     static constexpr std::uint64_t vmMapTrapNumber = syscallClass | 15U;
+    static constexpr std::uint64_t portModRefsTrapNumber = syscallClass | 19U;
     static constexpr std::uint64_t replyPortTrapNumber = syscallClass | 26U;
     static constexpr std::uint64_t taskSelfTrapNumber = syscallClass | 28U;
 
@@ -47,6 +48,7 @@ class MachDispatcher {
     // passed to the host Mach APIs or confused with a native mach_port_t.
     GuestMachPortName taskSelfPortName_{0x103U};
     GuestMachPortName nextReplyPortName_{0x203U};
+    std::uint32_t taskSelfSendReferences_{};
     std::vector<GuestMachPortName> receiveRights_;
 };
 

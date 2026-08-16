@@ -1,6 +1,7 @@
 #include "darwin/Mach.h"
 
 #include <algorithm>
+#include <bit>
 #include <iomanip>
 #include <limits>
 #include <optional>
@@ -15,12 +16,19 @@ constexpr std::uint64_t kernInvalidAddress = 1;
 constexpr std::uint64_t kernProtectionFailure = 2;
 constexpr std::uint64_t kernNoSpace = 3;
 constexpr std::uint64_t kernInvalidArgument = 4;
+constexpr std::uint64_t kernInvalidName = 15;
+constexpr std::uint64_t kernInvalidRight = 17;
+constexpr std::uint64_t kernInvalidValue = 18;
+constexpr std::uint64_t kernUrefsOverflow = 19;
 constexpr std::uint64_t machSendInvalidDestination = 0x10000003U;
 constexpr std::uint64_t vmProtectionMask = 0x7U;
 constexpr std::uint64_t vmFlagsAnywhere = 0x1U;
 constexpr std::uint64_t vmFlagsAliasMask = 0xFF000000U;
 constexpr std::uint64_t minimumAnywhereAddress = 0x0000000100000000ULL;
 constexpr std::uint64_t maximumUserMapEnd = 0x00007FFFFFFFF000ULL;
+constexpr std::uint32_t machPortRightSend = 0;
+constexpr std::uint32_t machPortRightCount = 6;
+constexpr std::uint32_t machPortUrefsMaximum = 0xFFFF;
 
 guest::Permission permissionsFromProtection(std::uint64_t protection) {
     auto permissions = guest::Permission::None;
@@ -194,6 +202,43 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = kernSuccess;
         return;
     }
+    case 19U: {
+        // XNU trap 19 is _kernelrpc_mach_port_mod_refs_trap. Model the
+        // task-self send right currently exposed by Rosa's guest namespace.
+        if (state.rdi != taskSelfPortName_.value) {
+            state.rax = machSendInvalidDestination;
+            return;
+        }
+        const auto right = static_cast<std::uint32_t>(state.rdx);
+        if (right >= machPortRightCount) {
+            state.rax = kernInvalidValue;
+            return;
+        }
+        const auto name = static_cast<std::uint32_t>(state.rsi);
+        if (name != taskSelfPortName_.value || taskSelfSendReferences_ == 0) {
+            state.rax = kernInvalidName;
+            return;
+        }
+        if (right != machPortRightSend) {
+            state.rax = kernInvalidRight;
+            return;
+        }
+        const auto delta = std::bit_cast<std::int32_t>(
+            static_cast<std::uint32_t>(state.r10));
+        const auto updated = static_cast<std::int64_t>(taskSelfSendReferences_) +
+                             static_cast<std::int64_t>(delta);
+        if (updated < 0) {
+            state.rax = kernInvalidValue;
+            return;
+        }
+        if (updated > machPortUrefsMaximum) {
+            state.rax = kernUrefsOverflow;
+            return;
+        }
+        taskSelfSendReferences_ = static_cast<std::uint32_t>(updated);
+        state.rax = kernSuccess;
+        return;
+    }
     case 26U: {
         // mach_reply_port allocates a fresh receive right in the calling task on every call.
         const auto name = nextReplyPortName_;
@@ -207,6 +252,11 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         return;
     }
     case 28U:
+        if (taskSelfSendReferences_ == machPortUrefsMaximum) {
+            state.rax = 0;
+            return;
+        }
+        ++taskSelfSendReferences_;
         state.rax = taskSelfPortName_.value;
         return;
     default:

@@ -10795,6 +10795,55 @@ void testGeneratedMachTaskSelfTrap() {
                 "generated task_self_trap changed guest flags");
 }
 
+void testMachPortModRefsTrap() {
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    const auto taskSelf = state.rax;
+
+    state.rax = rosa::darwin::MachDispatcher::portModRefsTrapNumber;
+    state.rdi = taskSelf;
+    state.rsi = taskSelf;
+    state.rdx = 0;          // MACH_PORT_RIGHT_SEND
+    state.r10 = UINT32_MAX; // signed delta -1 through the 32-bit trap ABI
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802A8B520ULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "mach_port_mod_refs did not drop the task-self send right");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_port_mod_refs applied BSD carry semantics");
+
+    state.rax = rosa::darwin::MachDispatcher::portModRefsTrapNumber;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{15},
+                "mach_port_mod_refs missing name returned the wrong result");
+
+    state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    state.rax = rosa::darwin::MachDispatcher::portModRefsTrapNumber;
+    state.r10 = UINT32_MAX - 1U; // signed delta -2
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{18},
+                "mach_port_mod_refs underflow returned the wrong result");
+
+    state.rax = rosa::darwin::MachDispatcher::portModRefsTrapNumber;
+    state.r10 = UINT32_MAX;
+    state.rdx = 6; // MACH_PORT_RIGHT_NUMBER
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{18},
+                "mach_port_mod_refs invalid right returned the wrong result");
+
+    state.rax = rosa::darwin::MachDispatcher::portModRefsTrapNumber;
+    state.rdi = 0xDEAD;
+    state.rdx = 0;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{0x10000003},
+                "mach_port_mod_refs invalid task returned the wrong result");
+}
+
 void testMachReplyPortTrap() {
     rosa::guest::AddressSpace addressSpace;
     rosa::darwin::MachDispatcher dispatcher;
@@ -13996,6 +14045,7 @@ int main() {
          testGeneratedDarwinThreadFastSetCthreadSelf},
         {"Mach task-self trap", testMachTaskSelfTrap},
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
+        {"Mach port mod-refs trap", testMachPortModRefsTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
         {"Mach VM protect trap", testMachVmProtectTrap},
         {"Mach VM map trap", testMachVmMapTrap},
