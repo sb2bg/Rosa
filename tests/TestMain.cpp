@@ -1308,6 +1308,20 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("bswap64", CaseId::bswap64,
+                             differentialBytes_bswap64);
+        testCase.request.state.rsi = 0x0123456789ABCDEFULL;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
+        auto testCase = make("bswap64_zero", CaseId::bswap64_zero,
+                             differentialBytes_bswap64_zero);
+        testCase.request.state.rsi = 0;
+        testCase.request.state.rflags = 0xAD7;
+        run(testCase);
+    }
+    {
         auto testCase = make("bsr64_nonzero", CaseId::bsr64_nonzero,
                              differentialBytes_bsr64_nonzero);
         testCase.request.state.rax = UINT64_MAX;
@@ -2120,6 +2134,7 @@ void testAssemblerEncodings() {
     assembler.bitOr(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.bitXor(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.reverseBytes32(rosa::arm64::x10, rosa::arm64::x9);
+    assembler.reverseBytes64(rosa::arm64::x10, rosa::arm64::x9);
     assembler.signExtend32(rosa::arm64::x10, rosa::arm64::x9);
     assembler.ldr(rosa::arm64::x9, rosa::arm64::x0, 0);
     assembler.ldr32(rosa::arm64::x9, rosa::arm64::x0, 0);
@@ -2131,12 +2146,12 @@ void testAssemblerEncodings() {
     assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 24> expected{
+    const std::array<std::uint32_t, 25> expected{
         0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0xD35FFD2AU, 0x9343FD2AU,
         0x9ACB212AU,
         0x9ACB252AU, 0x9B0A7D2BU, 0x9BCA7D2CU, 0x93C9814BU, 0x8A0B012AU, 0xAA0B012AU,
-        0xCA0B012AU, 0x5AC0092AU, 0x93407D2AU, 0xF9400009U, 0xB9400009U,
-        0xF9000009U, 0xD63F0200U,
+        0xCA0B012AU, 0x5AC0092AU, 0xDAC00D2AU, 0x93407D2AU, 0xF9400009U,
+        0xB9400009U, 0xF9000009U, 0xD63F0200U,
         0xA9BF7BFDU, 0xA8C17BFDU, 0xD5033BBFU, 0xD5033FDFU, 0xD65F03C0U,
     };
     expectEqual(assembler.words().size(), expected.size(), "assembler word count differs");
@@ -12449,6 +12464,28 @@ void testByteSwap32() {
     state.rsi = 0xAABBCCDD00000000ULL;
     static_cast<void>(block.execute(state));
     expectEqual(state.rsi, std::uint64_t{0}, "BSWAP zero result differs");
+
+    constexpr std::array<std::uint8_t, 4> wideCode{
+        0x48, 0x0F, 0xCE, 0xC3};
+    const auto wideDecoded = decoder.decodeBlock(
+        wideCode, rosa::guest::GuestAddress{0x7FF700035631ULL});
+    const auto wideDestination =
+        std::get<rosa::x86::RegisterOperand>(wideDecoded[0].operands[0]);
+    expect(wideDestination.reg == rosa::x86::Register::Rsi &&
+               wideDestination.width == 64,
+           "BSWAP rsi operand differs");
+    expect(rosa::debug::dumpX86(wideDecoded).find("bswap rsi") !=
+               std::string::npos,
+           "BSWAP rsi dump differs");
+    const auto wideBlock = translator.translate(
+        wideCode, rosa::guest::GuestAddress{0x7FF700035631ULL});
+    state.rsi = 0x0123456789ABCDEFULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(wideBlock.execute(state));
+    expectEqual(state.rsi, std::uint64_t{0xEFCDAB8967452301ULL},
+                "BSWAP rsi result differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "BSWAP rsi changed flags");
 }
 
 void testBitScanReverse64() {

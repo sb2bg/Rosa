@@ -146,6 +146,15 @@ void Assembler::reverseBytes32(XRegister destination, XRegister source) {
                    std::to_string(source.encoding));
 }
 
+void Assembler::reverseBytes64(XRegister destination, XRegister source) {
+    requireRegister(destination);
+    requireRegister(source);
+    const auto word = 0xDAC00C00U |
+                      (static_cast<std::uint32_t>(source.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "rev " + regName(destination) + ", " + regName(source));
+}
+
 void Assembler::signExtend32(XRegister destination, XRegister source) {
     requireRegister(destination);
     requireRegister(source);

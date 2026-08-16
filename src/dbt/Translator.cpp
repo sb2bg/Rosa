@@ -2485,14 +2485,16 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg =
                 std::get<x86::RegisterOperand>(instruction.operands[0]);
-            if (reg.width != 32) {
+            if (reg.width != 32 && reg.width != 64) {
                 throw std::runtime_error("internal decoder error: BSWAP width");
             }
+            const auto width =
+                reg.width == 32 ? ir::Width::I32 : ir::Width::I64;
             const auto original = builder.readGuestRegister(
-                reg.reg, ir::Width::I32, instruction.address);
-            const auto result = builder.byteSwap(
-                original, ir::Width::I32, instruction.address);
-            builder.writeGuestRegister(reg.reg, result, ir::Width::I32,
+                reg.reg, width, instruction.address);
+            const auto result = builder.byteSwap(original, width,
+                                                 instruction.address);
+            builder.writeGuestRegister(reg.reg, result, width,
                                        instruction.address);
             break;
         }
@@ -3611,8 +3613,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    hostRegister(*operation.lhs));
             break;
         case ir::Opcode::ByteSwap:
-            assembler.reverseBytes32(hostRegister(*operation.result),
-                                     hostRegister(*operation.lhs));
+            if (operation.width == ir::Width::I32) {
+                assembler.reverseBytes32(hostRegister(*operation.result),
+                                         hostRegister(*operation.lhs));
+            } else {
+                assembler.reverseBytes64(hostRegister(*operation.result),
+                                         hostRegister(*operation.lhs));
+            }
             break;
         case ir::Opcode::EvaluateCondition: {
             if (*operation.condition != x86::Condition::Equal &&

@@ -48,6 +48,7 @@ class Assembler {
     void lsrImmediate(XRegister destination, XRegister source, std::uint8_t shift);
     void asrImmediate(XRegister destination, XRegister source, std::uint8_t shift);
     void reverseBytes32(XRegister destination, XRegister source);
+    void reverseBytes64(XRegister destination, XRegister source);
     void signExtend32(XRegister destination, XRegister source);
     void lslVariable(XRegister destination, XRegister source, XRegister shift);
     void lsrVariable(XRegister destination, XRegister source, XRegister shift);

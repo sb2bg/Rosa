@@ -855,8 +855,9 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::ByteSwap:
             checkUse(operation.lhs, "source");
-            if (operation.width != Width::I32) {
-                errors.emplace_back("byte_swap currently requires i32");
+            if (operation.width != Width::I32 &&
+                operation.width != Width::I64) {
+                errors.emplace_back("byte_swap currently requires i32 or i64");
             }
             break;
         case Opcode::EvaluateCondition:

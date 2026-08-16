@@ -744,6 +744,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] >= 0x40U && code[cursor] <= 0x4FU &&
+            code.size() - cursor >= 3 && code[cursor + 1] == 0x0FU &&
+            code[cursor + 2] >= 0xC8U && code[cursor + 2] <= 0xCFU) {
+            const auto rex = code[cursor];
+            instruction.opcode = Opcode::BswapReg;
+            instruction.length = 3;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 3,
+                        instruction.bytes.begin());
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(code[cursor + 2] - 0xC8U),
+                               (rex & 0x1U) != 0),
+                static_cast<std::uint8_t>((rex & 0x8U) != 0 ? 64U : 32U)});
+            result.push_back(std::move(instruction));
+            cursor += 3;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x0FU && code.size() - cursor >= 2 &&
             code[cursor + 1] == 0x57U) {
             if (code.size() - cursor < 3) {
