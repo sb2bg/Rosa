@@ -2810,11 +2810,34 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (rexX || mode > 0x2U || rmEncoding == 0x4U ||
+            if (mode > 0x2U ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only SUB register, [base+disp8/disp32] memory operands are supported");
+                    "only SUB register, [base+index+disp8/disp32] memory operands are supported");
+            }
+            auto baseEncoding = rmEncoding;
+            std::optional<Register> index;
+            if (rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated SUB memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if (scaleBits != 0 ||
+                    (mode == 0 && baseEncoding == 0x5U)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only scale-one, based SIB addressing is supported for SUB memory operands");
+                }
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                }
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -2831,11 +2854,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto destination =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
-            const auto base = decodeRegister(rmEncoding, rexB);
+            const auto base = decodeRegister(baseEncoding, rexB);
             const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
             instruction.opcode = Opcode::SubRegMem;
             instruction.operands.push_back(RegisterOperand{destination, width});
-            instruction.operands.push_back(MemoryOperand{base, displacement, width});
+            instruction.operands.push_back(
+                MemoryOperand{base, displacement, width, index, 1});
         } else if (opcode == 0x20U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated and r8, r8");

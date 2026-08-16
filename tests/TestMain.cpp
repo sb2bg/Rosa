@@ -565,6 +565,34 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("sub64_indexed_memory_borrow",
+                             CaseId::sub64_indexed_memory_borrow,
+                             differentialBytes_sub64_indexed_memory_borrow);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 5;
+        testCase.request.state.rcx = 0x20;
+        const std::uint64_t value = 7;
+        std::memcpy(testCase.request.memory.data() + 0x20, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x20;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("sub64_indexed_memory_overflow",
+                             CaseId::sub64_indexed_memory_overflow,
+                             differentialBytes_sub64_indexed_memory_overflow);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 0x8000000000000000ULL;
+        testCase.request.state.rcx = 0x20;
+        const std::uint64_t value = 1;
+        std::memcpy(testCase.request.memory.data() + 0x20, &value,
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x20;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("sub32_extended_borrow",
                              CaseId::sub32_extended_borrow,
                              differentialBytes_sub32_extended_borrow);
@@ -3146,6 +3174,76 @@ void testSub32BitRegisterFromGuestMemory() {
                 "failed SUB r32 changed its destination");
     expectEqual(state.rflags, std::uint64_t{0x8D7},
                 "failed SUB r32 changed flags");
+}
+
+void testSub64BitRegisterFromIndexedGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x48, 0x2B, 0x04, 0x0F, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SubRegMem,
+           "indexed SUB r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "indexed SUB r64 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 64,
+           "indexed SUB r64 destination differs");
+    expect(memory.base == rosa::x86::Register::Rdi &&
+               memory.index == rosa::x86::Register::Rcx &&
+               memory.scale == 1 && memory.displacement == 0 &&
+               memory.width == 64,
+           "indexed SUB r64 memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "sub rax, [rdi+rcx]") != std::string::npos,
+           "indexed SUB r64 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8120};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 7);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = 5;
+    state.rdi = 0x8100;
+    state.rcx = 0x20;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{UINT64_MAX - 1},
+                "indexed SUB r64 result differs");
+    expectEqual(state.rdi, std::uint64_t{0x8100},
+                "indexed SUB r64 changed its base");
+    expectEqual(state.rcx, std::uint64_t{0x20},
+                "indexed SUB r64 changed its index");
+    expectEqual(addressSpace.readU64(target), std::uint64_t{7},
+                "indexed SUB r64 changed guest memory");
+    expectEqual(state.rflags, std::uint64_t{0x93},
+                "indexed SUB r64 flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    state.rax = 5;
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "indexed SUB r64 from unmapped memory did not fault");
+    expectEqual(state.rax, std::uint64_t{5},
+                "faulted indexed SUB r64 changed its destination");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "faulted indexed SUB r64 changed flags");
 }
 
 void testAddRegisterFromGuestMemory() {
@@ -16228,6 +16326,8 @@ int main() {
         {"SUB register from register", testSubRegisterFromRegister},
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
         {"SUB 32-bit register from guest memory", testSub32BitRegisterFromGuestMemory},
+        {"SUB 64-bit register from indexed guest memory",
+         testSub64BitRegisterFromIndexedGuestMemory},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register to guest memory", testAddRegisterToGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
