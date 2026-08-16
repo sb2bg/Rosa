@@ -64,6 +64,7 @@ enum class Opcode {
     IncrementGuestMemory,
     DecrementGuestMemory,
     CompareExchangeGuestMemory,
+    CompareExchangeGuestPair,
     ExchangeGuestMemory,
     LockedIncrementGuestMemory,
     LockedOrGuestMemory,
@@ -190,6 +191,7 @@ class Builder {
                               guest::GuestAddress rip);
     void compareExchangeGuestMemory(ValueId address, ValueId source,
                                     Width width, guest::GuestAddress rip);
+    void compareExchangeGuestPair(ValueId address, guest::GuestAddress rip);
     void exchangeGuestMemory(ValueId address, ValueId source,
                              x86::Register destination, Width width,
                              guest::GuestAddress rip);

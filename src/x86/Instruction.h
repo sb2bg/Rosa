@@ -67,6 +67,7 @@ enum class Opcode {
     CmpMemReg,
     CmpMemImm,
     CmpxchgMemReg,
+    Cmpxchg16bMem,
     XchgMemReg,
     LockIncMem,
     LockOrMemImm,

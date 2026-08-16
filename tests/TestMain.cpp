@@ -1030,6 +1030,42 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("lock_cmpxchg16b_equal",
+                             CaseId::lock_cmpxchg16b_equal,
+                             differentialBytes_lock_cmpxchg16b_equal);
+        bindMemory(testCase, rosa::x86::Register::Rsi, 0);
+        constexpr std::array<std::uint64_t, 2> memoryValue{
+            0x1111222233334444ULL, 0x5555666677778888ULL};
+        std::memcpy(testCase.request.memory.data() + 0x30,
+                    memoryValue.data(), sizeof(memoryValue));
+        testCase.request.state.rax = memoryValue[0];
+        testCase.request.state.rdx = memoryValue[1];
+        testCase.request.state.rbx = 0xAAAABBBBCCCCDDDDULL;
+        testCase.request.state.rcx = 0xEEEEFFFF00001111ULL;
+        testCase.memoryCompareOffset = 0x30;
+        testCase.memoryCompareSize = sizeof(memoryValue);
+        testCase.flagMask = zeroFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("lock_cmpxchg16b_mismatch",
+                             CaseId::lock_cmpxchg16b_mismatch,
+                             differentialBytes_lock_cmpxchg16b_mismatch);
+        bindMemory(testCase, rosa::x86::Register::Rsi, 0);
+        constexpr std::array<std::uint64_t, 2> memoryValue{
+            0x1111222233334444ULL, 0x5555666677778888ULL};
+        std::memcpy(testCase.request.memory.data() + 0x30,
+                    memoryValue.data(), sizeof(memoryValue));
+        testCase.request.state.rax = 1;
+        testCase.request.state.rdx = 2;
+        testCase.request.state.rbx = 3;
+        testCase.request.state.rcx = 4;
+        testCase.memoryCompareOffset = 0x30;
+        testCase.memoryCompareSize = sizeof(memoryValue);
+        testCase.flagMask = zeroFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("xchg32_memory", CaseId::xchg32_memory,
                              differentialBytes_xchg32_memory);
         bindMemory(testCase, rosa::x86::Register::Rdi, 0x40);
@@ -4439,6 +4475,145 @@ void testLockedCompareExchangeGuestDword() {
                 "faulted LOCK CMPXCHG changed its source");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "faulted LOCK CMPXCHG changed flags");
+}
+
+void testLockedCompareExchangeGuestPair() {
+    constexpr std::array<std::uint8_t, 10> code{
+        0xF0, 0x48, 0x0F, 0xC7, 0x8E, 0x30, 0x01, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded =
+        decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::Cmpxchg16bMem,
+           "LOCK CMPXCHG16B opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9},
+                "LOCK CMPXCHG16B length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rsi &&
+               memory.displacement == 0x130 && memory.width == 128,
+           "LOCK CMPXCHG16B memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "lock cmpxchg16b [rsi+0x130]") != std::string::npos,
+           "LOCK CMPXCHG16B dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8130};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block =
+        translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "compare_exchange_guest_pair") != std::string::npos,
+           "LOCK CMPXCHG16B IR differs");
+
+    constexpr std::uint64_t memoryLow = 0x1111222233334444ULL;
+    constexpr std::uint64_t memoryHigh = 0x5555666677778888ULL;
+    addressSpace.writeU64(target, memoryLow);
+    addressSpace.writeU64(rosa::guest::GuestAddress{target.value + 8},
+                          memoryHigh);
+    rosa::x86::X86State equalState;
+    equalState.rsi = page.value;
+    equalState.rax = memoryLow;
+    equalState.rdx = memoryHigh;
+    equalState.rbx = 0xAAAABBBBCCCCDDDDULL;
+    equalState.rcx = 0xEEEEFFFF00001111ULL;
+    equalState.rflags = 0x897;
+    static_cast<void>(block.execute(equalState, &addressSpace));
+    expectEqual(addressSpace.readU64(target), equalState.rbx,
+                "successful CMPXCHG16B stored the wrong low lane");
+    expectEqual(addressSpace.readU64(
+                    rosa::guest::GuestAddress{target.value + 8}),
+                equalState.rcx,
+                "successful CMPXCHG16B stored the wrong high lane");
+    expect((equalState.rflags & (1U << 6U)) != 0,
+           "successful CMPXCHG16B did not set ZF");
+    expectEqual(equalState.rax, memoryLow,
+                "successful CMPXCHG16B changed RAX");
+    expectEqual(equalState.rdx, memoryHigh,
+                "successful CMPXCHG16B changed RDX");
+
+    addressSpace.writeU64(target, memoryLow);
+    addressSpace.writeU64(rosa::guest::GuestAddress{target.value + 8},
+                          memoryHigh);
+    rosa::x86::X86State mismatchState;
+    mismatchState.rsi = page.value;
+    mismatchState.rax = 1;
+    mismatchState.rdx = 2;
+    mismatchState.rbx = 3;
+    mismatchState.rcx = 4;
+    mismatchState.rflags = 0x8D7;
+    static_cast<void>(block.execute(mismatchState, &addressSpace));
+    expectEqual(mismatchState.rax, memoryLow,
+                "failed CMPXCHG16B did not load RAX");
+    expectEqual(mismatchState.rdx, memoryHigh,
+                "failed CMPXCHG16B did not load RDX");
+    expectEqual(mismatchState.rbx, std::uint64_t{3},
+                "failed CMPXCHG16B changed RBX");
+    expectEqual(mismatchState.rcx, std::uint64_t{4},
+                "failed CMPXCHG16B changed RCX");
+    expect((mismatchState.rflags & (1U << 6U)) == 0,
+           "failed CMPXCHG16B did not clear ZF");
+    expectEqual(addressSpace.readU64(target), memoryLow,
+                "failed CMPXCHG16B changed memory");
+
+    rosa::x86::X86State unalignedState;
+    unalignedState.rsi = 0x8008;
+    unalignedState.rax = 1;
+    unalignedState.rdx = 2;
+    unalignedState.rbx = 3;
+    unalignedState.rcx = 4;
+    unalignedState.rflags = 0xAD7;
+    const auto before = addressSpace.readBytes(
+        rosa::guest::GuestAddress{0x8138}, 16);
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(unalignedState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("16-byte aligned") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "unaligned CMPXCHG16B did not fault");
+    expect(addressSpace.readBytes(rosa::guest::GuestAddress{0x8138}, 16) ==
+               before,
+           "unaligned CMPXCHG16B changed memory");
+    expectEqual(unalignedState.rax, std::uint64_t{1},
+                "unaligned CMPXCHG16B changed RAX");
+    expectEqual(unalignedState.rflags, std::uint64_t{0xAD7},
+                "unaligned CMPXCHG16B changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    std::memcpy(readOnlyBytes.data() + 0x130, &memoryLow,
+                sizeof(memoryLow));
+    std::memcpy(readOnlyBytes.data() + 0x138, &memoryHigh,
+                sizeof(memoryHigh));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        page, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        readOnlyBytes, "read-only CMPXCHG16B target");
+    rosa::x86::X86State faultState;
+    faultState.rsi = page.value;
+    faultState.rax = memoryLow;
+    faultState.rdx = memoryHigh;
+    faultState.rbx = 3;
+    faultState.rcx = 4;
+    faultState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "CMPXCHG16B accepted read-only memory");
+    expectEqual(faultState.rax, memoryLow,
+                "faulted CMPXCHG16B changed RAX");
+    expectEqual(faultState.rdx, memoryHigh,
+                "faulted CMPXCHG16B changed RDX");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted CMPXCHG16B changed flags");
 }
 
 void testExchangeGuestDwordWithRegister() {
@@ -15578,6 +15753,7 @@ int main() {
          testCompareGuestMemoryWith64BitRegister},
         {"CMP guest byte with register", testCompareGuestByteWithRegister},
         {"LOCK CMPXCHG guest dword", testLockedCompareExchangeGuestDword},
+        {"LOCK CMPXCHG16B guest pair", testLockedCompareExchangeGuestPair},
         {"XCHG guest dword with register", testExchangeGuestDwordWithRegister},
         {"XCHG guest qword with register", testExchangeGuestQwordWithRegister},
         {"LOCK OR guest dword immediate", testLockedOrGuestDwordImmediate},

@@ -2074,6 +2074,57 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0xF0U && code.size() - cursor >= 4 &&
+            code[cursor + 1] >= 0x48U && code[cursor + 1] <= 0x4FU &&
+            code[cursor + 2] == 0x0FU && code[cursor + 3] == 0xC7U) {
+            if (code.size() - cursor < 5) {
+                throw DecodeError(address, remaining,
+                                  "truncated LOCK CMPXCHG16B memory operand");
+            }
+            const auto rex = code[cursor + 1];
+            const bool rexB = (rex & 0x1U) != 0;
+            const auto modrm = code[cursor + 4];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto extension =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode > 0x2U || extension != 0x1U || rmEncoding == 0x4U ||
+                (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only LOCK CMPXCHG16B [base+disp8/disp32] is supported");
+            }
+            cursor += 5;
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated LOCK CMPXCHG16B disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated LOCK CMPXCHG16B disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            }
+            instruction.opcode = Opcode::Cmpxchg16bMem;
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(rmEncoding, rexB), displacement, 128});
+            const auto length = cursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(
+                code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0xF0U) {
             if (code.size() - cursor < 4 || code[cursor + 1] != 0x0FU ||
                 code[cursor + 2] != 0xB1U) {

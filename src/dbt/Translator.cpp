@@ -1082,6 +1082,57 @@ compareExchangeGuest32(GuestExecutionContext *context, x86::X86State *state,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+compareExchangeGuestPair(GuestExecutionContext *context,
+                         x86::X86State *state,
+                         std::uint64_t address) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated CMPXCHG16B has no guest address space");
+        }
+        constexpr auto width = std::size_t{16};
+        if ((address & (width - 1U)) != 0) {
+            throw std::runtime_error(
+                "CMPXCHG16B requires a 16-byte aligned guest address");
+        }
+        context->addressSpace->validateAccess(
+            guest::GuestAddress{address}, width,
+            guest::Permission::Read | guest::Permission::Write);
+        const auto bytes = context->addressSpace->readBytes(
+            guest::GuestAddress{address}, width);
+        std::uint64_t memoryLow = 0;
+        std::uint64_t memoryHigh = 0;
+        std::memcpy(&memoryLow, bytes.data(), sizeof(memoryLow));
+        std::memcpy(&memoryHigh, bytes.data() + sizeof(memoryLow),
+                    sizeof(memoryHigh));
+        if (state->rax == memoryLow && state->rdx == memoryHigh) {
+            std::array<std::uint8_t, width> replacement{};
+            std::memcpy(replacement.data(), &state->rbx, sizeof(state->rbx));
+            std::memcpy(replacement.data() + sizeof(state->rbx), &state->rcx,
+                        sizeof(state->rcx));
+            context->addressSpace->writeBytes(
+                guest::GuestAddress{address}, replacement);
+            state->rflags |= flagZero;
+        } else {
+            state->rax = memoryLow;
+            state->rdx = memoryHigh;
+            state->rflags &= ~flagZero;
+        }
+        // Rosa currently has one guest thread. Keep the LOCK ordering boundary
+        // explicit without claiming host-thread atomicity for guest mappings.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = 16;
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 exchangeGuest32(GuestExecutionContext *context, x86::X86State *state,
                 std::uint64_t address, std::uint64_t sourceValue,
                 std::uint64_t destinationEncoding) noexcept {
@@ -2281,6 +2332,30 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 source.reg, ir::Width::I32, instruction.address);
             builder.compareExchangeGuestMemory(
                 address, sourceValue, ir::Width::I32, instruction.address);
+            break;
+        }
+        case x86::Opcode::Cmpxchg16bMem: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error(
+                    "internal decoder error: cmpxchg16b operand count");
+            }
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            if (memory.width != 128) {
+                throw std::runtime_error(
+                    "CMPXCHG16B requires a 128-bit memory operand");
+            }
+            const auto base = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            auto address = base;
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(base, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            builder.compareExchangeGuestPair(address, instruction.address);
             break;
         }
         case x86::Opcode::XchgMemReg: {
@@ -3540,6 +3615,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::IncrementGuestMemory ||
                          operation.opcode == ir::Opcode::DecrementGuestMemory ||
                          operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
+                         operation.opcode == ir::Opcode::CompareExchangeGuestPair ||
                          operation.opcode == ir::Opcode::ExchangeGuestMemory ||
                          operation.opcode ==
                              ir::Opcode::LockedIncrementGuestMemory ||
@@ -3564,6 +3640,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    operation.opcode == ir::Opcode::IncrementGuestMemory ||
                                    operation.opcode == ir::Opcode::DecrementGuestMemory ||
                                    operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
+                                   operation.opcode ==
+                                       ir::Opcode::CompareExchangeGuestPair ||
                                    operation.opcode == ir::Opcode::ExchangeGuestMemory ||
                                    operation.opcode ==
                                        ir::Opcode::LockedIncrementGuestMemory ||
@@ -3975,6 +4053,26 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(arm64::x0,
                                    static_cast<std::uint64_t>(
                                        BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::CompareExchangeGuestPair: {
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(
+                arm64::x16, pointerBits(&compareExchangeGuestPair));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(
+                arm64::x0,
+                static_cast<std::uint64_t>(BlockExit::MemoryFault));
             assembler.ret();
             assembler.bind(committed);
             break;

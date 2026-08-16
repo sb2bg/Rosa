@@ -524,6 +524,16 @@ void Builder::compareExchangeGuestMemory(ValueId address, ValueId source,
     });
 }
 
+void Builder::compareExchangeGuestPair(ValueId address,
+                                       guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::CompareExchangeGuestPair,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+    });
+}
+
 void Builder::exchangeGuestMemory(ValueId address, ValueId source,
                                   x86::Register destination, Width width,
                                   guest::GuestAddress rip) {
@@ -931,6 +941,13 @@ std::vector<std::string> verify(const Block &block) {
             if (operation.width != Width::I32) {
                 errors.emplace_back(
                     "compare_exchange_guest_memory currently requires i32");
+            }
+            break;
+        case Opcode::CompareExchangeGuestPair:
+            checkUse(operation.lhs, "guest address");
+            if (operation.width != Width::I64) {
+                errors.emplace_back(
+                    "compare_exchange_guest_pair requires i64 lanes");
             }
             break;
         case Opcode::ExchangeGuestMemory:
