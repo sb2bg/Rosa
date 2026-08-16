@@ -34,8 +34,10 @@ class Dispatcher {
     explicit Dispatcher(
         guest::AddressSpace &addressSpace,
         std::size_t maximumInstructionsPerBlock = std::numeric_limits<std::size_t>::max(),
-        TimestampCounterReader timestampCounterReader = nullptr)
-        : addressSpace_(addressSpace), maximumInstructionsPerBlock_(maximumInstructionsPerBlock),
+        TimestampCounterReader timestampCounterReader = nullptr,
+        const darwin::GuestSharedCache *sharedCache = nullptr)
+        : addressSpace_(addressSpace), syscallDispatcher_(sharedCache),
+          maximumInstructionsPerBlock_(maximumInstructionsPerBlock),
           timestampCounterReader_(timestampCounterReader) {}
 
     [[nodiscard]] DispatchResult

@@ -12189,6 +12189,86 @@ void testGuestSharedCacheRejectsMalformedFiles() {
     }
 }
 
+void testDarwinSharedRegionCheckWithCache() {
+    constexpr auto callNumber = UINT64_C(0x02000126);
+    constexpr rosa::guest::GuestAddress outputPage{0x8000};
+    constexpr rosa::guest::GuestAddress output{0x8100};
+    SharedCacheFixture fixture;
+    const auto cache = rosa::darwin::GuestSharedCache::open(fixture.mainPath());
+    rosa::guest::AddressSpace addressSpace;
+    cache.mapInto(addressSpace);
+    addressSpace.mapAnonymous(outputPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+
+    rosa::darwin::SyscallDispatcher dispatcher(&cache);
+    rosa::x86::X86State state;
+    state.rax = callNumber;
+    state.rdi = output.value;
+    state.rflags = 0xAD7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF800064A40ULL});
+    expect(!outcome.exited, "cache-backed shared-region check terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "cache-backed shared-region check did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "cache-backed shared-region check did not clear BSD carry");
+    expectEqual(addressSpace.readU64(output), cache.regionStart().value,
+                "cache-backed shared-region check copied out the wrong base");
+
+    state.rax = callNumber;
+    state.rdi = 0xDEADBEEF;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid shared-region output pointer returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "invalid shared-region output pointer did not set BSD carry");
+}
+
+void testGeneratedDarwinSharedRegionCheckWithCache() {
+    constexpr rosa::guest::GuestAddress codeBase{0x3000};
+    constexpr rosa::guest::GuestAddress outputPage{0x8000};
+    constexpr rosa::guest::GuestAddress output{0x8100};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0x26, 0x01, 0x00, 0x02, // mov eax, 0x2000126
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    SharedCacheFixture fixture;
+    const auto cache = rosa::darwin::GuestSharedCache::open(fixture.mainPath());
+    rosa::guest::AddressSpace addressSpace;
+    cache.mapInto(addressSpace);
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(outputPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rdi = output.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - sizeof(std::uint64_t);
+    state.rflags = 0xAD7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+    rosa::dbt::Dispatcher dispatcher(addressSpace, 1, nullptr, &cache);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated shared-region check terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "generated shared-region check did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "generated shared-region check did not clear BSD carry");
+    expectEqual(addressSpace.readU64(output), cache.regionStart().value,
+                "generated shared-region check copied out the wrong base");
+}
+
 void testGuestFailureReport() {
     constexpr std::array<std::uint8_t, 12> code{
         0x48, 0xB8, 0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x0B,
@@ -13838,6 +13918,9 @@ int main() {
         {"guest file-backed address space", testGuestFileBackedAddressSpace},
         {"guest shared-cache parsing and mapping", testGuestSharedCacheParsingAndMapping},
         {"guest shared-cache malformed files", testGuestSharedCacheRejectsMalformedFiles},
+        {"Darwin shared-region check with cache", testDarwinSharedRegionCheckWithCache},
+        {"generated Darwin shared-region check with cache",
+         testGeneratedDarwinSharedRegionCheckWithCache},
         {"guest failure report", testGuestFailureReport},
         {"hot guest block diagnostics", testHotGuestBlockDiagnostics},
         {"x86 commpage", testX86Commpage},

@@ -1,5 +1,7 @@
 #include "darwin/Syscall.h"
 
+#include "darwin/SharedCache.h"
+
 #include <sys/random.h>
 #include <unistd.h>
 
@@ -107,10 +109,20 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         return {};
     }
     if (number == syscallSharedRegionCheck) {
-        // Rosa has not provisioned or mapped an Intel shared region. XNU's
-        // shared_region_check_np returns EINVAL in this state without reading
-        // or writing the start-address pointer.
-        setError(state, EINVAL);
+        if (sharedCache_ == nullptr) {
+            // Preserve XNU's no-cache result without touching the guest pointer.
+            setError(state, EINVAL);
+            return {};
+        }
+        try {
+            addressSpace.writeU64(guest::GuestAddress{state.rdi},
+                                  sharedCache_->regionStart().value +
+                                      sharedCache_->slide());
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        setSuccess(state, 0);
         return {};
     }
     if (number == syscallGetentropy) {
