@@ -2674,6 +2674,19 @@ void testRosettaDifferentialSemantics() {
         testCase.memoryCompareSize = 8;
         run(testCase);
     }
+    {
+        auto testCase = make("movq_load", CaseId::movq_load,
+                             differentialBytes_movq_load);
+        bindMemory(testCase, rosa::x86::Register::Rax, 0);
+        constexpr std::uint64_t value = 0x0123456789ABCDEFULL;
+        std::memcpy(testCase.request.memory.data() + 0x38, &value,
+                    sizeof(value));
+        testCase.request.state.xmm[0] = {
+            .low = UINT64_MAX, .high = 0xFEDCBA9876543210ULL};
+        testCase.memoryCompareOffset = 0x38;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
 
     expectEqual(compared, static_cast<std::size_t>(CaseId::Count),
                 "not every differential case was executed");
@@ -13084,6 +13097,80 @@ void testMovqXmmToGuestMemory() {
                 "failed MOVQ changed its XMM source");
 }
 
+void testMovqGuestMemoryToXmm() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0xF3, 0x0F, 0x7E, 0x40, 0x38, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF700081A44ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovqXmmMem,
+           "MOVQ xmm, [mem] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "MOVQ xmm, [mem] length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               memory.base == rosa::x86::Register::Rax &&
+               memory.displacement == 0x38 && memory.width == 64,
+           "MOVQ xmm0, [rax+0x38] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movq xmm0, qword [rax+0x38]") != std::string::npos,
+           "MOVQ xmm0, [rax+0x38] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr auto value = std::uint64_t{0x0123456789ABCDEFULL};
+    std::array<std::uint8_t, rosa::guest::guestPageSize> bytes{};
+    std::memcpy(bytes.data() + 0x38, &value, sizeof(value));
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(page, bytes.size(), rosa::guest::Permission::Read,
+                            bytes, "read-only MOVQ source");
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF700081A44ULL});
+    rosa::x86::X86State state;
+    state.rax = page.value;
+    state.xmm[0] = {
+        .low = UINT64_MAX, .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, value,
+                "MOVQ loaded the wrong low XMM lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0},
+                "MOVQ did not zero the high XMM lane");
+    expectEqual(state.rax, page.value, "MOVQ changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVQ load changed flags");
+    expectEqual(addressSpace.readU64(
+                    rosa::guest::GuestAddress{page.value + 0x38}),
+                value, "MOVQ load changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = page.value;
+    faultState.xmm[0] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL};
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOVQ load accepted unmapped guest memory");
+    expectEqual(faultState.xmm[0].low,
+                std::uint64_t{0x8877665544332211ULL},
+                "faulted MOVQ load changed its low lane");
+    expectEqual(faultState.xmm[0].high,
+                std::uint64_t{0x1020304050607080ULL},
+                "faulted MOVQ load changed its high lane");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted MOVQ load changed flags");
+}
+
 void testRegisterMoveExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x89, 0xE7, 0xC3};
     const rosa::dbt::Translator translator;
@@ -17601,6 +17688,7 @@ int main() {
         {"MOVDQU register to guest memory", testMovdquRegisterToGuestMemory},
         {"MOVDQU guest memory to register", testMovdquGuestMemoryToRegister},
         {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
+        {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
         {"register move execution", testRegisterMoveExecution},
         {"LEA base displacement execution", testLeaBaseDisplacementExecution},
         {"LEA 32-bit base displacement execution", testLea32BitBaseDisplacementExecution},

@@ -98,6 +98,7 @@ enum class Opcode {
     MovdqaRegMem,
     MovdquRegMem,
     MovdquMemReg,
+    MovqXmmMem,
     MovqMemXmm,
     RepMovsb,
     Push,
