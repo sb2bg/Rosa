@@ -19,6 +19,11 @@ GuestFileSpace::GuestFileSpace(std::filesystem::path currentDirectory)
 
 GuestFileDescriptor GuestFileSpace::openCurrentDirectory(
     std::uint32_t flags) {
+    return openReadOnlyFile(currentDirectory_, flags);
+}
+
+GuestFileDescriptor GuestFileSpace::openReadOnlyFile(
+    std::filesystem::path guestPath, std::uint32_t flags) {
     if (nextDescriptor_ == std::numeric_limits<std::int32_t>::max()) {
         throw std::runtime_error("guest file-descriptor namespace exhausted");
     }
@@ -26,8 +31,10 @@ GuestFileDescriptor GuestFileSpace::openCurrentDirectory(
     files_.emplace(descriptor,
                    GuestOpenFile{
                        .descriptor = descriptor,
-                       .kind = GuestFileKind::CurrentDirectory,
-                       .guestPath = currentDirectory_,
+                       .kind = guestPath == currentDirectory_
+                                   ? GuestFileKind::CurrentDirectory
+                                   : GuestFileKind::HostReadOnlyFile,
+                       .guestPath = std::move(guestPath),
                        .flags = flags,
                    });
     return descriptor;

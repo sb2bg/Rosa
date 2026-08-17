@@ -88,6 +88,16 @@ std::optional<std::string> readGuestCString(
     return std::nullopt;
 }
 
+bool isWithinDirectory(const std::filesystem::path &directory,
+                       const std::filesystem::path &candidate) {
+    const auto relative = candidate.lexically_relative(directory);
+    if (relative.empty() || relative.is_absolute()) {
+        return false;
+    }
+    const auto first = relative.begin();
+    return first == relative.end() || *first != "..";
+}
+
 std::runtime_error unsupported(const x86::X86State &state, guest::GuestAddress rip,
                                const std::string &reason) {
     std::ostringstream stream;
@@ -163,14 +173,43 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         }
         const auto flags = static_cast<std::uint32_t>(state.rsi);
         const auto mode = static_cast<std::uint32_t>(state.rdx);
-        if (*path != "." || flags != guestOpenDirectory || mode != 0) {
-            throw unsupported(
-                state, syscallRip,
-                "only the observed open(\".\", O_RDONLY|O_DIRECTORY, 0) is implemented");
+        if (*path == "." && flags == guestOpenDirectory && mode == 0) {
+            const auto descriptor = fileSpace_.openCurrentDirectory(flags);
+            setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
+            return {};
         }
-        const auto descriptor = fileSpace_.openCurrentDirectory(flags);
-        setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
-        return {};
+        if (flags == 0 && mode == 0 &&
+            std::filesystem::path(*path).is_absolute()) {
+            std::error_code error;
+            const auto canonicalPath = std::filesystem::canonical(*path, error);
+            if (error) {
+                setError(state, error.value());
+                return {};
+            }
+            if (!isWithinDirectory(fileSpace_.currentDirectory(),
+                                   canonicalPath)) {
+                std::ostringstream reason;
+                reason << "guest VFS has no mapping for read-only path \""
+                       << *path << '"';
+                throw unsupported(state, syscallRip, reason.str());
+            }
+            if (!std::filesystem::is_regular_file(canonicalPath, error) ||
+                error) {
+                setError(state, error ? error.value() : EINVAL);
+                return {};
+            }
+            const auto descriptor =
+                fileSpace_.openReadOnlyFile(canonicalPath, flags);
+            setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
+            return {};
+        }
+        {
+            std::ostringstream reason;
+            reason << "only the observed current-directory and mapped user-file open operations are implemented; got path=\""
+                   << *path << "\" flags=0x" << std::hex << flags
+                   << " mode=0x" << mode;
+            throw unsupported(state, syscallRip, reason.str());
+        }
     }
     if (number == syscallClose) {
         const auto descriptor = GuestFileDescriptor{

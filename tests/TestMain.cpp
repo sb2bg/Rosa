@@ -14153,7 +14153,7 @@ void testDarwinOpenCurrentDirectory() {
 
     state.rax = openNumber;
     state.rdi = pathAddress.value;
-    state.rsi = O_RDONLY;
+    state.rsi = O_WRONLY;
     state.rdx = 0;
     bool unsupportedFlags = false;
     try {
@@ -14161,12 +14161,68 @@ void testDarwinOpenCurrentDirectory() {
             addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     } catch (const std::runtime_error &error) {
         unsupportedFlags = std::string_view(error.what()).find(
-                               "O_RDONLY|O_DIRECTORY") !=
+                               "mapped user-file open") !=
                            std::string_view::npos;
     }
     expect(unsupportedFlags, "unobserved guest open flags did not fail loudly");
     expectEqual(dispatcher.fileSpace().size(), std::size_t{2},
                 "unsupported guest open allocated a descriptor");
+}
+
+void testDarwinOpenReadOnlyUserFile() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    const auto fixturePath = std::filesystem::canonical(
+        std::filesystem::path{ROSA_TEST_HELLO_MACHO_PATH});
+    const auto fixtureString = fixturePath.string();
+    std::vector<std::uint8_t> fixtureBytes(fixtureString.begin(),
+                                            fixtureString.end());
+    fixtureBytes.push_back(0);
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, fixtureBytes);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = O_RDONLY;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEE844ULL}));
+    expectEqual(state.rax, std::uint64_t{3},
+                "read-only guest user-file open returned the wrong descriptor");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "read-only guest user-file open did not clear BSD carry");
+    const auto *opened = dispatcher.fileSpace().lookup(
+        rosa::darwin::GuestFileDescriptor{3});
+    expect(opened != nullptr &&
+               opened->kind == rosa::darwin::GuestFileKind::HostReadOnlyFile &&
+               opened->guestPath == fixturePath && opened->flags == O_RDONLY,
+           "read-only guest user-file open stored the wrong metadata");
+
+    const auto missingString = fixtureString + ".missing";
+    std::vector<std::uint8_t> missingBytes(missingString.begin(),
+                                           missingString.end());
+    missingBytes.push_back(0);
+    addressSpace.writeBytes(pathAddress, missingBytes);
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = O_RDONLY;
+    state.rdx = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                "missing read-only guest file returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "missing read-only guest file did not set BSD carry");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+                "failed read-only guest open allocated a descriptor");
 }
 
 void testDarwinFcntlGetPath() {
@@ -19535,6 +19591,7 @@ int main() {
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin getpid", testDarwinGetpid},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
+        {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
         {"Darwin close guest descriptor", testDarwinCloseGuestDescriptor},
         {"Darwin proc_info set dyld images", testDarwinProcInfoSetDyldImages},
