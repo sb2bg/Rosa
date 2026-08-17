@@ -5388,23 +5388,31 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                   "only register or [base/SIB+disp] MOV from opcode C7 /0 is supported");
             }
             auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
             if (mode != 0x3U && rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining,
                                       "truncated MOV immediate SIB");
                 }
                 const auto sib = code[cursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
                 const auto indexEncoding =
                     static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
                 const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
                 const bool hasIndex = indexEncoding != 0x4U || rexX;
                 const bool noBase = mode == 0 && baseEncoding == 0x5U;
-                if (hasIndex || noBase) {
+                if (noBase) {
                     throw DecodeError(
                         address, remaining,
-                        "only no-index, based MOV immediate SIB is supported");
+                        "only based MOV immediate SIB is supported");
                 }
                 base = decodeRegister(baseEncoding, rexB);
+                if (hasIndex) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
             }
             std::int64_t displacement = 0;
             if (ripRelative) {
@@ -5446,7 +5454,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     ripRelative
                         ? MemoryOperand{Register::Rax, displacement, operandWidth,
                                         std::nullopt, 1, false, true}
-                        : MemoryOperand{base, displacement, operandWidth});
+                        : MemoryOperand{base, displacement, operandWidth,
+                                        index, scale});
             }
             instruction.operands.push_back(ImmediateOperand{
                 rexW ? static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate))

@@ -3386,6 +3386,17 @@ void testRosettaDifferentialSemantics() {
         testCase.memoryCompareSize = 8;
         run(testCase);
     }
+    {
+        auto testCase = make("mov32_immediate_indexed",
+                             CaseId::mov32_immediate_indexed,
+                             differentialBytes_mov32_immediate_indexed);
+        bindMemory(testCase, rosa::x86::Register::Rsi, 0);
+        testCase.request.state.rdx = 0x20;
+        std::fill_n(testCase.request.memory.begin() + 0x1E, 8, 0xA5);
+        testCase.memoryCompareOffset = 0x1E;
+        testCase.memoryCompareSize = 8;
+        run(testCase);
+    }
 
     expectEqual(compared, static_cast<std::size_t>(CaseId::Count),
                 "not every differential case was executed");
@@ -8342,6 +8353,81 @@ void testMovLowByteRegisterToExtendedBase() {
                 std::uint8_t{0xA5}, "MOV byte store through REX.B value differs");
     expectEqual(state.rflags, std::uint64_t{0x8D7},
                 "MOV byte store through REX.B changed flags");
+}
+
+void testMov32BitImmediateToIndexedGuestMemory() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0xC7, 0x04, 0x16, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AE9E8BULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "indexed MOV dword immediate opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "indexed MOV dword immediate length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rsi && memory.index &&
+               *memory.index == rosa::x86::Register::Rdx &&
+               memory.scale == 1 && memory.displacement == 0 &&
+               memory.width == 32 && immediate.width == 32 &&
+               immediate.value == UINT32_MAX,
+           "indexed MOV dword immediate operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov dword [rsi+rdx*1], 0xffffffff") != std::string::npos,
+           "indexed MOV dword immediate dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8020};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 8> sentinel{
+        0x11, 0x22, 0xA5, 0xA5, 0xA5, 0xA5, 0x77, 0x88};
+    addressSpace.writeBytes(
+        rosa::guest::GuestAddress{target.value - 2}, sentinel);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AE9E8BULL});
+    rosa::x86::X86State state;
+    state.rsi = page.value;
+    state.rdx = 0x20;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{target.value - 2}, 8),
+                std::vector<std::uint8_t>{0x11, 0x22, 0xFF, 0xFF,
+                                          0xFF, 0xFF, 0x77, 0x88},
+                "indexed MOV immediate did not store exactly four bytes");
+    expectEqual(state.rsi, page.value,
+                "indexed MOV immediate changed its base");
+    expectEqual(state.rdx, std::uint64_t{0x20},
+                "indexed MOV immediate changed its index");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "indexed MOV immediate changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rsi = page.value;
+    faultState.rdx = 0x20;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "indexed MOV immediate accepted unmapped guest memory");
+    expectEqual(faultState.rsi, page.value,
+                "faulted indexed MOV immediate changed its base");
+    expectEqual(faultState.rdx, std::uint64_t{0x20},
+                "faulted indexed MOV immediate changed its index");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted indexed MOV immediate changed flags");
 }
 
 void testMovImmediateToGuestMemory() {
@@ -22456,6 +22542,8 @@ int main() {
          testMovLowByteRegisterToRipRelativeGuestMemory},
         {"MOV low-byte register to extended base", testMovLowByteRegisterToExtendedBase},
         {"MOV immediate to guest memory", testMovImmediateToGuestMemory},
+        {"MOV 32-bit immediate to indexed guest memory",
+         testMov32BitImmediateToIndexedGuestMemory},
         {"MOV immediate to guest stack", testMovImmediateToGuestStack},
         {"MOV immediate to RIP-relative guest memory",
          testMovImmediateToRipRelativeGuestMemory},
