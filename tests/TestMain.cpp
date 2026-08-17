@@ -17664,6 +17664,34 @@ void testX86Commpage() {
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageKdebugEnableOffset}),
                 std::uint32_t{0}, "x86 commpage kdebug state is not disabled");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{
+                        rosa::darwin::x86CommpageBase.value +
+                        rosa::darwin::x86CommpageDtraceDofEnabledOffset},
+                    1)
+                    .front(),
+                std::uint8_t{0},
+                "x86 commpage DTrace DOF registration is not disabled");
+
+    // Exact cached-dyld gate: movabs rax, commpage+0x4c; mov al,[rax];
+    // and al,1; ret. The generated code must observe the defined zero byte,
+    // without treating the guest address as a host pointer.
+    constexpr std::array<std::uint8_t, 17> loadDtraceDofEnabled{
+        0x48, 0xB8, 0x4C, 0x00, 0xE0, 0xFF, 0xFF, 0x7F, 0x00,
+        0x00, 0x8A, 0x00, 0x24, 0x01, 0xC3, 0x90, 0x90};
+    const auto dtraceBlock = translator.translate(
+        loadDtraceDofEnabled, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State dtraceState;
+    dtraceState.rflags = 0x8D7;
+    static_cast<void>(dtraceBlock.execute(dtraceState, &addressSpace));
+    expectEqual(dtraceState.rax, std::uint64_t{0x00007FFFFFE00000ULL},
+                "generated dyld DTrace gate did not observe disabled state");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(dtraceState.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "generated dyld DTrace gate flags differ");
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageContinuousTimebaseOffset}),

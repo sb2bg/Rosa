@@ -20,6 +20,7 @@ inline constexpr std::size_t x86CommpageUserPageShiftOffset = 0x4E;
 inline constexpr std::uint8_t x86CommpageKernelPageShift = 12;
 inline constexpr std::uint8_t x86CommpageUserPageShift = 12;
 inline constexpr std::size_t x86CommpageKdebugEnableOffset = 0x44;
+inline constexpr std::size_t x86CommpageDtraceDofEnabledOffset = 0x4C;
 inline constexpr std::size_t x86CommpageContinuousTimebaseOffset = 0xC0;
 inline constexpr std::size_t x86CommpageDyldFlagsOffset = 0x100;
 inline constexpr std::size_t x86CommpageNanotimeTscBaseOffset = 0x50;

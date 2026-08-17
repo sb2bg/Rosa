@@ -86,6 +86,14 @@ void mapX86Commpage(guest::AddressSpace &addressSpace,
     addressSpace.populateSparseReadOnly(
         guest::GuestAddress{x86CommpageBase.value + x86CommpageKdebugEnableOffset},
         kdebugDisabled);
+    // Rosa does not register guest DTrace DOF sections with the host kernel.
+    // XNU publishes a defined zero byte here when userspace DOF registration
+    // is disabled; dyld uses it to avoid /dev/dtracehelper entirely.
+    constexpr std::array<std::uint8_t, 1> dtraceDofDisabled{};
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value +
+                            x86CommpageDtraceDofEnabledOffset},
+        dtraceDofDisabled);
     std::array<std::uint8_t, sizeof(continuousTimebase)> continuousTimebaseBytes{};
     writeLittleEndian(continuousTimebaseBytes, 0, continuousTimebase,
                       sizeof(continuousTimebase));
