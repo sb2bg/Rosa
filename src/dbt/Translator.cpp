@@ -3559,12 +3559,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);
             if (destination.width != memory.width ||
-                (destination.width != 8 && destination.width != 64)) {
+                (destination.width != 8 && destination.width != 32 &&
+                 destination.width != 64)) {
                 throw std::runtime_error(
-                    "only byte and qword register-from-memory AND are implemented");
+                    "only byte, dword, and qword register-from-memory AND are implemented");
             }
-            const auto width = destination.width == 8 ? ir::Width::I8
-                                                      : ir::Width::I64;
+            const auto width = destination.width == 8    ? ir::Width::I8
+                               : destination.width == 32 ? ir::Width::I32
+                                                         : ir::Width::I64;
             const auto base = memory.ripRelative
                                   ? builder.constant(
                                         instruction.address.value +

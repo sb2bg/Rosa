@@ -2772,6 +2772,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x28U && opcode != 0x29U && opcode != 0x2BU &&
             opcode != 0x33U &&
             opcode != 0x20U && opcode != 0x21U && opcode != 0x22U &&
+            opcode != 0x23U &&
             opcode != 0x0FU &&
             opcode != 0x81U && opcode != 0xC0U && opcode != 0xC1U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD0U &&
@@ -4305,32 +4306,33 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto regEncoding =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (!rexW || mode > 0x2U || rmEncoding == 0x4U ||
+            if (mode > 0x2U || rmEncoding == 0x4U ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only AND r64, qword [base+disp8/disp32] is supported from opcode 23");
+                    "only AND r32/r64, dword/qword [base+disp8/disp32] is supported from opcode 23");
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining,
-                                      "truncated qword AND disp8");
+                                      "truncated memory AND disp8");
                 }
                 displacement = std::bit_cast<std::int8_t>(code[cursor++]);
             } else if (mode == 0x2U) {
                 if (code.size() - cursor < 4) {
                     throw DecodeError(address, remaining,
-                                      "truncated qword AND disp32");
+                                      "truncated memory AND disp32");
                 }
                 displacement = readI32(code.subspan(cursor, 4));
                 cursor += 4;
             }
             instruction.opcode = Opcode::AndRegMem;
+            const auto width = static_cast<std::uint8_t>(rexW ? 64 : 32);
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(regEncoding, rexR), 64});
+                decodeRegister(regEncoding, rexR), width});
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, rexB), displacement, 64});
+                decodeRegister(rmEncoding, rexB), displacement, width});
         } else if (opcode == 0x84U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated test r8, r8");

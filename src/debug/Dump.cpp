@@ -994,7 +994,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", "
-                   << (memory.width == 8 ? "byte" : "qword") << " [";
+                   << (memory.width == 8    ? "byte"
+                       : memory.width == 32 ? "dword"
+                                            : "qword")
+                   << " [";
             if (memory.ripRelative) {
                 stream << "rip";
             } else {
