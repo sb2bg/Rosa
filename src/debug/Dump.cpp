@@ -1039,7 +1039,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << "set" << conditionName(*instruction.condition)
-                   << " byte [" << x86::registerName(memory.base);
+                   << " byte [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else {
+                stream << x86::registerName(memory.base);
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {

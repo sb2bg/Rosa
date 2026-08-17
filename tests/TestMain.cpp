@@ -21132,6 +21132,72 @@ void testSetGreaterExtendedLowByteRegister() {
            "SETG DH was silently treated as a low-byte register");
 }
 
+void testSetEqualRipRelativeGuestByte() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x0F, 0x94, 0x05, 0x07, 0x68, 0xBC, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802AEA562ULL};
+    constexpr rosa::guest::GuestAddress destination{0x7FF8436B0D70ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccMem &&
+               decoded[0].condition == rosa::x86::Condition::Equal,
+           "RIP-relative SETE opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "RIP-relative SETE length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 8 &&
+               memory.displacement == 0x40BC6807,
+           "RIP-relative SETE operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "sete byte [rip+0x40bc6807]") != std::string::npos,
+           "RIP-relative SETE dump differs");
+
+    constexpr auto page = rosa::guest::GuestAddress{
+        destination.value & ~(rosa::guest::guestPageSize - 1)};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write,
+                              "RIP-relative SETE destination");
+    addressSpace.writeBytes(destination,
+                            std::array<std::uint8_t, 1>{0xA5});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State state;
+    state.rflags = 0x8D7 | (std::uint64_t{1} << 6U);
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readBytes(destination, 1).front(),
+                std::uint8_t{1},
+                "taken RIP-relative SETE stored the wrong byte");
+    expectEqual(state.rflags,
+                std::uint64_t{0x8D7 | (std::uint64_t{1} << 6U)},
+                "RIP-relative SETE changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[destination.value - page.value] = 0xA5;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(page, readOnlyBytes.size(),
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes,
+                                    "read-only SETE destination");
+    rosa::x86::X86State faultState;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative SETE accepted a read-only destination");
+    expectEqual(readOnlyAddressSpace.readBytes(destination, 1).front(),
+                std::uint8_t{0xA5},
+                "faulted RIP-relative SETE changed guest memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative SETE changed flags");
+}
+
 void testSetAboveOrEqualGuestByte() {
     constexpr std::array<std::uint8_t, 8> observed{
         0x0F, 0x93, 0x83, 0xCE, 0x00, 0x00, 0x00, 0xC3};
@@ -22537,6 +22603,8 @@ int main() {
         {"unsigned-below long conditional", testUnsignedBelowLongConditional},
         {"register-indirect jump", testRegisterIndirectJump},
         {"set below low-byte register", testSetBelowLowByteRegister},
+        {"set equal RIP-relative guest byte",
+         testSetEqualRipRelativeGuestByte},
         {"set equal low-byte register", testSetEqualLowByteRegister},
         {"set not-equal low-byte register", testSetNotEqualLowByteRegister},
         {"set greater extended low-byte register",

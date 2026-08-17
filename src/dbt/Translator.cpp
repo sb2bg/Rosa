@@ -4504,13 +4504,19 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            if (memory.width != 8 || memory.index || !memory.hasBase ||
-                memory.ripRelative) {
+            if (memory.width != 8 || memory.index ||
+                (!memory.hasBase && !memory.ripRelative)) {
                 throw std::runtime_error(
-                    "only based byte memory SETcc is implemented");
+                    "only based or RIP-relative byte memory SETcc is implemented");
             }
-            auto address = builder.readGuestRegister(
-                memory.base, ir::Width::I64, instruction.address);
+            auto address = memory.ripRelative
+                               ? builder.constant(
+                                     instruction.address.value +
+                                         instruction.length,
+                                     ir::Width::I64, instruction.address)
+                               : builder.readGuestRegister(
+                                     memory.base, ir::Width::I64,
+                                     instruction.address);
             if (memory.displacement != 0) {
                 const auto displacement = builder.constant(
                     static_cast<std::uint64_t>(memory.displacement),
