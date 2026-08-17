@@ -15742,6 +15742,73 @@ void testMachPortModRefsTrap() {
                 "mach_port_mod_refs invalid task returned the wrong result");
 }
 
+void testMachPortDeallocateTrap() {
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::hostSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto hostName = static_cast<std::uint32_t>(state.rax);
+    state.rax = rosa::darwin::MachDispatcher::hostSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto *host = dispatcher.portSpace().lookup(
+        rosa::darwin::GuestMachPortName{hostName});
+    expect(host != nullptr && host->sendUrefs == 2,
+           "host_self setup did not create two send urefs");
+
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::portDeallocateTrapNumber;
+    state.rdi = dispatcher.taskSelfPortName().value;
+    state.rsi = hostName;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802A8B514ULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "mach_port_deallocate did not return KERN_SUCCESS");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_port_deallocate applied BSD carry semantics");
+    host = dispatcher.portSpace().lookup(
+        rosa::darwin::GuestMachPortName{hostName});
+    expect(host != nullptr && host->sendUrefs == 1,
+           "mach_port_deallocate did not drop one send uref");
+
+    state.rax = rosa::darwin::MachDispatcher::portDeallocateTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{0},
+                "final mach_port_deallocate failed");
+    expect(dispatcher.portSpace().lookup(
+               rosa::darwin::GuestMachPortName{hostName}) == nullptr,
+           "final host send-right deallocation retained a dead name");
+
+    state.rax = rosa::darwin::MachDispatcher::portDeallocateTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{15},
+                "deallocating an absent port returned the wrong result");
+
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto replyName = state.rax;
+    state.rax = rosa::darwin::MachDispatcher::portDeallocateTrapNumber;
+    state.rsi = replyName;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{17},
+                "deallocating a receive-only name returned the wrong result");
+
+    state.rax = rosa::darwin::MachDispatcher::portDeallocateTrapNumber;
+    state.rdi = 0xDEAD;
+    state.rsi = 0;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{0x10000003},
+                "mach_port_deallocate invalid task returned the wrong result");
+}
+
 void testMachReplyPortTrap() {
     rosa::guest::AddressSpace addressSpace;
     rosa::darwin::MachDispatcher dispatcher;
@@ -20429,6 +20496,7 @@ int main() {
         {"Mach host-self trap", testMachHostSelfTrap},
         {"generated Mach host-self trap", testGeneratedMachHostSelfTrap},
         {"Mach port mod-refs trap", testMachPortModRefsTrap},
+        {"Mach port deallocate trap", testMachPortDeallocateTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
         {"Mach port construct trap", testMachPortConstructTrap},
         {"Mach VM deallocate trap", testMachVmDeallocateTrap},

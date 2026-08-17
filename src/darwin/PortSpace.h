@@ -21,6 +21,12 @@ enum class GuestPortType : std::uint8_t {
     Host,
 };
 
+enum class GuestPortDeallocateResult : std::uint8_t {
+    Success,
+    InvalidName,
+    InvalidRight,
+};
+
 struct GuestPort {
     GuestMachPortName name;
     GuestPortType type{GuestPortType::Ordinary};
@@ -49,6 +55,8 @@ class GuestPortSpace {
     allocateReceiveRight(GuestPort attributes = {});
     [[nodiscard]] std::optional<GuestMachPortName>
     copyoutHostSendRight(std::uint32_t maximumUrefs);
+    [[nodiscard]] GuestPortDeallocateResult
+    deallocateUref(GuestMachPortName name);
     void rollbackLastAllocation(GuestMachPortName name) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept { return ports_.size(); }

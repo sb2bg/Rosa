@@ -55,6 +55,36 @@ GuestPortSpace::copyoutHostSendRight(std::uint32_t maximumUrefs) {
     return hostSelfName_;
 }
 
+GuestPortDeallocateResult
+GuestPortSpace::deallocateUref(GuestMachPortName name) {
+    // MACH_PORT_NULL and MACH_PORT_DEAD are accepted no-ops by XNU's
+    // mach_port_deallocate_kernel path.
+    if (name.value == 0 || name.value == UINT32_MAX) {
+        return GuestPortDeallocateResult::Success;
+    }
+    auto found = ports_.find(name.value);
+    if (found == ports_.end()) {
+        return GuestPortDeallocateResult::InvalidName;
+    }
+    auto &port = found->second;
+    if (port.sendUrefs != 0) {
+        --port.sendUrefs;
+    } else if (port.sendOnceUrefs != 0) {
+        --port.sendOnceUrefs;
+    } else {
+        return GuestPortDeallocateResult::InvalidRight;
+    }
+
+    if (name != taskSelfName && !port.hasReceiveRight &&
+        port.sendUrefs == 0 && port.sendOnceUrefs == 0) {
+        if (hostSelfName_ == name) {
+            hostSelfName_.reset();
+        }
+        ports_.erase(found);
+    }
+    return GuestPortDeallocateResult::Success;
+}
+
 std::optional<GuestMachPortName>
 GuestPortSpace::allocatePort(GuestPort attributes) {
     auto candidate = nextSyntheticName_;

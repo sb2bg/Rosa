@@ -30,6 +30,7 @@ class MachDispatcher {
     static constexpr std::uint64_t vmDeallocateTrapNumber = syscallClass | 12U;
     static constexpr std::uint64_t vmProtectTrapNumber = syscallClass | 14U;
     static constexpr std::uint64_t vmMapTrapNumber = syscallClass | 15U;
+    static constexpr std::uint64_t portDeallocateTrapNumber = syscallClass | 18U;
     static constexpr std::uint64_t portModRefsTrapNumber = syscallClass | 19U;
     static constexpr std::uint64_t portConstructTrapNumber = syscallClass | 24U;
     static constexpr std::uint64_t replyPortTrapNumber = syscallClass | 26U;

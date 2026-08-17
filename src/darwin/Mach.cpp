@@ -663,6 +663,28 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = kernSuccess;
         return;
     }
+    case 18U: {
+        // XNU trap 18 drops one send, send-once, or dead-name uref in the
+        // target task's IPC space. Rosa currently has explicit send and
+        // send-once rights; no dead-name state has been observed yet.
+        if (state.rdi != taskSelfPortName().value) {
+            state.rax = machSendInvalidDestination;
+            return;
+        }
+        switch (portSpace_.deallocateUref(GuestMachPortName{
+            static_cast<std::uint32_t>(state.rsi)})) {
+        case GuestPortDeallocateResult::Success:
+            state.rax = kernSuccess;
+            return;
+        case GuestPortDeallocateResult::InvalidName:
+            state.rax = kernInvalidName;
+            return;
+        case GuestPortDeallocateResult::InvalidRight:
+            state.rax = kernInvalidRight;
+            return;
+        }
+        throw std::runtime_error("unreachable guest port deallocation result");
+    }
     case 19U: {
         // XNU trap 19 is _kernelrpc_mach_port_mod_refs_trap. Model the
         // task-self send right currently exposed by Rosa's guest namespace.
