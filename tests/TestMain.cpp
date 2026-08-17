@@ -3078,6 +3078,35 @@ void testRosettaDifferentialSemantics() {
         testCase.memoryCompareSize = sizeof(value);
         run(testCase);
     }
+    {
+        auto testCase = make("movd_xmm_register",
+                             CaseId::movd_xmm_register,
+                             differentialBytes_movd_xmm_register);
+        testCase.request.state.rax = 0xAABBCCDD12345678ULL;
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        run(testCase);
+    }
+    {
+        auto testCase = make("movd_xmm_register_high_bit",
+                             CaseId::movd_xmm_register_high_bit,
+                             differentialBytes_movd_xmm_register_high_bit);
+        testCase.request.state.rax = 0xAABBCCDD80000001ULL;
+        testCase.request.state.xmm[0] = {
+            .low = UINT64_MAX, .high = UINT64_MAX};
+        run(testCase);
+    }
+    {
+        auto testCase = make("movd_xmm_extended_register",
+                             CaseId::movd_xmm_extended_register,
+                             differentialBytes_movd_xmm_extended_register);
+        testCase.request.state.r8 = 0xDEADBEEFCAFEBABEULL;
+        testCase.request.state.xmm[13] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        run(testCase);
+    }
 
     expectEqual(compared, static_cast<std::size_t>(CaseId::Count),
                 "not every differential case was executed");
@@ -14309,6 +14338,87 @@ void testMovqGuestMemoryToXmm() {
                 "faulted MOVQ load changed flags");
 }
 
+void testMovdRegisterToXmm() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x0F, 0x6E, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AA0F1BULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovdXmmReg,
+           "MOVD xmm, r32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "MOVD xmm, r32 length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               source.reg == rosa::x86::Register::Rax && source.width == 32,
+           "MOVD xmm0, eax operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("movd xmm0, eax") !=
+               std::string::npos,
+           "MOVD xmm0, eax dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AA0F1BULL});
+    rosa::x86::X86State state;
+    state.rax = 0xAABBCCDD89ABCDEFULL;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x89ABCDEFULL},
+                "MOVD did not zero-extend EAX into the low XMM lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0},
+                "MOVD did not clear the high XMM lane");
+    expectEqual(state.rax, std::uint64_t{0xAABBCCDD89ABCDEFULL},
+                "MOVD changed its GPR source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVD changed flags");
+
+    constexpr std::array<std::uint8_t, 6> extendedCode{
+        0x66, 0x45, 0x0F, 0x6E, 0xE8, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x1000});
+    const auto extendedDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            extendedDecoded[0].operands[0]);
+    const auto extendedSource =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[1]);
+    expect(extendedDestination.reg == rosa::x86::XmmRegister::Xmm13 &&
+               extendedSource.reg == rosa::x86::Register::R8 &&
+               extendedSource.width == 32,
+           "extended MOVD operands differ");
+    const auto extendedBlock = translator.translate(
+        extendedCode, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State extendedState;
+    extendedState.r8 = 0xDEADBEEFCAFEBABEULL;
+    extendedState.xmm[13] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    extendedState.rflags = 0xAD7;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.xmm[13].low, std::uint64_t{0xCAFEBABEULL},
+                "extended MOVD produced the wrong low lane");
+    expectEqual(extendedState.xmm[13].high, std::uint64_t{0},
+                "extended MOVD did not clear the high lane");
+    expectEqual(extendedState.r8, std::uint64_t{0xDEADBEEFCAFEBABEULL},
+                "extended MOVD changed its source");
+    expectEqual(extendedState.rflags, std::uint64_t{0xAD7},
+                "extended MOVD changed flags");
+
+    bool rejectedMovq = false;
+    try {
+        constexpr std::array<std::uint8_t, 5> movq{
+            0x66, 0x48, 0x0F, 0x6E, 0xC0};
+        static_cast<void>(decoder.decodeBlock(
+            movq, rosa::guest::GuestAddress{0x2000}));
+    } catch (const rosa::x86::DecodeError &) {
+        rejectedMovq = true;
+    }
+    expect(rejectedMovq, "MOVD decoder silently accepted the MOVQ form");
+}
+
 void testPinsrdGuestMemoryToXmm() {
     constexpr std::array<std::uint8_t, 8> code{
         0x66, 0x0F, 0x3A, 0x22, 0x4B, 0xF0, 0x02, 0xC3};
@@ -21155,6 +21265,7 @@ int main() {
         {"MOVDQU guest memory to register", testMovdquGuestMemoryToRegister},
         {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
+        {"MOVD register to XMM", testMovdRegisterToXmm},
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},
         {"PBLENDW registers", testPblendwRegisters},
         {"register move execution", testRegisterMoveExecution},

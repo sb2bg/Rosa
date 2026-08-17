@@ -1250,6 +1250,17 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               instruction.operands[1])
                               .reg);
             break;
+        case x86::Opcode::MovdXmmReg:
+            stream << "movd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[1]));
+            break;
         case x86::Opcode::MovdqaMemReg: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
