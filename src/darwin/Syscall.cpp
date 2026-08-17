@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 namespace rosa::darwin {
 namespace {
@@ -27,6 +28,7 @@ constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
 constexpr std::uint64_t syscallOpen = unixSyscallClass | 5U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
 constexpr std::uint64_t syscallMunmap = unixSyscallClass | 73U;
+constexpr std::uint64_t syscallFcntl = unixSyscallClass | 92U;
 constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 constexpr std::uint64_t syscallProcInfo = unixSyscallClass | 336U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
@@ -51,6 +53,7 @@ constexpr std::size_t maximumControlledWrite = 16U * 1024U * 1024U;
 constexpr std::size_t maximumLongPath = 8192;
 constexpr std::size_t guestPathMaximum = 1024;
 constexpr std::uint32_t guestOpenDirectory = 0x00100000;
+constexpr std::uint32_t guestFcntlGetPath = 50;
 
 struct GuestFsid {
     std::int32_t value[2];
@@ -166,6 +169,36 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         }
         const auto descriptor = fileSpace_.openCurrentDirectory(flags);
         setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
+        return {};
+    }
+    if (number == syscallFcntl) {
+        const auto descriptor = GuestFileDescriptor{
+            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(state.rdi))};
+        const auto command = static_cast<std::uint32_t>(state.rsi);
+        if (command != guestFcntlGetPath) {
+            throw unsupported(
+                state, syscallRip,
+                "only the observed fcntl(F_GETPATH) operation is implemented");
+        }
+        const auto *file = fileSpace_.lookup(descriptor);
+        if (file == nullptr) {
+            setError(state, EBADF);
+            return {};
+        }
+        const auto path = file->guestPath.string();
+        if (path.size() >= guestPathMaximum) {
+            setError(state, ENAMETOOLONG);
+            return {};
+        }
+        std::vector<std::uint8_t> bytes(path.begin(), path.end());
+        bytes.push_back(0);
+        try {
+            addressSpace.writeBytes(guest::GuestAddress{state.rdx}, bytes);
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        setSuccess(state, 0);
         return {};
     }
     if (number == syscallMunmap) {
@@ -329,7 +362,7 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
     }
     if (number != syscallWrite) {
         throw unsupported(state, syscallRip,
-                          "only BSD write(2), exit(2), open(2), getpid(2), munmap(2), "
+                          "only BSD write(2), exit(2), open(2), getpid(2), munmap(2), fcntl(2), "
                           "shared_region_check_np(2), proc_info(2), thread_selfid(2), "
                           "fsgetpath(2), csrctl(2), and getentropy(2) are "
                           "implemented");

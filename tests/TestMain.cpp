@@ -14169,6 +14169,100 @@ void testDarwinOpenCurrentDirectory() {
                 "unsupported guest open allocated a descriptor");
 }
 
+void testDarwinFcntlGetPath() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto fcntlNumber = UINT64_C(0x0200005C);
+    constexpr std::uint32_t openDirectory = 0x00100000;
+    constexpr std::uint32_t fGetPath = 50;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8200};
+    constexpr std::array<std::uint8_t, 2> currentDirectoryPath{'.', 0};
+    constexpr std::array<std::uint8_t, 8> outputSentinel{
+        0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, currentDirectoryPath);
+    addressSpace.writeBytes(outputAddress, outputSentinel);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = openDirectory;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    const auto descriptor = state.rax;
+
+    state.rax = fcntlNumber;
+    state.rdi = descriptor;
+    state.rsi = fGetPath;
+    state.rdx = outputAddress.value;
+    state.rflags = 0xAD7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802A8E584ULL});
+    expect(!outcome.exited, "fcntl F_GETPATH terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "fcntl F_GETPATH did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "fcntl F_GETPATH did not clear BSD carry");
+    const auto expectedPath = std::filesystem::current_path().string();
+    const auto guestPathBytes = addressSpace.readBytes(
+        outputAddress, expectedPath.size() + 1);
+    expect(std::equal(expectedPath.begin(), expectedPath.end(),
+                      guestPathBytes.begin()) && guestPathBytes.back() == 0,
+           "fcntl F_GETPATH returned the wrong guest path");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+                "fcntl F_GETPATH changed the guest descriptor namespace");
+
+    addressSpace.writeBytes(outputAddress, outputSentinel);
+    state.rax = fcntlNumber;
+    state.rdi = 99;
+    state.rsi = fGetPath;
+    state.rdx = outputAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "fcntl F_GETPATH invalid descriptor returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "fcntl F_GETPATH invalid descriptor did not set BSD carry");
+    expectEqual(addressSpace.readBytes(outputAddress, outputSentinel.size()),
+                std::vector<std::uint8_t>(outputSentinel.begin(),
+                                          outputSentinel.end()),
+                "failed fcntl F_GETPATH changed its output");
+
+    state.rax = fcntlNumber;
+    state.rdi = descriptor;
+    state.rsi = fGetPath;
+    state.rdx = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "fcntl F_GETPATH invalid output returned the wrong errno");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+                "faulted fcntl F_GETPATH changed the descriptor namespace");
+
+    state.rax = fcntlNumber;
+    state.rdi = descriptor;
+    state.rsi = 0;
+    state.rdx = outputAddress.value;
+    bool unsupportedCommand = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        unsupportedCommand = std::string_view(error.what()).find("F_GETPATH") !=
+                             std::string_view::npos;
+    }
+    expect(unsupportedCommand, "unobserved guest fcntl command did not fail loudly");
+}
+
 void testDarwinProcInfoSetDyldImages() {
     constexpr auto procInfoNumber = UINT64_C(0x02000150);
     constexpr std::uint64_t allImageInfoAddress = 0x7FF8436AF040ULL;
@@ -19389,6 +19483,7 @@ int main() {
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin getpid", testDarwinGetpid},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
+        {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
         {"Darwin proc_info set dyld images", testDarwinProcInfoSetDyldImages},
         {"Darwin proc_info rejects invalid dyld images",
          testDarwinProcInfoRejectsInvalidDyldImages},
