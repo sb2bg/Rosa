@@ -16492,6 +16492,168 @@ void testMachMessage2Diagnostic() {
                 "mach_msg2 diagnostic mutated the guest port namespace");
 }
 
+void testMachMessage2HostBasicInfoRequest() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr std::uint32_t requestSize = 40;
+    constexpr std::uint32_t receiveSize = 320;
+    constexpr std::uint32_t replySize = 88;
+    constexpr std::uint32_t trailerSize = 8;
+    constexpr std::uint32_t messageBits = 0x1513;
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::hostSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto hostName = static_cast<std::uint32_t>(state.rax);
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto replyName = static_cast<std::uint32_t>(state.rax);
+
+    std::array<std::uint8_t, requestSize> request{};
+    const auto encode32 = [&request](std::size_t offset,
+                                     std::uint32_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, messageBits);
+    encode32(4, requestSize);
+    encode32(8, hostName);
+    encode32(12, replyName);
+    encode32(16, 0);
+    encode32(20, 200);
+    request[28] = 1; // native little-endian NDR integer representation
+    encode32(32, 1);  // HOST_BASIC_INFO
+    encode32(36, 12); // HOST_BASIC_INFO_COUNT
+
+    addressSpace.mapAnonymous(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "host_info message");
+    addressSpace.writeBytes(messageAddress, request);
+    addressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "host_info stack arguments");
+    addressSpace.writeU64(stackAddress, 0xDEADBEEF);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(requestSize) << 32U) |
+                messageBits;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) |
+                hostName;
+    state.r8 = std::uint64_t{200} << 32U;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802A8B664ULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "host_info mach_msg2 did not return MACH_MSG_SUCCESS");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "host_info mach_msg2 changed guest flags");
+    expectEqual(addressSpace.readU32(messageAddress), std::uint32_t{0x1200},
+                "host_info reply bits differ");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 4}),
+                replySize, "host_info reply size differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 12}),
+                replyName, "host_info reply port differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 20}),
+                std::uint32_t{300}, "host_info reply ID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 32}),
+                std::uint32_t{0}, "host_info MIG result differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 36}),
+                std::uint32_t{12}, "host_info output count differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 52}),
+                std::uint32_t{7}, "host_info did not expose x86 CPU type");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 56}),
+                std::uint32_t{4}, "host_info did not expose x86 CPU subtype");
+    const auto maximumCpus = addressSpace.readU32(
+        rosa::guest::GuestAddress{messageAddress.value + 40});
+    const auto availableCpus = addressSpace.readU32(
+        rosa::guest::GuestAddress{messageAddress.value + 44});
+    expect(maximumCpus >= availableCpus && availableCpus != 0,
+           "host_info returned invalid guest CPU counts");
+    expect(addressSpace.readU64(
+               rosa::guest::GuestAddress{messageAddress.value + 80}) != 0,
+           "host_info returned zero maximum memory");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 88}),
+                std::uint32_t{0}, "host_info trailer type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 92}),
+                trailerSize, "host_info trailer size differs");
+    const auto *hostPort = dispatcher.portSpace().lookup(
+        rosa::darwin::GuestMachPortName{hostName});
+    expect(hostPort != nullptr &&
+               hostPort->type == rosa::darwin::GuestPortType::Host &&
+               hostPort->sendUrefs == 1,
+           "host_info consumed or changed the guest host send right");
+
+    rosa::darwin::MachDispatcher faultDispatcher;
+    rosa::x86::X86State faultState;
+    faultState.rax = rosa::darwin::MachDispatcher::hostSelfTrapNumber;
+    faultDispatcher.dispatch(addressSpace, faultState,
+                             rosa::guest::GuestAddress{0x1000});
+    const auto faultHost = static_cast<std::uint32_t>(faultState.rax);
+    faultState.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    faultDispatcher.dispatch(addressSpace, faultState,
+                             rosa::guest::GuestAddress{0x1000});
+    const auto faultReply = static_cast<std::uint32_t>(faultState.rax);
+    encode32(8, faultHost);
+    encode32(12, faultReply);
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read, request, "read-only host_info message");
+    readOnlyAddressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    readOnlyAddressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    readOnlyAddressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+    faultState = state;
+    faultState.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    faultState.r10 = (static_cast<std::uint64_t>(faultReply) << 32U) |
+                     faultHost;
+    faultState.r9 = static_cast<std::uint64_t>(faultReply) << 32U;
+    const auto before = readOnlyAddressSpace.readBytes(messageAddress,
+                                                       request.size());
+    bool faulted = false;
+    try {
+        faultDispatcher.dispatch(
+            readOnlyAddressSpace, faultState,
+            rosa::guest::GuestAddress{0x7FF802A8B664ULL});
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("mach_msg2") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "host_info accepted a non-writable reply buffer");
+    expect(readOnlyAddressSpace.readBytes(messageAddress, request.size()) ==
+               before,
+           "faulted host_info mutated the guest message buffer");
+    expectEqual(faultState.rax,
+                rosa::darwin::MachDispatcher::machMessage2TrapNumber,
+                "faulted host_info changed the trap result register");
+}
+
 void testMachMessage2MachVmMapRequest() {
     constexpr rosa::guest::GuestAddress messageAddress{0x8000};
     constexpr rosa::guest::GuestAddress stackAddress{0x9000};
@@ -20277,6 +20439,8 @@ int main() {
         {"generated Mach VM map trap", testGeneratedMachVmMapTrap},
         {"generated Mach VM protect trap", testGeneratedMachVmProtectTrap},
         {"Mach message2 diagnostic", testMachMessage2Diagnostic},
+        {"Mach message2 host basic-info request",
+         testMachMessage2HostBasicInfoRequest},
         {"Mach message2 mach_vm_map request",
          testMachMessage2MachVmMapRequest},
         {"unsupported Mach trap diagnostic", testUnsupportedMachTrapDiagnostic},

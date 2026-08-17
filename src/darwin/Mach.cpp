@@ -11,6 +11,8 @@
 #include <stdexcept>
 #include <type_traits>
 
+#include <mach/mach.h>
+
 namespace rosa::darwin {
 namespace {
 
@@ -53,6 +55,15 @@ constexpr std::uint32_t machVmMapReplySize = 44U;
 constexpr std::uint32_t machMessageTrailerSize = 8U;
 constexpr std::uint32_t machVmMapReceiveSize =
     machVmMapReplySize + machMessageTrailerSize;
+constexpr std::int32_t hostInfoMessageId = 200;
+constexpr std::int32_t hostInfoReplyId = hostInfoMessageId + 100;
+constexpr std::uint32_t hostInfoRequestSize = 40U;
+constexpr std::uint32_t hostInfoReplySize = 88U;
+constexpr std::uint32_t hostInfoReceiveSize = 320U;
+constexpr std::uint32_t hostBasicInfoFlavor = 1U;
+constexpr std::uint32_t hostBasicInfoCount = 12U;
+constexpr std::int32_t guestCpuTypeX86 = 7;
+constexpr std::int32_t guestCpuSubtypeX86Arch1 = 4;
 
 struct GuestMachPortOptions {
     std::uint32_t flags{};
@@ -132,6 +143,137 @@ struct GuestMachVmMapRequest {
     std::uint32_t maximumProtection{};
     std::uint32_t inheritance{};
 };
+
+struct GuestHostBasicInfo {
+    std::int32_t maximumCpus{};
+    std::int32_t availableCpus{};
+    std::uint32_t memorySize{};
+    std::int32_t cpuType{};
+    std::int32_t cpuSubtype{};
+    std::int32_t cpuThreadType{};
+    std::int32_t physicalCpus{};
+    std::int32_t maximumPhysicalCpus{};
+    std::int32_t logicalCpus{};
+    std::int32_t maximumLogicalCpus{};
+    std::uint64_t maximumMemory{};
+};
+
+static_assert(sizeof(GuestHostBasicInfo) == hostBasicInfoCount * sizeof(std::uint32_t));
+
+std::optional<GuestMachPortName> decodeObservedHostInfoRequest(
+    std::span<const std::uint8_t> message, const x86::X86State &state,
+    std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
+    const GuestPortSpace &portSpace) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    constexpr auto observedBits =
+        machMessageTypeCopySend | (machMessageTypeMakeSendOnce << 8U);
+
+    const auto remoteName = static_cast<std::uint32_t>(state.r10);
+    const auto localName = static_cast<std::uint32_t>(state.r10 >> 32U);
+    const auto receiveName = static_cast<std::uint32_t>(state.r9 >> 32U);
+    const auto *hostPort = portSpace.lookup(GuestMachPortName{remoteName});
+    const auto *replyPort = portSpace.lookup(GuestMachPortName{localName});
+    if (state.rsi != observedMachMessage2Options ||
+        static_cast<std::uint32_t>(state.rdx) != observedBits ||
+        static_cast<std::uint32_t>(state.rdx >> 32U) !=
+            hostInfoRequestSize ||
+        localName != receiveName || static_cast<std::uint32_t>(state.r8) != 0 ||
+        static_cast<std::int32_t>(state.r8 >> 32U) != hostInfoMessageId ||
+        static_cast<std::uint32_t>(state.r9) != 0 ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority) !=
+            hostInfoReceiveSize ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority >> 32U) != 0 ||
+        timeout != 0 || message.size() != hostInfoRequestSize ||
+        hostPort == nullptr || hostPort->type != GuestPortType::Host ||
+        hostPort->sendUrefs == 0 || replyPort == nullptr ||
+        replyPort->type != GuestPortType::Reply ||
+        !replyPort->hasReceiveRight) {
+        return std::nullopt;
+    }
+
+    if (decodeGuestInteger<std::uint32_t>(message, 0) != observedBits ||
+        decodeGuestInteger<std::uint32_t>(message, 4) !=
+            hostInfoRequestSize ||
+        decodeGuestInteger<std::uint32_t>(message, 8) != remoteName ||
+        decodeGuestInteger<std::uint32_t>(message, 12) != localName ||
+        decodeGuestInteger<std::uint32_t>(message, 16) != 0 ||
+        decodeGuestInteger<std::int32_t>(message, 20) != hostInfoMessageId ||
+        !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr) ||
+        decodeGuestInteger<std::uint32_t>(message, 32) !=
+            hostBasicInfoFlavor ||
+        decodeGuestInteger<std::uint32_t>(message, 36) !=
+            hostBasicInfoCount) {
+        return std::nullopt;
+    }
+    return GuestMachPortName{receiveName};
+}
+
+GuestHostBasicInfo queryGuestHostBasicInfo() {
+    host_basic_info_data_t native{};
+    mach_msg_type_number_t count = HOST_BASIC_INFO_COUNT;
+    const auto host = mach_host_self();
+    const auto result = host_info(host, HOST_BASIC_INFO,
+                                  reinterpret_cast<host_info_t>(&native),
+                                  &count);
+    static_cast<void>(mach_port_deallocate(mach_task_self(), host));
+    if (result != KERN_SUCCESS || count < HOST_BASIC_INFO_COUNT) {
+        std::ostringstream stream;
+        stream << "host_info(HOST_BASIC_INFO) failed for guest translation: "
+               << result << " count=" << count;
+        throw std::runtime_error(stream.str());
+    }
+
+    // Rosetta's x86_64 host_info view reports CPU_TYPE_X86 and
+    // CPU_SUBTYPE_X86_ARCH1. The topology and memory fields are the current
+    // machine's values, copied through a host-local structure.
+    return GuestHostBasicInfo{
+        .maximumCpus = native.max_cpus,
+        .availableCpus = native.avail_cpus,
+        .memorySize = native.memory_size,
+        .cpuType = guestCpuTypeX86,
+        .cpuSubtype = guestCpuSubtypeX86Arch1,
+        .cpuThreadType = native.cpu_threadtype,
+        .physicalCpus = native.physical_cpu,
+        .maximumPhysicalCpus = native.physical_cpu_max,
+        .logicalCpus = native.logical_cpu,
+        .maximumLogicalCpus = native.logical_cpu_max,
+        .maximumMemory = native.max_mem,
+    };
+}
+
+std::array<std::uint8_t, hostInfoReplySize + machMessageTrailerSize>
+encodeHostInfoReply(GuestMachPortName receiveName,
+                    const GuestHostBasicInfo &info) {
+    std::array<std::uint8_t,
+               hostInfoReplySize + machMessageTrailerSize> reply{};
+    encodeGuestInteger<std::uint32_t>(
+        reply, 0, machMessageTypeMoveSendOnce << 8U);
+    encodeGuestInteger<std::uint32_t>(reply, 4, hostInfoReplySize);
+    encodeGuestInteger<std::uint32_t>(reply, 8, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 12, receiveName.value);
+    encodeGuestInteger<std::uint32_t>(reply, 16, 0);
+    encodeGuestInteger<std::int32_t>(reply, 20, hostInfoReplyId);
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    std::ranges::copy(nativeNdr, reply.begin() + 24);
+    encodeGuestInteger<std::uint32_t>(reply, 32, kernSuccess);
+    encodeGuestInteger<std::uint32_t>(reply, 36, hostBasicInfoCount);
+    encodeGuestInteger<std::int32_t>(reply, 40, info.maximumCpus);
+    encodeGuestInteger<std::int32_t>(reply, 44, info.availableCpus);
+    encodeGuestInteger<std::uint32_t>(reply, 48, info.memorySize);
+    encodeGuestInteger<std::int32_t>(reply, 52, info.cpuType);
+    encodeGuestInteger<std::int32_t>(reply, 56, info.cpuSubtype);
+    encodeGuestInteger<std::int32_t>(reply, 60, info.cpuThreadType);
+    encodeGuestInteger<std::int32_t>(reply, 64, info.physicalCpus);
+    encodeGuestInteger<std::int32_t>(reply, 68, info.maximumPhysicalCpus);
+    encodeGuestInteger<std::int32_t>(reply, 72, info.logicalCpus);
+    encodeGuestInteger<std::int32_t>(reply, 76, info.maximumLogicalCpus);
+    encodeGuestInteger<std::uint64_t>(reply, 80, info.maximumMemory);
+    encodeGuestInteger<std::uint32_t>(reply, 88, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 92, machMessageTrailerSize);
+    return reply;
+}
 
 std::optional<GuestMachVmMapRequest> decodeObservedMachVmMapRequest(
     std::span<const std::uint8_t> message, const x86::X86State &state,
@@ -686,6 +828,25 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         } catch (const std::runtime_error &) {
             throw inspectUnsupportedMachMessage2(addressSpace, state,
                                                  syscallRip);
+        }
+
+        if (const auto receiveName = decodeObservedHostInfoRequest(
+                message, state, receiveSizeAndPriority, timeout, portSpace_)) {
+            constexpr auto replySize =
+                hostInfoReplySize + machMessageTrailerSize;
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdi}, replySize,
+                    guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto reply =
+                encodeHostInfoReply(*receiveName, queryGuestHostBasicInfo());
+            addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
+            state.rax = kernSuccess;
+            return;
         }
 
         const auto request = decodeObservedMachVmMapRequest(
