@@ -2624,33 +2624,65 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         if (code[cursor] == 0x0FU) {
             if (code.size() - cursor >= 2 && code[cursor + 1] == 0xBAU) {
-                if (code.size() - cursor < 4) {
+                if (code.size() - cursor < 3) {
                     throw DecodeError(address, remaining,
-                                      "truncated BT r32, imm8");
+                                      "truncated BT r/m32, imm8");
                 }
                 const auto modrm = code[cursor + 2];
                 const auto mode =
                     static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
                 const auto extension =
                     static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-                if (mode != 0x3U || extension != 0x4U) {
+                const auto rmEncoding =
+                    static_cast<std::uint8_t>(modrm & 0x7U);
+                if (extension != 0x4U ||
+                    (mode != 0x3U &&
+                     (rmEncoding == 0x4U ||
+                      (mode == 0 && rmEncoding == 0x5U)))) {
                     throw DecodeError(
                         address, remaining,
-                        "only register-direct BT r32, imm8 is supported from 0F BA");
+                        "only BT r32 or dword [base+disp8/disp32], imm8 is supported from 0F BA");
                 }
-                instruction.opcode = Opcode::BitTestRegImm;
-                instruction.length = 4;
+                auto operandCursor = cursor + 3;
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated BT dword disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[operandCursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - operandCursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated BT dword disp32");
+                    }
+                    displacement = readI32(code.subspan(operandCursor, 4));
+                    operandCursor += 4;
+                }
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated BT r/m32 immediate");
+                }
+                const auto immediate = code[operandCursor++];
+                instruction.opcode = mode == 0x3U ? Opcode::BitTestRegImm
+                                                   : Opcode::BitTestMemImm;
+                instruction.length = static_cast<std::uint8_t>(
+                    operandCursor - cursor);
                 std::copy_n(
-                    code.begin() + static_cast<std::ptrdiff_t>(cursor), 4,
-                    instruction.bytes.begin());
-                instruction.operands.push_back(RegisterOperand{
-                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U),
-                                   false),
-                    32});
+                    code.begin() + static_cast<std::ptrdiff_t>(cursor),
+                    instruction.length, instruction.bytes.begin());
+                if (mode == 0x3U) {
+                    instruction.operands.push_back(RegisterOperand{
+                        decodeRegister(rmEncoding, false), 32});
+                } else {
+                    instruction.operands.push_back(MemoryOperand{
+                        decodeRegister(rmEncoding, false), displacement, 32});
+                }
                 instruction.operands.push_back(
-                    ImmediateOperand{code[cursor + 3], 8});
+                    ImmediateOperand{immediate, 8});
                 result.push_back(std::move(instruction));
-                cursor += 4;
+                cursor = operandCursor;
                 if (result.size() == maximumInstructions) {
                     return result;
                 }

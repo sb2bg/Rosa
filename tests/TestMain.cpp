@@ -2065,6 +2065,49 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("bt32_memory_set", CaseId::bt32_memory_set,
+                             differentialBytes_bt32_memory_set);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        const std::uint32_t value = 1U << 21U;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value,
+                    sizeof(value));
+        testCase.request.state.rflags &= ~carryFlag;
+        testCase.flagMask = carryFlag;
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("bt32_memory_clear", CaseId::bt32_memory_clear,
+                             differentialBytes_bt32_memory_clear);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        const std::uint32_t value = 0;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value,
+                    sizeof(value));
+        testCase.request.state.rflags |= carryFlag;
+        testCase.flagMask = carryFlag;
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("bt32_memory_masked_immediate",
+                             CaseId::bt32_memory_masked_immediate,
+                             differentialBytes_bt32_memory_masked_immediate);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        const std::uint32_t first = 0;
+        const std::uint32_t second = 1U << 5U;
+        std::memcpy(testCase.request.memory.data() + 0x10, &first,
+                    sizeof(first));
+        std::memcpy(testCase.request.memory.data() + 0x14, &second,
+                    sizeof(second));
+        testCase.request.state.rflags &= ~carryFlag;
+        testCase.flagMask = carryFlag;
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(first) + sizeof(second);
+        run(testCase);
+    }
+    {
         auto testCase = make("cmovae64_taken", CaseId::cmovae64_taken,
                              differentialBytes_cmovae64_taken);
         testCase.request.state.rsi = 0x0123456789ABCDEFULL;
@@ -17638,8 +17681,6 @@ void testBitTestRegisterImmediate32() {
         }
         expect(rejected, message);
     };
-    constexpr std::array<std::uint8_t, 4> memoryForm{
-        0x0F, 0xBA, 0x26, 0x09};
     constexpr std::array<std::uint8_t, 4> wrongExtension{
         0x0F, 0xBA, 0xEE, 0x09};
     constexpr std::array<std::uint8_t, 5> rexW{
@@ -17648,11 +17689,92 @@ void testBitTestRegisterImmediate32() {
         0x44, 0x0F, 0xBA, 0xE6, 0x09};
     constexpr std::array<std::uint8_t, 5> rexX{
         0x42, 0x0F, 0xBA, 0xE6, 0x09};
-    expectRejected(memoryForm, "BT memory form was accepted");
     expectRejected(wrongExtension, "non-BT 0F BA extension was accepted");
     expectRejected(rexW, "BT r64 form was accepted");
     expectRejected(rexR, "REX.R BT extension was accepted");
     expectRejected(rexX, "REX.X BT form was accepted");
+}
+
+void testBitTestGuestDwordImmediate() {
+    constexpr std::array<std::uint8_t, 9> observed{
+        0x0F, 0xBA, 0xA3, 0x90, 0x00, 0x00, 0x00, 0x15, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        observed, rosa::guest::GuestAddress{0x7FF802AA05C0ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::BitTestMemImm,
+           "BT dword memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "BT dword memory length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbx && memory.width == 32 &&
+               memory.displacement == 0x90 && immediate.width == 8 &&
+               immediate.value == 0x15,
+           "BT dword [rbx+0x90], 0x15 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "bt dword [rbx+0x90], 0x15") != std::string::npos,
+           "BT dword memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress operand{0x8090};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const std::array<std::uint8_t, 8> setValue{
+        0x00, 0x00, 0x20, 0x00, 0xEF, 0xBE, 0xAD, 0xDE};
+    addressSpace.writeBytes(operand, setValue);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        observed, rosa::guest::GuestAddress{0x7FF802AA05C0ULL});
+    rosa::x86::X86State state;
+    state.rbx = page.value;
+    state.rflags = 0xAD6;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "BT dword memory did not copy the selected bit to CF");
+    expectEqual(state.rbx, page.value, "BT dword memory changed its base");
+    expect(addressSpace.readBytes(operand, setValue.size()) ==
+               std::vector<std::uint8_t>(setValue.begin(), setValue.end()),
+           "BT dword memory changed its source or read beyond four bytes");
+
+    const std::array<std::uint8_t, 4> clearValue{};
+    addressSpace.writeBytes(operand, clearValue);
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "BT dword memory did not clear CF");
+
+    constexpr std::array<std::uint8_t, 6> highOffset{
+        0x0F, 0xBA, 0x63, 0x10, 0x25, 0xC3};
+    const auto highBlock = translator.translate(
+        highOffset, rosa::guest::GuestAddress{0x1000});
+    const std::array<std::uint8_t, 8> bitString{
+        0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8010}, bitString);
+    state.rflags = 0xAD6;
+    static_cast<void>(highBlock.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "BT dword memory did not mask the immediate to five bits");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rbx = page.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "BT dword from unmapped guest memory did not fault");
+    expectEqual(faultState.rbx, page.value,
+                "faulted BT dword memory changed its base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted BT dword memory changed flags");
 }
 
 void testBitScanForward64() {
@@ -20530,6 +20652,7 @@ int main() {
         {"AND 32-bit register with guest memory",
          testAnd32BitRegisterWithGuestMemory},
         {"BT 32-bit register with immediate", testBitTestRegisterImmediate32},
+        {"BT guest dword with immediate", testBitTestGuestDwordImmediate},
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},
         {"BSWAP 32-bit register", testByteSwap32},

@@ -3619,6 +3619,32 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             break;
         }
+        case x86::Opcode::BitTestMemImm: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto bitIndex =
+                std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (memory.width != 32 || bitIndex.width != 8 ||
+                memory.index || !memory.hasBase || memory.ripRelative) {
+                throw std::runtime_error(
+                    "only based dword BT memory operands are implemented");
+            }
+            auto address = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto value = builder.loadGuest(
+                address, ir::Width::I32, instruction.address);
+            builder.updateBitTestFlags(
+                value, static_cast<std::uint8_t>(bitIndex.value & 0x1FU),
+                ir::Width::I32, instruction.address);
+            break;
+        }
         case x86::Opcode::BitScanReverseRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(

@@ -818,6 +818,20 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << std::get<x86::ImmediateOperand>(instruction.operands[1])
                           .value;
             break;
+        case x86::Opcode::BitTestMemImm: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "bt dword [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], 0x"
+                   << std::get<x86::ImmediateOperand>(instruction.operands[1])
+                          .value;
+            break;
+        }
         case x86::Opcode::BitScanReverseRegReg:
             stream << "bsr "
                    << registerOperandName(
