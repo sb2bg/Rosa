@@ -965,19 +965,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const bool rexB = (rex & 0x1U) != 0;
                 const auto modrm = code[testOpcodeOffset + 2];
                 const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-                if (rexW || mode != 0x3U) {
+                if (mode != 0x3U) {
                     throw DecodeError(
                         address, remaining,
-                        "only register-direct MOVD xmm, r32 is supported");
+                        "only register-direct MOVD/MOVQ xmm, register is supported");
                 }
-                instruction.opcode = Opcode::MovdXmmReg;
+                instruction.opcode =
+                    rexW ? Opcode::MovqXmmReg : Opcode::MovdXmmReg;
                 instruction.operands.push_back(XmmRegisterOperand{
                     static_cast<XmmRegister>(static_cast<std::uint8_t>(
                         ((modrm >> 3U) & 0x7U) | (rexR ? 8U : 0U)))});
                 instruction.operands.push_back(RegisterOperand{
                     decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U),
                                    rexB),
-                    32});
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
                 const auto length = testOpcodeOffset + 3 - instructionStart;
                 instruction.length = static_cast<std::uint8_t>(length);
                 std::copy_n(

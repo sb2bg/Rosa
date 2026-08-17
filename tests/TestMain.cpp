@@ -3271,6 +3271,24 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movq_xmm_register",
+                             CaseId::movq_xmm_register,
+                             differentialBytes_movq_xmm_register);
+        testCase.request.state.rsi = 0xFEDCBA9876543210ULL;
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL, .high = UINT64_MAX};
+        run(testCase);
+    }
+    {
+        auto testCase = make("movq_xmm_extended_register",
+                             CaseId::movq_xmm_extended_register,
+                             differentialBytes_movq_xmm_extended_register);
+        testCase.request.state.r8 = 0x8000000000000001ULL;
+        testCase.request.state.xmm[13] = {
+            .low = 0x0123456789ABCDEFULL, .high = UINT64_MAX};
+        run(testCase);
+    }
+    {
         auto testCase = make("movd_memory", CaseId::movd_memory,
                              differentialBytes_movd_memory);
         bindMemory(testCase, rosa::x86::Register::R14, 0);
@@ -14930,16 +14948,41 @@ void testMovdRegisterToXmm() {
     expectEqual(extendedState.rflags, std::uint64_t{0xAD7},
                 "extended MOVD changed flags");
 
-    bool rejectedMovq = false;
-    try {
-        constexpr std::array<std::uint8_t, 5> movq{
-            0x66, 0x48, 0x0F, 0x6E, 0xC0};
-        static_cast<void>(decoder.decodeBlock(
-            movq, rosa::guest::GuestAddress{0x2000}));
-    } catch (const rosa::x86::DecodeError &) {
-        rejectedMovq = true;
-    }
-    expect(rejectedMovq, "MOVD decoder silently accepted the MOVQ form");
+    constexpr std::array<std::uint8_t, 6> movq{
+        0x66, 0x48, 0x0F, 0x6E, 0xC6, 0xC3};
+    const auto movqDecoded = decoder.decodeBlock(
+        movq, rosa::guest::GuestAddress{0x7FF802A8BE13ULL});
+    expect(movqDecoded[0].opcode == rosa::x86::Opcode::MovqXmmReg,
+           "MOVQ xmm, r64 opcode differs");
+    const auto movqDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(movqDecoded[0].operands[0]);
+    const auto movqSource =
+        std::get<rosa::x86::RegisterOperand>(movqDecoded[0].operands[1]);
+    expectEqual(movqDecoded[0].length, std::uint8_t{5},
+                "MOVQ xmm, r64 length differs");
+    expect(movqDestination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               movqSource.reg == rosa::x86::Register::Rsi &&
+               movqSource.width == 64,
+           "MOVQ xmm0, rsi operands differ");
+    expect(rosa::debug::dumpX86(movqDecoded).find("movq xmm0, rsi") !=
+               std::string::npos,
+           "MOVQ xmm0, rsi dump differs");
+    const auto movqBlock = translator.translate(
+        movq, rosa::guest::GuestAddress{0x7FF802A8BE13ULL});
+    rosa::x86::X86State movqState;
+    movqState.rsi = 0xFEDCBA9876543210ULL;
+    movqState.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = UINT64_MAX};
+    movqState.rflags = 0xAD7;
+    static_cast<void>(movqBlock.execute(movqState));
+    expectEqual(movqState.xmm[0].low,
+                std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVQ copied the wrong low XMM lane");
+    expectEqual(movqState.xmm[0].high, std::uint64_t{0},
+                "MOVQ did not clear the high XMM lane");
+    expectEqual(movqState.rsi, std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVQ changed its source GPR");
+    expectEqual(movqState.rflags, std::uint64_t{0xAD7},
+                "MOVQ changed flags");
 }
 
 void testMovdXmmToGuestMemory() {

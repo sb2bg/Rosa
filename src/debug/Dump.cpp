@@ -1326,7 +1326,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               .reg);
             break;
         case x86::Opcode::MovdXmmReg:
-            stream << "movd "
+        case x86::Opcode::MovqXmmReg:
+            stream << (instruction.opcode == x86::Opcode::MovqXmmReg
+                           ? "movq "
+                           : "movd ")
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0])
