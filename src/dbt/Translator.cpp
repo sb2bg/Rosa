@@ -2091,6 +2091,35 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::MovsxRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: movsx memory operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            auto address = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto value = builder.loadGuest(
+                address, ir::Width::I8, instruction.address);
+            const auto shifted = builder.shiftLeft(
+                value, 56, ir::Width::I64, instruction.address);
+            const auto extended = builder.shiftRightArithmetic(
+                shifted, 56, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(destination.reg, extended,
+                                       ir::Width::I32,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::MovzxRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: movzx operand count");

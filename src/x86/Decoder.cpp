@@ -572,6 +572,58 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code.size() - cursor >= 2 && code[cursor] == 0x0FU &&
+            code[cursor + 1] == 0xBEU) {
+            if (code.size() - cursor < 3) {
+                throw DecodeError(address, remaining,
+                                  "truncated movsx r32, byte [memory]");
+            }
+            auto operandCursor = cursor + 2;
+            const auto modrm = code[operandCursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode == 0x3U || rmEncoding == 0x4U ||
+                (mode == 0 && rmEncoding == 0x5U)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only MOVSX r32, byte [base+disp8/disp32] is supported without REX");
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOVSX byte disp8");
+                }
+                displacement =
+                    std::bit_cast<std::int8_t>(code[operandCursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - operandCursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOVSX byte disp32");
+                }
+                displacement = readI32(code.subspan(operandCursor, 4));
+                operandCursor += 4;
+            }
+            instruction.opcode = Opcode::MovsxRegMem;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), false),
+                32});
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(rmEncoding, false), displacement, 8});
+            const auto length = operandCursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(
+                code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            cursor = operandCursor;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         const bool movzxByteHasRex = code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
         const auto movzxByteOpcodeOffset = cursor + (movzxByteHasRex ? 1U : 0U);
         if (code.size() - movzxByteOpcodeOffset >= 2 &&

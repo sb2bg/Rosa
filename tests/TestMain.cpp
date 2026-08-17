@@ -1893,6 +1893,28 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movsx8_memory_positive",
+                             CaseId::movsx8_memory_positive,
+                             differentialBytes_movsx8_memory_positive);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rdx = UINT64_MAX;
+        testCase.request.memory[0] = 0x2F;
+        testCase.memoryCompareSize = 1;
+        testCase.flagMask = arithmeticFlags | directionFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("movsx8_memory_negative",
+                             CaseId::movsx8_memory_negative,
+                             differentialBytes_movsx8_memory_negative);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rdx = UINT64_MAX;
+        testCase.request.memory[0] = 0x80;
+        testCase.memoryCompareSize = 1;
+        testCase.flagMask = arithmeticFlags | directionFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("movzx8_register", CaseId::movzx8_register,
                              differentialBytes_movzx8_register);
         testCase.request.state.rcx = 0xAABBCCDDEEFF00A5ULL;
@@ -9013,6 +9035,87 @@ void testMovsxLowByteRegisterTo32BitRegister() {
     expectRejected(noRex, "non-REX MOVSX r32, r8 was accepted");
     expectRejected(memory, "MOVSX byte memory form was accepted");
     expectRejected(rexW, "MOVSX r64, r8 was accepted");
+}
+
+void testMovsxGuestByteTo32BitRegister() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x0F, 0xBE, 0x17, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802A8C856ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovsxRegMem,
+           "MOVSX r32, byte [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "MOVSX r32, byte [memory] length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx &&
+               destination.width == 32,
+           "MOVSX byte memory destination differs");
+    expect(memory.base == rosa::x86::Register::Rdi && memory.width == 8 &&
+               memory.displacement == 0,
+           "MOVSX byte memory source differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movsx edx, byte [rdi]") != std::string::npos,
+           "MOVSX byte memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress source{0x8120};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802A8C856ULL});
+
+    constexpr std::array<std::uint8_t, 1> positive{0x2F};
+    addressSpace.writeBytes(source, positive);
+    rosa::x86::X86State positiveState;
+    positiveState.rdi = source.value;
+    positiveState.rdx = UINT64_MAX;
+    positiveState.rflags = 0x8D7;
+    static_cast<void>(block.execute(positiveState, &addressSpace));
+    expectEqual(positiveState.rdx, std::uint64_t{0x2F},
+                "positive MOVSX byte memory result differs");
+    expectEqual(positiveState.rdi, source.value,
+                "positive MOVSX byte memory changed its base");
+    expectEqual(positiveState.rflags, std::uint64_t{0x8D7},
+                "positive MOVSX byte memory changed flags");
+
+    constexpr std::array<std::uint8_t, 1> negative{0x80};
+    addressSpace.writeBytes(source, negative);
+    rosa::x86::X86State negativeState;
+    negativeState.rdi = source.value;
+    negativeState.rdx = UINT64_MAX;
+    negativeState.rflags = 0xAD7;
+    static_cast<void>(block.execute(negativeState, &addressSpace));
+    expectEqual(negativeState.rdx, std::uint64_t{0xFFFFFF80},
+                "negative MOVSX byte memory result differs");
+    expectEqual(addressSpace.readBytes(source, 1).front(), std::uint8_t{0x80},
+                "MOVSX byte memory changed its source");
+    expectEqual(negativeState.rflags, std::uint64_t{0xAD7},
+                "negative MOVSX byte memory changed flags");
+
+    rosa::guest::AddressSpace unmapped;
+    rosa::x86::X86State faultState;
+    faultState.rdi = source.value;
+    faultState.rdx = 0x0123456789ABCDEFULL;
+    faultState.rflags = 0xBD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmapped));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "MOVSX byte from unmapped guest memory did not fault");
+    expectEqual(faultState.rdx, std::uint64_t{0x0123456789ABCDEFULL},
+                "faulted MOVSX byte memory changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "faulted MOVSX byte memory changed flags");
 }
 
 void testMovzxGuestByteTo32BitRegister() {
@@ -19578,6 +19681,8 @@ int main() {
          testMovzxLowByteRegisterTo32BitRegister},
         {"MOVSX low-byte register to 32-bit register",
          testMovsxLowByteRegisterTo32BitRegister},
+        {"MOVSX guest byte to 32-bit register",
+         testMovsxGuestByteTo32BitRegister},
         {"MOVZX guest byte to 32-bit register",
          testMovzxGuestByteTo32BitRegister},
         {"MOVZX guest byte with SIB to 64-bit register",
