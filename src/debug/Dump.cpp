@@ -1821,6 +1821,10 @@ std::string dumpGuestFailure(std::string_view imageHint, const std::exception &e
     dumpMapping(stream, "RSP", rspMapping);
     stream << "  blocks: executed=" << std::dec << dispatcher.executedBlocks()
            << " translations=" << dispatcher.translatedBlocks() << '\n';
+    if (dispatcher.machDispatcher().lastPortConstruct()) {
+        stream << "  guest Mach port namespace:\n    "
+               << dispatcher.machDispatcher().portSpaceSummary() << '\n';
+    }
     const auto hotBlocks = dispatcher.hotBlocks();
     if (!hotBlocks.empty()) {
         stream << "  hot guest blocks:\n";

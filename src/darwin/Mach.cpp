@@ -1,7 +1,9 @@
 #include "darwin/Mach.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <optional>
@@ -30,6 +32,47 @@ constexpr std::uint64_t maximumUserMapEnd = 0x00007FFFFFFFF000ULL;
 constexpr std::uint32_t machPortRightSend = 0;
 constexpr std::uint32_t machPortRightCount = 6;
 constexpr std::uint32_t machPortUrefsMaximum = 0xFFFF;
+constexpr std::uint32_t machPortQlimitDefault = 5;
+constexpr std::uint32_t mpoReplyPort = 0x1000;
+constexpr std::uint32_t observedDyldPortOptions = mpoReplyPort;
+
+struct GuestMachPortOptions {
+    std::uint32_t flags{};
+    std::uint32_t queueLimit{};
+    std::array<std::uint64_t, 2> specialFields{};
+};
+
+static_assert(sizeof(GuestMachPortOptions) == 24);
+
+template <typename Integer>
+Integer decodeGuestInteger(std::span<const std::uint8_t> bytes,
+                           std::size_t offset) {
+    Integer value{};
+    std::memcpy(&value, bytes.data() + offset, sizeof(value));
+    return value;
+}
+
+GuestMachPortOptions decodeGuestPortOptions(
+    std::span<const std::uint8_t> bytes) {
+    if (bytes.size() != sizeof(GuestMachPortOptions)) {
+        throw std::invalid_argument("guest mach_port_options_t has the wrong size");
+    }
+    return GuestMachPortOptions{
+        .flags = decodeGuestInteger<std::uint32_t>(bytes, 0),
+        .queueLimit = decodeGuestInteger<std::uint32_t>(bytes, 4),
+        .specialFields = {
+            decodeGuestInteger<std::uint64_t>(bytes, 8),
+            decodeGuestInteger<std::uint64_t>(bytes, 16),
+        },
+    };
+}
+
+std::array<std::uint8_t, sizeof(std::uint32_t)>
+encodeGuestPortName(GuestMachPortName name) {
+    std::array<std::uint8_t, sizeof(std::uint32_t)> bytes{};
+    std::memcpy(bytes.data(), &name.value, bytes.size());
+    return bytes;
+}
 
 guest::Permission permissionsFromProtection(std::uint64_t protection) {
     auto permissions = guest::Permission::None;
@@ -104,7 +147,24 @@ std::runtime_error unsupported(const x86::X86State &state, guest::GuestAddress r
 } // namespace
 
 bool MachDispatcher::ownsReceiveRight(GuestMachPortName name) const {
-    return std::ranges::find(receiveRights_, name) != receiveRights_.end();
+    return portSpace_.ownsReceiveRight(name);
+}
+
+std::string MachDispatcher::portSpaceSummary() const {
+    std::ostringstream stream;
+    stream << portSpace_.summary();
+    if (lastPortConstruct_) {
+        const auto &request = *lastPortConstruct_;
+        stream << "\n    last construct: target=0x" << std::hex
+               << request.target.value << " options*=0x"
+               << request.optionsPointer.value << " flags=0x" << request.flags
+               << std::dec << " qlimit-field=" << request.queueLimit
+               << " special[0]=0x" << std::hex << request.specialFields[0]
+               << " special[1]=0x" << request.specialFields[1]
+               << " context=0x" << request.context << " output*=0x"
+               << request.outputPointer.value << std::dec;
+    }
+    return stream.str();
 }
 
 void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
@@ -120,7 +180,7 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         // XNU trap 12 is _kernelrpc_mach_vm_deallocate_trap. The operation
         // removes the page-rounded address range from the target task's map;
         // ranges containing holes still succeed.
-        if (state.rdi != taskSelfPortName_.value) {
+        if (state.rdi != taskSelfPortName().value) {
             state.rax = machSendInvalidDestination;
             return;
         }
@@ -138,7 +198,7 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
     case 14U: {
         // XNU trap 14 is _kernelrpc_mach_vm_protect_trap. Its five x86_64
         // arguments are target, address, size, set_maximum, and new_protection.
-        if (state.rdi != taskSelfPortName_.value) {
+        if (state.rdi != taskSelfPortName().value) {
             state.rax = machSendInvalidDestination;
             return;
         }
@@ -172,7 +232,7 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         // fast path used when object is null, maximum protection is ALL, and
         // inheritance is DEFAULT. The second argument points to an in/out
         // guest mach_vm_address_t.
-        if (state.rdi != taskSelfPortName_.value) {
+        if (state.rdi != taskSelfPortName().value) {
             state.rax = machSendInvalidDestination;
             return;
         }
@@ -226,7 +286,7 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
     case 19U: {
         // XNU trap 19 is _kernelrpc_mach_port_mod_refs_trap. Model the
         // task-self send right currently exposed by Rosa's guest namespace.
-        if (state.rdi != taskSelfPortName_.value) {
+        if (state.rdi != taskSelfPortName().value) {
             state.rax = machSendInvalidDestination;
             return;
         }
@@ -236,7 +296,8 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             return;
         }
         const auto name = static_cast<std::uint32_t>(state.rsi);
-        if (name != taskSelfPortName_.value || taskSelfSendReferences_ == 0) {
+        auto *port = portSpace_.lookup(GuestMachPortName{name});
+        if (port == nullptr || port->sendUrefs == 0) {
             state.rax = kernInvalidName;
             return;
         }
@@ -246,7 +307,7 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         }
         const auto delta = std::bit_cast<std::int32_t>(
             static_cast<std::uint32_t>(state.r10));
-        const auto updated = static_cast<std::int64_t>(taskSelfSendReferences_) +
+        const auto updated = static_cast<std::int64_t>(port->sendUrefs) +
                              static_cast<std::int64_t>(delta);
         if (updated < 0) {
             state.rax = kernInvalidValue;
@@ -256,30 +317,104 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             state.rax = kernUrefsOverflow;
             return;
         }
-        taskSelfSendReferences_ = static_cast<std::uint32_t>(updated);
+        port->sendUrefs = static_cast<std::uint32_t>(updated);
+        state.rax = kernSuccess;
+        return;
+    }
+    case 24U: {
+        // XNU's x86_64 trap ABI is target, options pointer, 64-bit context,
+        // and output-name pointer in RDI, RSI, RDX, and R10 respectively.
+        // Decode the guest structure explicitly instead of aliasing a host ABI
+        // type. The macOS 26.5 structure is 24 bytes.
+        if (state.rdi != taskSelfPortName().value) {
+            state.rax = machSendInvalidDestination;
+            return;
+        }
+
+        GuestMachPortOptions options;
+        try {
+            const auto bytes = addressSpace.readBytes(
+                guest::GuestAddress{state.rsi}, sizeof(GuestMachPortOptions));
+            options = decodeGuestPortOptions(bytes);
+        } catch (const std::runtime_error &) {
+            state.rax = kernInvalidAddress;
+            return;
+        }
+        lastPortConstruct_ = GuestPortConstructObservation{
+            .target = GuestMachPortName{static_cast<std::uint32_t>(state.rdi)},
+            .optionsPointer = guest::GuestAddress{state.rsi},
+            .flags = options.flags,
+            .queueLimit = options.queueLimit,
+            .specialFields = options.specialFields,
+            .context = state.rdx,
+            .outputPointer = guest::GuestAddress{state.r10},
+        };
+
+        // This is the exact reply-port type requested by the cached macOS
+        // 26.5 dyld. Other option combinations remain loud until their rights
+        // and policy semantics have been observed and understood.
+        if (options.flags != observedDyldPortOptions) {
+            throw unsupported(state, syscallRip);
+        }
+
+        try {
+            addressSpace.validateAccess(guest::GuestAddress{state.r10},
+                                        sizeof(std::uint32_t),
+                                        guest::Permission::Write);
+        } catch (const std::runtime_error &) {
+            state.rax = kernInvalidAddress;
+            return;
+        }
+
+        GuestPort port;
+        port.type = GuestPortType::Reply;
+        port.context = state.rdx;
+        port.queueLimit = machPortQlimitDefault;
+        port.optionFlags = options.flags;
+        const auto name = portSpace_.allocateReceiveRight(port);
+        if (!name) {
+            state.rax = kernNoSpace;
+            return;
+        }
+        try {
+            const auto encoded = encodeGuestPortName(*name);
+            addressSpace.writeBytes(guest::GuestAddress{state.r10}, encoded);
+        } catch (const std::runtime_error &) {
+            // Rosa intentionally provides stronger fault atomicity than the
+            // XNU trap wrapper: a failed guest copyout leaves no created right.
+            portSpace_.rollbackLastAllocation(*name);
+            state.rax = kernInvalidAddress;
+            return;
+        }
         state.rax = kernSuccess;
         return;
     }
     case 26U: {
         // mach_reply_port allocates a fresh receive right in the calling task on every call.
-        const auto name = nextReplyPortName_;
-        if (name.value > UINT32_MAX - 0x100U) {
+        GuestPort port;
+        port.type = GuestPortType::Reply;
+        port.queueLimit = machPortQlimitDefault;
+        const auto name = portSpace_.allocateReceiveRight(port);
+        if (!name) {
             state.rax = 0; // MACH_PORT_NULL models allocation exhaustion.
             return;
         }
-        nextReplyPortName_.value += 0x100U;
-        receiveRights_.push_back(name);
-        state.rax = name.value;
+        state.rax = name->value;
         return;
     }
-    case 28U:
-        if (taskSelfSendReferences_ == machPortUrefsMaximum) {
+    case 28U: {
+        auto *taskSelf = portSpace_.lookup(taskSelfPortName());
+        if (taskSelf == nullptr) {
+            throw std::runtime_error("guest task-self port is absent from its namespace");
+        }
+        if (taskSelf->sendUrefs == machPortUrefsMaximum) {
             state.rax = 0;
             return;
         }
-        ++taskSelfSendReferences_;
-        state.rax = taskSelfPortName_.value;
+        ++taskSelf->sendUrefs;
+        state.rax = taskSelfPortName().value;
         return;
+    }
     default:
         throw unsupported(state, syscallRip);
     }

@@ -52,6 +52,9 @@ class Dispatcher {
     }
     [[nodiscard]] std::vector<BlockExecutionCount>
     hotBlocks(std::size_t minimumExecutions = 16, std::size_t limit = 8) const;
+    [[nodiscard]] const darwin::MachDispatcher &machDispatcher() const noexcept {
+        return syscallDispatcher_.machDispatcher();
+    }
 
   private:
     [[nodiscard]] std::span<const std::uint8_t> codeAt(guest::GuestAddress address) const;

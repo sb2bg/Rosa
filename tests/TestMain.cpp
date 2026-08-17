@@ -14870,6 +14870,151 @@ void testMachReplyPortTrap() {
            "mach_reply_port lost a previously allocated receive right");
 }
 
+void testMachPortConstructTrap() {
+    constexpr rosa::guest::GuestAddress optionsAddress{0x8100};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8200};
+    constexpr std::uint32_t mpoReplyPort = 0x1000;
+    constexpr std::uint64_t context = 0x0123456789ABCDEFULL;
+
+    const auto writeOptions = [](rosa::guest::AddressSpace &addressSpace,
+                                 rosa::guest::GuestAddress address,
+                                 std::uint32_t flags,
+                                 std::uint32_t queueLimit,
+                                 std::uint64_t special0 = 0,
+                                 std::uint64_t special1 = 0) {
+        std::array<std::uint8_t, 24> bytes{};
+        std::memcpy(bytes.data(), &flags, sizeof(flags));
+        std::memcpy(bytes.data() + 4, &queueLimit, sizeof(queueLimit));
+        std::memcpy(bytes.data() + 8, &special0, sizeof(special0));
+        std::memcpy(bytes.data() + 16, &special1, sizeof(special1));
+        addressSpace.writeBytes(address, bytes);
+    };
+    const auto invoke = [](rosa::darwin::MachDispatcher &dispatcher,
+                           rosa::guest::AddressSpace &addressSpace,
+                           rosa::guest::GuestAddress options,
+                           rosa::guest::GuestAddress output,
+                           std::uint64_t portContext = context) {
+        rosa::x86::X86State state;
+        state.rax = rosa::darwin::MachDispatcher::portConstructTrapNumber;
+        state.rdi = dispatcher.taskSelfPortName().value;
+        state.rsi = options.value;
+        state.rdx = portContext;
+        state.r10 = output.value;
+        state.rflags = 0x8D7;
+        dispatcher.dispatch(addressSpace, state,
+                            rosa::guest::GuestAddress{0x7FF802A8B55CULL});
+        return state;
+    };
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "mach_port_construct arguments");
+    writeOptions(addressSpace, optionsAddress, mpoReplyPort, 0);
+    rosa::darwin::MachDispatcher dispatcher;
+
+    const auto firstState =
+        invoke(dispatcher, addressSpace, optionsAddress, outputAddress);
+    expectEqual(firstState.rax, std::uint64_t{0},
+                "mach_port_construct did not return KERN_SUCCESS");
+    expectEqual(firstState.rflags, std::uint64_t{0x8D7},
+                "mach_port_construct applied BSD carry semantics");
+    const rosa::darwin::GuestMachPortName first{
+        addressSpace.readU32(outputAddress)};
+    expect(first != dispatcher.taskSelfPortName(),
+           "mach_port_construct collided with task-self");
+    const auto *firstPort = dispatcher.portSpace().lookup(first);
+    expect(firstPort != nullptr, "constructed port is absent from its namespace");
+    expect(firstPort->hasReceiveRight,
+           "mach_port_construct did not create a receive right");
+    expectEqual(firstPort->type, rosa::darwin::GuestPortType::Reply,
+                "mach_port_construct created the wrong port type");
+    expectEqual(firstPort->sendUrefs, std::uint32_t{0},
+                "reply-port construction fabricated a send right");
+    expectEqual(firstPort->sendOnceUrefs, std::uint32_t{0},
+                "reply-port construction fabricated a send-once right");
+    expectEqual(firstPort->context, context,
+                "mach_port_construct lost the port context");
+    expectEqual(firstPort->queueLimit, std::uint32_t{5},
+                "mach_port_construct did not apply the default queue limit");
+    expect(!firstPort->guarded,
+           "MPO_REPLY_PORT unexpectedly created a guarded port");
+    expect(dispatcher.portSpace().lookup(dispatcher.taskSelfPortName()) != nullptr,
+           "task-self does not coexist in the guest port namespace");
+
+    const auto secondState =
+        invoke(dispatcher, addressSpace, optionsAddress, outputAddress, 0);
+    expectEqual(secondState.rax, std::uint64_t{0},
+                "second mach_port_construct failed");
+    const rosa::darwin::GuestMachPortName second{
+        addressSpace.readU32(outputAddress)};
+    expect(second != first, "mach_port_construct reused a live guest name");
+
+    rosa::darwin::MachDispatcher invalidOptionsDispatcher;
+    writeOptions(addressSpace, optionsAddress, 0x1001, 0);
+    bool invalidOptionsRejected = false;
+    try {
+        static_cast<void>(invoke(invalidOptionsDispatcher, addressSpace,
+                                 optionsAddress, outputAddress));
+    } catch (const std::runtime_error &) {
+        invalidOptionsRejected = true;
+    }
+    expect(invalidOptionsRejected,
+           "mach_port_construct accepted unimplemented option semantics");
+    expectEqual(invalidOptionsDispatcher.portSpace().size(), std::size_t{1},
+                "invalid port options mutated the namespace");
+
+    rosa::darwin::MachDispatcher invalidPointerDispatcher;
+    const auto invalidOptionsState = invoke(
+        invalidPointerDispatcher, addressSpace,
+        rosa::guest::GuestAddress{0xDEAD0000}, outputAddress);
+    expectEqual(invalidOptionsState.rax, std::uint64_t{1},
+                "invalid options pointer returned the wrong Mach result");
+    expectEqual(invalidPointerDispatcher.portSpace().size(), std::size_t{1},
+                "invalid options pointer allocated a port");
+
+    rosa::guest::AddressSpace faultAddressSpace;
+    faultAddressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    faultAddressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{0x9000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read);
+    faultAddressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{0xA000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    writeOptions(faultAddressSpace, optionsAddress, mpoReplyPort, 0);
+    rosa::darwin::MachDispatcher faultDispatcher;
+    const auto invalidOutputState = invoke(
+        faultDispatcher, faultAddressSpace, optionsAddress,
+        rosa::guest::GuestAddress{0x9000});
+    expectEqual(invalidOutputState.rax, std::uint64_t{1},
+                "invalid output pointer returned the wrong Mach result");
+    expectEqual(faultDispatcher.portSpace().size(), std::size_t{1},
+                "invalid output pointer left a constructed port");
+
+    const auto recoveredState = invoke(
+        faultDispatcher, faultAddressSpace, optionsAddress,
+        rosa::guest::GuestAddress{0xA000});
+    expectEqual(recoveredState.rax, std::uint64_t{0},
+                "construct did not recover after output fault");
+    expectEqual(faultAddressSpace.readU32(rosa::guest::GuestAddress{0xA000}),
+                std::uint32_t{0x203},
+                "failed construct consumed a guest port name");
+
+    rosa::x86::X86State invalidTaskState;
+    invalidTaskState.rax =
+        rosa::darwin::MachDispatcher::portConstructTrapNumber;
+    invalidTaskState.rdi = 0xDEAD;
+    invalidTaskState.rsi = 0xDEAD0000;
+    invalidTaskState.r10 = 0xDEAD1000;
+    faultDispatcher.dispatch(faultAddressSpace, invalidTaskState,
+                             rosa::guest::GuestAddress{0x1000});
+    expectEqual(invalidTaskState.rax, std::uint64_t{0x10000003},
+                "invalid construct task returned the wrong Mach result");
+}
+
 void testMachVmDeallocateTrap() {
     constexpr rosa::guest::GuestAddress mappingBase{0x4000};
     constexpr auto pageSize = rosa::guest::guestPageSize;
@@ -18542,6 +18687,7 @@ int main() {
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
         {"Mach port mod-refs trap", testMachPortModRefsTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
+        {"Mach port construct trap", testMachPortConstructTrap},
         {"Mach VM deallocate trap", testMachVmDeallocateTrap},
         {"generated Mach VM deallocate trap",
          testGeneratedMachVmDeallocateTrap},

@@ -32,6 +32,9 @@ class SyscallDispatcher {
     [[nodiscard]] const std::optional<GuestDyldInfo> &dyldInfo() const noexcept {
         return dyldInfo_;
     }
+    [[nodiscard]] const MachDispatcher &machDispatcher() const noexcept {
+        return machDispatcher_;
+    }
 
   private:
     const GuestSharedCache *sharedCache_{};

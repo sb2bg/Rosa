@@ -25,6 +25,7 @@ add_library(rosa_core
     src/debug/Dump.cpp
     src/darwin/Commpage.cpp
     src/darwin/Mach.cpp
+    src/darwin/PortSpace.cpp
     src/darwin/SharedCache.cpp
     src/darwin/Syscall.cpp
     src/ir/IR.cpp

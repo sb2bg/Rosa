@@ -1,18 +1,25 @@
 #pragma once
 
+#include "darwin/PortSpace.h"
 #include "guest/Address.h"
 #include "guest/AddressSpace.h"
 #include "x86/Registers.h"
 
+#include <array>
 #include <cstdint>
-#include <vector>
+#include <optional>
+#include <string>
 
 namespace rosa::darwin {
 
-struct GuestMachPortName {
-    std::uint32_t value{};
-
-    auto operator<=>(const GuestMachPortName &) const = default;
+struct GuestPortConstructObservation {
+    GuestMachPortName target;
+    guest::GuestAddress optionsPointer;
+    std::uint32_t flags{};
+    std::uint32_t queueLimit{};
+    std::array<std::uint64_t, 2> specialFields{};
+    std::uint64_t context{};
+    guest::GuestAddress outputPointer;
 };
 
 class MachDispatcher {
@@ -24,6 +31,7 @@ class MachDispatcher {
     static constexpr std::uint64_t vmProtectTrapNumber = syscallClass | 14U;
     static constexpr std::uint64_t vmMapTrapNumber = syscallClass | 15U;
     static constexpr std::uint64_t portModRefsTrapNumber = syscallClass | 19U;
+    static constexpr std::uint64_t portConstructTrapNumber = syscallClass | 24U;
     static constexpr std::uint64_t replyPortTrapNumber = syscallClass | 26U;
     static constexpr std::uint64_t taskSelfTrapNumber = syscallClass | 28U;
 
@@ -36,21 +44,27 @@ class MachDispatcher {
     }
 
     [[nodiscard]] constexpr GuestMachPortName taskSelfPortName() const {
-        return taskSelfPortName_;
+        return GuestPortSpace::taskSelfName;
     }
 
     [[nodiscard]] bool ownsReceiveRight(GuestMachPortName name) const;
+    [[nodiscard]] const GuestPortSpace &portSpace() const noexcept {
+        return portSpace_;
+    }
+    [[nodiscard]] const std::optional<GuestPortConstructObservation> &
+    lastPortConstruct() const noexcept {
+        return lastPortConstruct_;
+    }
+    [[nodiscard]] std::string portSpaceSummary() const;
 
     void dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
                   guest::GuestAddress syscallRip);
 
   private:
-    // Mach port names are opaque identifiers in the guest task's namespace. This value is never
-    // passed to the host Mach APIs or confused with a native mach_port_t.
-    GuestMachPortName taskSelfPortName_{0x103U};
-    GuestMachPortName nextReplyPortName_{0x203U};
-    std::uint32_t taskSelfSendReferences_{};
-    std::vector<GuestMachPortName> receiveRights_;
+    // This namespace contains guest-only names and rights. None of its values
+    // are ever passed to host Mach APIs or confused with mach_port_t.
+    GuestPortSpace portSpace_;
+    std::optional<GuestPortConstructObservation> lastPortConstruct_;
 };
 
 } // namespace rosa::darwin
