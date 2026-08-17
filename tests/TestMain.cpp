@@ -14693,6 +14693,123 @@ void testDarwinGetpid() {
                 "getpid changed an ignored argument register");
 }
 
+void testDarwinSandboxSyscallCheck() {
+    constexpr auto macSyscallNumber = UINT64_C(0x0200017D);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress policyAddress{0x8000};
+    constexpr rosa::guest::GuestAddress operationAddress{0x8020};
+    constexpr rosa::guest::GuestAddress requestAddress{0x8100};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8180};
+    constexpr std::array<std::uint8_t, 8> policy{
+        'S', 'a', 'n', 'd', 'b', 'o', 'x', 0};
+    constexpr std::array<std::uint8_t, 13> operation{
+        's', 'y', 's', 'c', 'a', 'l', 'l', '-', 'u', 'n', 'i', 'x', 0};
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(policyAddress, policy);
+    addressSpace.writeBytes(operationAddress, operation);
+
+    const auto writeRequest = [&](std::uint64_t resultAddress,
+                                  std::uint64_t operationPointer,
+                                  std::uint64_t flags) {
+        const std::array<std::uint64_t, 6> fields{
+            resultAddress,
+            static_cast<std::uint64_t>(::getpid()),
+            operationPointer,
+            0x41,
+            550,
+            flags,
+        };
+        std::array<std::uint8_t, sizeof(fields)> bytes{};
+        std::memcpy(bytes.data(), fields.data(), sizeof(fields));
+        addressSpace.writeBytes(requestAddress, bytes);
+        return bytes;
+    };
+
+    const auto requestBytes = writeRequest(
+        outputAddress.value, operationAddress.value, 1);
+    addressSpace.writeU64(outputAddress, UINT64_MAX);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 2;
+    state.rdx = requestAddress.value;
+    state.rflags = 0x8D7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state,
+        rosa::guest::GuestAddress{0x7FF802AEE7FCULL});
+    expect(!outcome.exited, "Sandbox check terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "unsandboxed syscall check did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "Sandbox check did not clear BSD carry");
+    expectEqual(addressSpace.readU64(outputAddress), std::uint64_t{0},
+                "Sandbox check did not report the syscall allowed");
+    expectEqual(addressSpace.readBytes(requestAddress, requestBytes.size()),
+                std::vector<std::uint8_t>(requestBytes.begin(),
+                                          requestBytes.end()),
+                "Sandbox check changed its input request");
+
+    addressSpace.writeU64(outputAddress, UINT64_MAX);
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 2;
+    state.rdx = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid Sandbox argument pointer returned the wrong errno");
+    expectEqual(addressSpace.readU64(outputAddress), UINT64_MAX,
+                "faulted Sandbox argument read changed its output");
+
+    static_cast<void>(writeRequest(outputAddress.value, 0x9000, 1));
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 2;
+    state.rdx = requestAddress.value;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid Sandbox operation pointer returned the wrong errno");
+    expectEqual(addressSpace.readU64(outputAddress), UINT64_MAX,
+                "faulted Sandbox operation read changed its output");
+
+    static_cast<void>(writeRequest(0x9000, operationAddress.value, 1));
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 2;
+    state.rdx = requestAddress.value;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid Sandbox result pointer returned the wrong errno");
+
+    static_cast<void>(writeRequest(outputAddress.value,
+                                   operationAddress.value, 0));
+    addressSpace.writeU64(outputAddress, UINT64_MAX);
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 2;
+    state.rdx = requestAddress.value;
+    bool unsupportedFlags = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        unsupportedFlags = std::string_view(error.what()).find("flags=0x0") !=
+                           std::string_view::npos;
+    }
+    expect(unsupportedFlags,
+           "unobserved Sandbox flags did not fail diagnostically");
+    expectEqual(addressSpace.readU64(outputAddress), UINT64_MAX,
+                "unsupported Sandbox check changed its output");
+}
+
 void testDarwinOpenCurrentDirectory() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr std::uint32_t openDirectory = 0x00100000;
@@ -20830,6 +20947,7 @@ int main() {
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin getpid", testDarwinGetpid},
+        {"Darwin Sandbox syscall check", testDarwinSandboxSyscallCheck},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},

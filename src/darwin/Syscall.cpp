@@ -11,7 +11,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -33,6 +32,7 @@ constexpr std::uint64_t syscallFcntl = unixSyscallClass | 92U;
 constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 constexpr std::uint64_t syscallProcInfo = unixSyscallClass | 336U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
+constexpr std::uint64_t syscallMac = unixSyscallClass | 381U;
 constexpr std::uint64_t syscallFsgetpath = unixSyscallClass | 427U;
 constexpr std::uint64_t syscallCsrctl = unixSyscallClass | 483U;
 constexpr std::uint64_t syscallGetentropy = unixSyscallClass | 500U;
@@ -55,12 +55,29 @@ constexpr std::size_t maximumLongPath = 8192;
 constexpr std::size_t guestPathMaximum = 1024;
 constexpr std::uint32_t guestOpenDirectory = 0x00100000;
 constexpr std::uint32_t guestFcntlGetPath = 50;
+constexpr std::uint32_t guestSandboxCheckCall = 2;
+constexpr std::uint64_t guestSandboxSyscallFilterType = 0x41;
+constexpr std::uint64_t guestSandboxObservedFlags = 1;
+constexpr std::uint64_t guestMapWithLinkingSyscall = 550;
 
 struct GuestFsid {
     std::int32_t value[2];
 };
 
 static_assert(sizeof(GuestFsid) == 8);
+
+// Private x86_64 Sandbox policy call-2 ABI observed in the guest dyld cache.
+// Every address remains a guest integer until copied through AddressSpace.
+struct GuestSandboxCheckRequest {
+    std::uint64_t resultAddress;
+    std::uint64_t pid;
+    std::uint64_t operationAddress;
+    std::uint64_t filterType;
+    std::uint64_t value;
+    std::uint64_t flags;
+};
+
+static_assert(sizeof(GuestSandboxCheckRequest) == 48);
 
 void setSuccess(x86::X86State &state, std::uint64_t result) {
     state.rax = result;
@@ -149,6 +166,71 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
     }
     if (number == syscallThreadSelfid) {
         setSuccess(state, initialGuestThreadId);
+        return {};
+    }
+    if (number == syscallMac) {
+        std::optional<std::string> policy;
+        try {
+            policy = readGuestCString(
+                addressSpace, guest::GuestAddress{state.rdi},
+                guestPathMaximum);
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        if (!policy) {
+            setError(state, ENAMETOOLONG);
+            return {};
+        }
+        const auto call = static_cast<std::uint32_t>(state.rsi);
+        if (*policy != "Sandbox" || call != guestSandboxCheckCall) {
+            std::ostringstream reason;
+            reason << "only Sandbox policy call 2 is implemented; got policy=\""
+                   << *policy << "\" call=" << std::dec << call;
+            throw unsupported(state, syscallRip, reason.str());
+        }
+
+        GuestSandboxCheckRequest request{};
+        std::optional<std::string> operation;
+        try {
+            const auto requestBytes = addressSpace.readBytes(
+                guest::GuestAddress{state.rdx}, sizeof(request));
+            std::memcpy(&request, requestBytes.data(), sizeof(request));
+            operation = readGuestCString(
+                addressSpace,
+                guest::GuestAddress{request.operationAddress},
+                guestPathMaximum);
+            addressSpace.validateAccess(
+                guest::GuestAddress{request.resultAddress},
+                sizeof(std::uint64_t), guest::Permission::Write);
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        if (!operation) {
+            setError(state, ENAMETOOLONG);
+            return {};
+        }
+
+        const auto guestPid = static_cast<std::uint64_t>(::getpid());
+        if (request.pid != guestPid || *operation != "syscall-unix" ||
+            request.filterType != guestSandboxSyscallFilterType ||
+            request.value != guestMapWithLinkingSyscall ||
+            request.flags != guestSandboxObservedFlags) {
+            std::ostringstream reason;
+            reason << "unsupported Sandbox check: pid=0x" << std::hex
+                   << request.pid << " operation=\"" << *operation
+                   << "\" filter-type=0x" << request.filterType
+                   << " value=0x" << request.value << " flags=0x"
+                   << request.flags;
+            throw unsupported(state, syscallRip, reason.str());
+        }
+
+        // Rosa has not installed a sandbox profile for this controlled guest,
+        // so the exact observed syscall check is allowed. The x86 policy ABI
+        // writes a 64-bit zero decision and returns success.
+        addressSpace.writeU64(guest::GuestAddress{request.resultAddress}, 0);
+        setSuccess(state, 0);
         return {};
     }
     if (number == syscallGetpid) {
