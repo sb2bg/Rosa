@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -66,9 +67,12 @@ constexpr std::uint32_t guestAmfiDyldPolicyCall = 90;
 constexpr std::uint64_t guestAmfiUnrestrictedDyldPolicy = 0x1DF;
 constexpr std::array<std::uint32_t, 2> guestSysctlNameToOid{0, 3};
 constexpr std::array<std::uint32_t, 3> guestLockdownModeOid{103, 101, 101};
+constexpr std::array<std::uint32_t, 2> guestBootArgsOid{1, 143};
 constexpr std::string_view guestLockdownModeName =
     "security.mac.lockdown_mode_state";
+constexpr std::string_view guestBootArgsName = "kern.bootargs";
 constexpr std::uint32_t guestLockdownModeState = 0;
+constexpr std::array<std::uint8_t, 1> guestBootArgs{0};
 
 struct GuestFsid {
     std::int32_t value[2];
@@ -300,11 +304,12 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         }
 
         if (std::ranges::equal(name, guestSysctlNameToOid)) {
-            if (state.r8 == 0 || state.r9 != guestLockdownModeName.size() ||
-                state.rdx == 0 || state.r10 == 0) {
+            if (state.r8 == 0 || state.r9 == 0 ||
+                state.r9 > guestPathMaximum || state.rdx == 0 ||
+                state.r10 == 0) {
                 throw unsupported(
                     state, syscallRip,
-                    "only the observed CTL_SYSCTL/CTL_SYSCTL_NAME2OID request is implemented");
+                    "malformed CTL_SYSCTL/CTL_SYSCTL_NAME2OID request");
             }
             std::string requestedName;
             std::uint64_t outputCapacity = 0;
@@ -319,13 +324,19 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
                 setError(state, EFAULT);
                 return {};
             }
-            if (requestedName != guestLockdownModeName) {
+            std::span<const std::uint32_t> resultOid;
+            if (requestedName == guestLockdownModeName) {
+                resultOid = guestLockdownModeOid;
+            } else if (requestedName == guestBootArgsName) {
+                resultOid = guestBootArgsOid;
+            } else {
                 std::ostringstream reason;
                 reason << "unsupported guest sysctl name \"" << requestedName
                        << '"';
                 throw unsupported(state, syscallRip, reason.str());
             }
-            constexpr auto resultSize = sizeof(guestLockdownModeOid);
+            const auto resultSize =
+                resultOid.size() * sizeof(std::uint32_t);
             if (outputCapacity < resultSize) {
                 setError(state, ENOMEM);
                 return {};
@@ -341,11 +352,46 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
                 setError(state, EFAULT);
                 return {};
             }
-            std::array<std::uint8_t, resultSize> oidBytes{};
-            std::memcpy(oidBytes.data(), guestLockdownModeOid.data(),
-                        resultSize);
+            std::vector<std::uint8_t> oidBytes(resultSize);
+            std::memcpy(oidBytes.data(), resultOid.data(), resultSize);
             addressSpace.writeBytes(guest::GuestAddress{state.rdx}, oidBytes);
             addressSpace.writeU64(guest::GuestAddress{state.r10}, resultSize);
+            setSuccess(state, 0);
+            return {};
+        }
+
+        if (std::ranges::equal(name, guestBootArgsOid)) {
+            if (state.r10 == 0 || state.r8 != 0 || state.r9 != 0) {
+                throw unsupported(
+                    state, syscallRip,
+                    "only a read or size query of guest kern.bootargs is implemented");
+            }
+            std::uint64_t outputCapacity = 0;
+            try {
+                outputCapacity = addressSpace.readU64(
+                    guest::GuestAddress{state.r10});
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.r10}, sizeof(std::uint64_t),
+                    guest::Permission::Write);
+                if (state.rdx != 0) {
+                    addressSpace.validateAccess(
+                        guest::GuestAddress{state.rdx}, guestBootArgs.size(),
+                        guest::Permission::Write);
+                }
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            if (state.rdx != 0 && outputCapacity < guestBootArgs.size()) {
+                setError(state, ENOMEM);
+                return {};
+            }
+            if (state.rdx != 0) {
+                addressSpace.writeBytes(guest::GuestAddress{state.rdx},
+                                        guestBootArgs);
+            }
+            addressSpace.writeU64(guest::GuestAddress{state.r10},
+                                  guestBootArgs.size());
             setSuccess(state, 0);
             return {};
         }
