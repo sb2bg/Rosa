@@ -59,6 +59,7 @@ enum class Opcode {
     CompareEqualXmmDwords,
     AndNotXmm,
     MoveXmmByteMask,
+    ShuffleXmmBytes,
     ShuffleXmmDwords,
     AlignRightXmmBytes,
     BlendXmmWords,
@@ -193,6 +194,8 @@ class Builder {
                    guest::GuestAddress rip);
     void moveXmmByteMask(x86::Register destination, x86::XmmRegister source,
                          guest::GuestAddress rip);
+    void shuffleXmmBytes(x86::XmmRegister destination,
+                         x86::XmmRegister source, guest::GuestAddress rip);
     void shuffleXmmDwords(x86::XmmRegister destination,
                           x86::XmmRegister source, std::uint8_t control,
                           guest::GuestAddress rip);

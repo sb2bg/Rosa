@@ -1201,6 +1201,16 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
+        case x86::Opcode::PshufbRegReg:
+            stream << "pshufb "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0]).reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1]).reg);
+            break;
         case x86::Opcode::PshufdRegRegImm:
             stream << "pshufd "
                    << x86::xmmRegisterName(
@@ -1803,6 +1813,13 @@ std::string dumpIr(const ir::Block &block) {
             stream << "move_xmm_byte_mask "
                    << x86::registerName(*operation.guestRegister) << ", "
                    << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::ShuffleXmmBytes:
+            stream << "shuffle_xmm_bytes "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          *operation.sourceGuestXmmRegister);
             break;
         case ir::Opcode::ShuffleXmmDwords:
             stream << "shuffle_xmm_dwords "

@@ -530,6 +530,35 @@ shuffleXmmDwords(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+shuffleXmmBytes(x86::X86State *state, std::uint64_t destinationIndex,
+                std::uint64_t sourceIndex) {
+    if (destinationIndex >= state->xmm.size() ||
+        sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    const auto input = state->xmm[destinationIndex];
+    const auto control = state->xmm[sourceIndex];
+    const auto byteAt = [](const x86::X86State::XmmValue &value,
+                           std::size_t index) -> std::uint8_t {
+        const auto lane = index < 8 ? value.low : value.high;
+        return static_cast<std::uint8_t>(
+            lane >> ((index & 7U) * 8U));
+    };
+    x86::X86State::XmmValue result{};
+    for (std::size_t index = 0; index < 16; ++index) {
+        const auto mask = byteAt(control, index);
+        const auto value = (mask & 0x80U) != 0
+                               ? std::uint8_t{0}
+                               : byteAt(input, mask & 0x0FU);
+        auto &lane = index < 8 ? result.low : result.high;
+        lane |= static_cast<std::uint64_t>(value)
+                << ((index & 7U) * 8U);
+    }
+    state->xmm[destinationIndex] = result;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 alignRightXmmBytes(x86::X86State *state, std::uint64_t destinationIndex,
                    std::uint64_t sourceIndex, std::uint64_t count) {
     if (destinationIndex >= state->xmm.size() ||
@@ -4019,6 +4048,17 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.moveXmmByteMask(destination, source, instruction.address);
             break;
         }
+        case x86::Opcode::PshufbRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: PSHUFB operand count");
+            }
+            builder.shuffleXmmBytes(
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg,
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg,
+                instruction.address);
+            break;
+        }
         case x86::Opcode::PshufdRegRegImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error("internal decoder error: pshufd operand count");
@@ -4672,6 +4712,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::CompareEqualXmmDwords ||
                          operation.opcode == ir::Opcode::AndNotXmm ||
                          operation.opcode == ir::Opcode::MoveXmmByteMask ||
+                         operation.opcode == ir::Opcode::ShuffleXmmBytes ||
                          operation.opcode == ir::Opcode::ShuffleXmmDwords ||
                          operation.opcode == ir::Opcode::AlignRightXmmBytes ||
                          operation.opcode == ir::Opcode::BlendXmmWords ||
@@ -5526,6 +5567,18 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.movImmediate(
                 arm64::x2, static_cast<std::uint64_t>(*operation.guestXmmRegister));
             assembler.movImmediate(arm64::x16, pointerBits(&moveXmmByteMask32));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::ShuffleXmmBytes:
+            assembler.movImmediate(
+                arm64::x1,
+                static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(
+                arm64::x2,
+                static_cast<std::uint64_t>(
+                    *operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&shuffleXmmBytes));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::ShuffleXmmDwords:

@@ -3308,6 +3308,25 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("pshufb_mixed", CaseId::pshufb_mixed,
+                             differentialBytes_pshufb_mixed);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0706050403020100ULL,
+            .high = 0x0F0E0D0C0B0A0908ULL};
+        testCase.request.state.xmm[1] = {
+            .low = 0x0807820100800E0FULL,
+            .high = 0xFF0F0E0D0C0B0A09ULL};
+        run(testCase);
+    }
+    {
+        auto testCase = make("pshufb_alias", CaseId::pshufb_alias,
+                             differentialBytes_pshufb_alias);
+        testCase.request.state.xmm[0] = {
+            .low = 0x070605040302800FULL,
+            .high = 0xFF0E0D0C0B0A0908ULL};
+        run(testCase);
+    }
+    {
         auto testCase = make("movd_memory", CaseId::movd_memory,
                              differentialBytes_movd_memory);
         bindMemory(testCase, rosa::x86::Register::R14, 0);
@@ -14954,6 +14973,47 @@ void testMovlhpsRegister() {
                 "extended MOVLHPS changed flags");
 }
 
+void testPshufbRegisters() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x66, 0x0F, 0x38, 0x00, 0xC1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802A8CCEDULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PshufbRegReg,
+           "PSHUFB opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "PSHUFB length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "PSHUFB xmm0, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("pshufb xmm0, xmm1") !=
+               std::string::npos,
+           "PSHUFB dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802A8CCEDULL});
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x0706050403020100ULL,
+                    .high = 0x0F0E0D0C0B0A0908ULL};
+    state.xmm[1] = {.low = 0x0807820100800E0FULL,
+                    .high = 0xFF0F0E0D0C0B0A09ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0807000100000E0FULL},
+                "PSHUFB produced the wrong low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x000F0E0D0C0B0A09ULL},
+                "PSHUFB produced the wrong high lane");
+    expectEqual(state.xmm[1].low, std::uint64_t{0x0807820100800E0FULL},
+                "PSHUFB changed its control source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PSHUFB changed flags");
+}
+
 void testMovdRegisterToXmm() {
     constexpr std::array<std::uint8_t, 5> code{
         0x66, 0x0F, 0x6E, 0xC0, 0xC3};
@@ -22251,6 +22311,7 @@ int main() {
         {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"PSHUFB register execution", testPshufbRegisters},
         {"MOVD register to XMM", testMovdRegisterToXmm},
         {"MOVD XMM to guest memory", testMovdXmmToGuestMemory},
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},

@@ -97,6 +97,7 @@ enum class Opcode {
     PandRegMem,
     PandnRegReg,
     PmovmskbRegXmm,
+    PshufbRegReg,
     PshufdRegRegImm,
     PalignrRegRegImm,
     PblendwRegRegImm,
