@@ -144,6 +144,99 @@ std::runtime_error unsupported(const x86::X86State &state, guest::GuestAddress r
     return std::runtime_error(stream.str());
 }
 
+std::runtime_error inspectUnsupportedMachMessage2(
+    const guest::AddressSpace &addressSpace, const x86::X86State &state,
+    guest::GuestAddress rip) {
+    constexpr std::uint64_t maximumInspectedMessageSize = 64U * 1024U;
+    const auto bits = static_cast<std::uint32_t>(state.rdx);
+    const auto sendSize = static_cast<std::uint32_t>(state.rdx >> 32U);
+    const auto remoteName = static_cast<std::uint32_t>(state.r10);
+    const auto localName = static_cast<std::uint32_t>(state.r10 >> 32U);
+    const auto voucherName = static_cast<std::uint32_t>(state.r8);
+    const auto messageId = static_cast<std::int32_t>(state.r8 >> 32U);
+    const auto descriptorCount = static_cast<std::uint32_t>(state.r9);
+    const auto receiveName = static_cast<std::uint32_t>(state.r9 >> 32U);
+
+    std::ostringstream stream;
+    stream << "unsupported Darwin guest mach_msg2 trap\n"
+           << "  RIP: 0x" << std::hex << rip.value << '\n'
+           << "  data: 0x" << state.rdi << '\n'
+           << "  options: 0x" << state.rsi << '\n'
+           << "  bits: 0x" << bits << '\n'
+           << "  send-size: " << std::dec << sendSize << '\n'
+           << "  remote-name: 0x" << std::hex << remoteName << '\n'
+           << "  local-name: 0x" << localName << '\n'
+           << "  voucher-name: 0x" << voucherName << '\n'
+           << "  message-id: " << std::dec << messageId << '\n'
+           << "  descriptor-count: " << descriptorCount << '\n'
+           << "  receive-name: 0x" << std::hex << receiveName << '\n';
+
+    if (state.rsp > std::numeric_limits<std::uint64_t>::max() - 16U) {
+        stream << "  stack-arguments: unavailable (RSP overflow)";
+        return std::runtime_error(stream.str());
+    }
+    try {
+        const auto receiveSizeAndPriority = addressSpace.readU64(
+            guest::GuestAddress{state.rsp + 8U});
+        const auto timeout = addressSpace.readU64(
+            guest::GuestAddress{state.rsp + 16U});
+        stream << "  receive-size: " << std::dec
+               << static_cast<std::uint32_t>(receiveSizeAndPriority) << '\n'
+               << "  priority: 0x" << std::hex
+               << static_cast<std::uint32_t>(receiveSizeAndPriority >> 32U)
+               << '\n'
+               << "  timeout: " << std::dec << timeout << '\n';
+    } catch (const std::runtime_error &error) {
+        stream << "  stack-arguments: unavailable (" << error.what() << ")\n";
+    }
+
+    if (sendSize < 24U || sendSize > maximumInspectedMessageSize) {
+        stream << "  message: not inspected (invalid diagnostic size)";
+        return std::runtime_error(stream.str());
+    }
+
+    try {
+        const auto message = addressSpace.readBytes(
+            guest::GuestAddress{state.rdi}, sendSize);
+        stream << "  header.bits: 0x" << std::hex
+               << decodeGuestInteger<std::uint32_t>(message, 0) << '\n'
+               << "  header.size: " << std::dec
+               << decodeGuestInteger<std::uint32_t>(message, 4) << '\n'
+               << "  header.remote: 0x" << std::hex
+               << decodeGuestInteger<std::uint32_t>(message, 8) << '\n'
+               << "  header.local: 0x"
+               << decodeGuestInteger<std::uint32_t>(message, 12) << '\n'
+               << "  header.voucher: 0x"
+               << decodeGuestInteger<std::uint32_t>(message, 16) << '\n'
+               << "  header.id: " << std::dec
+               << decodeGuestInteger<std::int32_t>(message, 20) << '\n';
+        if (message.size() >= 28U) {
+            stream << "  body.descriptor-count: "
+                   << decodeGuestInteger<std::uint32_t>(message, 24) << '\n';
+        }
+        if (descriptorCount != 0 && message.size() >= 40U) {
+            stream << "  descriptor[0].name: 0x" << std::hex
+                   << decodeGuestInteger<std::uint32_t>(message, 28) << '\n'
+                   << "  descriptor[0].disposition: 0x"
+                   << static_cast<unsigned>(message[38]) << '\n'
+                   << "  descriptor[0].type: 0x"
+                   << static_cast<unsigned>(message[39]) << '\n';
+        }
+        stream << "  message-bytes:";
+        for (std::size_t offset = 0; offset < message.size(); ++offset) {
+            if ((offset % 16U) == 0) {
+                stream << "\n    " << std::hex << std::setw(4)
+                       << std::setfill('0') << offset << ":";
+            }
+            stream << ' ' << std::setw(2) << std::setfill('0')
+                   << static_cast<unsigned>(message[offset]);
+        }
+    } catch (const std::runtime_error &error) {
+        stream << "  message: unavailable (" << error.what() << ')';
+    }
+    return std::runtime_error(stream.str());
+}
+
 } // namespace
 
 bool MachDispatcher::ownsReceiveRight(GuestMachPortName name) const {
@@ -415,6 +508,11 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = taskSelfPortName().value;
         return;
     }
+    case 47U:
+        // mach_msg2 is an eight-argument packed ABI. Capture the first real
+        // request before designing any local IPC or task-kobject behavior.
+        // This diagnostic path is deliberately non-mutating and unsupported.
+        throw inspectUnsupportedMachMessage2(addressSpace, state, syscallRip);
     default:
         throw unsupported(state, syscallRip);
     }

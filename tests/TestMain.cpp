@@ -15589,6 +15589,88 @@ void testGeneratedMachVmProtectTrap() {
                 "generated mach_vm_protect changed guest flags");
 }
 
+void testMachMessage2Diagnostic() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    std::array<std::uint8_t, 100> message{};
+    const auto encode32 = [&message](std::size_t offset, std::uint32_t value) {
+        std::memcpy(message.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, 0x80001513U);
+    encode32(4, static_cast<std::uint32_t>(message.size()));
+    encode32(8, 0x103U);
+    encode32(12, 0x403U);
+    encode32(16, 0);
+    encode32(20, 4811U);
+    encode32(24, 1);
+    encode32(28, 0x503U);
+    message[38] = 0x13;
+    message[39] = 0;
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "mach_msg2 request");
+    addressSpace.writeBytes(messageAddress, message);
+    addressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "mach_msg2 arguments");
+    addressSpace.writeU64(stackAddress, 0xDEADBEEF); // wrapper return address
+    addressSpace.writeU64(rosa::guest::GuestAddress{stackAddress.value + 8U},
+                          0x34U); // receive size 52, priority zero
+    addressSpace.writeU64(rosa::guest::GuestAddress{stackAddress.value + 16U},
+                          0); // timeout
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = 0x0000006480001513ULL;
+    state.r10 = 0x0000040300000103ULL;
+    state.r8 = 0x000012CB00000000ULL;
+    state.r9 = 0x0000040300000001ULL;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+
+    try {
+        dispatcher.dispatch(addressSpace, state,
+                            rosa::guest::GuestAddress{0x7FF802A8B664ULL});
+        throw std::runtime_error("mach_msg2 diagnostic accepted unsupported IPC");
+    } catch (const std::runtime_error &error) {
+        const std::string_view diagnostic{error.what()};
+        expect(diagnostic.find("unsupported Darwin guest mach_msg2 trap") !=
+                   std::string_view::npos,
+               "mach_msg2 diagnostic lacks its boundary class");
+        expect(diagnostic.find("send-size: 100") != std::string_view::npos,
+               "mach_msg2 diagnostic lacks the send size");
+        expect(diagnostic.find("receive-size: 52") != std::string_view::npos,
+               "mach_msg2 diagnostic lacks the stack receive size");
+        expect(diagnostic.find("timeout: 0") != std::string_view::npos,
+               "mach_msg2 diagnostic lacks the stack timeout");
+        expect(diagnostic.find("header.id: 4811") != std::string_view::npos,
+               "mach_msg2 diagnostic lacks the message ID");
+        expect(diagnostic.find("descriptor[0].name: 0x503") !=
+                   std::string_view::npos,
+               "mach_msg2 diagnostic lacks the first descriptor name");
+        expect(diagnostic.find("descriptor[0].disposition: 0x13") !=
+                   std::string_view::npos,
+               "mach_msg2 diagnostic lacks the descriptor disposition");
+        expect(diagnostic.find("0000: 13 15 00 80") !=
+                   std::string_view::npos,
+               "mach_msg2 diagnostic lacks the raw request bytes");
+    }
+    expectEqual(state.rax,
+                rosa::darwin::MachDispatcher::machMessage2TrapNumber,
+                "mach_msg2 diagnostic mutated RAX");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_msg2 diagnostic mutated flags");
+    expectEqual(dispatcher.portSpace().size(), std::size_t{1},
+                "mach_msg2 diagnostic mutated the guest port namespace");
+}
+
 void testUnsupportedMachTrapDiagnostic() {
     rosa::guest::AddressSpace addressSpace;
     rosa::darwin::SyscallDispatcher dispatcher;
@@ -18914,6 +18996,7 @@ int main() {
         {"Mach VM map trap", testMachVmMapTrap},
         {"generated Mach VM map trap", testGeneratedMachVmMapTrap},
         {"generated Mach VM protect trap", testGeneratedMachVmProtectTrap},
+        {"Mach message2 diagnostic", testMachMessage2Diagnostic},
         {"unsupported Mach trap diagnostic", testUnsupportedMachTrapDiagnostic},
         {"IR verification", testIrVerification},
         {"R1 generated execution", testR1ExecutesGeneratedCode},
