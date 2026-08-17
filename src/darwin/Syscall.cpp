@@ -26,6 +26,7 @@ constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
 constexpr std::uint64_t syscallExit = unixSyscallClass | 1U;
 constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
 constexpr std::uint64_t syscallOpen = unixSyscallClass | 5U;
+constexpr std::uint64_t syscallClose = unixSyscallClass | 6U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
 constexpr std::uint64_t syscallMunmap = unixSyscallClass | 73U;
 constexpr std::uint64_t syscallFcntl = unixSyscallClass | 92U;
@@ -169,6 +170,16 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         }
         const auto descriptor = fileSpace_.openCurrentDirectory(flags);
         setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
+        return {};
+    }
+    if (number == syscallClose) {
+        const auto descriptor = GuestFileDescriptor{
+            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(state.rdi))};
+        if (!fileSpace_.close(descriptor)) {
+            setError(state, EBADF);
+            return {};
+        }
+        setSuccess(state, 0);
         return {};
     }
     if (number == syscallFcntl) {
@@ -362,7 +373,7 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
     }
     if (number != syscallWrite) {
         throw unsupported(state, syscallRip,
-                          "only BSD write(2), exit(2), open(2), getpid(2), munmap(2), fcntl(2), "
+                          "only BSD write(2), exit(2), open(2), close(2), getpid(2), munmap(2), fcntl(2), "
                           "shared_region_check_np(2), proc_info(2), thread_selfid(2), "
                           "fsgetpath(2), csrctl(2), and getentropy(2) are "
                           "implemented");

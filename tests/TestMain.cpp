@@ -14263,6 +14263,58 @@ void testDarwinFcntlGetPath() {
     expect(unsupportedCommand, "unobserved guest fcntl command did not fail loudly");
 }
 
+void testDarwinCloseGuestDescriptor() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto closeNumber = UINT64_C(0x02000006);
+    constexpr std::uint32_t openDirectory = 0x00100000;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr std::array<std::uint8_t, 2> currentDirectoryPath{'.', 0};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, currentDirectoryPath);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = openDirectory;
+    state.rdx = 0;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    const auto descriptor = state.rax;
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+                "close setup did not create a guest descriptor");
+
+    state.rax = closeNumber;
+    state.rdi = descriptor;
+    state.rflags = 0x8D7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802A8CA4CULL});
+    expect(!outcome.exited, "close terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "close did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "close did not clear BSD carry");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+                "close retained the guest descriptor");
+    expect(dispatcher.fileSpace().lookup(rosa::darwin::GuestFileDescriptor{
+               static_cast<std::int32_t>(descriptor)}) == nullptr,
+           "closed guest descriptor remains discoverable");
+
+    state.rax = closeNumber;
+    state.rdi = descriptor;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "repeated close returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "repeated close did not set BSD carry");
+}
+
 void testDarwinProcInfoSetDyldImages() {
     constexpr auto procInfoNumber = UINT64_C(0x02000150);
     constexpr std::uint64_t allImageInfoAddress = 0x7FF8436AF040ULL;
@@ -19484,6 +19536,7 @@ int main() {
         {"Darwin getpid", testDarwinGetpid},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
+        {"Darwin close guest descriptor", testDarwinCloseGuestDescriptor},
         {"Darwin proc_info set dyld images", testDarwinProcInfoSetDyldImages},
         {"Darwin proc_info rejects invalid dyld images",
          testDarwinProcInfoRejectsInvalidDyldImages},
