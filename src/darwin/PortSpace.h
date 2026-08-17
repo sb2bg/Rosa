@@ -18,6 +18,7 @@ struct GuestMachPortName {
 enum class GuestPortType : std::uint8_t {
     Ordinary,
     Reply,
+    Host,
 };
 
 struct GuestPort {
@@ -46,6 +47,8 @@ class GuestPortSpace {
     [[nodiscard]] bool ownsReceiveRight(GuestMachPortName name) const;
     [[nodiscard]] std::optional<GuestMachPortName>
     allocateReceiveRight(GuestPort attributes = {});
+    [[nodiscard]] std::optional<GuestMachPortName>
+    copyoutHostSendRight(std::uint32_t maximumUrefs);
     void rollbackLastAllocation(GuestMachPortName name) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept { return ports_.size(); }
@@ -54,8 +57,12 @@ class GuestPortSpace {
   private:
     static constexpr std::uint32_t syntheticNameStride = 0x100U;
 
+    [[nodiscard]] std::optional<GuestMachPortName>
+    allocatePort(GuestPort attributes);
+
     std::map<std::uint32_t, GuestPort> ports_;
     std::uint32_t nextSyntheticName_{0x203U};
+    std::optional<GuestMachPortName> hostSelfName_;
 };
 
 } // namespace rosa::darwin

@@ -653,6 +653,15 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = taskSelfPortName().value;
         return;
     }
+    case 29U: {
+        // XNU host_self_trap has no arguments. It copies a send right for the
+        // task's host object into the calling IPC space. Rosa keeps the
+        // corresponding object and right entirely in its guest namespace.
+        const auto name =
+            portSpace_.copyoutHostSendRight(machPortUrefsMaximum);
+        state.rax = name ? name->value : 0; // MACH_PORT_NULL on exhaustion.
+        return;
+    }
     case 47U: {
         // The first observed mach_msg2 call is the MIG mach_vm_map request
         // used by cached dyld to reserve its former standalone address range.

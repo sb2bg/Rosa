@@ -34,6 +34,7 @@ class MachDispatcher {
     static constexpr std::uint64_t portConstructTrapNumber = syscallClass | 24U;
     static constexpr std::uint64_t replyPortTrapNumber = syscallClass | 26U;
     static constexpr std::uint64_t taskSelfTrapNumber = syscallClass | 28U;
+    static constexpr std::uint64_t hostSelfTrapNumber = syscallClass | 29U;
     static constexpr std::uint64_t machMessage2TrapNumber = syscallClass | 47U;
 
     [[nodiscard]] static constexpr bool isMachTrap(std::uint64_t number) {

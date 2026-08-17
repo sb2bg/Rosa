@@ -29,6 +29,34 @@ bool GuestPortSpace::ownsReceiveRight(GuestMachPortName name) const {
 
 std::optional<GuestMachPortName>
 GuestPortSpace::allocateReceiveRight(GuestPort attributes) {
+    attributes.hasReceiveRight = true;
+    return allocatePort(attributes);
+}
+
+std::optional<GuestMachPortName>
+GuestPortSpace::copyoutHostSendRight(std::uint32_t maximumUrefs) {
+    if (hostSelfName_) {
+        auto *port = lookup(*hostSelfName_);
+        if (port == nullptr || port->type != GuestPortType::Host ||
+            port->sendUrefs == 0) {
+            return std::nullopt;
+        }
+        if (port->sendUrefs == maximumUrefs) {
+            return std::nullopt;
+        }
+        ++port->sendUrefs;
+        return hostSelfName_;
+    }
+
+    GuestPort host;
+    host.type = GuestPortType::Host;
+    host.sendUrefs = 1;
+    hostSelfName_ = allocatePort(host);
+    return hostSelfName_;
+}
+
+std::optional<GuestMachPortName>
+GuestPortSpace::allocatePort(GuestPort attributes) {
     auto candidate = nextSyntheticName_;
     while (ports_.contains(candidate)) {
         if (candidate > std::numeric_limits<std::uint32_t>::max() -
@@ -43,7 +71,6 @@ GuestPortSpace::allocateReceiveRight(GuestPort attributes) {
     }
 
     attributes.name = GuestMachPortName{candidate};
-    attributes.hasReceiveRight = true;
     ports_.emplace(candidate, attributes);
     nextSyntheticName_ = candidate + syntheticNameStride;
     return attributes.name;
@@ -55,6 +82,9 @@ void GuestPortSpace::rollbackLastAllocation(GuestMachPortName name) noexcept {
         return;
     }
     ports_.erase(found);
+    if (hostSelfName_ == name) {
+        hostSelfName_.reset();
+    }
     if (name.value <= std::numeric_limits<std::uint32_t>::max() -
                           syntheticNameStride &&
         name.value + syntheticNameStride == nextSyntheticName_) {
@@ -66,9 +96,11 @@ std::string GuestPortSpace::summary() const {
     std::ostringstream stream;
     stream << "ports=" << ports_.size();
     for (const auto &[name, port] : ports_) {
+        const auto type = port.type == GuestPortType::Reply   ? "reply"
+                          : port.type == GuestPortType::Host ? "host"
+                                                             : "ordinary";
         stream << "\n    name=0x" << std::hex << name << std::dec
-               << " type="
-               << (port.type == GuestPortType::Reply ? "reply" : "ordinary")
+               << " type=" << type
                << " receive=" << (port.hasReceiveRight ? "yes" : "no")
                << " send-urefs=" << port.sendUrefs
                << " send-once-urefs=" << port.sendOnceUrefs

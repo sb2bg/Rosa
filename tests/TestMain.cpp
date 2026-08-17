@@ -15493,6 +15493,92 @@ void testGeneratedMachTaskSelfTrap() {
                 "generated task_self_trap changed guest flags");
 }
 
+void testMachHostSelfTrap() {
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::hostSelfTrapNumber;
+    state.rdi = 0x1111111111111111ULL;
+    state.rsi = 0x2222222222222222ULL;
+    state.rdx = 0x3333333333333333ULL;
+    state.r10 = 0x4444444444444444ULL;
+    state.r8 = 0x5555555555555555ULL;
+    state.r9 = 0x6666666666666666ULL;
+    state.rflags = 0x8D7;
+
+    auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802A8B598ULL});
+    expect(!outcome.exited, "host_self_trap terminated the guest");
+    const rosa::darwin::GuestMachPortName name{
+        static_cast<std::uint32_t>(state.rax)};
+    expect(name.value != 0 && name.value != 0x103,
+           "host_self_trap returned an invalid or task-self name");
+    const auto *port = dispatcher.machDispatcher().portSpace().lookup(name);
+    expect(port != nullptr &&
+               port->type == rosa::darwin::GuestPortType::Host,
+           "host_self_trap did not create a guest host object");
+    expect(!port->hasReceiveRight && port->sendUrefs == 1 &&
+               port->sendOnceUrefs == 0,
+           "host_self_trap created the wrong guest rights");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "host_self_trap applied BSD carry semantics");
+    expectEqual(state.rdi, std::uint64_t{0x1111111111111111ULL},
+                "host_self_trap changed an ignored argument register");
+
+    state.rax = rosa::darwin::MachDispatcher::hostSelfTrapNumber;
+    outcome = dispatcher.dispatch(addressSpace, state,
+                                  rosa::guest::GuestAddress{0x1000});
+    expect(!outcome.exited, "repeated host_self_trap terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(name.value),
+                "repeated host_self_trap returned a different guest name");
+    port = dispatcher.machDispatcher().portSpace().lookup(name);
+    expect(port != nullptr && port->sendUrefs == 2,
+           "repeated host_self_trap did not copy out another send uref");
+}
+
+void testGeneratedMachHostSelfTrap() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 8> code{
+        0xB8, 0x1D, 0x00, 0x00, 0x01, // mov eax, 0x100001d
+        0x0F, 0x05,                   // syscall
+        0xC3,                         // ret
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rflags = 0x8D7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 8, sentinel);
+    expect(!result.exited, "generated host_self_trap terminated the guest");
+    expect(state.rax != 0 && state.rax != 0x103,
+           "generated host_self_trap returned an invalid name");
+    const auto *port = dispatcher.machDispatcher().portSpace().lookup(
+        rosa::darwin::GuestMachPortName{
+            static_cast<std::uint32_t>(state.rax)});
+    expect(port != nullptr &&
+               port->type == rosa::darwin::GuestPortType::Host &&
+               port->sendUrefs == 1,
+           "generated host_self_trap did not create a host send right");
+    expectEqual(state.rcx, std::uint64_t{0x1007},
+                "generated host_self_trap saved the wrong fallthrough");
+    expectEqual(state.r11, std::uint64_t{0x8D7},
+                "generated host_self_trap saved the wrong input flags");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "generated host_self_trap changed guest flags");
+}
+
 void testMachPortModRefsTrap() {
     rosa::guest::AddressSpace addressSpace;
     rosa::darwin::MachDispatcher dispatcher;
@@ -20011,6 +20097,8 @@ int main() {
          testGeneratedDarwinThreadFastSetCthreadSelf},
         {"Mach task-self trap", testMachTaskSelfTrap},
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
+        {"Mach host-self trap", testMachHostSelfTrap},
+        {"generated Mach host-self trap", testGeneratedMachHostSelfTrap},
         {"Mach port mod-refs trap", testMachPortModRefsTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
         {"Mach port construct trap", testMachPortConstructTrap},
