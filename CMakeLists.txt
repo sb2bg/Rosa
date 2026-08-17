@@ -24,6 +24,7 @@ add_library(rosa_core
     src/dbt/Dispatcher.cpp
     src/debug/Dump.cpp
     src/darwin/Commpage.cpp
+    src/darwin/Files.cpp
     src/darwin/Mach.cpp
     src/darwin/PortSpace.cpp
     src/darwin/SharedCache.cpp

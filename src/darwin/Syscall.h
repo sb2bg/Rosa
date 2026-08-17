@@ -1,5 +1,6 @@
 #pragma once
 
+#include "darwin/Files.h"
 #include "darwin/Mach.h"
 #include "guest/Address.h"
 #include "guest/AddressSpace.h"
@@ -35,9 +36,13 @@ class SyscallDispatcher {
     [[nodiscard]] const MachDispatcher &machDispatcher() const noexcept {
         return machDispatcher_;
     }
+    [[nodiscard]] const GuestFileSpace &fileSpace() const noexcept {
+        return fileSpace_;
+    }
 
   private:
     const GuestSharedCache *sharedCache_{};
+    GuestFileSpace fileSpace_;
     MachDispatcher machDispatcher_;
     std::optional<GuestDyldInfo> dyldInfo_;
     bool dyldInfoFinal_{};

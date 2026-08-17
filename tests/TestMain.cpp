@@ -14089,6 +14089,86 @@ void testDarwinGetpid() {
                 "getpid changed an ignored argument register");
 }
 
+void testDarwinOpenCurrentDirectory() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr std::uint32_t openDirectory = 0x00100000;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr std::array<std::uint8_t, 2> currentDirectoryPath{'.', 0};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, currentDirectoryPath);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = openDirectory;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEE844ULL});
+    expect(!outcome.exited, "open current directory terminated the guest");
+    expectEqual(state.rax, std::uint64_t{3},
+                "open current directory returned the wrong guest descriptor");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "open current directory did not clear BSD carry");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+                "open current directory did not create one guest descriptor");
+    const auto *opened = dispatcher.fileSpace().lookup(
+        rosa::darwin::GuestFileDescriptor{3});
+    expect(opened != nullptr &&
+               opened->kind == rosa::darwin::GuestFileKind::CurrentDirectory &&
+               opened->guestPath == std::filesystem::current_path() &&
+               opened->flags == openDirectory,
+           "open current directory stored the wrong guest metadata");
+
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = openDirectory;
+    state.rdx = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{4},
+                "repeated guest open did not allocate a unique descriptor");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{2},
+                "repeated guest open changed descriptor-space size incorrectly");
+
+    state.rax = openNumber;
+    state.rdi = 0x9000;
+    state.rsi = openDirectory;
+    state.rdx = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "open invalid guest path returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "open invalid guest path did not set BSD carry");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{2},
+                "faulted guest open allocated a descriptor");
+
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = O_RDONLY;
+    state.rdx = 0;
+    bool unsupportedFlags = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        unsupportedFlags = std::string_view(error.what()).find(
+                               "O_RDONLY|O_DIRECTORY") !=
+                           std::string_view::npos;
+    }
+    expect(unsupportedFlags, "unobserved guest open flags did not fail loudly");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{2},
+                "unsupported guest open allocated a descriptor");
+}
+
 void testDarwinProcInfoSetDyldImages() {
     constexpr auto procInfoNumber = UINT64_C(0x02000150);
     constexpr std::uint64_t allImageInfoAddress = 0x7FF8436AF040ULL;
@@ -19308,6 +19388,7 @@ int main() {
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin getpid", testDarwinGetpid},
+        {"Darwin open current directory", testDarwinOpenCurrentDirectory},
         {"Darwin proc_info set dyld images", testDarwinProcInfoSetDyldImages},
         {"Darwin proc_info rejects invalid dyld images",
          testDarwinProcInfoRejectsInvalidDyldImages},

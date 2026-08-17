@@ -24,6 +24,7 @@ constexpr std::uint64_t syscallClassMask = 0xFF000000U;
 constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
 constexpr std::uint64_t syscallExit = unixSyscallClass | 1U;
 constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
+constexpr std::uint64_t syscallOpen = unixSyscallClass | 5U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
 constexpr std::uint64_t syscallMunmap = unixSyscallClass | 73U;
 constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
@@ -48,6 +49,8 @@ constexpr std::uint64_t carryFlag = 1U << 0U;
 constexpr std::uint64_t reservedOneFlag = 1U << 1U;
 constexpr std::size_t maximumControlledWrite = 16U * 1024U * 1024U;
 constexpr std::size_t maximumLongPath = 8192;
+constexpr std::size_t guestPathMaximum = 1024;
+constexpr std::uint32_t guestOpenDirectory = 0x00100000;
 
 struct GuestFsid {
     std::int32_t value[2];
@@ -63,6 +66,22 @@ void setSuccess(x86::X86State &state, std::uint64_t result) {
 void setError(x86::X86State &state, int error) {
     state.rax = static_cast<std::uint64_t>(error);
     state.rflags = state.rflags | carryFlag | reservedOneFlag;
+}
+
+std::optional<std::string> readGuestCString(
+    const guest::AddressSpace &addressSpace, guest::GuestAddress address,
+    std::size_t maximumSize) {
+    std::string result;
+    result.reserve(maximumSize);
+    for (std::size_t index = 0; index < maximumSize; ++index) {
+        const auto byte = addressSpace.readBytes(address, 1).front();
+        if (byte == 0) {
+            return result;
+        }
+        result.push_back(static_cast<char>(byte));
+        ++address.value;
+    }
+    return std::nullopt;
 }
 
 std::runtime_error unsupported(const x86::X86State &state, guest::GuestAddress rip,
@@ -122,6 +141,31 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         // Rosa currently has one guest process hosted by one Rosa process, so
         // the host PID is also its externally observable guest process ID.
         setSuccess(state, static_cast<std::uint64_t>(::getpid()));
+        return {};
+    }
+    if (number == syscallOpen) {
+        std::optional<std::string> path;
+        try {
+            path = readGuestCString(addressSpace,
+                                    guest::GuestAddress{state.rdi},
+                                    guestPathMaximum);
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        if (!path) {
+            setError(state, ENAMETOOLONG);
+            return {};
+        }
+        const auto flags = static_cast<std::uint32_t>(state.rsi);
+        const auto mode = static_cast<std::uint32_t>(state.rdx);
+        if (*path != "." || flags != guestOpenDirectory || mode != 0) {
+            throw unsupported(
+                state, syscallRip,
+                "only the observed open(\".\", O_RDONLY|O_DIRECTORY, 0) is implemented");
+        }
+        const auto descriptor = fileSpace_.openCurrentDirectory(flags);
+        setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
         return {};
     }
     if (number == syscallMunmap) {
@@ -285,7 +329,7 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
     }
     if (number != syscallWrite) {
         throw unsupported(state, syscallRip,
-                          "only BSD write(2), exit(2), getpid(2), munmap(2), "
+                          "only BSD write(2), exit(2), open(2), getpid(2), munmap(2), "
                           "shared_region_check_np(2), proc_info(2), thread_selfid(2), "
                           "fsgetpath(2), csrctl(2), and getentropy(2) are "
                           "implemented");
