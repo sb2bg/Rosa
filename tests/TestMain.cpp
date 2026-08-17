@@ -16661,6 +16661,50 @@ void testDarwinDuplicateGuestDescriptor() {
                 "failed dup allocated a guest descriptor");
 }
 
+void testUnsupportedDarwinFstatat64Diagnostic() {
+    constexpr auto fstatat64Number = UINT64_C(0x020001D6);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr std::string_view path = "System/Library/dyld/";
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(
+        pathAddress,
+        std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t *>(path.data()),
+            path.size()});
+    addressSpace.writeBytes(
+        rosa::guest::GuestAddress{pathAddress.value + path.size()},
+        std::array<std::uint8_t, 1>{0});
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = fstatat64Number;
+    state.rdi = 6;
+    state.rsi = pathAddress.value;
+    state.rdx = 0x8200;
+    state.r10 = 0;
+    state.rflags = 0x8D7;
+    bool diagnosed = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEEBD8ULL}));
+    } catch (const std::runtime_error &error) {
+        const auto message = std::string_view(error.what());
+        diagnosed = message.find("unsupported fstatat64: dirfd=6") !=
+                        std::string_view::npos &&
+                    message.find("path=\"System/Library/dyld/\"") !=
+                        std::string_view::npos &&
+                    message.find("stat*=0x8200 flags=0x0") !=
+                        std::string_view::npos;
+    }
+    expect(diagnosed,
+           "unsupported fstatat64 did not report its decoded guest ABI");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "unsupported fstatat64 changed guest flags");
+}
+
 void testDarwinOpenReadOnlyUserFile() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -22902,6 +22946,8 @@ int main() {
          testDarwinOpenatGuestCryptexDirectory},
         {"Darwin duplicate guest descriptor",
          testDarwinDuplicateGuestDescriptor},
+        {"unsupported Darwin fstatat64 diagnostic",
+         testUnsupportedDarwinFstatat64Diagnostic},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
         {"Darwin close guest descriptor", testDarwinCloseGuestDescriptor},

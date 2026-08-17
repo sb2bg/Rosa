@@ -43,6 +43,7 @@ constexpr std::uint64_t syscallFsgetpath = unixSyscallClass | 427U;
 constexpr std::uint64_t syscallCsrctl = unixSyscallClass | 483U;
 constexpr std::uint64_t syscallGetentropy = unixSyscallClass | 500U;
 constexpr std::uint64_t syscallOpenat = unixSyscallClass | 463U;
+constexpr std::uint64_t syscallFstatat64 = unixSyscallClass | 470U;
 constexpr std::uint64_t csrSyscallCheck = 0;
 // Rosa exposes a fully restrictive guest System Integrity Protection
 // configuration. This is guest policy state, not a host kernel pointer or
@@ -625,6 +626,23 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
             std::filesystem::path{"/"} / *path, flags);
         setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
         return {};
+    }
+    if (number == syscallFstatat64) {
+        std::optional<std::string> path;
+        try {
+            path = readGuestCString(addressSpace,
+                                    guest::GuestAddress{state.rsi},
+                                    guestPathMaximum);
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        std::ostringstream reason;
+        reason << "unsupported fstatat64: dirfd="
+               << static_cast<std::int32_t>(state.rdi) << " path=\""
+               << (path ? *path : "<unterminated>") << "\" stat*=0x"
+               << std::hex << state.rdx << " flags=0x" << state.r10;
+        throw unsupported(state, syscallRip, reason.str());
     }
     if (number == syscallClose) {
         const auto descriptor = GuestFileDescriptor{
