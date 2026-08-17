@@ -572,12 +572,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
             if (extension != 0 ||
                 (mode != 0x3U &&
-                 (conditionOpcode != 0x93U || rmEncoding == 0x4U ||
+                 (rmEncoding == 0x4U ||
                   (mode == 0 && rmEncoding == 0x5U))) ||
                 (mode == 0x3U && !setHasRex && rmEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register SETAE/SETE/SETNE/SETG or SETAE byte [base+disp8/disp32] is supported");
+                    "only register or byte [base+disp8/disp32] SETAE/SETE/SETNE/SETG is supported");
             }
             instruction.condition =
                 conditionOpcode == 0x93U   ? Condition::AboveOrEqual

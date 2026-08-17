@@ -2062,6 +2062,28 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("setne8_memory_taken",
+                             CaseId::setne8_memory_taken,
+                             differentialBytes_setne8_memory_taken);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.memory[0xCF] = 0xA5;
+        testCase.request.state.rflags &= ~zeroFlag;
+        testCase.memoryCompareOffset = 0xCF;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
+        auto testCase = make("setne8_memory_not_taken",
+                             CaseId::setne8_memory_not_taken,
+                             differentialBytes_setne8_memory_not_taken);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.memory[0xCF] = 0xA5;
+        testCase.request.state.rflags |= zeroFlag;
+        testCase.memoryCompareOffset = 0xCF;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmovb64_taken", CaseId::cmovb64_taken,
                              differentialBytes_cmovb64_taken);
         testCase.request.state.rax = 0x1122334455667788ULL;
@@ -19480,6 +19502,39 @@ void testSetAboveOrEqualGuestByte() {
                 "not-taken SETAE byte memory stored the wrong value");
     expectEqual(notTaken.rflags, std::uint64_t{0xAD7 | 1U},
                 "not-taken SETAE byte memory changed flags");
+
+    constexpr std::array<std::uint8_t, 8> setneCode{
+        0x0F, 0x95, 0x83, 0xCF, 0x00, 0x00, 0x00, 0xC3};
+    const auto setneDecoded = decoder.decodeBlock(
+        setneCode, rosa::guest::GuestAddress{0x7FF802AA05E5ULL});
+    expect(setneDecoded[0].opcode == rosa::x86::Opcode::SetccMem &&
+               setneDecoded[0].condition == rosa::x86::Condition::NotEqual,
+           "SETNE byte memory opcode or condition differs");
+    expect(rosa::debug::dumpX86(setneDecoded).find(
+               "setne byte [rbx+0xcf]") != std::string::npos,
+           "SETNE byte memory dump differs");
+    const auto setneBlock = translator.translate(
+        setneCode, rosa::guest::GuestAddress{0x7FF802AA05E5ULL});
+    constexpr rosa::guest::GuestAddress setneDestination{0x80CF};
+    rosa::x86::X86State setneTaken;
+    setneTaken.rbx = page.value;
+    setneTaken.rflags = 0x896 & ~(std::uint64_t{1} << 6U);
+    static_cast<void>(setneBlock.execute(setneTaken, &addressSpace));
+    expectEqual(addressSpace.readBytes(setneDestination, 1).front(),
+                std::uint8_t{1}, "taken SETNE byte memory stored the wrong value");
+    expectEqual(setneTaken.rflags,
+                std::uint64_t{0x896 & ~(std::uint64_t{1} << 6U)},
+                "taken SETNE byte memory changed flags");
+    rosa::x86::X86State setneNotTaken;
+    setneNotTaken.rbx = page.value;
+    setneNotTaken.rflags = 0x8D7 | (std::uint64_t{1} << 6U);
+    static_cast<void>(setneBlock.execute(setneNotTaken, &addressSpace));
+    expectEqual(addressSpace.readBytes(setneDestination, 1).front(),
+                std::uint8_t{0},
+                "not-taken SETNE byte memory stored the wrong value");
+    expectEqual(setneNotTaken.rflags,
+                std::uint64_t{0x8D7 | (std::uint64_t{1} << 6U)},
+                "not-taken SETNE byte memory changed flags");
 
     rosa::guest::AddressSpace readOnlyAddressSpace;
     readOnlyAddressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
