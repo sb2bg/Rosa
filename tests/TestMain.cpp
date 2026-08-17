@@ -2604,6 +2604,25 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("pcmpeqd_self", CaseId::pcmpeqd_self,
+                             differentialBytes_pcmpeqd_self);
+        testCase.request.state.xmm[0] = {
+            .low = 0x2222222211111111ULL,
+            .high = 0x4444444433333333ULL};
+        run(testCase);
+    }
+    {
+        auto testCase = make("pcmpeqd_distinct", CaseId::pcmpeqd_distinct,
+                             differentialBytes_pcmpeqd_distinct);
+        testCase.request.state.xmm[0] = {
+            .low = 0x2222222211111111ULL,
+            .high = 0x4444444433333333ULL};
+        testCase.request.state.xmm[1] = {
+            .low = 0x9999999911111111ULL,
+            .high = 0x8888888833333333ULL};
+        run(testCase);
+    }
+    {
         auto testCase = make("pmovmskb", CaseId::pmovmskb,
                              differentialBytes_pmovmskb);
         testCase.request.state.rsi = UINT64_MAX;
@@ -13241,6 +13260,66 @@ void testPcmpeqbRegisterGeneratedExecution() {
                 "aliased PCMPEQB high lane differs");
 }
 
+void testPcmpeqdRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> observed{
+        0x66, 0x0F, 0x76, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        observed, rosa::guest::GuestAddress{0x7FF802AA15C4ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PcmpeqdRegReg,
+           "PCMPEQD xmm, xmm opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "PCMPEQD xmm, xmm length differs");
+    expect(rosa::debug::dumpX86(decoded).find("pcmpeqd xmm0, xmm0") !=
+               std::string::npos,
+           "PCMPEQD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto observedBlock = translator.translate(
+        observed, rosa::guest::GuestAddress{0x7FF802AA15C4ULL});
+    expect(rosa::debug::dumpIr(observedBlock.intermediateRepresentation())
+                   .find("compare_equal_xmm_dwords.i32") !=
+               std::string::npos,
+           "PCMPEQD did not lower through dword-compare IR");
+    rosa::x86::X86State selfState;
+    selfState.xmm[0] = {
+        .low = 0x2222222211111111ULL,
+        .high = 0x4444444433333333ULL};
+    selfState.rflags = 0x8D7;
+    static_cast<void>(observedBlock.execute(selfState));
+    expectEqual(selfState.xmm[0].low, UINT64_MAX,
+                "self-PCMPEQD low lane differs");
+    expectEqual(selfState.xmm[0].high, UINT64_MAX,
+                "self-PCMPEQD high lane differs");
+    expectEqual(selfState.rflags, std::uint64_t{0x8D7},
+                "self-PCMPEQD changed flags");
+
+    constexpr std::array<std::uint8_t, 5> distinct{
+        0x66, 0x0F, 0x76, 0xC1, 0xC3};
+    const auto distinctBlock = translator.translate(
+        distinct, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State distinctState;
+    distinctState.xmm[0] = {
+        .low = 0x2222222211111111ULL,
+        .high = 0x4444444433333333ULL};
+    distinctState.xmm[1] = {
+        .low = 0x9999999911111111ULL,
+        .high = 0x8888888833333333ULL};
+    distinctState.rflags = 0xAD7;
+    static_cast<void>(distinctBlock.execute(distinctState));
+    expectEqual(distinctState.xmm[0].low,
+                std::uint64_t{0x00000000FFFFFFFFULL},
+                "distinct PCMPEQD low lane differs");
+    expectEqual(distinctState.xmm[0].high,
+                std::uint64_t{0x00000000FFFFFFFFULL},
+                "distinct PCMPEQD high lane differs");
+    expectEqual(distinctState.xmm[1].low,
+                std::uint64_t{0x9999999911111111ULL},
+                "PCMPEQD changed its source");
+    expectEqual(distinctState.rflags, std::uint64_t{0xAD7},
+                "distinct PCMPEQD changed flags");
+}
+
 void testPandnRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{
         0x66, 0x0F, 0xDF, 0xC8, 0xC3};
@@ -21645,6 +21724,8 @@ int main() {
          testPcmpeqbGuestMemoryGeneratedExecution},
         {"PCMPEQB register generated execution",
          testPcmpeqbRegisterGeneratedExecution},
+        {"PCMPEQD register generated execution",
+         testPcmpeqdRegisterGeneratedExecution},
         {"PANDN register generated execution", testPandnRegisterGeneratedExecution},
         {"PMOVMSKB generated execution", testPmovmskbGeneratedExecution},
         {"PSHUFD register execution", testPshufdRegisterExecution},

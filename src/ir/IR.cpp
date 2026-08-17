@@ -438,6 +438,18 @@ void Builder::compareEqualXmmBytes(x86::XmmRegister destination,
     });
 }
 
+void Builder::compareEqualXmmDwords(x86::XmmRegister destination,
+                                    x86::XmmRegister source,
+                                    guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::CompareEqualXmmDwords,
+        .width = Width::I32,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+    });
+}
+
 void Builder::andNotXmm(x86::XmmRegister destination,
                         x86::XmmRegister source, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -1180,6 +1192,14 @@ std::vector<std::string> verify(const Block &block) {
             if (!operation.guestXmmRegister ||
                 !operation.sourceGuestXmmRegister) {
                 errors.emplace_back("compare_equal_xmm_bytes has incomplete registers");
+            }
+            break;
+        case Opcode::CompareEqualXmmDwords:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister ||
+                operation.width != Width::I32) {
+                errors.emplace_back(
+                    "compare_equal_xmm_dwords has incomplete registers");
             }
             break;
         case Opcode::AndNotXmm:

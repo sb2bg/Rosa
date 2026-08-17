@@ -92,6 +92,7 @@ enum class Opcode {
     PtestRegReg,
     PcmpeqbRegReg,
     PcmpeqbRegMem,
+    PcmpeqdRegReg,
     PandRegMem,
     PandnRegReg,
     PmovmskbRegXmm,
