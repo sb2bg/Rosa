@@ -1875,6 +1875,24 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movsx8_register_positive",
+                             CaseId::movsx8_register_positive,
+                             differentialBytes_movsx8_register_positive);
+        testCase.request.state.rcx = UINT64_MAX;
+        testCase.request.state.rsi = 0xAAAAAAAAAAAAAA2FULL;
+        testCase.flagMask = arithmeticFlags | directionFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("movsx8_register_negative",
+                             CaseId::movsx8_register_negative,
+                             differentialBytes_movsx8_register_negative);
+        testCase.request.state.rcx = UINT64_MAX;
+        testCase.request.state.rsi = 0xAAAAAAAAAAAAAA80ULL;
+        testCase.flagMask = arithmeticFlags | directionFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("movzx8_register", CaseId::movzx8_register,
                              differentialBytes_movzx8_register);
         testCase.request.state.rcx = 0xAABBCCDDEEFF00A5ULL;
@@ -8909,6 +8927,92 @@ void testMovzxLowByteRegisterTo32BitRegister() {
         rejectedHighByte = true;
     }
     expect(rejectedHighByte, "MOVZX from AH was not rejected explicitly");
+}
+
+void testMovsxLowByteRegisterTo32BitRegister() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x40, 0x0F, 0xBE, 0xCE, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802A8C850ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovsxRegReg,
+           "MOVSX r32, r8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "MOVSX r32, r8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 32,
+           "MOVSX ECX destination differs");
+    expect(source.reg == rosa::x86::Register::Rsi && source.width == 8,
+           "MOVSX SIL source differs");
+    expect(rosa::debug::dumpX86(decoded).find("movsx ecx, sil") !=
+               std::string::npos,
+           "MOVSX ECX, SIL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802A8C850ULL});
+    rosa::x86::X86State positiveState;
+    positiveState.rcx = UINT64_MAX;
+    positiveState.rsi = 0xAAAAAAAAAAAAAA2FULL;
+    positiveState.rflags = 0x8D7;
+    static_cast<void>(block.execute(positiveState));
+    expectEqual(positiveState.rcx, std::uint64_t{0x2F},
+                "positive MOVSX r32, r8 result differs");
+    expectEqual(positiveState.rsi, std::uint64_t{0xAAAAAAAAAAAAAA2FULL},
+                "positive MOVSX changed its source");
+    expectEqual(positiveState.rflags, std::uint64_t{0x8D7},
+                "positive MOVSX changed flags");
+
+    rosa::x86::X86State negativeState;
+    negativeState.rcx = UINT64_MAX;
+    negativeState.rsi = 0xAAAAAAAAAAAAAA80ULL;
+    negativeState.rflags = 0xAD7;
+    static_cast<void>(block.execute(negativeState));
+    expectEqual(negativeState.rcx, std::uint64_t{0xFFFFFF80},
+                "negative MOVSX r32, r8 result or zero extension differs");
+    expectEqual(negativeState.rsi, std::uint64_t{0xAAAAAAAAAAAAAA80ULL},
+                "negative MOVSX changed its source");
+    expectEqual(negativeState.rflags, std::uint64_t{0xAD7},
+                "negative MOVSX changed flags");
+
+    constexpr std::array<std::uint8_t, 5> extendedCode{
+        0x45, 0x0F, 0xBE, 0xC8, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    const auto extendedDestination =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[0]);
+    const auto extendedSource =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[1]);
+    expect(extendedDestination.reg == rosa::x86::Register::R9 &&
+               extendedDestination.width == 32 &&
+               extendedSource.reg == rosa::x86::Register::R8 &&
+               extendedSource.width == 8,
+           "extended MOVSX r32, r8 operands differ");
+
+    const auto expectRejected = [&decoder](std::span<const std::uint8_t> bytes,
+                                           std::string_view message) {
+        bool rejected = false;
+        try {
+            static_cast<void>(decoder.decodeBlock(
+                bytes, rosa::guest::GuestAddress{0x3000}));
+        } catch (const rosa::x86::DecodeError &) {
+            rejected = true;
+        }
+        expect(rejected, message);
+    };
+    constexpr std::array<std::uint8_t, 4> noRex{
+        0x0F, 0xBE, 0xCE, 0xC3};
+    constexpr std::array<std::uint8_t, 4> memory{
+        0x40, 0x0F, 0xBE, 0x0E};
+    constexpr std::array<std::uint8_t, 4> rexW{
+        0x48, 0x0F, 0xBE, 0xCE};
+    expectRejected(noRex, "non-REX MOVSX r32, r8 was accepted");
+    expectRejected(memory, "MOVSX byte memory form was accepted");
+    expectRejected(rexW, "MOVSX r64, r8 was accepted");
 }
 
 void testMovzxGuestByteTo32BitRegister() {
@@ -19472,6 +19576,8 @@ int main() {
          testMovGuestMemoryToByteRegisterWithScaledIndex},
         {"MOVZX low-byte register to 32-bit register",
          testMovzxLowByteRegisterTo32BitRegister},
+        {"MOVSX low-byte register to 32-bit register",
+         testMovsxLowByteRegisterTo32BitRegister},
         {"MOVZX guest byte to 32-bit register",
          testMovzxGuestByteTo32BitRegister},
         {"MOVZX guest byte with SIB to 64-bit register",

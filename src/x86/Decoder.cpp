@@ -2853,18 +2853,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 secondOpcode != 0x44U && secondOpcode != 0x45U &&
                 secondOpcode != 0x47U &&
                 secondOpcode != 0xBAU &&
+                secondOpcode != 0xBEU &&
                 secondOpcode != 0xACU &&
                 secondOpcode != 0xAFU && secondOpcode != 0xBCU &&
                 secondOpcode != 0xBDU) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA, IMUL, SHRD, BSF, and BSR register forms are supported from 0F");
+                    "only CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA, MOVSX, IMUL, SHRD, BSF, and BSR register forms are supported from REX 0F");
             }
             const bool isConditionalMove =
                 secondOpcode == 0x42U || secondOpcode == 0x43U ||
                 secondOpcode == 0x44U || secondOpcode == 0x45U ||
                 secondOpcode == 0x47U;
             if (!rexW && !isConditionalMove && secondOpcode != 0xBAU &&
+                secondOpcode != 0xBEU &&
                 secondOpcode != 0xBCU) {
                 throw DecodeError(
                     address, remaining,
@@ -2886,7 +2888,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (mode != 0x3U || (rexX && secondOpcode != 0xBAU)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA/IMUL/SHRD/BSF/BSR is supported");
+                    "only register-direct CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA/MOVSX/IMUL/SHRD/BSF/BSR is supported");
             }
             const auto rawReg =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
@@ -2904,6 +2906,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     RegisterOperand{encodedRm, 32});
                 instruction.operands.push_back(
                     ImmediateOperand{code[cursor++], 8});
+            } else if (secondOpcode == 0xBEU) {
+                if (rexW || rexX) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only register-direct MOVSX r32, r8 is supported from REX 0F BE");
+                }
+                instruction.opcode = Opcode::MovsxRegReg;
+                instruction.operands.push_back(
+                    RegisterOperand{encodedReg, 32});
+                instruction.operands.push_back(
+                    RegisterOperand{encodedRm, 8});
             } else if (isConditionalMove) {
                 instruction.opcode = Opcode::CmovccReg;
                 instruction.condition = secondOpcode == 0x42U
