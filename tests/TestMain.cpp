@@ -2048,6 +2048,23 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmovb32_taken", CaseId::cmovb32_taken,
+                             differentialBytes_cmovb32_taken);
+        testCase.request.state.rax = 0xAABBCCDD11223344ULL;
+        testCase.request.state.rcx = UINT64_MAX;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("cmovb32_not_taken",
+                             CaseId::cmovb32_not_taken,
+                             differentialBytes_cmovb32_not_taken);
+        testCase.request.state.rax = UINT64_MAX;
+        testCase.request.state.rcx = 0xAABBCCDD55667788ULL;
+        testCase.request.state.rflags &= ~carryFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmovae64_taken", CaseId::cmovae64_taken,
                              differentialBytes_cmovae64_taken);
         testCase.request.state.rsi = 0x0123456789ABCDEFULL;
@@ -18981,6 +18998,57 @@ void testConditionalMoveBelow64() {
                 "untaken CMOVB changed flags");
 }
 
+void testConditionalMoveBelow32() {
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x42, 0xC8, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802A8F255ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               decoded[0].condition == rosa::x86::Condition::Below,
+           "CMOVB r32 opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "CMOVB r32 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 32 &&
+               source.reg == rosa::x86::Register::Rax &&
+               source.width == 32,
+           "CMOVB ecx, eax operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmovb ecx, eax") !=
+               std::string::npos,
+           "CMOVB r32 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802A8F255ULL});
+    rosa::x86::X86State taken;
+    taken.rax = 0xAABBCCDD11223344ULL;
+    taken.rcx = UINT64_MAX;
+    taken.rflags = 0x8D7 | 1U;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rcx, std::uint64_t{0x11223344},
+                "taken CMOVB r32 did not zero-extend its destination");
+    expectEqual(taken.rax, std::uint64_t{0xAABBCCDD11223344ULL},
+                "CMOVB r32 changed its source");
+    expectEqual(taken.rflags, std::uint64_t{0x8D7 | 1U},
+                "taken CMOVB r32 changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rax = UINT64_MAX;
+    notTaken.rcx = 0xAABBCCDD55667788ULL;
+    notTaken.rflags = 0x8D6 & ~std::uint64_t{1};
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rcx, std::uint64_t{0x55667788},
+                "untaken CMOVB r32 did not clear destination upper bits");
+    expectEqual(notTaken.rax, UINT64_MAX,
+                "untaken CMOVB r32 changed its source");
+    expectEqual(notTaken.rflags, std::uint64_t{0x8D6 & ~std::uint64_t{1}},
+                "untaken CMOVB r32 changed flags");
+}
+
 void testConditionalMoveAboveOrEqual64() {
     constexpr std::array<std::uint8_t, 5> code{
         0x4C, 0x0F, 0x43, 0xFE, 0xC3};
@@ -20164,6 +20232,7 @@ int main() {
         {"set greater extended low-byte register",
          testSetGreaterExtendedLowByteRegister},
         {"conditional move below 64-bit", testConditionalMoveBelow64},
+        {"conditional move below 32-bit", testConditionalMoveBelow32},
         {"conditional move above-or-equal 64-bit",
          testConditionalMoveAboveOrEqual64},
         {"conditional move above-or-equal 32-bit",

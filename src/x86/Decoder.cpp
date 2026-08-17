@@ -2635,17 +2635,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 continue;
             }
-            if (code.size() - cursor >= 3 && code[cursor + 1] == 0x43U) {
+            if (code.size() - cursor >= 3 &&
+                (code[cursor + 1] == 0x42U || code[cursor + 1] == 0x43U)) {
                 const auto modrm = code[cursor + 2];
                 const auto mode =
                     static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
                 if (mode != 0x3U) {
                     throw DecodeError(
                         address, remaining,
-                        "only register-direct CMOVAE r32 is supported without REX");
+                        "only register-direct CMOVB/CMOVAE r32 is supported without REX");
                 }
                 instruction.opcode = Opcode::CmovccReg;
-                instruction.condition = Condition::AboveOrEqual;
+                instruction.condition = code[cursor + 1] == 0x42U
+                                            ? Condition::Below
+                                            : Condition::AboveOrEqual;
                 instruction.length = 3;
                 std::copy_n(
                     code.begin() + static_cast<std::ptrdiff_t>(cursor), 3,
