@@ -3166,6 +3166,30 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movdqu_extended_base_store",
+                             CaseId::movdqu_extended_base_store,
+                             differentialBytes_movdqu_extended_base_store);
+        bindMemory(testCase, rosa::x86::Register::R15, 3);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        testCase.memoryCompareOffset = 0x0B;
+        testCase.memoryCompareSize = 16;
+        run(testCase);
+    }
+    {
+        auto testCase = make("movdqu_extended_register_store",
+                             CaseId::movdqu_extended_register_store,
+                             differentialBytes_movdqu_extended_register_store);
+        bindMemory(testCase, rosa::x86::Register::R15, 3);
+        testCase.request.state.xmm[13] = {
+            .low = 0x8877665544332211ULL,
+            .high = 0x1020304050607080ULL};
+        testCase.memoryCompareOffset = 0x0B;
+        testCase.memoryCompareSize = 16;
+        run(testCase);
+    }
+    {
         auto testCase = make("movdqu_indexed_load", CaseId::movdqu_indexed_load,
                              differentialBytes_movdqu_indexed_load);
         bindMemory(testCase, rosa::x86::Register::Rsi, 3);
@@ -14474,6 +14498,75 @@ void testMovdquRegisterToGuestMemory() {
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x810B}),
                 state.xmm[0].high, "MOVDQU stored the wrong high lane");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVDQU changed flags");
+
+    constexpr std::array<std::uint8_t, 7> extendedCode{
+        0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x08, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x7FF802AA163DULL});
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::MovdquMemReg,
+           "REX MOVDQU store opcode differs");
+    expectEqual(extendedDecoded[0].length, std::uint8_t{6},
+                "REX MOVDQU store length differs");
+    const auto extendedMemory =
+        std::get<rosa::x86::MemoryOperand>(extendedDecoded[0].operands[0]);
+    const auto extendedSource =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            extendedDecoded[0].operands[1]);
+    expect(extendedMemory.base == rosa::x86::Register::R15 &&
+               extendedMemory.displacement == 8 &&
+               extendedSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "MOVDQU [r15+8], xmm0 operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find(
+               "movdqu [r15+0x8], xmm0") != std::string::npos,
+           "REX MOVDQU store dump differs");
+    const auto extendedBlock = translator.translate(
+        extendedCode, rosa::guest::GuestAddress{0x7FF802AA163DULL});
+    rosa::x86::X86State extendedState;
+    extendedState.r15 = 0x8103;
+    extendedState.xmm[0] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL};
+    extendedState.rflags = 0xAD7;
+    static_cast<void>(extendedBlock.execute(extendedState, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x810B}),
+                std::uint64_t{0x8877665544332211ULL},
+                "REX MOVDQU stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8113}),
+                std::uint64_t{0x1020304050607080ULL},
+                "REX MOVDQU stored the wrong high lane");
+    expectEqual(extendedState.r15, std::uint64_t{0x8103},
+                "REX MOVDQU changed its base register");
+    expectEqual(extendedState.xmm[0].low,
+                std::uint64_t{0x8877665544332211ULL},
+                "REX MOVDQU changed its source");
+    expectEqual(extendedState.rflags, std::uint64_t{0xAD7},
+                "REX MOVDQU changed flags");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    std::fill_n(readOnlyBytes.begin() + 0x10B, 16, 0xA5);
+    readOnlyAddressSpace.mapSegment(memoryBase, readOnlyBytes.size(),
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes,
+                                    "read-only REX MOVDQU target");
+    auto faultState = extendedState;
+    faultState.rflags = 0xBD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(extendedBlock.execute(faultState,
+                                                 &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "REX MOVDQU accepted read-only guest memory");
+    const auto unchanged = readOnlyAddressSpace.readBytes(
+        rosa::guest::GuestAddress{0x810B}, 16);
+    expect(std::ranges::all_of(unchanged,
+                               [](std::uint8_t byte) { return byte == 0xA5; }),
+           "faulted REX MOVDQU partially changed guest memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "faulted REX MOVDQU changed flags");
 }
 
 void testMovdquGuestMemoryToRegister() {
