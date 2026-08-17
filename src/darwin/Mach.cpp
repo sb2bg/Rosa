@@ -9,6 +9,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 
 namespace rosa::darwin {
 namespace {
@@ -35,6 +36,23 @@ constexpr std::uint32_t machPortUrefsMaximum = 0xFFFF;
 constexpr std::uint32_t machPortQlimitDefault = 5;
 constexpr std::uint32_t mpoReplyPort = 0x1000;
 constexpr std::uint32_t observedDyldPortOptions = mpoReplyPort;
+constexpr std::uint64_t mach64SendMessage = 0x1U;
+constexpr std::uint64_t mach64ReceiveMessage = 0x2U;
+constexpr std::uint64_t mach64SendKobjectCall = 0x0000000200000000ULL;
+constexpr std::uint64_t observedMachMessage2Options =
+    mach64SendMessage | mach64ReceiveMessage | mach64SendKobjectCall;
+constexpr std::uint32_t machMessageHeaderComplex = 0x80000000U;
+constexpr std::uint32_t machMessageTypeCopySend = 19U;
+constexpr std::uint32_t machMessageTypeMakeSendOnce = 21U;
+constexpr std::uint32_t machMessageTypeMoveSendOnce = 18U;
+constexpr std::uint32_t machMessagePortDescriptor = 0U;
+constexpr std::int32_t machVmMapMessageId = 4811;
+constexpr std::int32_t machVmMapReplyId = machVmMapMessageId + 100;
+constexpr std::uint32_t machVmMapRequestSize = 100U;
+constexpr std::uint32_t machVmMapReplySize = 44U;
+constexpr std::uint32_t machMessageTrailerSize = 8U;
+constexpr std::uint32_t machVmMapReceiveSize =
+    machVmMapReplySize + machMessageTrailerSize;
 
 struct GuestMachPortOptions {
     std::uint32_t flags{};
@@ -47,9 +65,38 @@ static_assert(sizeof(GuestMachPortOptions) == 24);
 template <typename Integer>
 Integer decodeGuestInteger(std::span<const std::uint8_t> bytes,
                            std::size_t offset) {
-    Integer value{};
-    std::memcpy(&value, bytes.data() + offset, sizeof(value));
-    return value;
+    if (offset > bytes.size() || sizeof(Integer) > bytes.size() - offset) {
+        throw std::invalid_argument("guest integer lies outside its byte buffer");
+    }
+    using Unsigned = std::make_unsigned_t<Integer>;
+    Unsigned value{};
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        value |= static_cast<Unsigned>(bytes[offset + index]) << (index * 8U);
+    }
+    if constexpr (std::is_signed_v<Integer>) {
+        return std::bit_cast<Integer>(value);
+    } else {
+        return value;
+    }
+}
+
+template <typename Integer>
+void encodeGuestInteger(std::span<std::uint8_t> bytes, std::size_t offset,
+                        Integer value) {
+    if (offset > bytes.size() || sizeof(Integer) > bytes.size() - offset) {
+        throw std::invalid_argument("guest integer lies outside its byte buffer");
+    }
+    using Unsigned = std::make_unsigned_t<Integer>;
+    const auto encoded = [&] {
+        if constexpr (std::is_signed_v<Integer>) {
+            return std::bit_cast<Unsigned>(value);
+        }
+        return static_cast<Unsigned>(value);
+    }();
+    for (std::size_t index = 0; index < sizeof(encoded); ++index) {
+        bytes[offset + index] =
+            static_cast<std::uint8_t>(encoded >> (index * 8U));
+    }
 }
 
 GuestMachPortOptions decodeGuestPortOptions(
@@ -70,8 +117,106 @@ GuestMachPortOptions decodeGuestPortOptions(
 std::array<std::uint8_t, sizeof(std::uint32_t)>
 encodeGuestPortName(GuestMachPortName name) {
     std::array<std::uint8_t, sizeof(std::uint32_t)> bytes{};
-    std::memcpy(bytes.data(), &name.value, bytes.size());
+    encodeGuestInteger<std::uint32_t>(bytes, 0, name.value);
     return bytes;
+}
+
+struct GuestMachVmMapRequest {
+    std::uint64_t address{};
+    std::uint64_t size{};
+    std::uint64_t mask{};
+    std::uint32_t flags{};
+    std::uint64_t offset{};
+    std::uint32_t copy{};
+    std::uint32_t currentProtection{};
+    std::uint32_t maximumProtection{};
+    std::uint32_t inheritance{};
+};
+
+std::optional<GuestMachVmMapRequest> decodeObservedMachVmMapRequest(
+    std::span<const std::uint8_t> message, const x86::X86State &state,
+    std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
+    const GuestPortSpace &portSpace) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    constexpr auto observedBits =
+        machMessageHeaderComplex | machMessageTypeCopySend |
+        (machMessageTypeMakeSendOnce << 8U);
+
+    const auto remoteName = static_cast<std::uint32_t>(state.r10);
+    const auto localName = static_cast<std::uint32_t>(state.r10 >> 32U);
+    const auto receiveName = static_cast<std::uint32_t>(state.r9 >> 32U);
+    const auto *taskPort =
+        portSpace.lookup(GuestMachPortName{remoteName});
+    const auto *replyPort =
+        portSpace.lookup(GuestMachPortName{localName});
+    if (state.rsi != observedMachMessage2Options ||
+        static_cast<std::uint32_t>(state.rdx) != observedBits ||
+        static_cast<std::uint32_t>(state.rdx >> 32U) !=
+            machVmMapRequestSize ||
+        remoteName != GuestPortSpace::taskSelfName.value ||
+        localName != receiveName ||
+        static_cast<std::uint32_t>(state.r8) != 0 ||
+        static_cast<std::int32_t>(state.r8 >> 32U) != machVmMapMessageId ||
+        static_cast<std::uint32_t>(state.r9) != 1 ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority) !=
+            machVmMapReceiveSize ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority >> 32U) != 0 ||
+        timeout != 0 || message.size() != machVmMapRequestSize ||
+        taskPort == nullptr || taskPort->sendUrefs == 0 ||
+        replyPort == nullptr || !replyPort->hasReceiveRight ||
+        replyPort->type != GuestPortType::Reply) {
+        return std::nullopt;
+    }
+
+    if (decodeGuestInteger<std::uint32_t>(message, 0) != observedBits ||
+        decodeGuestInteger<std::uint32_t>(message, 4) !=
+            machVmMapRequestSize ||
+        decodeGuestInteger<std::uint32_t>(message, 8) != remoteName ||
+        decodeGuestInteger<std::uint32_t>(message, 12) != localName ||
+        decodeGuestInteger<std::uint32_t>(message, 16) != 0 ||
+        decodeGuestInteger<std::int32_t>(message, 20) != machVmMapMessageId ||
+        decodeGuestInteger<std::uint32_t>(message, 24) != 1 ||
+        decodeGuestInteger<std::uint32_t>(message, 28) != 0 ||
+        message[38] != machMessageTypeCopySend ||
+        message[39] != machMessagePortDescriptor ||
+        !std::ranges::equal(message.subspan(40, nativeNdr.size()), nativeNdr)) {
+        return std::nullopt;
+    }
+
+    return GuestMachVmMapRequest{
+        .address = decodeGuestInteger<std::uint64_t>(message, 48),
+        .size = decodeGuestInteger<std::uint64_t>(message, 56),
+        .mask = decodeGuestInteger<std::uint64_t>(message, 64),
+        .flags = decodeGuestInteger<std::uint32_t>(message, 72),
+        .offset = decodeGuestInteger<std::uint64_t>(message, 76),
+        .copy = decodeGuestInteger<std::uint32_t>(message, 84),
+        .currentProtection = decodeGuestInteger<std::uint32_t>(message, 88),
+        .maximumProtection = decodeGuestInteger<std::uint32_t>(message, 92),
+        .inheritance = decodeGuestInteger<std::uint32_t>(message, 96),
+    };
+}
+
+std::array<std::uint8_t, machVmMapReceiveSize> encodeMachVmMapReply(
+    GuestMachPortName receiveName, std::uint32_t result,
+    std::uint64_t mappedAddress) {
+    std::array<std::uint8_t, machVmMapReceiveSize> reply{};
+    encodeGuestInteger<std::uint32_t>(
+        reply, 0, machMessageTypeMoveSendOnce << 8U);
+    encodeGuestInteger<std::uint32_t>(reply, 4, machVmMapReplySize);
+    encodeGuestInteger<std::uint32_t>(reply, 8, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 12, receiveName.value);
+    encodeGuestInteger<std::uint32_t>(reply, 16, 0);
+    encodeGuestInteger<std::int32_t>(reply, 20, machVmMapReplyId);
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    std::ranges::copy(nativeNdr, reply.begin() + 24);
+    encodeGuestInteger<std::uint32_t>(reply, 32, result);
+    encodeGuestInteger<std::uint64_t>(reply, 36, mappedAddress);
+    // A receive with no trailer options appends the format-0 trailer.
+    encodeGuestInteger<std::uint32_t>(reply, 44, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 48, machMessageTrailerSize);
+    return reply;
 }
 
 guest::Permission permissionsFromProtection(std::uint64_t protection) {
@@ -508,11 +653,92 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = taskSelfPortName().value;
         return;
     }
-    case 47U:
-        // mach_msg2 is an eight-argument packed ABI. Capture the first real
-        // request before designing any local IPC or task-kobject behavior.
-        // This diagnostic path is deliberately non-mutating and unsupported.
-        throw inspectUnsupportedMachMessage2(addressSpace, state, syscallRip);
+    case 47U: {
+        // The first observed mach_msg2 call is the MIG mach_vm_map request
+        // used by cached dyld to reserve its former standalone address range.
+        // Keep this a narrow task-kobject path: there is no generic message
+        // queue, host port forwarding, or fabricated IPC success here.
+        if (state.rsp > std::numeric_limits<std::uint64_t>::max() - 16U) {
+            throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                 syscallRip);
+        }
+
+        std::uint64_t receiveSizeAndPriority{};
+        std::uint64_t timeout{};
+        std::vector<std::uint8_t> message;
+        try {
+            receiveSizeAndPriority = addressSpace.readU64(
+                guest::GuestAddress{state.rsp + 8U});
+            timeout = addressSpace.readU64(
+                guest::GuestAddress{state.rsp + 16U});
+            const auto sendSize = static_cast<std::uint32_t>(state.rdx >> 32U);
+            message = addressSpace.readBytes(
+                guest::GuestAddress{state.rdi}, sendSize);
+        } catch (const std::runtime_error &) {
+            throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                 syscallRip);
+        }
+
+        const auto request = decodeObservedMachVmMapRequest(
+            message, state, receiveSizeAndPriority, timeout, portSpace_);
+        if (!request || request->size == 0 ||
+            request->size > std::numeric_limits<std::size_t>::max() ||
+            (request->address % guest::guestPageSize) != 0 ||
+            (request->size % guest::guestPageSize) != 0 ||
+            request->address >
+                std::numeric_limits<std::uint64_t>::max() - request->size ||
+            request->mask != guest::guestPageSize - 1U ||
+            request->flags != 0 || request->offset != 0 ||
+            request->copy != 0 || request->currentProtection != 0 ||
+            request->maximumProtection != 0 || request->inheritance != 1) {
+            throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                 syscallRip);
+        }
+
+        try {
+            addressSpace.validateAccess(
+                guest::GuestAddress{state.rdi}, machVmMapReceiveSize,
+                guest::Permission::Write);
+        } catch (const std::runtime_error &) {
+            // The combined send/receive fault path would require queueing the
+            // reply after a failed copyout. Keep it unsupported and atomic
+            // until a real guest needs that behavior.
+            throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                 syscallRip);
+        }
+
+        auto result = static_cast<std::uint32_t>(kernSuccess);
+        bool mapped = false;
+        try {
+            addressSpace.mapAnonymous(
+                guest::GuestAddress{request->address},
+                static_cast<std::size_t>(request->size),
+                guest::Permission::None, guest::Permission::None,
+                "mach_vm_map fixed no-access reservation");
+            mapped = true;
+        } catch (const std::invalid_argument &) {
+            result = static_cast<std::uint32_t>(kernNoSpace);
+        }
+
+        const auto receiveName = GuestMachPortName{
+            static_cast<std::uint32_t>(state.r9 >> 32U)};
+        const auto reply =
+            encodeMachVmMapReply(receiveName, result, request->address);
+        try {
+            addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
+        } catch (const std::runtime_error &) {
+            if (mapped) {
+                static_cast<void>(addressSpace.deallocate(
+                    guest::GuestAddress{request->address}, request->size));
+            }
+            throw;
+        }
+
+        // mach_msg2 itself succeeded; the MIG operation result lives in the
+        // reply body and is decoded by the guest's generated client stub.
+        state.rax = kernSuccess;
+        return;
+    }
     default:
         throw unsupported(state, syscallRip);
     }

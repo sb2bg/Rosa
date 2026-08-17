@@ -15671,6 +15671,181 @@ void testMachMessage2Diagnostic() {
                 "mach_msg2 diagnostic mutated the guest port namespace");
 }
 
+void testMachMessage2MachVmMapRequest() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr rosa::guest::GuestAddress portArguments{0xA000};
+    constexpr rosa::guest::GuestAddress targetAddress{0x7FF700000000ULL};
+    constexpr std::uint64_t targetSize = 0x120000;
+    constexpr std::uint32_t requestBits = 0x80001513U;
+    constexpr std::uint64_t requestOptions = 0x0000000200000003ULL;
+
+    rosa::guest::AddressSpace addressSpace;
+    for (const auto base : {messageAddress, stackAddress, portArguments}) {
+        addressSpace.mapAnonymous(
+            base, rosa::guest::guestPageSize,
+            rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+            "mach_msg2 test arguments");
+    }
+    rosa::darwin::MachDispatcher dispatcher;
+
+    rosa::x86::X86State setupState;
+    setupState.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, setupState,
+                        rosa::guest::GuestAddress{0x1000});
+    expectEqual(setupState.rax, std::uint64_t{0x103},
+                "mach_msg2 setup did not acquire task-self");
+
+    std::array<std::uint8_t, 24> options{};
+    constexpr std::uint32_t mpoReplyPort = 0x1000;
+    std::memcpy(options.data(), &mpoReplyPort, sizeof(mpoReplyPort));
+    addressSpace.writeBytes(portArguments, options);
+    setupState.rax = rosa::darwin::MachDispatcher::portConstructTrapNumber;
+    setupState.rdi = 0x103;
+    setupState.rsi = portArguments.value;
+    setupState.rdx = 0;
+    setupState.r10 = portArguments.value + 0x20;
+    dispatcher.dispatch(addressSpace, setupState,
+                        rosa::guest::GuestAddress{0x1000});
+    expectEqual(setupState.rax, std::uint64_t{0},
+                "mach_msg2 setup could not construct its reply port");
+    const auto replyName = addressSpace.readU32(
+        rosa::guest::GuestAddress{portArguments.value + 0x20});
+
+    const auto makeRequest = [replyName](std::uint64_t address,
+                                         std::uint64_t size) {
+        std::array<std::uint8_t, 100> request{};
+        const auto encode32 = [&request](std::size_t offset,
+                                         std::uint32_t value) {
+            std::memcpy(request.data() + offset, &value, sizeof(value));
+        };
+        const auto encode64 = [&request](std::size_t offset,
+                                         std::uint64_t value) {
+            std::memcpy(request.data() + offset, &value, sizeof(value));
+        };
+        encode32(0, requestBits);
+        encode32(4, static_cast<std::uint32_t>(request.size()));
+        encode32(8, 0x103);
+        encode32(12, replyName);
+        encode32(16, 0);
+        encode32(20, 4811);
+        encode32(24, 1);
+        encode32(28, 0); // null memory-object port
+        // The generated client's descriptor padding is not architectural.
+        encode32(32, 0x42000000);
+        request[38] = 0x13; // MACH_MSG_TYPE_COPY_SEND
+        request[39] = 0;    // MACH_MSG_PORT_DESCRIPTOR
+        request[44] = 1;    // native little-endian NDR record
+        encode64(48, address);
+        encode64(56, size);
+        encode64(64, 0xFFF);
+        encode32(72, 0); // fixed mapping
+        encode64(76, 0);
+        encode32(84, 0); // no copy
+        encode32(88, 0); // VM_PROT_NONE
+        encode32(92, 0); // VM_PROT_NONE maximum
+        encode32(96, 1); // VM_INHERIT_COPY
+        return request;
+    };
+    const auto makeState = [replyName] {
+        rosa::x86::X86State state;
+        state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+        state.rdi = messageAddress.value;
+        state.rsi = requestOptions;
+        state.rdx = (std::uint64_t{100} << 32U) | requestBits;
+        state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) | 0x103U;
+        state.r8 = std::uint64_t{4811} << 32U;
+        state.r9 = (static_cast<std::uint64_t>(replyName) << 32U) | 1U;
+        state.rsp = stackAddress.value;
+        state.rflags = 0x8D7;
+        return state;
+    };
+    addressSpace.writeU64(stackAddress, 0xDEADBEEF);
+    addressSpace.writeU64(rosa::guest::GuestAddress{stackAddress.value + 8U},
+                          52);
+    addressSpace.writeU64(rosa::guest::GuestAddress{stackAddress.value + 16U},
+                          0);
+    const auto request = makeRequest(targetAddress.value, targetSize);
+    addressSpace.writeBytes(messageAddress, request);
+    auto state = makeState();
+    const auto portsBefore = dispatcher.portSpace().size();
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802A8B664ULL});
+
+    expectEqual(state.rax, std::uint64_t{0},
+                "local mach_vm_map mach_msg2 did not return MACH_MSG_SUCCESS");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "local mach_vm_map mach_msg2 changed flags");
+    expectEqual(addressSpace.readU32(messageAddress), std::uint32_t{0x1200},
+                "mach_vm_map reply bits differ");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 4}),
+                std::uint32_t{44}, "mach_vm_map reply size differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 8}),
+                std::uint32_t{0}, "mach_vm_map reply remote name differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 12}),
+                replyName, "mach_vm_map reply local name differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 20}),
+                std::uint32_t{4911}, "mach_vm_map reply ID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 32}),
+                std::uint32_t{0}, "mach_vm_map MIG result differs");
+    expectEqual(addressSpace.readU64(
+                    rosa::guest::GuestAddress{messageAddress.value + 36}),
+                targetAddress.value, "mach_vm_map reply address differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 44}),
+                std::uint32_t{0}, "mach_vm_map trailer type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 48}),
+                std::uint32_t{8}, "mach_vm_map trailer size differs");
+    expectEqual(dispatcher.portSpace().size(), portsBefore,
+                "local mach_vm_map fabricated persistent Mach rights");
+
+    const auto mappings = addressSpace.mappingInfos();
+    const auto reservation = std::ranges::find_if(
+        mappings, [targetAddress](const rosa::guest::MappingInfo &mapping) {
+            return mapping.base == targetAddress;
+        });
+    expect(reservation != mappings.end(),
+           "local mach_vm_map did not create the fixed reservation");
+    expectEqual(reservation->size, static_cast<std::size_t>(targetSize),
+                "local mach_vm_map reservation size differs");
+    expect(reservation->permissions == rosa::guest::Permission::None &&
+               reservation->maximumPermissions == rosa::guest::Permission::None,
+           "local mach_vm_map reservation permissions differ");
+    bool inaccessible = false;
+    try {
+        static_cast<void>(addressSpace.readU32(targetAddress));
+    } catch (const std::runtime_error &error) {
+        inaccessible = std::string_view(error.what()).find("permissions") !=
+                       std::string_view::npos;
+    }
+    expect(inaccessible,
+           "VM_PROT_NONE mach_vm_map reservation was guest-readable");
+
+    // A collision still completes mach_msg2; KERN_NO_SPACE is returned in
+    // the MIG reply and no additional mapping or right is created.
+    addressSpace.writeBytes(messageAddress, request);
+    state = makeState();
+    const auto mappingsBeforeCollision = addressSpace.mappingCount();
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802A8B664ULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "colliding mach_vm_map did not complete mach_msg2");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 32}),
+                std::uint32_t{3},
+                "colliding mach_vm_map did not return KERN_NO_SPACE");
+    expectEqual(addressSpace.mappingCount(), mappingsBeforeCollision,
+                "colliding mach_vm_map changed the mapping count");
+    expectEqual(dispatcher.portSpace().size(), portsBefore,
+                "colliding mach_vm_map changed the port namespace");
+}
+
 void testUnsupportedMachTrapDiagnostic() {
     rosa::guest::AddressSpace addressSpace;
     rosa::darwin::SyscallDispatcher dispatcher;
@@ -18997,6 +19172,8 @@ int main() {
         {"generated Mach VM map trap", testGeneratedMachVmMapTrap},
         {"generated Mach VM protect trap", testGeneratedMachVmProtectTrap},
         {"Mach message2 diagnostic", testMachMessage2Diagnostic},
+        {"Mach message2 mach_vm_map request",
+         testMachMessage2MachVmMapRequest},
         {"unsupported Mach trap diagnostic", testUnsupportedMachTrapDiagnostic},
         {"IR verification", testIrVerification},
         {"R1 generated execution", testR1ExecutesGeneratedCode},
