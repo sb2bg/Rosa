@@ -3904,14 +3904,25 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            const bool ripRelative =
+                mode == 0 && rmEncoding == 0x5U && !rexB;
             if (rexX || mode > 0x2U || rmEncoding == 0x4U ||
-                (mode == 0 && rmEncoding == 0x5U)) {
+                (mode == 0 && rmEncoding == 0x5U && !ripRelative)) {
                 throw DecodeError(
                     address, remaining,
                     "only CMP register, [base+disp8/disp32] memory operands are supported");
             }
             std::int64_t displacement = 0;
-            if (mode == 0x1U) {
+            if (ripRelative) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated RIP-relative CMP disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+            } else if (mode == 0x1U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated CMP memory disp8");
                 }
@@ -3929,7 +3940,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto operandWidth = static_cast<std::uint8_t>(rexW ? 64U : 32U);
             instruction.opcode = Opcode::CmpRegMem;
             instruction.operands.push_back(RegisterOperand{lhs, operandWidth});
-            instruction.operands.push_back(MemoryOperand{base, displacement, operandWidth});
+            instruction.operands.push_back(
+                ripRelative
+                    ? MemoryOperand{Register::Rax, displacement, operandWidth,
+                                    std::nullopt, 1, false, true}
+                    : MemoryOperand{base, displacement, operandWidth});
         } else if (opcode == 0x87U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining,

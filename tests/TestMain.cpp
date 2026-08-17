@@ -1189,6 +1189,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("cmp64_rip_memory_equal",
+                             CaseId::cmp64_rip_memory_equal,
+                             differentialBytes_cmp64_rip_memory_equal);
+        testCase.request.state.rcx = 5;
+        testCase.flagMask = arithmeticFlags;
+        run(testCase);
+    }
+    {
+        auto testCase = make("cmp64_rip_memory_below",
+                             CaseId::cmp64_rip_memory_below,
+                             differentialBytes_cmp64_rip_memory_below);
+        testCase.request.state.rcx = 4;
+        testCase.flagMask = arithmeticFlags;
+        run(testCase);
+    }
+    {
         auto testCase = make(
             "cmp64_memory_immediate_equal",
             CaseId::cmp64_memory_immediate_equal,
@@ -4967,6 +4983,74 @@ void testCompare64BitRegisterWithGuestMemory() {
     static_cast<void>(block.execute(state, &addressSpace));
     expectEqual(state.rax, std::uint64_t{5}, "CMP r64 changed its register operand");
     expectEqual(state.rflags, std::uint64_t{0x93}, "CMP r64 flags differ");
+}
+
+void testCompare64BitRegisterWithRipRelativeGuestMemory() {
+    constexpr std::array<std::uint8_t, 16> code{
+        0x48, 0x3B, 0x0D, 0x01, 0x00, 0x00, 0x00, 0xC3,
+        0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress target{0x1008};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeBase);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegMem,
+           "RIP-relative CMP r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "RIP-relative CMP r64 length differs");
+    const auto lhs =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(lhs.reg == rosa::x86::Register::Rcx && lhs.width == 64,
+           "RIP-relative CMP r64 register differs");
+    expect(memory.ripRelative && !memory.hasBase &&
+               memory.displacement == 1 && memory.width == 64,
+           "RIP-relative CMP r64 memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "cmp rcx, [rip+0x1] ; 0x1008") != std::string::npos,
+           "RIP-relative CMP r64 dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeBase);
+    rosa::x86::X86State equalState;
+    equalState.rcx = 5;
+    equalState.rflags = 0x8D7;
+    static_cast<void>(block.execute(equalState, &addressSpace));
+    expectEqual(equalState.rcx, std::uint64_t{5},
+                "RIP-relative CMP changed its register");
+    expectEqual(equalState.rflags, std::uint64_t{0x46},
+                "RIP-relative CMP equal flags differ");
+    expectEqual(addressSpace.readU64(target), std::uint64_t{5},
+                "RIP-relative CMP changed guest memory");
+
+    constexpr std::array<std::uint8_t, 8> faultCode{
+        0x48, 0x3B, 0x0D, 0xF9, 0x1F, 0x00, 0x00, 0xC3};
+    rosa::guest::AddressSpace faultAddressSpace;
+    faultAddressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                                 rosa::guest::Permission::Read |
+                                     rosa::guest::Permission::Execute,
+                                 faultCode);
+    const auto faultBlock = translator.translate(faultCode, codeBase);
+    rosa::x86::X86State faultState;
+    faultState.rcx = 0x0123456789ABCDEFULL;
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(faultBlock.execute(faultState, &faultAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "RIP-relative CMP from unmapped guest memory did not fault");
+    expectEqual(faultState.rcx, std::uint64_t{0x0123456789ABCDEFULL},
+                "faulted RIP-relative CMP changed its register");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative CMP changed flags");
 }
 
 void testCompareGuestByteWithRegister() {
@@ -19597,6 +19681,8 @@ int main() {
         {"legacy CMP 32-bit register with guest memory",
          testLegacyCompare32BitRegisterWithGuestMemory},
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
+        {"CMP 64-bit register with RIP-relative guest memory",
+         testCompare64BitRegisterWithRipRelativeGuestMemory},
         {"CMP guest memory with 64-bit register",
          testCompareGuestMemoryWith64BitRegister},
         {"CMP guest byte with register", testCompareGuestByteWithRegister},

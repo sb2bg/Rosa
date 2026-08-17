@@ -447,7 +447,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", [";
-            if (memory.hasBase) {
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
                 stream << x86::registerName(memory.base);
             }
             if (memory.index) {
@@ -903,7 +905,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", [";
-            if (memory.hasBase) {
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
                 stream << x86::registerName(memory.base);
             }
             if (memory.index) {
@@ -916,12 +920,17 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
-                if (memory.hasBase || memory.index) {
+                if (memory.ripRelative || memory.hasBase || memory.index) {
                     stream << '+';
                 }
                 stream << "0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::CmpMemReg: {

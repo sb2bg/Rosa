@@ -3997,7 +3997,12 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto width = lhsRegister.width == 8   ? ir::Width::I8
                                : lhsRegister.width == 32 ? ir::Width::I32
                                                          : ir::Width::I64;
-            auto address = memory.hasBase
+            auto address = memory.ripRelative
+                               ? builder.constant(
+                                     instruction.address.value +
+                                         instruction.length,
+                                     ir::Width::I64, instruction.address)
+                           : memory.hasBase
                                ? builder.readGuestRegister(
                                      memory.base, ir::Width::I64,
                                      instruction.address)
