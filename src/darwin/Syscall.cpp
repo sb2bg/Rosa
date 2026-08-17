@@ -62,6 +62,8 @@ constexpr std::uint32_t guestSandboxCheckCall = 2;
 constexpr std::uint64_t guestSandboxSyscallFilterType = 0x41;
 constexpr std::uint64_t guestSandboxObservedFlags = 1;
 constexpr std::uint64_t guestMapWithLinkingSyscall = 550;
+constexpr std::uint32_t guestAmfiDyldPolicyCall = 90;
+constexpr std::uint64_t guestAmfiUnrestrictedDyldPolicy = 0x1DF;
 constexpr std::array<std::uint32_t, 2> guestSysctlNameToOid{0, 3};
 constexpr std::array<std::uint32_t, 3> guestLockdownModeOid{103, 101, 101};
 constexpr std::string_view guestLockdownModeName =
@@ -86,6 +88,13 @@ struct GuestSandboxCheckRequest {
 };
 
 static_assert(sizeof(GuestSandboxCheckRequest) == 48);
+
+struct GuestAmfiDyldPolicyRequest {
+    std::uint64_t inputFlags;
+    std::uint64_t outputAddress;
+};
+
+static_assert(sizeof(GuestAmfiDyldPolicyRequest) == 16);
 
 void setSuccess(x86::X86State &state, std::uint64_t result) {
     state.rax = result;
@@ -191,6 +200,38 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
             return {};
         }
         const auto call = static_cast<std::uint32_t>(state.rsi);
+        if (*policy == "AMFI" && call == guestAmfiDyldPolicyCall) {
+            GuestAmfiDyldPolicyRequest request{};
+            try {
+                const auto requestBytes = addressSpace.readBytes(
+                    guest::GuestAddress{state.rdx}, sizeof(request));
+                std::memcpy(&request, requestBytes.data(), sizeof(request));
+                addressSpace.validateAccess(
+                    guest::GuestAddress{request.outputAddress},
+                    sizeof(std::uint64_t), guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            if (request.inputFlags != 0) {
+                std::ostringstream reason;
+                reason << "unsupported AMFI dyld-policy input flags 0x"
+                       << std::hex << request.inputFlags;
+                throw unsupported(state, syscallRip, reason.str());
+            }
+
+            // This initial guest process is an unsigned, unrestricted,
+            // unencrypted development executable. A matching x86_64 process
+            // reports these dyld policy bits: @ paths, path variables, custom
+            // cache, fallback paths, print variables, interposing, embedded
+            // variables, and development variables. Restricted/encrypted
+            // process policy remains unsupported above.
+            addressSpace.writeU64(
+                guest::GuestAddress{request.outputAddress},
+                guestAmfiUnrestrictedDyldPolicy);
+            setSuccess(state, 0);
+            return {};
+        }
         if (*policy != "Sandbox" || call != guestSandboxCheckCall) {
             std::ostringstream reason;
             reason << "only Sandbox policy call 2 is implemented; got policy=\""

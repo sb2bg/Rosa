@@ -2243,6 +2243,16 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make(
+            "amfi_input_flags_unrestricted",
+            CaseId::amfi_input_flags_unrestricted,
+            differentialBytes_amfi_input_flags_unrestricted);
+        testCase.request.state.rdi = 0x00000001000002A8ULL;
+        testCase.request.state.rsi = 0;
+        testCase.request.state.rdx = 0;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmove32_extended_taken",
                              CaseId::cmove32_extended_taken,
                              differentialBytes_cmove32_extended_taken);
@@ -14810,6 +14820,98 @@ void testDarwinSandboxSyscallCheck() {
                 "unsupported Sandbox check changed its output");
 }
 
+void testDarwinAmfiDyldPolicy() {
+    constexpr auto macSyscallNumber = UINT64_C(0x0200017D);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress policyAddress{0x8000};
+    constexpr rosa::guest::GuestAddress requestAddress{0x8100};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8180};
+    constexpr std::array<std::uint8_t, 5> policy{
+        'A', 'M', 'F', 'I', 0};
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(policyAddress, policy);
+    const auto writeRequest = [&](std::uint64_t inputFlags,
+                                  std::uint64_t outputPointer) {
+        const std::array<std::uint64_t, 2> fields{
+            inputFlags, outputPointer};
+        std::array<std::uint8_t, sizeof(fields)> bytes{};
+        std::memcpy(bytes.data(), fields.data(), sizeof(fields));
+        addressSpace.writeBytes(requestAddress, bytes);
+        return bytes;
+    };
+
+    const auto requestBytes = writeRequest(0, outputAddress.value);
+    addressSpace.writeU64(outputAddress, 0xAAAAAAAAAAAAAAAAULL);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 90;
+    state.rdx = requestAddress.value;
+    state.rflags = 0x8D7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state,
+        rosa::guest::GuestAddress{0x7FF802AEE7FCULL});
+    expect(!outcome.exited, "AMFI dyld-policy check terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "AMFI dyld-policy check did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "AMFI dyld-policy check did not clear BSD carry");
+    expectEqual(addressSpace.readU64(outputAddress),
+                std::uint64_t{0x1DF},
+                "unrestricted guest AMFI dyld policy differs");
+    expectEqual(addressSpace.readBytes(requestAddress, requestBytes.size()),
+                std::vector<std::uint8_t>(requestBytes.begin(),
+                                          requestBytes.end()),
+                "AMFI dyld-policy check changed its input request");
+
+    addressSpace.writeU64(outputAddress, UINT64_MAX);
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 90;
+    state.rdx = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid AMFI request returned the wrong errno");
+    expectEqual(addressSpace.readU64(outputAddress), UINT64_MAX,
+                "faulted AMFI request changed its output");
+
+    static_cast<void>(writeRequest(0, 0x9000));
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 90;
+    state.rdx = requestAddress.value;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid AMFI output returned the wrong errno");
+
+    static_cast<void>(writeRequest(2, outputAddress.value));
+    addressSpace.writeU64(outputAddress, UINT64_MAX);
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 90;
+    state.rdx = requestAddress.value;
+    bool unsupportedInput = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        unsupportedInput = std::string_view(error.what()).find(
+                               "input flags 0x2") != std::string_view::npos;
+    }
+    expect(unsupportedInput,
+           "restricted AMFI input flags did not fail diagnostically");
+    expectEqual(addressSpace.readU64(outputAddress), UINT64_MAX,
+                "unsupported AMFI policy changed its output");
+}
+
 void testDarwinLockdownModeSysctl() {
     constexpr auto sysctlNumber = UINT64_C(0x020000CA);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -21065,6 +21167,7 @@ int main() {
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin getpid", testDarwinGetpid},
         {"Darwin Sandbox syscall check", testDarwinSandboxSyscallCheck},
+        {"Darwin AMFI dyld policy", testDarwinAmfiDyldPolicy},
         {"Darwin lockdown-mode sysctl", testDarwinLockdownModeSysctl},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
