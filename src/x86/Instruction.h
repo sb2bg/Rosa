@@ -59,6 +59,7 @@ enum class Opcode {
     AndRegReg,
     AndRegMem,
     AndRegImm,
+    BitTestRegImm,
     BitScanForwardRegReg,
     BitScanReverseRegReg,
     TestRegReg,

@@ -2550,6 +2550,39 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if (code[cursor] == 0x0FU) {
+            if (code.size() - cursor >= 2 && code[cursor + 1] == 0xBAU) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated BT r32, imm8");
+                }
+                const auto modrm = code[cursor + 2];
+                const auto mode =
+                    static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto extension =
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+                if (mode != 0x3U || extension != 0x4U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only register-direct BT r32, imm8 is supported from 0F BA");
+                }
+                instruction.opcode = Opcode::BitTestRegImm;
+                instruction.length = 4;
+                std::copy_n(
+                    code.begin() + static_cast<std::ptrdiff_t>(cursor), 4,
+                    instruction.bytes.begin());
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U),
+                                   false),
+                    32});
+                instruction.operands.push_back(
+                    ImmediateOperand{code[cursor + 3], 8});
+                result.push_back(std::move(instruction));
+                cursor += 4;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
             if (code.size() - cursor >= 3 && code[cursor + 1] == 0x43U) {
                 const auto modrm = code[cursor + 2];
                 const auto mode =
@@ -2819,6 +2852,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (secondOpcode != 0x42U && secondOpcode != 0x43U &&
                 secondOpcode != 0x44U && secondOpcode != 0x45U &&
                 secondOpcode != 0x47U &&
+                secondOpcode != 0xBAU &&
                 secondOpcode != 0xACU &&
                 secondOpcode != 0xAFU && secondOpcode != 0xBCU &&
                 secondOpcode != 0xBDU) {
@@ -2830,15 +2864,18 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 secondOpcode == 0x42U || secondOpcode == 0x43U ||
                 secondOpcode == 0x44U || secondOpcode == 0x45U ||
                 secondOpcode == 0x47U;
-            if (!rexW && !isConditionalMove && secondOpcode != 0xBCU) {
+            if (!rexW && !isConditionalMove && secondOpcode != 0xBAU &&
+                secondOpcode != 0xBCU) {
                 throw DecodeError(
                     address, remaining,
                     "only 32-bit register CMOV or BSF is supported from non-W REX 0F");
             }
             if (cursor >= code.size() ||
-                (secondOpcode == 0xACU && code.size() - cursor < 2)) {
+                ((secondOpcode == 0xACU || secondOpcode == 0xBAU) &&
+                 code.size() - cursor < 2)) {
                 throw DecodeError(address, remaining,
                                   secondOpcode == 0xACU ? "truncated SHRD r64"
+                                  : secondOpcode == 0xBAU ? "truncated BT register, imm8"
                                   : secondOpcode == 0xAFU ? "truncated IMUL r64"
                                   : secondOpcode == 0xBCU ? "truncated BSF r64"
                                   : secondOpcode == 0xBDU ? "truncated BSR r64"
@@ -2846,16 +2883,28 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-            if (mode != 0x3U || rexX) {
+            if (mode != 0x3U || (rexX && secondOpcode != 0xBAU)) {
                 throw DecodeError(
                     address, remaining,
                     "only register-direct CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA/IMUL/SHRD/BSF/BSR is supported");
             }
-            const auto encodedReg =
-                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
+            const auto rawReg =
+                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+            const auto encodedReg = decodeRegister(rawReg, rexR);
             const auto encodedRm =
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
-            if (isConditionalMove) {
+            if (secondOpcode == 0xBAU) {
+                if (rawReg != 0x4U || rexW || rexR || rexX) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only register-direct BT r32, imm8 with optional REX.B is supported from 0F BA");
+                }
+                instruction.opcode = Opcode::BitTestRegImm;
+                instruction.operands.push_back(
+                    RegisterOperand{encodedRm, 32});
+                instruction.operands.push_back(
+                    ImmediateOperand{code[cursor++], 8});
+            } else if (isConditionalMove) {
                 instruction.opcode = Opcode::CmovccReg;
                 instruction.condition = secondOpcode == 0x42U
                                             ? Condition::Below

@@ -89,6 +89,7 @@ enum class Opcode {
     UpdateMultiplyFlags,
     UpdateSignedMultiplyFlags,
     UpdateShiftRightDoubleFlags,
+    UpdateBitTestFlags,
     ExitBlock,
 };
 
@@ -251,6 +252,8 @@ class Builder {
                                    guest::GuestAddress rip);
     void updateShiftRightDoubleFlags(ValueId original, ValueId result, std::uint8_t count,
                                      Width width, guest::GuestAddress rip);
+    void updateBitTestFlags(ValueId value, std::uint8_t bitIndex, Width width,
+                            guest::GuestAddress rip);
     void exitBlock(guest::GuestAddress rip);
     void exitDirect(guest::GuestAddress target, guest::GuestAddress rip);
     void exitDirect(ValueId target, guest::GuestAddress rip);

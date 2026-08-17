@@ -827,6 +827,17 @@ void Builder::updateShiftRightDoubleFlags(ValueId original, ValueId result,
     });
 }
 
+void Builder::updateBitTestFlags(ValueId value, std::uint8_t bitIndex,
+                                 Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateBitTestFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = value,
+        .immediate = bitIndex,
+    });
+}
+
 void Builder::exitBlock(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::ExitBlock,
@@ -1206,6 +1217,13 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::UpdateShiftRightDoubleFlags:
             checkUse(operation.lhs, "original");
             checkUse(operation.rhs, "result");
+            break;
+        case Opcode::UpdateBitTestFlags:
+            checkUse(operation.lhs, "tested value");
+            if (operation.width != Width::I32) {
+                errors.emplace_back(
+                    "update_bit_test_flags currently requires i32");
+            }
             break;
         case Opcode::UpdateShiftLeftFlags:
             checkUse(operation.lhs, "original");

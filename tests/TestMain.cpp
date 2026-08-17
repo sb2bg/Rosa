@@ -1778,6 +1778,28 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("bt32_register_set", CaseId::bt32_register_set,
+                             differentialBytes_bt32_register_set);
+        testCase.request.state.rsi = 0xFFFFFFFF00000200ULL;
+        testCase.flagMask = carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("bt32_register_clear", CaseId::bt32_register_clear,
+                             differentialBytes_bt32_register_clear);
+        testCase.request.state.rsi = 0xFFFFFFFF00000000ULL;
+        testCase.flagMask = carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("bt32_register_masked_index",
+                             CaseId::bt32_register_masked_index,
+                             differentialBytes_bt32_register_masked_index);
+        testCase.request.state.rsi = 0xFFFFFFFF00000200ULL;
+        testCase.flagMask = carryFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("bsf64_nonzero", CaseId::bsf64_nonzero,
                              differentialBytes_bsf64_nonzero);
         testCase.request.state.rdx = UINT64_MAX;
@@ -16419,6 +16441,118 @@ void testBitScanForward32() {
            "extended BSF r32 did not clear ZF for a nonzero source");
 }
 
+void testBitTestRegisterImmediate32() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x0F, 0xBA, 0xE6, 0x09, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802A8C8BCULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::BitTestRegImm,
+           "BT r32, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "BT r32, imm8 length differs");
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(source.reg == rosa::x86::Register::Rsi && source.width == 32,
+           "BT r32, imm8 source differs");
+    expectEqual(immediate.value, std::uint64_t{9},
+                "BT r32, imm8 bit index differs");
+    expectEqual(immediate.width, std::uint8_t{8},
+                "BT r32, imm8 immediate width differs");
+    expect(rosa::debug::dumpX86(decoded).find("bt esi, 0x9") !=
+               std::string::npos,
+           "BT r32, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802A8C8BCULL});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("update_bit_test_flags.i32") != std::string::npos,
+           "BT r32, imm8 did not lower through typed flags IR");
+
+    rosa::x86::X86State setState;
+    setState.rsi = 0xFFFFFFFF00000200ULL;
+    setState.rflags = 0xAD6;
+    static_cast<void>(block.execute(setState));
+    expectEqual(setState.rsi, std::uint64_t{0xFFFFFFFF00000200ULL},
+                "BT r32, imm8 changed its source");
+    expectEqual(setState.rflags, std::uint64_t{0xAD7},
+                "BT r32, imm8 set-CF semantics differ");
+
+    rosa::x86::X86State clearState;
+    clearState.rsi = 0xFFFFFFFF00000000ULL;
+    clearState.rflags = 0xAD7;
+    static_cast<void>(block.execute(clearState));
+    expectEqual(clearState.rsi, std::uint64_t{0xFFFFFFFF00000000ULL},
+                "BT r32, imm8 changed its clear source");
+    expectEqual(clearState.rflags, std::uint64_t{0xAD6},
+                "BT r32, imm8 clear-CF semantics differ");
+
+    constexpr std::array<std::uint8_t, 5> maskedCode{
+        0x0F, 0xBA, 0xE6, 0x29, 0xC3};
+    const auto maskedBlock = translator.translate(
+        maskedCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State maskedState;
+    maskedState.rsi = 0x200;
+    maskedState.rflags = 0xAD6;
+    static_cast<void>(maskedBlock.execute(maskedState));
+    expectEqual(maskedState.rflags, std::uint64_t{0xAD7},
+                "BT r32 did not mask the immediate index to five bits");
+
+    constexpr std::array<std::uint8_t, 5> highBitCode{
+        0x0F, 0xBA, 0xE6, 0x1F, 0xC3};
+    const auto highBitBlock = translator.translate(
+        highBitCode, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State highBitState;
+    highBitState.rsi = 0xFFFFFFFF80000000ULL;
+    highBitState.rflags = 0xAD6;
+    static_cast<void>(highBitBlock.execute(highBitState));
+    expectEqual(highBitState.rflags, std::uint64_t{0xAD7},
+                "BT r32 bit-31 semantics differ");
+
+    constexpr std::array<std::uint8_t, 6> extendedCode{
+        0x41, 0x0F, 0xBA, 0xE6, 0x09, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x4000});
+    const auto extendedSource =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[0]);
+    expect(extendedSource.reg == rosa::x86::Register::R14 &&
+               extendedSource.width == 32,
+           "REX.B BT r32 source differs");
+    expect(rosa::debug::dumpX86(extendedDecoded).find("bt r14d, 0x9") !=
+               std::string::npos,
+           "REX.B BT r32 dump differs");
+
+    const auto expectRejected = [&decoder](std::span<const std::uint8_t> bytes,
+                                           std::string_view message) {
+        bool rejected = false;
+        try {
+            static_cast<void>(decoder.decodeBlock(
+                bytes, rosa::guest::GuestAddress{0x5000}));
+        } catch (const rosa::x86::DecodeError &) {
+            rejected = true;
+        }
+        expect(rejected, message);
+    };
+    constexpr std::array<std::uint8_t, 4> memoryForm{
+        0x0F, 0xBA, 0x26, 0x09};
+    constexpr std::array<std::uint8_t, 4> wrongExtension{
+        0x0F, 0xBA, 0xEE, 0x09};
+    constexpr std::array<std::uint8_t, 5> rexW{
+        0x48, 0x0F, 0xBA, 0xE6, 0x09};
+    constexpr std::array<std::uint8_t, 5> rexR{
+        0x44, 0x0F, 0xBA, 0xE6, 0x09};
+    constexpr std::array<std::uint8_t, 5> rexX{
+        0x42, 0x0F, 0xBA, 0xE6, 0x09};
+    expectRejected(memoryForm, "BT memory form was accepted");
+    expectRejected(wrongExtension, "non-BT 0F BA extension was accepted");
+    expectRejected(rexW, "BT r64 form was accepted");
+    expectRejected(rexR, "REX.R BT extension was accepted");
+    expectRejected(rexX, "REX.X BT form was accepted");
+}
+
 void testBitScanForward64() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x0F, 0xBC, 0xD1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -19195,6 +19329,7 @@ int main() {
          testAnd8BitRegisterWithRipRelativeGuestMemory},
         {"AND 64-bit register with guest memory",
          testAnd64BitRegisterWithGuestMemory},
+        {"BT 32-bit register with immediate", testBitTestRegisterImmediate32},
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},
         {"BSWAP 32-bit register", testByteSwap32},

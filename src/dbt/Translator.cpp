@@ -1843,6 +1843,17 @@ updateSignedMultiplyFlags64(x86::X86State *state, std::uint64_t lhs,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateBitTestFlags32(x86::X86State *state, std::uint64_t value,
+                     std::uint64_t unmaskedBitIndex) {
+    const auto bitIndex =
+        static_cast<std::uint8_t>(unmaskedBitIndex & 0x1FU);
+    auto flags = (state->rflags & ~flagCarry) | flagReservedOne;
+    flags |= (value >> bitIndex) & 1U;
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateShiftRightDoubleFlags64(x86::X86State *state, std::uint64_t original,
                               std::uint64_t result, std::uint64_t unmaskedCount) {
     const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x3FU);
@@ -3544,6 +3555,19 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                    instruction.address);
             break;
         }
+        case x86::Opcode::BitTestRegImm: {
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto bitIndex =
+                std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            const auto width = ir::Width::I32;
+            const auto value = builder.readGuestRegister(
+                source.reg, width, instruction.address);
+            builder.updateBitTestFlags(
+                value, static_cast<std::uint8_t>(bitIndex.value), width,
+                instruction.address);
+            break;
+        }
         case x86::Opcode::BitScanReverseRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
@@ -4246,6 +4270,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::UpdateMultiplyFlags ||
                          operation.opcode == ir::Opcode::UpdateSignedMultiplyFlags ||
                          operation.opcode == ir::Opcode::UpdateShiftRightDoubleFlags ||
+                         operation.opcode == ir::Opcode::UpdateBitTestFlags ||
                          operation.opcode == ir::Opcode::Push ||
                          operation.opcode == ir::Opcode::AddGuestMemory ||
                          operation.opcode == ir::Opcode::OrGuestMemory ||
@@ -5302,6 +5327,13 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
             assembler.movImmediate(arm64::x3, operation.immediate);
             assembler.movImmediate(arm64::x16, pointerBits(&updateShiftRightDoubleFlags64));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::UpdateBitTestFlags:
+            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x2, operation.immediate);
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&updateBitTestFlags32));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::ExitBlock: {

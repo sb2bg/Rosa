@@ -785,6 +785,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
+        case x86::Opcode::BitTestRegImm:
+            stream << "bt "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(instruction.operands[1])
+                          .value;
+            break;
         case x86::Opcode::BitScanReverseRegReg:
             stream << "bsr "
                    << registerOperandName(
@@ -1703,6 +1711,11 @@ std::string dumpIr(const ir::Block &block) {
             stream << "update_shift_right_double_flags." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", " << valueName(*operation.rhs)
                    << ", " << std::dec << operation.immediate;
+            break;
+        case ir::Opcode::UpdateBitTestFlags:
+            stream << "update_bit_test_flags." << widthName(operation.width)
+                   << ' ' << valueName(*operation.lhs) << ", " << std::dec
+                   << operation.immediate;
             break;
         case ir::Opcode::ExitBlock:
             stream << "exit_block ";
