@@ -460,7 +460,8 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
         throw std::runtime_error("dyld returned without a guest exit syscall");
     } catch (const std::exception &error) {
         std::cerr << rosa::debug::dumpGuestFailure(dyldString, error, state, addressSpace,
-                                                   dispatcher);
+                                                   dispatcher,
+                                                   sharedCache ? &*sharedCache : nullptr);
         dumpCachedBlocks(dispatcher, options);
         throw std::runtime_error("dyld experiment stopped after " +
                                  std::to_string(dispatcher.cache().size()) +

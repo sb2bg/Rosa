@@ -16659,9 +16659,41 @@ class SharedCacheFixture {
         storeFixtureU64(main, 0x290, subcacheVmOffset);
         constexpr std::string_view suffix = ".01";
         std::copy(suffix.begin(), suffix.end(), main.begin() + 0x298);
+        constexpr std::size_t legacyImageTable = 0xD00;
+        constexpr std::size_t imageTextTable = 0xD40;
+        constexpr std::size_t firstPathOffset = 0xD80;
+        constexpr std::size_t secondPathOffset = 0xDA0;
+        storeFixtureU64(main, 0x88, imageTextTable);
+        storeFixtureU64(main, 0x90, 2);
+        storeFixtureU32(main, 0x1C0, legacyImageTable);
+        storeFixtureU32(main, 0x1C4, 2);
+        const auto storeImage = [&](std::size_t index,
+                                    std::uint64_t address,
+                                    std::uint32_t pathOffset,
+                                    const std::array<std::uint8_t, 16> &uuid) {
+            const auto legacyOffset = legacyImageTable + index * 32;
+            storeFixtureU64(main, legacyOffset, address);
+            storeFixtureU32(main, legacyOffset + 24, pathOffset);
+            const auto textOffset = imageTextTable + index * 32;
+            std::copy(uuid.begin(), uuid.end(), main.begin() + textOffset);
+            storeFixtureU64(main, textOffset + 16, address);
+            storeFixtureU32(main, textOffset + 24, 0x80);
+            storeFixtureU32(main, textOffset + 28, pathOffset);
+        };
+        storeImage(0, regionStart + 0x100, firstPathOffset, mainUuid_);
+        storeImage(1, regionStart + subcacheVmOffset + 0x100,
+                   secondPathOffset, subcacheUuid_);
+        main[0x100] = 0xEB;
+        main[0x101] = 0xFE; // stable two-byte loop inside image 0
+        constexpr std::string_view firstPath = "/usr/lib/dyld";
+        constexpr std::string_view secondPath = "/usr/lib/libSystem.B.dylib";
+        std::copy(firstPath.begin(), firstPath.end(),
+                  main.begin() + firstPathOffset);
+        std::copy(secondPath.begin(), secondPath.end(),
+                  main.begin() + secondPathOffset);
         auto subcache = makeSharedCacheFixtureFile(
             regionStart + subcacheVmOffset, subcacheUuid_,
-            regionStart + subcacheVmOffset, 0, 3, 3, false);
+            regionStart + subcacheVmOffset, 0, 5, 5, false);
         writeFixtureFile(mainPath_, main);
         writeFixtureFile(subcachePath_, subcache);
     }
@@ -16686,6 +16718,13 @@ class SharedCacheFixture {
                       std::uint32_t value) const {
         std::array<std::uint8_t, 4> bytes{};
         storeFixtureU32(bytes, 0, value);
+        overwrite(path, offset, bytes);
+    }
+
+    void overwriteU64(const std::filesystem::path &path, std::uint64_t offset,
+                      std::uint64_t value) const {
+        std::array<std::uint8_t, 8> bytes{};
+        storeFixtureU64(bytes, 0, value);
         overwrite(path, offset, bytes);
     }
 
@@ -16747,6 +16786,35 @@ void testGuestSharedCacheParsingAndMapping() {
                 "shared-cache mapping count differs");
     expectEqual(cache.mappings()[0].flags, std::uint64_t{4},
                 "shared-cache mapping-with-slide flags differ");
+    expectEqual(cache.images().size(), std::size_t{2},
+                "shared-cache image metadata count differs");
+    expectEqual(cache.images()[0].index, std::size_t{0},
+                "shared-cache image index differs");
+    expectEqual(cache.images()[0].path, std::string("/usr/lib/dyld"),
+                "shared-cache image path differs");
+    expectEqual(cache.images()[0].loadAddress.value,
+                SharedCacheFixture::regionStart + 0x100,
+                "shared-cache image load address differs");
+    expectEqual(cache.images()[0].textSize, std::uint64_t{0x80},
+                "shared-cache image text size differs");
+    expect(cache.images()[0].sourceSuffix.empty(),
+           "main-cache image has a subcache suffix");
+    expectEqual(cache.images()[1].sourceSuffix, std::string(".01"),
+                "subcache image source suffix differs");
+    expect(cache.imageForAddress(rosa::guest::GuestAddress{
+               SharedCacheFixture::regionStart + 0x100}) == &cache.images()[0],
+           "shared-cache resolver missed image range start");
+    expect(cache.imageForAddress(rosa::guest::GuestAddress{
+               SharedCacheFixture::regionStart + 0x17F}) == &cache.images()[0],
+           "shared-cache resolver missed image range end byte");
+    expect(cache.imageForAddress(rosa::guest::GuestAddress{
+               SharedCacheFixture::regionStart + 0x180}) == nullptr,
+           "shared-cache resolver included the half-open range end");
+    expect(cache.imageForAddress(rosa::guest::GuestAddress{
+               SharedCacheFixture::regionStart +
+               SharedCacheFixture::subcacheVmOffset + 0x100}) ==
+               &cache.images()[1],
+           "shared-cache resolver missed a subcache image");
 
     rosa::guest::AddressSpace addressSpace;
     cache.mapInto(addressSpace);
@@ -16764,10 +16832,14 @@ void testGuestSharedCacheParsingAndMapping() {
     expect(textWriteRejected, "shared-cache executable mapping accepted a write");
     constexpr rosa::guest::GuestAddress subcacheAddress{
         SharedCacheFixture::regionStart + SharedCacheFixture::subcacheVmOffset};
-    addressSpace.writeU64(subcacheAddress, 0x0123456789ABCDEFULL);
-    expectEqual(addressSpace.readU64(subcacheAddress),
-                std::uint64_t{0x0123456789ABCDEFULL},
-                "shared-cache writable mapping rejected a private write");
+    bool subcacheWriteRejected = false;
+    try {
+        addressSpace.writeU64(subcacheAddress, 0x0123456789ABCDEFULL);
+    } catch (const std::runtime_error &) {
+        subcacheWriteRejected = true;
+    }
+    expect(subcacheWriteRejected,
+           "shared-cache executable subcache mapping accepted a write");
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
                     cache.regionStart().value + 0x800}),
                 cache.regionStart().value + 0x900,
@@ -16777,7 +16849,7 @@ void testGuestSharedCacheParsingAndMapping() {
                 cache.regionStart().value + 0xA00,
                 "shared-cache terminal chained pointer was not rebased");
     expect(addressSpace.protect(subcacheAddress, rosa::guest::guestPageSize,
-                                rosa::guest::Permission::Execute) ==
+                                rosa::guest::Permission::Write) ==
                rosa::guest::ProtectResult::ProtectionFailure,
            "shared-cache mapping exceeded maximum protections");
     constexpr rosa::guest::GuestAddress dynamicAddress{
@@ -16797,6 +16869,37 @@ void testGuestSharedCacheParsingAndMapping() {
         dynamicWriteRejected = true;
     }
     expect(dynamicWriteRejected, "shared-cache dynamic data accepted a guest write");
+
+    rosa::x86::X86State provenanceState;
+    provenanceState.rip = SharedCacheFixture::regionStart + 0x100;
+    rosa::dbt::Dispatcher provenanceDispatcher(addressSpace, 1, nullptr,
+                                                &cache);
+    std::string provenanceReport;
+    try {
+        static_cast<void>(provenanceDispatcher.run(provenanceState, 20));
+    } catch (const std::runtime_error &error) {
+        provenanceReport = rosa::debug::dumpGuestFailure(
+            "fallback", error, provenanceState, addressSpace,
+            provenanceDispatcher, &cache);
+    }
+    expectEqual(provenanceDispatcher.cacheImageExecutions().size(),
+                std::size_t{1},
+                "dispatcher did not track first cache-image execution");
+    expectEqual(provenanceDispatcher.cacheImageExecutions()[0].image->index,
+                std::size_t{0},
+                "dispatcher tracked the wrong cache image");
+    expectEqual(provenanceDispatcher.cacheImageExecutions()[0].firstRip.value,
+                SharedCacheFixture::regionStart + 0x100,
+                "dispatcher tracked the wrong first image RIP");
+    expect(provenanceReport.find("image=/usr/lib/dyld") !=
+               std::string::npos,
+           "failure report omitted canonical cache-image provenance");
+    expect(provenanceReport.find("cache image: index=0") !=
+               std::string::npos,
+           "failure report omitted cache-image index");
+    expect(provenanceReport.find("cache images executed") !=
+               std::string::npos,
+           "failure report omitted cache-image execution history");
 }
 
 void testGuestSharedCacheRejectsMalformedFiles() {
@@ -16840,6 +16943,37 @@ void testGuestSharedCacheRejectsMalformedFiles() {
         SharedCacheFixture fixture;
         fixture.overwriteU32(fixture.mainPath(), 0x30C, 2);
         expectSharedCacheRejected(fixture.mainPath(), "slide page geometry");
+    }
+    {
+        SharedCacheFixture fixture;
+        fixture.overwriteU64(fixture.mainPath(), 0x90, 3);
+        expectSharedCacheRejected(fixture.mainPath(),
+                                  "image tables have different counts");
+    }
+    {
+        SharedCacheFixture fixture;
+        fixture.overwriteU64(fixture.mainPath(), 0xD00, 0x200000);
+        fixture.overwriteU64(fixture.mainPath(), 0xD50, 0x200000);
+        expectSharedCacheRejected(fixture.mainPath(),
+                                  "image text is not in one executable mapping");
+    }
+    {
+        SharedCacheFixture fixture;
+        fixture.overwriteU64(fixture.mainPath(), 0xD00,
+                             UINT64_MAX - 0x10);
+        fixture.overwriteU64(fixture.mainPath(), 0xD50,
+                             UINT64_MAX - 0x10);
+        expectSharedCacheRejected(fixture.mainPath(),
+                                  "image text range is invalid");
+    }
+    {
+        SharedCacheFixture fixture;
+        fixture.overwriteU32(fixture.mainPath(), 0xD18, 0xFF0);
+        fixture.overwriteU32(fixture.mainPath(), 0xD5C, 0xFF0);
+        constexpr std::array<std::uint8_t, 16> unterminated{
+            'n', 'o', '-', 't', 'e', 'r', 'm', 'i', 'n', 'a', 't', 'o', 'r', '!', '!', '!'};
+        fixture.overwrite(fixture.mainPath(), 0xFF0, unterminated);
+        expectSharedCacheRejected(fixture.mainPath(), "is not NUL-terminated");
     }
 }
 

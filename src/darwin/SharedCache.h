@@ -4,6 +4,7 @@
 #include "guest/AddressSpace.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -37,6 +38,15 @@ struct SharedCacheFile {
     std::array<std::uint8_t, 16> uuid{};
     std::uint64_t cacheVmOffset{};
     std::vector<SharedCacheMapping> mappings;
+};
+
+struct SharedCacheImage {
+    std::size_t index{};
+    guest::GuestAddress loadAddress{};
+    std::uint64_t textSize{};
+    std::array<std::uint8_t, 16> uuid{};
+    std::string path;
+    std::string sourceSuffix;
 };
 
 class GuestSharedCache {
@@ -80,6 +90,11 @@ class GuestSharedCache {
     [[nodiscard]] const std::vector<SharedCacheMapping> &mappings() const noexcept {
         return mappings_;
     }
+    [[nodiscard]] const std::vector<SharedCacheImage> &images() const noexcept {
+        return images_;
+    }
+    [[nodiscard]] const SharedCacheImage *
+    imageForAddress(guest::GuestAddress address) const noexcept;
 
   private:
     SharedCacheArchitecture architecture_{SharedCacheArchitecture::X86_64};
@@ -97,6 +112,7 @@ class GuestSharedCache {
     std::uint64_t dynamicDataSize_{};
     std::vector<SharedCacheFile> files_;
     std::vector<SharedCacheMapping> mappings_;
+    std::vector<SharedCacheImage> images_;
 };
 
 [[nodiscard]] std::string formatSharedCacheUuid(

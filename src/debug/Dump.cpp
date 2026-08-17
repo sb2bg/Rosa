@@ -1755,20 +1755,39 @@ std::string dumpArm64(const arm64::Program &program) {
 std::string dumpGuestFailure(std::string_view imageHint, const std::exception &error,
                              const x86::X86State &state,
                              const guest::AddressSpace &addressSpace,
-                             const dbt::Dispatcher &dispatcher) {
+                             const dbt::Dispatcher &dispatcher,
+                             const darwin::GuestSharedCache *sharedCache) {
     const auto mappings = addressSpace.mappingInfos();
     const auto *ripMapping = nearestMapping(mappings, state.rip);
     const auto *rspMapping = nearestMapping(mappings, state.rsp);
+    const auto *cacheImage = sharedCache == nullptr
+                                 ? nullptr
+                                 : sharedCache->imageForAddress(
+                                       guest::GuestAddress{state.rip});
 
     std::ostringstream stream;
     stream << "guest fatal: image=";
-    if (ripMapping != nullptr && contains(*ripMapping, state.rip) &&
+    if (cacheImage != nullptr) {
+        stream << cacheImage->path;
+    } else if (ripMapping != nullptr && contains(*ripMapping, state.rip) &&
         !ripMapping->label.empty()) {
         stream << ripMapping->label;
     } else {
         stream << imageHint;
     }
-    stream << "\n  reason: " << error.what() << '\n'
+    stream << "\n";
+    if (cacheImage != nullptr) {
+        stream << "  cache image: index=" << cacheImage->index
+               << " uuid=" << darwin::formatSharedCacheUuid(cacheImage->uuid)
+               << " text=[0x" << std::hex << cacheImage->loadAddress.value
+               << ",0x" << (cacheImage->loadAddress.value +
+                              cacheImage->textSize)
+               << ") source="
+               << (cacheImage->sourceSuffix.empty() ? "main"
+                                                    : cacheImage->sourceSuffix)
+               << '\n';
+    }
+    stream << "  reason: " << error.what() << '\n'
            << "  RIP=0x" << std::hex << state.rip << " RSP=0x" << state.rsp
            << " RFLAGS=0x" << state.rflags << " GSBASE=0x" << state.gsBase
            << '\n'
@@ -1824,6 +1843,15 @@ std::string dumpGuestFailure(std::string_view imageHint, const std::exception &e
     if (dispatcher.machDispatcher().lastPortConstruct()) {
         stream << "  guest Mach port namespace:\n    "
                << dispatcher.machDispatcher().portSpaceSummary() << '\n';
+    }
+    if (!dispatcher.cacheImageExecutions().empty()) {
+        stream << "  cache images executed:\n";
+        for (const auto &execution : dispatcher.cacheImageExecutions()) {
+            stream << "    block=" << std::dec << execution.executedBlock
+                   << " RIP=0x" << std::hex << execution.firstRip.value
+                   << std::dec << " index=" << execution.image->index << ' '
+                   << execution.image->path << '\n';
+        }
     }
     const auto hotBlocks = dispatcher.hotBlocks();
     if (!hotBlocks.empty()) {

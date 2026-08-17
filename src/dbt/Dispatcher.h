@@ -1,5 +1,6 @@
 #pragma once
 
+#include "darwin/SharedCache.h"
 #include "darwin/Syscall.h"
 #include "dbt/BlockCache.h"
 #include "guest/Address.h"
@@ -13,6 +14,7 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace rosa::dbt {
@@ -29,6 +31,12 @@ struct BlockExecutionCount {
     std::size_t count{};
 };
 
+struct CacheImageExecution {
+    const darwin::SharedCacheImage *image{};
+    guest::GuestAddress firstRip;
+    std::size_t executedBlock{};
+};
+
 class Dispatcher {
   public:
     explicit Dispatcher(
@@ -37,6 +45,7 @@ class Dispatcher {
         TimestampCounterReader timestampCounterReader = nullptr,
         const darwin::GuestSharedCache *sharedCache = nullptr)
         : addressSpace_(addressSpace), syscallDispatcher_(sharedCache),
+          sharedCache_(sharedCache),
           maximumInstructionsPerBlock_(maximumInstructionsPerBlock),
           timestampCounterReader_(timestampCounterReader) {}
 
@@ -55,6 +64,10 @@ class Dispatcher {
     [[nodiscard]] const darwin::MachDispatcher &machDispatcher() const noexcept {
         return syscallDispatcher_.machDispatcher();
     }
+    [[nodiscard]] const std::vector<CacheImageExecution> &
+    cacheImageExecutions() const noexcept {
+        return cacheImageExecutions_;
+    }
 
   private:
     [[nodiscard]] std::span<const std::uint8_t> codeAt(guest::GuestAddress address) const;
@@ -62,11 +75,14 @@ class Dispatcher {
     guest::AddressSpace &addressSpace_;
     BlockCache cache_;
     darwin::SyscallDispatcher syscallDispatcher_;
+    const darwin::GuestSharedCache *sharedCache_{};
     std::size_t maximumInstructionsPerBlock_;
     TimestampCounterReader timestampCounterReader_{};
     std::size_t executedBlocks_{};
     std::deque<guest::GuestAddress> recentBlocks_;
     std::unordered_map<std::uint64_t, std::size_t> blockExecutionCounts_;
+    std::unordered_set<std::size_t> executedCacheImageIndexes_;
+    std::vector<CacheImageExecution> cacheImageExecutions_;
 };
 
 } // namespace rosa::dbt

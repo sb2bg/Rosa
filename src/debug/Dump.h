@@ -1,6 +1,7 @@
 #pragma once
 
 #include "arm64/Assembler.h"
+#include "darwin/SharedCache.h"
 #include "dbt/Dispatcher.h"
 #include "guest/AddressSpace.h"
 #include "ir/IR.h"
@@ -20,6 +21,7 @@ namespace rosa::debug {
                                            const std::exception &error,
                                            const x86::X86State &state,
                                            const guest::AddressSpace &addressSpace,
-                                           const dbt::Dispatcher &dispatcher);
+                                           const dbt::Dispatcher &dispatcher,
+                                           const darwin::GuestSharedCache *sharedCache = nullptr);
 
 } // namespace rosa::debug

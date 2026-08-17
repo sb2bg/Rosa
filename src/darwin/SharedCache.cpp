@@ -31,12 +31,17 @@ constexpr std::size_t modernSubcacheRecordSize = 56;
 constexpr std::uint32_t maximumMappingCount = 64;
 constexpr std::uint32_t maximumSubcacheCount = 64;
 constexpr std::uint32_t supportedProtectionMask = 7;
+constexpr std::size_t imageTextRecordSize = 32;
+constexpr std::uint64_t maximumImageCount = 1'000'000;
+constexpr std::size_t maximumImagePathSize = 4096;
 
 constexpr std::size_t mappingOffsetField = 0x10;
 constexpr std::size_t mappingCountField = 0x14;
 constexpr std::size_t uuidField = 0x58;
 constexpr std::size_t dyldMachHeaderField = 0x78;
 constexpr std::size_t dyldEntryPointField = 0x80;
+constexpr std::size_t imagesTextOffsetField = 0x88;
+constexpr std::size_t imagesTextCountField = 0x90;
 constexpr std::size_t platformField = 0xD8;
 constexpr std::size_t regionStartField = 0xE0;
 constexpr std::size_t regionSizeField = 0xE8;
@@ -119,6 +124,30 @@ class FileReader {
             consumed += static_cast<std::size_t>(count);
         }
         return result;
+    }
+
+    [[nodiscard]] std::string readCString(
+        std::uint64_t offset, std::string_view description) const {
+        if (offset >= size_) {
+            throw std::runtime_error("dyld shared cache " +
+                                     std::string(description) + " exceeds " +
+                                     path_.string());
+        }
+        const auto available = static_cast<std::size_t>(
+            std::min<std::uint64_t>(maximumImagePathSize, size_ - offset));
+        const auto bytes = read(offset, available, description);
+        const auto terminator =
+            std::ranges::find(bytes, static_cast<std::uint8_t>(0));
+        if (terminator == bytes.end()) {
+            throw std::runtime_error("dyld shared cache " +
+                                     std::string(description) +
+                                     " is not NUL-terminated");
+        }
+        if (terminator == bytes.begin()) {
+            throw std::runtime_error("dyld shared cache " +
+                                     std::string(description) + " is empty");
+        }
+        return std::string(bytes.begin(), terminator);
     }
 
   private:
@@ -436,7 +465,10 @@ struct ParsedFile {
     guest::GuestAddress dyldEntryPoint{};
     std::uint32_t platform{};
     std::uint32_t osVersion{};
+    std::uint32_t imageOffset{};
     std::uint32_t imageCount{};
+    std::uint64_t imagesTextOffset{};
+    std::uint64_t imagesTextCount{};
     std::uint32_t subcacheOffset{};
     std::uint32_t subcacheCount{};
     bool hasModernSubcaches{};
@@ -466,6 +498,28 @@ ParsedFile parseFile(const std::filesystem::path &path, std::string_view suffix)
         result.dyldMachHeader = guest::GuestAddress{readU64(header, dyldMachHeaderField)};
         result.dyldEntryPoint = guest::GuestAddress{readU64(header, dyldEntryPointField)};
     }
+    if (mappingOffset > imagesTextCountField + sizeof(std::uint64_t) - 1U) {
+        result.imagesTextOffset = readU64(header, imagesTextOffsetField);
+        result.imagesTextCount = readU64(header, imagesTextCountField);
+        if ((result.imagesTextOffset == 0) != (result.imagesTextCount == 0)) {
+            throw std::runtime_error(
+                "dyld shared cache image-text table is incomplete");
+        }
+        if (result.imagesTextCount > maximumImageCount ||
+            result.imagesTextCount >
+                std::numeric_limits<std::size_t>::max() /
+                    imageTextRecordSize) {
+            throw std::runtime_error(
+                "dyld shared cache image-text count is unreasonable");
+        }
+        const auto tableSize = static_cast<std::size_t>(
+            result.imagesTextCount * imageTextRecordSize);
+        if (result.imagesTextOffset > reader.size() ||
+            tableSize > reader.size() - result.imagesTextOffset) {
+            throw std::runtime_error(
+                "dyld shared cache image-text table exceeds source file");
+        }
+    }
     if (mappingOffset > platformField + sizeof(std::uint32_t) - 1U) {
         result.platform = readU32(header, platformField);
     }
@@ -484,11 +538,12 @@ ParsedFile parseFile(const std::filesystem::path &path, std::string_view suffix)
     }
     if (mappingOffset > imageCountField + sizeof(std::uint32_t) - 1U) {
         result.imageCount = readU32(header, imageCountField);
-        const auto imageOffset = readU32(header, imageOffsetField);
+        result.imageOffset = readU32(header, imageOffsetField);
         constexpr std::size_t imageRecordSize = 32;
         const auto imageTableSize = checkedTableSize(
             result.imageCount, imageRecordSize, 1'000'000, "image");
-        if (imageOffset > reader.size() || imageTableSize > reader.size() - imageOffset) {
+        if (result.imageOffset > reader.size() ||
+            imageTableSize > reader.size() - result.imageOffset) {
             throw std::runtime_error("dyld shared cache image table exceeds source file");
         }
     }
@@ -646,6 +701,75 @@ locate(const std::vector<SharedCacheMapping> &mappings, guest::GuestAddress addr
     return std::nullopt;
 }
 
+std::vector<SharedCacheImage>
+parseImages(const FileReader &reader, const ParsedFile &main,
+            const std::vector<SharedCacheMapping> &mappings) {
+    if (main.imagesTextCount == 0) {
+        return {};
+    }
+    if (main.imageCount != 0 && main.imageCount != main.imagesTextCount) {
+        throw std::runtime_error(
+            "dyld shared cache image tables have different counts");
+    }
+    const auto count = static_cast<std::size_t>(main.imagesTextCount);
+    const auto table = reader.read(main.imagesTextOffset,
+                                   count * imageTextRecordSize,
+                                   "image-text table");
+    const auto legacyTable = main.imageCount == 0
+                                 ? std::vector<std::uint8_t>{}
+                                 : reader.read(main.imageOffset,
+                                               count * imageTextRecordSize,
+                                               "legacy image table");
+    std::vector<SharedCacheImage> images;
+    images.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto offset = index * imageTextRecordSize;
+        const auto address = readU64(table, offset + 16);
+        const auto textSize = readU32(table, offset + 24);
+        const auto pathOffset = readU32(table, offset + 28);
+        if (!legacyTable.empty() &&
+            (readU64(legacyTable, offset) != address ||
+             readU32(legacyTable, offset + 24) != pathOffset)) {
+            throw std::runtime_error(
+                "dyld shared cache image tables disagree");
+        }
+        if (textSize == 0 ||
+            address > std::numeric_limits<std::uint64_t>::max() - textSize) {
+            throw std::runtime_error(
+                "dyld shared cache image text range is invalid");
+        }
+        const auto location = locate(mappings, guest::GuestAddress{address},
+                                     textSize);
+        if (!location ||
+            (static_cast<std::uint8_t>(
+                 location->first->initialPermissions) &
+             static_cast<std::uint8_t>(guest::Permission::Execute)) == 0) {
+            throw std::runtime_error(
+                "dyld shared cache image text is not in one executable mapping");
+        }
+        images.push_back(SharedCacheImage{
+            .index = index,
+            .loadAddress = guest::GuestAddress{address},
+            .textSize = textSize,
+            .uuid = readUuid(table, offset),
+            .path = reader.readCString(pathOffset, "image path"),
+            .sourceSuffix = location->first->sourceSuffix,
+        });
+    }
+    std::ranges::sort(images, [](const auto &lhs, const auto &rhs) {
+        return lhs.loadAddress.value < rhs.loadAddress.value;
+    });
+    for (std::size_t index = 1; index < images.size(); ++index) {
+        const auto previousEnd = images[index - 1].loadAddress.value +
+                                 images[index - 1].textSize;
+        if (previousEnd > images[index].loadAddress.value) {
+            throw std::runtime_error(
+                "dyld shared cache image text ranges overlap");
+        }
+    }
+    return images;
+}
+
 } // namespace
 
 GuestSharedCache GuestSharedCache::open(const std::filesystem::path &path) {
@@ -769,6 +893,11 @@ GuestSharedCache GuestSharedCache::open(const std::filesystem::path &path) {
         }
     }
 
+    result.images_ = parseImages(mainReader, main, result.mappings_);
+    if (!result.images_.empty()) {
+        result.imageCount_ = static_cast<std::uint32_t>(result.images_.size());
+    }
+
     if (result.dyldMachHeader_.value != 0 || result.dyldEntryPoint_.value != 0) {
         const auto headerLocation = locate(result.mappings_, result.dyldMachHeader_, 8);
         const auto entryLocation = locate(result.mappings_, result.dyldEntryPoint_, 1);
@@ -841,6 +970,22 @@ void GuestSharedCache::mapInto(guest::AddressSpace &addressSpace) const {
 
 std::string_view GuestSharedCache::architectureName() const noexcept {
     return architecture_ == SharedCacheArchitecture::X86_64h ? "x86_64h" : "x86_64";
+}
+
+const SharedCacheImage *GuestSharedCache::imageForAddress(
+    guest::GuestAddress address) const noexcept {
+    const auto candidate = std::ranges::upper_bound(
+        images_, address.value, {}, [](const SharedCacheImage &image) {
+            return image.loadAddress.value;
+        });
+    if (candidate == images_.begin()) {
+        return nullptr;
+    }
+    const auto &image = *std::prev(candidate);
+    if (address.value - image.loadAddress.value >= image.textSize) {
+        return nullptr;
+    }
+    return &image;
 }
 
 std::string formatSharedCacheUuid(const std::array<std::uint8_t, 16> &uuid) {

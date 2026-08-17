@@ -36,10 +36,23 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
     executedBlocks_ = 0;
     recentBlocks_.clear();
     blockExecutionCounts_.clear();
+    executedCacheImageIndexes_.clear();
+    cacheImageExecutions_.clear();
     while (result.executedBlocks < maximumBlocks) {
         const auto blockAddress = guest::GuestAddress{state.rip};
         auto &block =
             cache_.getOrTranslate(blockAddress, codeAt(blockAddress), maximumInstructionsPerBlock_);
+        if (sharedCache_ != nullptr) {
+            if (const auto *image = sharedCache_->imageForAddress(blockAddress);
+                image != nullptr &&
+                executedCacheImageIndexes_.insert(image->index).second) {
+                cacheImageExecutions_.push_back(CacheImageExecution{
+                    .image = image,
+                    .firstRip = blockAddress,
+                    .executedBlock = result.executedBlocks + 1,
+                });
+            }
+        }
         ++result.executedBlocks;
         ++executedBlocks_;
         ++blockExecutionCounts_[blockAddress.value];
