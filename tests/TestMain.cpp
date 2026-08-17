@@ -1842,6 +1842,33 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("bt32_register_index_set",
+                             CaseId::bt32_register_index_set,
+                             differentialBytes_bt32_register_index_set);
+        testCase.request.state.rcx = 0xFFFFFFFF00000442ULL;
+        testCase.request.state.rax = 1;
+        testCase.flagMask = carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("bt32_register_index_clear",
+                             CaseId::bt32_register_index_clear,
+                             differentialBytes_bt32_register_index_clear);
+        testCase.request.state.rcx = 0xFFFFFFFF00000442ULL;
+        testCase.request.state.rax = 2;
+        testCase.flagMask = carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("bt32_register_index_masked",
+                             CaseId::bt32_register_index_masked,
+                             differentialBytes_bt32_register_index_masked);
+        testCase.request.state.rcx = 0xFFFFFFFF00000442ULL;
+        testCase.request.state.rax = 33;
+        testCase.flagMask = carryFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("bsf64_nonzero", CaseId::bsf64_nonzero,
                              differentialBytes_bsf64_nonzero);
         testCase.request.state.rdx = UINT64_MAX;
@@ -18589,6 +18616,59 @@ void testBitTestRegisterImmediate32() {
     expectRejected(rexX, "REX.X BT form was accepted");
 }
 
+void testBitTestRegisterIndex32() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x0F, 0xA3, 0xC1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AA0FE6ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::BitTestRegReg,
+           "BT r32, r32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "BT r32, r32 length differs");
+    const auto value =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto index =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(value.reg == rosa::x86::Register::Rcx && value.width == 32 &&
+               index.reg == rosa::x86::Register::Rax && index.width == 32,
+           "BT ecx, eax operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("bt ecx, eax") !=
+               std::string::npos,
+           "BT ecx, eax dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AA0FE6ULL});
+    rosa::x86::X86State setState;
+    setState.rcx = 0xFFFFFFFF00000442ULL;
+    setState.rax = 1;
+    setState.rflags = 0xAD6;
+    static_cast<void>(block.execute(setState));
+    expectEqual(setState.rcx, std::uint64_t{0xFFFFFFFF00000442ULL},
+                "BT r32, r32 changed its value operand");
+    expectEqual(setState.rax, std::uint64_t{1},
+                "BT r32, r32 changed its index operand");
+    expectEqual(setState.rflags, std::uint64_t{0xAD7},
+                "BT r32, r32 set-CF semantics differ");
+
+    rosa::x86::X86State clearState;
+    clearState.rcx = 0xFFFFFFFF00000442ULL;
+    clearState.rax = 2;
+    clearState.rflags = 0xAD7;
+    static_cast<void>(block.execute(clearState));
+    expectEqual(clearState.rflags, std::uint64_t{0xAD6},
+                "BT r32, r32 clear-CF semantics differ");
+
+    rosa::x86::X86State maskedState;
+    maskedState.rcx = 0x442;
+    maskedState.rax = 33;
+    maskedState.rflags = 0xAD6;
+    static_cast<void>(block.execute(maskedState));
+    expectEqual(maskedState.rflags, std::uint64_t{0xAD7},
+                "BT r32, r32 did not mask its register index");
+}
+
 void testBitTestGuestDwordImmediate() {
     constexpr std::array<std::uint8_t, 9> observed{
         0x0F, 0xBA, 0xA3, 0x90, 0x00, 0x00, 0x00, 0x15, 0xC3};
@@ -21663,6 +21743,8 @@ int main() {
         {"AND 32-bit register with guest memory",
          testAnd32BitRegisterWithGuestMemory},
         {"BT 32-bit register with immediate", testBitTestRegisterImmediate32},
+        {"BT 32-bit register with register index",
+         testBitTestRegisterIndex32},
         {"BT guest dword with immediate", testBitTestGuestDwordImmediate},
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},

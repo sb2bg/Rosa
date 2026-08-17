@@ -3716,6 +3716,29 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             break;
         }
+        case x86::Opcode::BitTestRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: BT register operand count");
+            }
+            const auto valueRegister =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto indexRegister =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            const auto value = builder.readGuestRegister(
+                valueRegister.reg, ir::Width::I32, instruction.address);
+            const auto index = builder.readGuestRegister(
+                indexRegister.reg, ir::Width::I32, instruction.address);
+            const auto indexMask = builder.constant(
+                31, ir::Width::I32, instruction.address);
+            const auto maskedIndex = builder.bitAnd(
+                index, indexMask, ir::Width::I32, instruction.address);
+            const auto shifted = builder.shiftRightLogical(
+                value, maskedIndex, ir::Width::I32, instruction.address);
+            builder.updateBitTestFlags(shifted, 0, ir::Width::I32,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::BitTestMemImm: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
