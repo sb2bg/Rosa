@@ -392,6 +392,17 @@ void Builder::xorGuestMemoryXmm(ValueId address, x86::XmmRegister reg,
     });
 }
 
+void Builder::andGuestMemoryXmm(ValueId address, x86::XmmRegister reg,
+                                guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::AndGuestMemoryXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = reg,
+    });
+}
+
 void Builder::testXmmBits(x86::XmmRegister destination,
                           x86::XmmRegister source,
                           guest::GuestAddress rip) {
@@ -1145,6 +1156,12 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "guest address");
             if (!operation.guestXmmRegister) {
                 errors.emplace_back("xor_guest_memory_xmm has no register");
+            }
+            break;
+        case Opcode::AndGuestMemoryXmm:
+            checkUse(operation.lhs, "guest address");
+            if (!operation.guestXmmRegister) {
+                errors.emplace_back("and_guest_memory_xmm has no register");
             }
             break;
         case Opcode::TestXmmBits:

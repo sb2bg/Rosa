@@ -2521,6 +2521,30 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("pand_memory", CaseId::pand_memory,
+                             differentialBytes_pand_memory);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 3);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        const std::array<std::uint64_t, 2> value{
+            0xFF00FF00FF00FF00ULL, 0x0F0F0F0F0F0F0F0FULL};
+        std::memcpy(testCase.request.memory.data() + 3, value.data(),
+                    sizeof(value));
+        testCase.memoryCompareOffset = 3;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("pand_memory_zero", CaseId::pand_memory_zero,
+                             differentialBytes_pand_memory_zero);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.xmm[0] = {
+            .low = UINT64_MAX, .high = UINT64_MAX};
+        testCase.memoryCompareSize = 16;
+        run(testCase);
+    }
+    {
         auto testCase = make("ptest_xmm_self_zero",
                              CaseId::ptest_xmm_self_zero,
                              differentialBytes_ptest_xmm_self_zero);
@@ -12931,6 +12955,84 @@ void testPxorGuestMemoryGeneratedExecution() {
                 "faulted PXOR changed flags");
 }
 
+void testPandRipGuestMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x66, 0x0F, 0xDB, 0x05, 0xED, 0x13, 0x07, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802AA0F3BULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF802B12330ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PandRegMem,
+           "PAND xmm, [RIP+disp32] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "PAND xmm, [RIP+disp32] length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               memory.ripRelative && !memory.hasBase &&
+               memory.displacement == 0x713ED && memory.width == 128,
+           "PAND RIP-relative operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "pand xmm0, [rip+0x713ed]") != std::string::npos,
+           "PAND RIP-relative dump differs");
+
+    constexpr auto pageBase = rosa::guest::GuestAddress{
+        target.value & ~(rosa::guest::guestPageSize - 1)};
+    constexpr std::array<std::uint64_t, 2> source{
+        0xFF00FF00FF00FF00ULL, 0x0F0F0F0F0F0F0F0FULL};
+    std::array<std::uint8_t, rosa::guest::guestPageSize> pageBytes{};
+    std::memcpy(pageBytes.data() + (target.value - pageBase.value),
+                source.data(), sizeof(source));
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(pageBase, pageBytes.size(),
+                            rosa::guest::Permission::Read, pageBytes,
+                            "read-only PAND source");
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "and_guest_memory_xmm.i128") != std::string::npos,
+           "PAND memory did not lower through guest-memory IR");
+    rosa::x86::X86State state;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low,
+                std::uint64_t{0x0123456789ABCDEFULL} & source[0],
+                "PAND memory low lane differs");
+    expectEqual(state.xmm[0].high,
+                std::uint64_t{0xFEDCBA9876543210ULL} & source[1],
+                "PAND memory high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PAND memory changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.xmm[0] = {
+        .low = 0x1111111111111111ULL,
+        .high = 0x2222222222222222ULL};
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "PAND accepted unmapped guest memory");
+    expectEqual(faultState.xmm[0].low,
+                std::uint64_t{0x1111111111111111ULL},
+                "faulted PAND changed its low lane");
+    expectEqual(faultState.xmm[0].high,
+                std::uint64_t{0x2222222222222222ULL},
+                "faulted PAND changed its high lane");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted PAND changed flags");
+}
+
 void testPtestRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 6> selfCode{
         0x66, 0x0F, 0x38, 0x17, 0xC0, 0xC3};
@@ -21345,6 +21447,8 @@ int main() {
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PXOR guest memory generated execution",
          testPxorGuestMemoryGeneratedExecution},
+        {"PAND RIP-relative guest memory generated execution",
+         testPandRipGuestMemoryGeneratedExecution},
         {"PTEST register generated execution", testPtestRegisterGeneratedExecution},
         {"PCMPEQB guest memory generated execution",
          testPcmpeqbGuestMemoryGeneratedExecution},

@@ -1125,6 +1125,28 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
+        case x86::Opcode::PandRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "pand "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::PandnRegReg:
             stream << "pandn "
                    << x86::xmmRegisterName(
@@ -1675,6 +1697,11 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::XorGuestMemoryXmm:
             stream << "xor_guest_memory_xmm.i128 "
+                   << valueName(*operation.lhs) << ", "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::AndGuestMemoryXmm:
+            stream << "and_guest_memory_xmm.i128 "
                    << valueName(*operation.lhs) << ", "
                    << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;

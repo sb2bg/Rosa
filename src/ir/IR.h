@@ -52,6 +52,7 @@ enum class Opcode {
     StoreGuestXmm,
     LoadGuestXmm,
     XorGuestMemoryXmm,
+    AndGuestMemoryXmm,
     TestXmmBits,
     CompareEqualGuestBytesXmm,
     CompareEqualXmmBytes,
@@ -174,6 +175,8 @@ class Builder {
     void loadGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
                       guest::GuestAddress rip);
     void xorGuestMemoryXmm(ValueId address, x86::XmmRegister reg,
+                           guest::GuestAddress rip);
+    void andGuestMemoryXmm(ValueId address, x86::XmmRegister reg,
                            guest::GuestAddress rip);
     void testXmmBits(x86::XmmRegister destination,
                      x86::XmmRegister source, guest::GuestAddress rip);

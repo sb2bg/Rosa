@@ -287,6 +287,42 @@ xorGuestMemoryXmm128(GuestExecutionContext *context, x86::X86State *state,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+andGuestMemoryXmm128(GuestExecutionContext *context, x86::X86State *state,
+                     std::uint64_t address,
+                     std::uint64_t registerIndex) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error(
+                "generated PAND has no guest address space");
+        }
+        if (registerIndex >= state->xmm.size()) {
+            throw std::runtime_error(
+                "generated PAND has an invalid XMM register");
+        }
+        const auto bytes = context->addressSpace->readBytes(
+            guest::GuestAddress{address}, 16);
+        std::uint64_t sourceLow = 0;
+        std::uint64_t sourceHigh = 0;
+        std::memcpy(&sourceLow, bytes.data(), sizeof(sourceLow));
+        std::memcpy(&sourceHigh, bytes.data() + sizeof(sourceLow),
+                    sizeof(sourceHigh));
+        const auto original = state->xmm[registerIndex];
+        state->xmm[registerIndex] = {
+            .low = original.low & sourceLow,
+            .high = original.high & sourceHigh,
+        };
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = 16;
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 testXmmBits128(x86::X86State *state, std::uint64_t destinationIndex,
                std::uint64_t sourceIndex) noexcept {
     if (destinationIndex >= state->xmm.size() ||
@@ -3743,6 +3779,34 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                       instruction.address);
             break;
         }
+        case x86::Opcode::PandRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: PAND memory operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            auto address = memory.ripRelative
+                               ? builder.constant(
+                                     instruction.address.value +
+                                         instruction.length,
+                                     ir::Width::I64, instruction.address)
+                               : builder.readGuestRegister(
+                                     memory.base, ir::Width::I64,
+                                     instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            builder.andGuestMemoryXmm(address, destination,
+                                      instruction.address);
+            break;
+        }
         case x86::Opcode::PtestRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
@@ -4455,6 +4519,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                          operation.opcode == ir::Opcode::StoreGuestXmm ||
                          operation.opcode == ir::Opcode::LoadGuestXmm ||
                          operation.opcode == ir::Opcode::XorGuestMemoryXmm ||
+                         operation.opcode == ir::Opcode::AndGuestMemoryXmm ||
                          operation.opcode == ir::Opcode::TestXmmBits ||
                          operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
                          operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
@@ -4490,6 +4555,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    operation.opcode == ir::Opcode::LoadGuestXmm ||
                                    operation.opcode ==
                                        ir::Opcode::XorGuestMemoryXmm ||
+                                   operation.opcode ==
+                                       ir::Opcode::AndGuestMemoryXmm ||
                                    operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
                                    operation.opcode == ir::Opcode::RepeatMoveByte ||
                                    operation.opcode == ir::Opcode::LoadGuest ||
@@ -5229,6 +5296,29 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(arm64::x16,
                                    pointerBits(&xorGuestMemoryXmm128));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(completed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(
+                arm64::x0,
+                static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(completed);
+            break;
+        }
+        case ir::Opcode::AndGuestMemoryXmm: {
+            const auto fault = assembler.makeLabel();
+            const auto completed = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(
+                arm64::x3,
+                static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16,
+                                   pointerBits(&andGuestMemoryXmm128));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(completed);
