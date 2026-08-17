@@ -3378,6 +3378,44 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                               instruction.address);
             break;
         }
+        case x86::Opcode::ImulRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: IMUL memory operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            if (!memory.ripRelative || memory.width != 64) {
+                throw std::runtime_error(
+                    "only RIP-relative qword IMUL memory is implemented");
+            }
+            auto address = builder.constant(
+                instruction.address.value + instruction.length,
+                ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto rhs = builder.loadGuest(
+                address, ir::Width::I64, instruction.address);
+            // Guest-memory helpers may clobber host temporaries. Materialize the
+            // register operand only after the load returns successfully.
+            const auto lhs = builder.readGuestRegister(
+                destination.reg, ir::Width::I64, instruction.address);
+            const auto result = builder.multiplyLow(
+                lhs, rhs, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(destination.reg, result,
+                                       ir::Width::I64,
+                                       instruction.address);
+            builder.updateSignedMultiplyFlags(lhs, rhs, ir::Width::I64,
+                                              instruction.address);
+            break;
+        }
         case x86::Opcode::ImulRegRegImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error(

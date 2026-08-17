@@ -677,6 +677,22 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
+        case x86::Opcode::ImulRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "imul "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]))
+                   << ", qword [rip";
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::ImulRegRegImm:
             stream << "imul "
                    << registerOperandName(

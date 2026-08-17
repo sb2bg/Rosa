@@ -1795,6 +1795,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("imul64_rip_memory_fit",
+                             CaseId::imul64_rip_memory_fit,
+                             differentialBytes_imul64_rip_memory_fit);
+        testCase.request.state.rsi = 7;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("imul64_rip_memory_overflow",
+                             CaseId::imul64_rip_memory_overflow,
+                             differentialBytes_imul64_rip_memory_overflow);
+        testCase.request.state.rsi = INT64_MAX;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("imul64_imm8_positive",
                              CaseId::imul64_imm8_positive,
                              differentialBytes_imul64_imm8_positive);
@@ -11787,6 +11803,70 @@ void testSignedMultiply64GeneratedExecution() {
                 "minimum-times-negative-one IMUL low result differs");
     expectEqual(state.rflags, std::uint64_t{0x803},
                 "minimum-times-negative-one IMUL flags differ");
+}
+
+void testSignedMultiply64RipMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x48, 0x0F, 0xAF, 0x35, 0x4D, 0x77, 0x08, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802A8BE0BULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF802B13560ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::ImulRegMem,
+           "IMUL r64, [RIP+disp32] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "IMUL r64, [RIP+disp32] length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rsi &&
+               destination.width == 64 && memory.ripRelative &&
+               !memory.hasBase && memory.displacement == 0x8774D &&
+               memory.width == 64,
+           "IMUL rsi, qword [RIP+0x8774d] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "imul rsi, qword [rip+0x8774d]") != std::string::npos,
+           "RIP-relative IMUL dump differs");
+
+    constexpr auto pageBase = rosa::guest::GuestAddress{
+        target.value & ~(rosa::guest::guestPageSize - 1)};
+    std::array<std::uint8_t, rosa::guest::guestPageSize> pageBytes{};
+    constexpr std::uint64_t multiplier = 3;
+    std::memcpy(pageBytes.data() + (target.value - pageBase.value),
+                &multiplier, sizeof(multiplier));
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(pageBase, pageBytes.size(),
+                            rosa::guest::Permission::Read, pageBytes,
+                            "read-only IMUL source");
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State state;
+    state.rsi = 7;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rsi, std::uint64_t{21},
+                "RIP-relative IMUL result differs");
+    expectEqual(state.rflags & (carryFlag | overflowFlag),
+                std::uint64_t{0},
+                "non-overflowing RIP-relative IMUL flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rsi = 7;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative IMUL accepted unmapped guest memory");
+    expectEqual(faultState.rsi, std::uint64_t{7},
+                "faulted RIP-relative IMUL changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative IMUL changed flags");
 }
 
 void testSignedMultiply64ImmediateGeneratedExecution() {
@@ -21990,6 +22070,8 @@ int main() {
         {"REP MOVSB generated execution", testRepMovsbGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
+        {"signed IMUL 64-bit RIP-relative memory execution",
+         testSignedMultiply64RipMemoryGeneratedExecution},
         {"signed IMUL 64-bit immediate generated execution",
          testSignedMultiply64ImmediateGeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},

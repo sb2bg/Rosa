@@ -3395,7 +3395,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-            if (mode != 0x3U || (rexX && secondOpcode != 0xBAU)) {
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            const bool isImulRipMemory =
+                secondOpcode == 0xAFU && mode == 0 && rmEncoding == 0x5U &&
+                !rexB && !rexX;
+            if ((!isImulRipMemory && mode != 0x3U) ||
+                (rexX && secondOpcode != 0xBAU)) {
                 throw DecodeError(
                     address, remaining,
                     "only register-direct CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA/MOVSX/IMUL/SHRD/BSF/BSR is supported");
@@ -3404,7 +3409,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto encodedReg = decodeRegister(rawReg, rexR);
             const auto encodedRm =
-                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB);
+                decodeRegister(rmEncoding, rexB);
             if (secondOpcode == 0xBAU) {
                 if (rawReg != 0x4U || rexW || rexR || rexX) {
                     throw DecodeError(
@@ -3455,9 +3460,27 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(RegisterOperand{encodedReg, 64});
                 instruction.operands.push_back(RegisterOperand{encodedRm, 64});
             } else if (secondOpcode == 0xAFU) {
-                instruction.opcode = Opcode::ImulRegReg;
-                instruction.operands.push_back(RegisterOperand{encodedReg, 64});
-                instruction.operands.push_back(RegisterOperand{encodedRm, 64});
+                instruction.operands.push_back(
+                    RegisterOperand{encodedReg, 64});
+                if (isImulRipMemory) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated IMUL RIP displacement");
+                    }
+                    const auto displacement =
+                        readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                    static_cast<void>(relativeTarget(
+                        address, cursor - instructionStart, displacement));
+                    instruction.opcode = Opcode::ImulRegMem;
+                    instruction.operands.push_back(MemoryOperand{
+                        Register::Rax, displacement, 64, std::nullopt, 1,
+                        false, true});
+                } else {
+                    instruction.opcode = Opcode::ImulRegReg;
+                    instruction.operands.push_back(
+                        RegisterOperand{encodedRm, 64});
+                }
             } else {
                 instruction.opcode = Opcode::ShrdRegRegImm;
                 instruction.operands.push_back(RegisterOperand{encodedRm, 64});
