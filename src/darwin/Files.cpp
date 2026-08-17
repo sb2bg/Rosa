@@ -30,6 +30,7 @@ GuestFileDescriptor GuestFileSpace::openRootDirectory(std::uint32_t flags) {
     files_.emplace(descriptor,
                    GuestOpenFile{
                        .descriptor = descriptor,
+                       .descriptionId = nextDescriptionId_++,
                        .kind = GuestFileKind::RootDirectory,
                        .guestPath = "/",
                        .flags = flags,
@@ -50,6 +51,7 @@ GuestFileDescriptor GuestFileSpace::openSyntheticDirectory(
     files_.emplace(descriptor,
                    GuestOpenFile{
                        .descriptor = descriptor,
+                       .descriptionId = nextDescriptionId_++,
                        .kind = GuestFileKind::SyntheticDirectory,
                        .guestPath = std::move(guestPath),
                        .flags = flags,
@@ -66,6 +68,7 @@ GuestFileDescriptor GuestFileSpace::openReadOnlyFile(
     files_.emplace(descriptor,
                    GuestOpenFile{
                        .descriptor = descriptor,
+                       .descriptionId = nextDescriptionId_++,
                        .kind = guestPath == currentDirectory_
                                    ? GuestFileKind::CurrentDirectory
                                    : GuestFileKind::HostReadOnlyFile,
@@ -73,6 +76,27 @@ GuestFileDescriptor GuestFileSpace::openReadOnlyFile(
                        .flags = flags,
                    });
     return descriptor;
+}
+
+std::optional<GuestFileDescriptor> GuestFileSpace::duplicate(
+    GuestFileDescriptor descriptor) {
+    const auto *source = lookup(descriptor);
+    if (source == nullptr) {
+        return std::nullopt;
+    }
+    if (nextDescriptor_ == std::numeric_limits<std::int32_t>::max()) {
+        throw std::runtime_error("guest file-descriptor namespace exhausted");
+    }
+    const GuestFileDescriptor duplicateDescriptor{nextDescriptor_++};
+    files_.emplace(duplicateDescriptor,
+                   GuestOpenFile{
+                       .descriptor = duplicateDescriptor,
+                       .descriptionId = source->descriptionId,
+                       .kind = source->kind,
+                       .guestPath = source->guestPath,
+                       .flags = source->flags,
+                   });
+    return duplicateDescriptor;
 }
 
 const GuestOpenFile *GuestFileSpace::lookup(

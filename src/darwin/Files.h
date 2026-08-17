@@ -23,6 +23,7 @@ enum class GuestFileKind {
 
 struct GuestOpenFile {
     GuestFileDescriptor descriptor;
+    std::uint64_t descriptionId{};
     GuestFileKind kind{};
     std::filesystem::path guestPath;
     std::uint32_t flags{};
@@ -42,6 +43,8 @@ class GuestFileSpace {
         std::filesystem::path guestPath, std::uint32_t flags);
     [[nodiscard]] GuestFileDescriptor openReadOnlyFile(
         std::filesystem::path guestPath, std::uint32_t flags);
+    [[nodiscard]] std::optional<GuestFileDescriptor> duplicate(
+        GuestFileDescriptor descriptor);
     [[nodiscard]] const GuestOpenFile *lookup(
         GuestFileDescriptor descriptor) const noexcept;
     [[nodiscard]] bool close(GuestFileDescriptor descriptor) noexcept;
@@ -55,6 +58,7 @@ class GuestFileSpace {
     std::filesystem::path currentDirectory_;
     std::map<GuestFileDescriptor, GuestOpenFile> files_;
     std::int32_t nextDescriptor_{3};
+    std::uint64_t nextDescriptionId_{1};
 };
 
 } // namespace rosa::darwin

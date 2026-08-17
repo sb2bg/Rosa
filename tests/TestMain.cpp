@@ -16607,6 +16607,60 @@ void testDarwinOpenatGuestCryptexDirectory() {
                 "faulted openat path allocated a guest descriptor");
 }
 
+void testDarwinDuplicateGuestDescriptor() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto dupNumber = UINT64_C(0x02000029);
+    constexpr std::uint32_t rootFlags = 0x20100000;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr std::array<std::uint8_t, 2> rootPath{'/', 0};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, rootPath);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = rootFlags;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    const auto *original = dispatcher.fileSpace().lookup(
+        rosa::darwin::GuestFileDescriptor{3});
+    expect(original != nullptr, "dup test did not create its original fd");
+    const auto descriptionId = original->descriptionId;
+
+    state.rax = dupNumber;
+    state.rdi = 3;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEEB18ULL}));
+    expectEqual(state.rax, std::uint64_t{4},
+                "dup returned the wrong guest descriptor");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "dup did not clear BSD carry");
+    const auto *duplicate = dispatcher.fileSpace().lookup(
+        rosa::darwin::GuestFileDescriptor{4});
+    expect(duplicate != nullptr && duplicate->descriptionId == descriptionId &&
+               duplicate->kind == original->kind &&
+               duplicate->guestPath == original->guestPath &&
+               duplicate->flags == original->flags,
+           "dup did not share the guest open-description identity");
+
+    state.rax = dupNumber;
+    state.rdi = 99;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "dup invalid guest descriptor returned the wrong errno");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{2},
+                "failed dup allocated a guest descriptor");
+}
+
 void testDarwinOpenReadOnlyUserFile() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -22846,6 +22900,8 @@ int main() {
          testDarwinOpenGuestRootDirectory},
         {"Darwin openat guest cryptex directory",
          testDarwinOpenatGuestCryptexDirectory},
+        {"Darwin duplicate guest descriptor",
+         testDarwinDuplicateGuestDescriptor},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
         {"Darwin close guest descriptor", testDarwinCloseGuestDescriptor},

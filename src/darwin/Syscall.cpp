@@ -31,6 +31,7 @@ constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
 constexpr std::uint64_t syscallOpen = unixSyscallClass | 5U;
 constexpr std::uint64_t syscallClose = unixSyscallClass | 6U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
+constexpr std::uint64_t syscallDup = unixSyscallClass | 41U;
 constexpr std::uint64_t syscallMunmap = unixSyscallClass | 73U;
 constexpr std::uint64_t syscallFcntl = unixSyscallClass | 92U;
 constexpr std::uint64_t syscallSysctl = unixSyscallClass | 202U;
@@ -209,6 +210,18 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
     }
     if (number == syscallThreadSelfid) {
         setSuccess(state, initialGuestThreadId);
+        return {};
+    }
+    if (number == syscallDup) {
+        const auto descriptor = GuestFileDescriptor{
+            std::bit_cast<std::int32_t>(
+                static_cast<std::uint32_t>(state.rdi))};
+        const auto duplicate = fileSpace_.duplicate(descriptor);
+        if (!duplicate) {
+            setError(state, EBADF);
+            return {};
+        }
+        setSuccess(state, static_cast<std::uint32_t>(duplicate->value));
         return {};
     }
     if (number == syscallMac) {
