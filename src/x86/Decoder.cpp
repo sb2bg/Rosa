@@ -117,6 +117,27 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x68U) {
+            if (code.size() - cursor < 5) {
+                throw DecodeError(address, remaining,
+                                  "truncated push imm32");
+            }
+            const auto immediate = readI32(code.subspan(cursor + 1, 4));
+            instruction.opcode = Opcode::Push;
+            instruction.length = 5;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 5,
+                        instruction.bytes.begin());
+            instruction.operands.push_back(ImmediateOperand{
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)),
+                32});
+            result.push_back(std::move(instruction));
+            cursor += 5;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0xA8U) {
             if (code.size() - cursor < 2) {
                 throw DecodeError(address, remaining, "truncated test al, imm8");

@@ -2335,6 +2335,24 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("push_imm32_positive",
+                             CaseId::push_imm32_positive,
+                             differentialBytes_push_imm32_positive);
+        testCase.request.state.rax = 0;
+        testCase.stackCompareOffset = rosa::differential::stackSize - 16;
+        testCase.stackCompareSize = 8;
+        run(testCase);
+    }
+    {
+        auto testCase = make("push_imm32_negative",
+                             CaseId::push_imm32_negative,
+                             differentialBytes_push_imm32_negative);
+        testCase.request.state.rax = 0;
+        testCase.stackCompareOffset = rosa::differential::stackSize - 16;
+        testCase.stackCompareSize = 8;
+        run(testCase);
+    }
+    {
         auto testCase = make("xorps_register", CaseId::xorps_register,
                              differentialBytes_xorps_register);
         testCase.request.state.xmm[0] = {
@@ -3273,6 +3291,85 @@ void testPushImm8GuestStackFaults() {
     expect(readOnlyRejected, "PUSH imm8 to a read-only guest stack did not fail");
     expectEqual(readOnlyState.rsp, std::uint64_t{0x9000},
                 "failed read-only PUSH imm8 changed RSP");
+}
+
+void testPushImm32GeneratedExecutionAndFault() {
+    constexpr std::array<std::uint8_t, 6> observed{
+        0x68, 0x40, 0x01, 0x00, 0x00, 0xC3};
+    constexpr std::array<std::uint8_t, 6> negative{
+        0x68, 0x00, 0x00, 0x00, 0x80, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto observedDecoded = decoder.decodeBlock(
+        observed, rosa::guest::GuestAddress{0x7FF802A8F2A4ULL});
+    const auto negativeDecoded = decoder.decodeBlock(
+        negative, rosa::guest::GuestAddress{0x1000});
+    expect(observedDecoded[0].opcode == rosa::x86::Opcode::Push,
+           "PUSH imm32 opcode differs");
+    expectEqual(observedDecoded[0].length, std::uint8_t{5},
+                "PUSH imm32 length differs");
+    const auto observedImmediate =
+        std::get<rosa::x86::ImmediateOperand>(
+            observedDecoded[0].operands[0]);
+    expect(observedImmediate.width == 32 && observedImmediate.value == 0x140,
+           "positive PUSH imm32 value differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(
+                    negativeDecoded[0].operands[0])
+                    .value,
+                std::uint64_t{0xFFFFFFFF80000000ULL},
+                "negative PUSH imm32 was not sign-extended");
+    expect(rosa::debug::dumpX86(observedDecoded).find("push 0x140") !=
+               std::string::npos,
+           "PUSH imm32 dump differs");
+
+    constexpr rosa::guest::GuestAddress stackBase{0x8000};
+    constexpr auto stackTop = stackBase.value + rosa::guest::guestPageSize;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        negative, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rsp = stackTop;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rsp, stackTop - 8,
+                "PUSH imm32 did not decrement RSP by 8");
+    expectEqual(addressSpace.readU64(
+                    rosa::guest::GuestAddress{stackTop - 8}),
+                std::uint64_t{0xFFFFFFFF80000000ULL},
+                "PUSH imm32 did not store a sign-extended qword");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "PUSH imm32 changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rsp = 0x9000;
+    faultState.rflags = 0x202;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "PUSH imm32 to unmapped guest stack did not fault");
+    expectEqual(faultState.rsp, std::uint64_t{0x9000},
+                "faulted PUSH imm32 changed RSP");
+    expectEqual(faultState.rflags, std::uint64_t{0x202},
+                "faulted PUSH imm32 changed flags");
+
+    constexpr std::array<std::uint8_t, 4> truncated{
+        0x68, 0x01, 0x02, 0x03};
+    bool truncatedRejected = false;
+    try {
+        static_cast<void>(decoder.decodeBlock(
+            truncated, rosa::guest::GuestAddress{0x1000}));
+    } catch (const rosa::x86::DecodeError &) {
+        truncatedRejected = true;
+    }
+    expect(truncatedRejected, "truncated PUSH imm32 was accepted");
 }
 
 void testPushRegisterGeneratedExecution() {
@@ -19901,6 +19998,8 @@ int main() {
         {"PUSH imm8 decoder", testDecoderPushImm8},
         {"PUSH imm8 generated execution", testPushImm8GeneratedExecution},
         {"PUSH imm8 guest stack faults", testPushImm8GuestStackFaults},
+        {"PUSH imm32 generated execution and fault",
+         testPushImm32GeneratedExecutionAndFault},
         {"PUSH register generated execution", testPushRegisterGeneratedExecution},
         {"POP register generated execution", testPopRegisterGeneratedExecution},
         {"SUB register imm32 generated execution", testSubRegImm32GeneratedExecution},
