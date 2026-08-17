@@ -36,6 +36,8 @@ Every generated exit reconstructs guest state and writes the next guest RIP. Dir
 
 Guest addresses use the `GuestAddress` strong type. The address space provides permission-checked anonymous, sparse, commpage, and Mach-O segment mappings with a 4 KiB guest-page contract. Generated helpers cover guarded 8/16/32/64-bit integer and 128-bit XMM accesses. Instruction fetches and syscall buffers come from those mappings; generated code does not treat guest virtual addresses as host pointers.
 
+Guest Mach names live in a task-local `GuestPortSpace`. It records receive, send, and send-once rights, urefs, queue limits, contexts, guards, and synthetic task/host/reply object types without ever reusing a host `mach_port_t`. Guest file descriptors likewise live in a task-local `GuestFileSpace`; duplicated descriptors retain a shared open-description identity. The current root and cryptex-directory capabilities are synthetic guest VFS objects, not host descriptors.
+
 ## Flags
 
 Observed 8/16/32/64-bit arithmetic and comparison forms eagerly compute `CF`, `PF`, `AF`, `ZF`, `SF`, and `OF` at the guest width. Logic forms clear `CF`/`OF` and compute `PF`/`ZF`/`SF`; Rosa deterministically clears undefined `AF`. `inc`/`dec` preserve `CF`. Signed `imul` replaces only its defined `CF`/`OF` and preserves other undefined flag bits. Narrow C++ helpers receive generated values through the host ABI.
@@ -52,6 +54,8 @@ The loader maps every nonempty segment at its guest virtual address plus an opti
 
 Rosa relies on dyld guest code to interpret application and cache structures. A manually supplied Intel shared cache is validated with all declared subcaches, mapped as private file-backed guest regions at slide zero, fixed up from version-2 slide metadata, and accompanied by a guest dynamic-data page. `shared_region_check_np` returns its guest base; no cache pointer is passed to the host kernel.
 
+Parsed cache image metadata resolves an executed guest PC to cache image index, UUID, and path. Fatal diagnostics include that provenance, recent guest instructions, registers, mappings, translation counts, hot blocks, and the guest Mach-port summary. This has verified execution in cache image 2, `/usr/lib/dyld`; it has not yet observed execution in another cached image.
+
 ## Darwin syscall boundary
 
 Generated code recognizes x86 `0F 05`, records `RCX`, `R11`, and the next guest RIP, and returns a distinct syscall exit reason. The semantic dispatcher decodes x86 Darwin registers (`RAX`; arguments in `RDI`, `RSI`, `RDX`, `R10`, `R8`, `R9`) and distinguishes BSD, Mach, and x86 machdep classes. Guest buffers and ABI values are translated through `AddressSpace`; no guest pointer is passed to the host kernel. Success/error translation follows the relevant guest convention. Unsupported calls fail with the number, syscall RIP, and arguments. The exact narrow call set is documented in `darwin-boundary.md`.
@@ -66,8 +70,8 @@ Generated code recognizes x86 `0F 05`, records `RCX`, `R11`, and the next guest 
 - eight temporary SSA values before the intentionally simple allocator rejects a block;
 - one host thread and one guest thread;
 - no general guest `mmap` or direct host-pointer memory fast path; the observed BSD `munmap` and Mach VM operations are semantic guest-map operations;
-- only the failure-driven BSD, Mach, and x86 machdep operations listed in `darwin-boundary.md`;
+- only the failure-driven BSD, Mach, VFS, and x86 machdep operations listed in `darwin-boundary.md`;
 - only version-2 x86 shared-cache slide fixups; no general Mach-O binding/rebase engine;
 - instruction encodings remain deliberately incomplete and are added only after an observed failure.
 
-The current dyld experiment reaches 1,058,265 executed blocks and 21,776 unique translations. It has recognized the mapped Intel cache, entered dyld-in-cache, made guest cache data privately writable with `VM_PROT_COPY`, and unmapped standalone dyld. The first failure is Mach trap 24 (`_kernelrpc_mach_port_construct_trap`). No non-dyld cached system image resolution, `libSystem` initialization, application initialization, or guest `main` has been verified.
+The current dyld experiment reaches 1,079,752 executed blocks and 24,954 unique translations. It has recognized the mapped Intel cache, entered dyld-in-cache, registered TASK_DYLD_INFO, made guest cache data privately writable with `VM_PROT_COPY`, unmapped standalone dyld, constructed and maintained guest Mach rights, queried guest policy/kernel metadata, and opened synthetic guest root/cryptex directory capabilities. The first failure is `fstatat64(470)` for `System/Library/dyld/`, relative to the synthetic `/System/Cryptexes/OS` descriptor. Correct support requires an explicit x86_64 Darwin `stat64` structure and synthetic VFS metadata. No non-dyld cached image execution, `libSystem` initialization, application initialization, or guest `main` has been verified.

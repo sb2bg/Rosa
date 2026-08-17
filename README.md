@@ -36,7 +36,7 @@ Rosa is built to make the whole compatibility path observable. It owns the x86 d
 | Memory       | Enforces a 4 KiB guest-page model with sparse, anonymous, Mach-O, commpage, and shared-cache mappings                        |
 | Mach-O       | Selects x86_64 universal slices, validates load commands, maps complete segments, and builds the initial Darwin stack        |
 | Darwin       | Implements the small BSD, Mach, and machdep surface reached by the fixture and current dyld probe                            |
-| Verification | Runs 265 semantic cases against an independent x86_64 oracle when Rosetta is installed                                       |
+| Verification | Runs 324 semantic cases against an independent x86_64 oracle when Rosetta is installed                                       |
 
 The [checked-in example](tests/fixtures/hello-darwin-x86_64.s) currently completes end to end:
 
@@ -156,6 +156,8 @@ Then run the fixture through the unmodified x86_64 dyld path:
 ```
 
 This is a diagnostic bring-up path. Cache compatibility matters, the supported instruction and ABI surfaces are intentionally incomplete, and the run is expected to stop loudly at the first unimplemented boundary.
+
+The current probe recognizes and enters the intact cache at slide zero, executes cached `/usr/lib/dyld`, and advances through guest Mach-port, policy, kernel-metadata, and synthetic cryptex-directory operations. It currently stops at the first unimplemented x86_64 `fstatat64` structure copyout. No non-dyld cached image execution or `libSystem` initialization is claimed.
 
 ## Architecture
 

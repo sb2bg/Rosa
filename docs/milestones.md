@@ -52,20 +52,22 @@ Dynamic-library commands are parsed but not acted upon.
 - the fixture prints `hello from Intel Darwin` and exits with status zero;
 - no output helper or interpreter fallback exists.
 
-## R5 — x86 dyld startup: shared-cache transition reached
+## R5 — x86 dyld startup: shared-cache transition and guest policy/VFS reached
 
 - universal Mach-O x86_64 slice selection works for a manually supplied dyld;
 - the controlled app and all six dyld segments map together at explicit guest addresses;
 - Rosa enters dyld's x86_64 `LC_UNIXTHREAD` entry with the initial stack;
 - a manually supplied x86_64 dyld cache plus six subcaches is validated and mapped intact as 28 guest mappings at slide zero;
 - `shared_region_check_np` succeeds and dyld recognizes/accesses the cache metadata;
-- diagnostic one-instruction translations have advanced through 1,058,265 executed blocks and 21,776 unique translations of the tested unmodified dyld;
+- diagnostic one-instruction translations have advanced through 1,079,752 executed blocks and 24,954 unique translations of the tested unmodified dyld;
 - dyld has parsed and repeatedly traversed application Mach-O structures, dispatched internal callbacks and jump tables, used vector string operations, consulted the x86 commpage, and entered deeper load-command/address-calculation paths;
-- the trace has reached BSD `proc_info(PROC_INFO_CALL_SET_DYLD_IMAGES)` and `munmap`, plus guest `VM_PROT_COPY`;
+- the trace has reached BSD `proc_info(PROC_INFO_CALL_SET_DYLD_IMAGES)`, `munmap`, sysctl/AMFI/Sandbox policy, and synthetic root/cryptex VFS operations, plus guest `VM_PROT_COPY`;
 - dyld enters dyld-in-cache and successfully unmaps the standalone dyld image;
-- the next loud failure is `_kernelrpc_mach_port_construct_trap` (Mach trap 24).
+- trap 24 constructs explicit guest-only `MPO_REPLY_PORT` receive rights with fault-atomic copyout; subsequent deallocation/refcount and observed `mach_msg2` operations use the same namespace;
+- cache-PC provenance still records only `/usr/lib/dyld` (image index 2) as executed;
+- the next loud failure is guest `fstatat64` for `System/Library/dyld/` relative to the synthetic `/System/Cryptexes/OS` descriptor.
 
-No non-dyld cached system image resolution is yet verified. `libSystem` initialization, application initialization, and transfer to guest `main` have not begun.
+No non-dyld cached system image resolution or execution is yet verified. `libSystem` initialization, application initialization, and transfer to guest `main` have not begun. The next slice must define the x86_64 Darwin `stat64` ABI and synthetic VFS metadata; copying an arm64 host `stat` is explicitly not acceptable.
 
 ## Verification notes
 
