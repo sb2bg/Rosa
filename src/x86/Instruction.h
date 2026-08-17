@@ -90,6 +90,7 @@ enum class Opcode {
     XorpsRegReg,
     PxorRegReg,
     PxorRegMem,
+    PorRegReg,
     PtestRegReg,
     PcmpeqbRegReg,
     PcmpeqbRegMem,

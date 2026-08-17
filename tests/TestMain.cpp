@@ -3327,6 +3327,25 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("por_distinct", CaseId::por_distinct,
+                             differentialBytes_por_distinct);
+        testCase.request.state.xmm[2] = {
+            .low = 0x00FF00FF00FF00FFULL,
+            .high = 0xAAAAAAAA55555555ULL};
+        testCase.request.state.xmm[1] = {
+            .low = 0xFF00FF000F0F0F0FULL,
+            .high = 0x55555555AAAAAAAAULL};
+        run(testCase);
+    }
+    {
+        auto testCase = make("por_alias", CaseId::por_alias,
+                             differentialBytes_por_alias);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        run(testCase);
+    }
+    {
         auto testCase = make("movd_memory", CaseId::movd_memory,
                              differentialBytes_movd_memory);
         bindMemory(testCase, rosa::x86::Register::R14, 0);
@@ -15014,6 +15033,45 @@ void testPshufbRegisters() {
                 "PSHUFB changed flags");
 }
 
+void testPorRegisters() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x0F, 0xEB, 0xD1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802A8CD08ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PorRegReg,
+           "POR opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "POR length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm2 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "POR xmm2, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("por xmm2, xmm1") !=
+               std::string::npos,
+           "POR dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802A8CD08ULL});
+    rosa::x86::X86State state;
+    state.xmm[2] = {.low = 0x00FF00FF00FF00FFULL,
+                    .high = 0xAAAAAAAA55555555ULL};
+    state.xmm[1] = {.low = 0xFF00FF000F0F0F0FULL,
+                    .high = 0x55555555AAAAAAAAULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[2].low, std::uint64_t{0xFFFFFFFF0FFF0FFFULL},
+                "POR produced the wrong low lane");
+    expectEqual(state.xmm[2].high, UINT64_MAX,
+                "POR produced the wrong high lane");
+    expectEqual(state.xmm[1].low, std::uint64_t{0xFF00FF000F0F0F0FULL},
+                "POR changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "POR changed flags");
+}
+
 void testMovdRegisterToXmm() {
     constexpr std::array<std::uint8_t, 5> code{
         0x66, 0x0F, 0x6E, 0xC0, 0xC3};
@@ -22312,6 +22370,7 @@ int main() {
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
         {"PSHUFB register execution", testPshufbRegisters},
+        {"POR register execution", testPorRegisters},
         {"MOVD register to XMM", testMovdRegisterToXmm},
         {"MOVD XMM to guest memory", testMovdXmmToGuestMemory},
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},

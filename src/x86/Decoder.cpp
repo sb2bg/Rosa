@@ -1440,6 +1440,50 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x66U && code.size() - cursor >= 2) {
+            const auto afterPrefix = cursor + 1;
+            const bool hasPorRex = code[afterPrefix] >= 0x40U &&
+                                   code[afterPrefix] <= 0x4FU;
+            const auto opcodeOffset = afterPrefix + (hasPorRex ? 1U : 0U);
+            if (opcodeOffset < code.size() && code[opcodeOffset] == 0x0FU &&
+                code.size() - opcodeOffset >= 2 &&
+                code[opcodeOffset + 1] == 0xEBU) {
+                if (code.size() - opcodeOffset < 3) {
+                    throw DecodeError(address, remaining,
+                                      "truncated por xmm, xmm");
+                }
+                const auto rex = hasPorRex ? code[afterPrefix] : 0U;
+                const auto modrm = code[opcodeOffset + 2];
+                const auto mode =
+                    static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                if (mode != 0x3U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only register-direct POR xmm, xmm is supported");
+                }
+                instruction.opcode = Opcode::PorRegReg;
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        ((modrm >> 3U) & 0x7U) |
+                        ((rex & 0x4U) != 0 ? 8U : 0U)))});
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        (modrm & 0x7U) |
+                        ((rex & 0x1U) != 0 ? 8U : 0U)))});
+                const auto length = opcodeOffset + 3 - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(
+                    code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                    length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = opcodeOffset + 3;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
         if (code[cursor] == 0x66U && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0xEFU) {
             if (code.size() - cursor < 4) {

@@ -4025,6 +4025,35 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                           instruction.address);
             break;
         }
+        case x86::Opcode::PorRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: POR register operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto destinationLow = builder.readGuestXmmLane(
+                destination, false, instruction.address);
+            const auto sourceLow = builder.readGuestXmmLane(
+                source, false, instruction.address);
+            const auto low = builder.bitOr(destinationLow, sourceLow,
+                                           ir::Width::I64,
+                                           instruction.address);
+            const auto destinationHigh = builder.readGuestXmmLane(
+                destination, true, instruction.address);
+            const auto sourceHigh = builder.readGuestXmmLane(
+                source, true, instruction.address);
+            const auto high = builder.bitOr(destinationHigh, sourceHigh,
+                                            ir::Width::I64,
+                                            instruction.address);
+            builder.writeGuestXmmLane(destination, false, low,
+                                      instruction.address);
+            builder.writeGuestXmmLane(destination, true, high,
+                                      instruction.address);
+            break;
+        }
         case x86::Opcode::PandnRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
