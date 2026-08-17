@@ -20,6 +20,7 @@ enum class Opcode {
     MovsxRegReg,
     MovsxRegMem,
     MovzxRegMem,
+    MovsxdRegReg,
     MovsxdRegMem,
     Cdqe,
     MovMemImm,

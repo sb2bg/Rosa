@@ -2154,6 +2154,24 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::MovsxdRegReg: {
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::RegisterOperand>(instruction.operands[1]);
+            if (destination.width != 64 || source.width != 32) {
+                throw std::runtime_error(
+                    "MOVSXD register operands have invalid widths");
+            }
+            const auto value = builder.readGuestRegister(
+                source.reg, ir::Width::I32, instruction.address);
+            const auto extended = builder.signExtend32(
+                value, instruction.address);
+            builder.writeGuestRegister(destination.reg, extended,
+                                       ir::Width::I64,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::MovsxdRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: movsxd operand count");

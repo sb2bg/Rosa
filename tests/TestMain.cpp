@@ -2004,6 +2004,29 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movsxd_register_negative",
+                             CaseId::movsxd_register_negative,
+                             differentialBytes_movsxd_register_negative);
+        testCase.request.state.r15 = 0xAABBCCDD80000001ULL;
+        testCase.request.state.rax = 0x1122334455667788ULL;
+        run(testCase);
+    }
+    {
+        auto testCase = make("movsxd_register_positive",
+                             CaseId::movsxd_register_positive,
+                             differentialBytes_movsxd_register_positive);
+        testCase.request.state.r15 = 0xAABBCCDD7FFFFFFFULL;
+        testCase.request.state.rax = UINT64_MAX;
+        run(testCase);
+    }
+    {
+        auto testCase = make("movsxd_register_alias",
+                             CaseId::movsxd_register_alias,
+                             differentialBytes_movsxd_register_alias);
+        testCase.request.state.rax = 0xAABBCCDD80000001ULL;
+        run(testCase);
+    }
+    {
         auto testCase = make("cdqe_negative", CaseId::cdqe_negative,
                              differentialBytes_cdqe_negative);
         testCase.request.state.rax = 0xAAAAAAAA80000001ULL;
@@ -9755,6 +9778,69 @@ void testMovsxdScaledGuestDword() {
                 "MOVSXD sign-extended result differs");
     expectEqual(state.rax, std::uint64_t{0x8000}, "MOVSXD changed base");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVSXD changed flags");
+}
+
+void testMovsxdRegister() {
+    constexpr std::array<std::uint8_t, 4> code{0x49, 0x63, 0xC7, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded =
+        decoder.decodeBlock(code, rosa::guest::GuestAddress{0x7FF802AEE25A});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovsxdRegReg,
+           "MOVSXD register opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "MOVSXD register length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 64,
+           "MOVSXD register destination differs");
+    expect(source.reg == rosa::x86::Register::R15 && source.width == 32,
+           "MOVSXD register source differs");
+    expect(rosa::debug::dumpX86(decoded).find("movsxd rax, r15d") !=
+               std::string::npos,
+           "MOVSXD register dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AEE25A});
+    rosa::x86::X86State negative;
+    negative.r15 = 0xAABBCCDD80000001ULL;
+    negative.rax = 0x1122334455667788ULL;
+    negative.rflags = 0x8D7;
+    static_cast<void>(block.execute(negative));
+    expectEqual(negative.rax, std::uint64_t{0xFFFFFFFF80000001ULL},
+                "MOVSXD register negative result differs");
+    expectEqual(negative.r15, std::uint64_t{0xAABBCCDD80000001ULL},
+                "MOVSXD register changed its source");
+    expectEqual(negative.rflags, std::uint64_t{0x8D7},
+                "MOVSXD register changed flags");
+
+    rosa::x86::X86State positive;
+    positive.r15 = 0xAABBCCDD7FFFFFFFULL;
+    positive.rax = UINT64_MAX;
+    positive.rflags = 0xAD7;
+    static_cast<void>(block.execute(positive));
+    expectEqual(positive.rax, std::uint64_t{0x7FFFFFFF},
+                "MOVSXD register positive result differs");
+    expectEqual(positive.r15, std::uint64_t{0xAABBCCDD7FFFFFFFULL},
+                "positive MOVSXD register changed its source");
+    expectEqual(positive.rflags, std::uint64_t{0xAD7},
+                "positive MOVSXD register changed flags");
+
+    constexpr std::array<std::uint8_t, 4> aliasCode{
+        0x48, 0x63, 0xC0, 0xC3};
+    const auto aliasBlock = translator.translate(
+        aliasCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State alias;
+    alias.rax = 0xAABBCCDD80000001ULL;
+    alias.rflags = 0x8D7;
+    static_cast<void>(aliasBlock.execute(alias));
+    expectEqual(alias.rax, std::uint64_t{0xFFFFFFFF80000001ULL},
+                "aliased MOVSXD register result differs");
+    expectEqual(alias.rflags, std::uint64_t{0x8D7},
+                "aliased MOVSXD register changed flags");
 }
 
 void testCdqeGeneratedExecution() {
@@ -20634,6 +20720,7 @@ int main() {
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},
         {"MOVZX guest word with scaled index", testMovzxGuestWordWithScaledIndex},
         {"MOVSXD scaled guest dword", testMovsxdScaledGuestDword},
+        {"MOVSXD register", testMovsxdRegister},
         {"CDQE generated execution", testCdqeGeneratedExecution},
         {"legacy MOV guest memory to 32-bit register",
          testMovGuestMemoryToLegacy32BitRegister},
