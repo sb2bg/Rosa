@@ -3127,6 +3127,34 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movdqa_extended_base_load",
+                             CaseId::movdqa_extended_base_load,
+                             differentialBytes_movdqa_extended_base_load);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        const std::array<std::uint64_t, 2> value{
+            0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL};
+        std::memcpy(testCase.request.memory.data() + 0x10, value.data(),
+                    sizeof(value));
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("movdqa_extended_register_load",
+                             CaseId::movdqa_extended_register_load,
+                             differentialBytes_movdqa_extended_register_load);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        const std::array<std::uint64_t, 2> value{
+            0x8877665544332211ULL, 0x1020304050607080ULL};
+        std::memcpy(testCase.request.memory.data() + 0x10, value.data(),
+                    sizeof(value));
+        testCase.request.state.xmm[13] = {
+            .low = UINT64_MAX, .high = UINT64_MAX};
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("movdqu_load", CaseId::movdqu_load,
                              differentialBytes_movdqu_load);
         bindMemory(testCase, rosa::x86::Register::R15, 3);
@@ -14354,6 +14382,70 @@ void testMovdqaGuestMemoryToRegister() {
                 "register MOVDQA changed its source");
     expectEqual(registerState.rflags, std::uint64_t{0x8D7},
                 "register MOVDQA changed flags");
+
+    constexpr std::array<std::uint8_t, 10> extendedCode{
+        0x66, 0x41, 0x0F, 0x6F, 0x86, 0xA0, 0x00, 0x00, 0x00, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x7FF802AA1634ULL});
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::MovdqaRegMem,
+           "REX MOVDQA load opcode differs");
+    expectEqual(extendedDecoded[0].length, std::uint8_t{9},
+                "REX MOVDQA load length differs");
+    const auto extendedDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            extendedDecoded[0].operands[0]);
+    const auto extendedMemory =
+        std::get<rosa::x86::MemoryOperand>(extendedDecoded[0].operands[1]);
+    expect(extendedDestination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               extendedMemory.base == rosa::x86::Register::R14 &&
+               extendedMemory.displacement == 0xA0 &&
+               extendedMemory.width == 128,
+           "MOVDQA xmm0, [r14+0xa0] operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find(
+               "movdqa xmm0, [r14+0xa0]") != std::string::npos,
+           "REX MOVDQA load dump differs");
+
+    const auto extendedBlock = translator.translate(
+        extendedCode, rosa::guest::GuestAddress{0x7FF802AA1634ULL});
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x80A0},
+                          0x8877665544332211ULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x80A8},
+                          0x1020304050607080ULL);
+    rosa::x86::X86State extendedState;
+    extendedState.r14 = memoryBase.value;
+    extendedState.xmm[0] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    extendedState.rflags = 0xAD7;
+    static_cast<void>(extendedBlock.execute(extendedState, &addressSpace));
+    expectEqual(extendedState.xmm[0].low,
+                std::uint64_t{0x8877665544332211ULL},
+                "REX MOVDQA loaded the wrong low lane");
+    expectEqual(extendedState.xmm[0].high,
+                std::uint64_t{0x1020304050607080ULL},
+                "REX MOVDQA loaded the wrong high lane");
+    expectEqual(extendedState.r14, memoryBase.value,
+                "REX MOVDQA changed its base register");
+    expectEqual(extendedState.rflags, std::uint64_t{0xAD7},
+                "REX MOVDQA changed flags");
+
+    rosa::x86::X86State unalignedState;
+    unalignedState.r14 = memoryBase.value + 1;
+    unalignedState.xmm[0] = {.low = 0x55, .high = 0xAA};
+    unalignedState.rflags = 0xBD7;
+    rejected = false;
+    try {
+        static_cast<void>(extendedBlock.execute(unalignedState,
+                                                 &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("aligned") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "REX MOVDQA accepted an unaligned guest address");
+    expectEqual(unalignedState.xmm[0].low, std::uint64_t{0x55},
+                "faulted REX MOVDQA changed the low lane");
+    expectEqual(unalignedState.xmm[0].high, std::uint64_t{0xAA},
+                "faulted REX MOVDQA changed the high lane");
+    expectEqual(unalignedState.rflags, std::uint64_t{0xBD7},
+                "faulted REX MOVDQA changed flags");
 }
 
 void testMovdquRegisterToGuestMemory() {

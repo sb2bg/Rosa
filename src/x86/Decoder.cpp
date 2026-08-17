@@ -2246,6 +2246,59 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x66U && code.size() - cursor >= 5 &&
+            code[cursor + 1] >= 0x40U && code[cursor + 1] <= 0x4FU &&
+            code[cursor + 2] == 0x0FU && code[cursor + 3] == 0x6FU) {
+            const auto rex = code[cursor + 1];
+            const bool rexW = (rex & 0x8U) != 0;
+            const bool rexR = (rex & 0x4U) != 0;
+            const bool rexX = (rex & 0x2U) != 0;
+            const bool rexB = (rex & 0x1U) != 0;
+            const auto modrm = code[cursor + 4];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (rexW || rexX || mode == 0x3U || rmEncoding == 0x4U ||
+                (mode == 0 && rmEncoding == 0x5U && !rexB)) {
+                throw DecodeError(
+                    address, remaining,
+                    "only REX-extended MOVDQA xmm, [base+disp8/disp32] is supported");
+            }
+            auto operandCursor = cursor + 5;
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated REX MOVDQA load disp8");
+                }
+                displacement =
+                    std::bit_cast<std::int8_t>(code[operandCursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - operandCursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated REX MOVDQA load disp32");
+                }
+                displacement = readI32(code.subspan(operandCursor, 4));
+                operandCursor += 4;
+            }
+            instruction.opcode = Opcode::MovdqaRegMem;
+            instruction.operands.push_back(XmmRegisterOperand{
+                static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                    ((modrm >> 3U) & 0x7U) | (rexR ? 8U : 0U)))});
+            instruction.operands.push_back(MemoryOperand{
+                decodeRegister(rmEncoding, rexB), displacement, 128});
+            const auto length = operandCursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(
+                code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            cursor = operandCursor;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x66U && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x6FU) {
             if (code.size() - cursor < 4) {
