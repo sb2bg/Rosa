@@ -16528,6 +16528,85 @@ void testDarwinOpenGuestRootDirectory() {
                 "unsupported guest root open allocated a descriptor");
 }
 
+void testDarwinOpenatGuestCryptexDirectory() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto openatNumber = UINT64_C(0x020001CF);
+    constexpr std::uint32_t rootFlags = 0x20100000;
+    constexpr std::uint32_t directoryFlag = 0x00100000;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress rootPathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress relativePathAddress{0x8200};
+    constexpr std::array<std::uint8_t, 2> rootPath{'/', 0};
+    constexpr std::string_view relativePath = "System/Cryptexes/OS";
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(rootPathAddress, rootPath);
+    addressSpace.writeBytes(
+        relativePathAddress,
+        std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t *>(relativePath.data()),
+            relativePath.size()});
+    addressSpace.writeBytes(
+        rosa::guest::GuestAddress{relativePathAddress.value +
+                                  relativePath.size()},
+        std::array<std::uint8_t, 1>{0});
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = rootPathAddress.value;
+    state.rsi = rootFlags;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+
+    state.rax = openatNumber;
+    state.rdi = 3;
+    state.rsi = relativePathAddress.value;
+    state.rdx = directoryFlag;
+    state.r10 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEE85CULL}));
+    expectEqual(state.rax, std::uint64_t{4},
+                "openat guest cryptex returned the wrong descriptor");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "openat guest cryptex did not clear BSD carry");
+    const auto *opened = dispatcher.fileSpace().lookup(
+        rosa::darwin::GuestFileDescriptor{4});
+    expect(opened != nullptr &&
+               opened->kind ==
+                   rosa::darwin::GuestFileKind::SyntheticDirectory &&
+               opened->guestPath ==
+                   std::filesystem::path{"/System/Cryptexes/OS"} &&
+               opened->flags == directoryFlag,
+           "openat guest cryptex stored the wrong synthetic metadata");
+
+    const auto sizeBeforeFailure = dispatcher.fileSpace().size();
+    state.rax = openatNumber;
+    state.rdi = 99;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "openat invalid guest dirfd returned the wrong errno");
+    expectEqual(dispatcher.fileSpace().size(), sizeBeforeFailure,
+                "faulted openat allocated a guest descriptor");
+
+    state.rax = openatNumber;
+    state.rdi = 3;
+    state.rsi = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "openat invalid guest path returned the wrong errno");
+    expectEqual(dispatcher.fileSpace().size(), sizeBeforeFailure,
+                "faulted openat path allocated a guest descriptor");
+}
+
 void testDarwinOpenReadOnlyUserFile() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -22765,6 +22844,8 @@ int main() {
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
         {"Darwin open guest root directory",
          testDarwinOpenGuestRootDirectory},
+        {"Darwin openat guest cryptex directory",
+         testDarwinOpenatGuestCryptexDirectory},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
         {"Darwin close guest descriptor", testDarwinCloseGuestDescriptor},

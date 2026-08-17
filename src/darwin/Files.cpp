@@ -37,6 +37,26 @@ GuestFileDescriptor GuestFileSpace::openRootDirectory(std::uint32_t flags) {
     return descriptor;
 }
 
+GuestFileDescriptor GuestFileSpace::openSyntheticDirectory(
+    std::filesystem::path guestPath, std::uint32_t flags) {
+    if (!guestPath.is_absolute()) {
+        throw std::invalid_argument(
+            "synthetic guest directory path must be absolute");
+    }
+    if (nextDescriptor_ == std::numeric_limits<std::int32_t>::max()) {
+        throw std::runtime_error("guest file-descriptor namespace exhausted");
+    }
+    const GuestFileDescriptor descriptor{nextDescriptor_++};
+    files_.emplace(descriptor,
+                   GuestOpenFile{
+                       .descriptor = descriptor,
+                       .kind = GuestFileKind::SyntheticDirectory,
+                       .guestPath = std::move(guestPath),
+                       .flags = flags,
+                   });
+    return descriptor;
+}
+
 GuestFileDescriptor GuestFileSpace::openReadOnlyFile(
     std::filesystem::path guestPath, std::uint32_t flags) {
     if (nextDescriptor_ == std::numeric_limits<std::int32_t>::max()) {

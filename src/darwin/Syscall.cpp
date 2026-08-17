@@ -41,6 +41,7 @@ constexpr std::uint64_t syscallMac = unixSyscallClass | 381U;
 constexpr std::uint64_t syscallFsgetpath = unixSyscallClass | 427U;
 constexpr std::uint64_t syscallCsrctl = unixSyscallClass | 483U;
 constexpr std::uint64_t syscallGetentropy = unixSyscallClass | 500U;
+constexpr std::uint64_t syscallOpenat = unixSyscallClass | 463U;
 constexpr std::uint64_t csrSyscallCheck = 0;
 // Rosa exposes a fully restrictive guest System Integrity Protection
 // configuration. This is guest policy state, not a host kernel pointer or
@@ -62,6 +63,7 @@ constexpr std::uint32_t guestOpenDirectory = 0x00100000;
 constexpr std::uint32_t guestOpenNoFollowAny = 0x20000000;
 constexpr std::uint32_t guestOpenRootDirectory =
     guestOpenDirectory | guestOpenNoFollowAny;
+constexpr std::string_view guestCryptexDirectory = "System/Cryptexes/OS";
 constexpr std::uint32_t guestFcntlGetPath = 50;
 constexpr std::uint32_t guestSandboxCheckCall = 2;
 constexpr std::uint64_t guestSandboxSyscallFilterType = 0x41;
@@ -571,6 +573,45 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
                    << " mode=0x" << mode;
             throw unsupported(state, syscallRip, reason.str());
         }
+    }
+    if (number == syscallOpenat) {
+        const auto directoryDescriptor = GuestFileDescriptor{
+            std::bit_cast<std::int32_t>(
+                static_cast<std::uint32_t>(state.rdi))};
+        const auto *directory = fileSpace_.lookup(directoryDescriptor);
+        if (directory == nullptr ||
+            directory->kind != GuestFileKind::RootDirectory) {
+            setError(state, EBADF);
+            return {};
+        }
+        std::optional<std::string> path;
+        try {
+            path = readGuestCString(addressSpace,
+                                    guest::GuestAddress{state.rsi},
+                                    guestPathMaximum);
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        if (!path) {
+            setError(state, ENAMETOOLONG);
+            return {};
+        }
+        const auto flags = static_cast<std::uint32_t>(state.rdx);
+        const auto mode = static_cast<std::uint32_t>(state.r10);
+        if (*path != guestCryptexDirectory || flags != guestOpenDirectory ||
+            mode != 0) {
+            std::ostringstream reason;
+            reason << "only openat of the provisioned guest cryptex directory is implemented; got dirfd="
+                   << directoryDescriptor.value << " path=\"" << *path
+                   << "\" flags=0x" << std::hex << flags << " mode=0x"
+                   << mode;
+            throw unsupported(state, syscallRip, reason.str());
+        }
+        const auto descriptor = fileSpace_.openSyntheticDirectory(
+            std::filesystem::path{"/"} / *path, flags);
+        setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
+        return {};
     }
     if (number == syscallClose) {
         const auto descriptor = GuestFileDescriptor{
