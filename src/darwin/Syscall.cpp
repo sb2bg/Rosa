@@ -3,6 +3,7 @@
 #include "darwin/SharedCache.h"
 
 #include <sys/random.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -68,11 +69,27 @@ constexpr std::uint64_t guestAmfiUnrestrictedDyldPolicy = 0x1DF;
 constexpr std::array<std::uint32_t, 2> guestSysctlNameToOid{0, 3};
 constexpr std::array<std::uint32_t, 3> guestLockdownModeOid{103, 101, 101};
 constexpr std::array<std::uint32_t, 2> guestBootArgsOid{1, 143};
+constexpr std::array<std::uint32_t, 2> guestKernelVersionOid{1, 4};
 constexpr std::string_view guestLockdownModeName =
     "security.mac.lockdown_mode_state";
 constexpr std::string_view guestBootArgsName = "kern.bootargs";
+constexpr std::string_view guestKernelVersionName = "kern.version";
 constexpr std::uint32_t guestLockdownModeState = 0;
 constexpr std::array<std::uint8_t, 1> guestBootArgs{0};
+
+std::vector<std::uint8_t> hostKernelVersion() {
+    std::size_t size = 0;
+    if (::sysctlbyname("kern.version", nullptr, &size, nullptr, 0) != 0 ||
+        size == 0) {
+        throw std::runtime_error("failed to query host kern.version size");
+    }
+    std::vector<std::uint8_t> bytes(size);
+    if (::sysctlbyname("kern.version", bytes.data(), &size, nullptr, 0) != 0) {
+        throw std::runtime_error("failed to query host kern.version");
+    }
+    bytes.resize(size);
+    return bytes;
+}
 
 struct GuestFsid {
     std::int32_t value[2];
@@ -329,6 +346,8 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
                 resultOid = guestLockdownModeOid;
             } else if (requestedName == guestBootArgsName) {
                 resultOid = guestBootArgsOid;
+            } else if (requestedName == guestKernelVersionName) {
+                resultOid = guestKernelVersionOid;
             } else {
                 std::ostringstream reason;
                 reason << "unsupported guest sysctl name \"" << requestedName
@@ -356,6 +375,46 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
             std::memcpy(oidBytes.data(), resultOid.data(), resultSize);
             addressSpace.writeBytes(guest::GuestAddress{state.rdx}, oidBytes);
             addressSpace.writeU64(guest::GuestAddress{state.r10}, resultSize);
+            setSuccess(state, 0);
+            return {};
+        }
+
+        if (std::ranges::equal(name, guestKernelVersionOid)) {
+            if (state.r10 == 0 || state.r8 != 0 || state.r9 != 0) {
+                throw unsupported(
+                    state, syscallRip,
+                    "only a read or size query of guest kern.version is implemented");
+            }
+            const auto version = hostKernelVersion();
+            std::uint64_t outputCapacity = 0;
+            try {
+                outputCapacity = addressSpace.readU64(
+                    guest::GuestAddress{state.r10});
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.r10}, sizeof(std::uint64_t),
+                    guest::Permission::Write);
+                if (state.rdx != 0 && outputCapacity >= version.size()) {
+                    addressSpace.validateAccess(
+                        guest::GuestAddress{state.rdx}, version.size(),
+                        guest::Permission::Write);
+                }
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            if (state.rdx != 0 && outputCapacity < version.size()) {
+                // The x86_64 Darwin kernel returns ENOMEM, leaves the short
+                // output untouched, and reports zero bytes copied.
+                addressSpace.writeU64(guest::GuestAddress{state.r10}, 0);
+                setError(state, ENOMEM);
+                return {};
+            }
+            if (state.rdx != 0) {
+                addressSpace.writeBytes(guest::GuestAddress{state.rdx},
+                                        version);
+            }
+            addressSpace.writeU64(guest::GuestAddress{state.r10},
+                                  version.size());
             setSuccess(state, 0);
             return {};
         }

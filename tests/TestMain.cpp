@@ -16199,6 +16199,120 @@ void testDarwinBootArgsSysctl() {
                 "faulted kern.bootargs read changed its length");
 }
 
+void testDarwinKernelVersionSysctl() {
+    constexpr auto sysctlNumber = UINT64_C(0x020000CA);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress mibAddress{0x8000};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8100};
+    constexpr rosa::guest::GuestAddress lengthAddress{0x8180};
+    constexpr rosa::guest::GuestAddress nameAddress{0x8200};
+    constexpr std::string_view name = "kern.version";
+    constexpr std::array<std::uint32_t, 2> nameToOid{0, 3};
+    constexpr std::array<std::uint32_t, 2> versionOid{1, 4};
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    std::array<std::uint8_t, sizeof(nameToOid)> mibBytes{};
+    std::memcpy(mibBytes.data(), nameToOid.data(), mibBytes.size());
+    addressSpace.writeBytes(mibAddress, mibBytes);
+    addressSpace.writeBytes(
+        nameAddress,
+        std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t *>(name.data()),
+            name.size()});
+    addressSpace.writeU64(lengthAddress, 16);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = nameToOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = nameAddress.value;
+    state.r9 = name.size();
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEEA88ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "kern.version name-to-OID did not succeed");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{8},
+                "kern.version name-to-OID returned the wrong size");
+    const auto oidBytes = addressSpace.readBytes(outputAddress,
+                                                  sizeof(versionOid));
+    std::array<std::uint32_t, 2> actualOid{};
+    std::memcpy(actualOid.data(), oidBytes.data(), sizeof(actualOid));
+    expectEqual(actualOid, versionOid,
+                "kern.version returned the wrong guest MIB");
+
+    addressSpace.writeBytes(mibAddress, oidBytes);
+    addressSpace.writeU64(lengthAddress, 512);
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = versionOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = 0;
+    state.r9 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "guest kern.version read did not succeed");
+    const auto versionSize = addressSpace.readU64(lengthAddress);
+    expect(versionSize > 32 && versionSize < 512,
+           "guest kern.version length is implausible");
+    const auto version = addressSpace.readBytes(
+        outputAddress, static_cast<std::size_t>(versionSize));
+    constexpr std::string_view prefix = "Darwin Kernel Version ";
+    expect(version.size() > prefix.size() && version.back() == 0 &&
+               std::equal(prefix.begin(), prefix.end(), version.begin()),
+           "guest kern.version bytes differ from Darwin kernel metadata");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "guest kern.version read did not clear BSD carry");
+
+    addressSpace.writeU64(lengthAddress, 0);
+    state.rax = sysctlNumber;
+    state.rdx = 0;
+    state.rflags = 0xBD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "guest kern.version size query failed");
+    expectEqual(addressSpace.readU64(lengthAddress), versionSize,
+                "guest kern.version size query returned a different size");
+
+    addressSpace.writeU64(lengthAddress, 4);
+    addressSpace.writeBytes(outputAddress,
+                            std::array<std::uint8_t, 4>{0xA5, 0xA5, 0xA5,
+                                                        0xA5});
+    state.rax = sysctlNumber;
+    state.rdx = outputAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "short kern.version buffer returned the wrong errno");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{0},
+                "short kern.version buffer did not report zero copied bytes");
+    expectEqual(addressSpace.readBytes(outputAddress, 4),
+                std::vector<std::uint8_t>{0xA5, 0xA5, 0xA5, 0xA5},
+                "short kern.version buffer was partially changed");
+
+    addressSpace.writeU64(lengthAddress, 512);
+    state.rax = sysctlNumber;
+    state.rdx = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid kern.version output returned the wrong errno");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{512},
+                "faulted kern.version read changed its length");
+}
+
 void testDarwinOpenCurrentDirectory() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr std::uint32_t openDirectory = 0x00100000;
@@ -22510,6 +22624,7 @@ int main() {
         {"Darwin AMFI dyld policy", testDarwinAmfiDyldPolicy},
         {"Darwin lockdown-mode sysctl", testDarwinLockdownModeSysctl},
         {"Darwin boot-arguments sysctl", testDarwinBootArgsSysctl},
+        {"Darwin kernel-version sysctl", testDarwinKernelVersionSysctl},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
