@@ -5,6 +5,7 @@
 #include <sys/random.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cerrno>
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace rosa::darwin {
@@ -29,6 +31,7 @@ constexpr std::uint64_t syscallClose = unixSyscallClass | 6U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
 constexpr std::uint64_t syscallMunmap = unixSyscallClass | 73U;
 constexpr std::uint64_t syscallFcntl = unixSyscallClass | 92U;
+constexpr std::uint64_t syscallSysctl = unixSyscallClass | 202U;
 constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 constexpr std::uint64_t syscallProcInfo = unixSyscallClass | 336U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
@@ -59,6 +62,11 @@ constexpr std::uint32_t guestSandboxCheckCall = 2;
 constexpr std::uint64_t guestSandboxSyscallFilterType = 0x41;
 constexpr std::uint64_t guestSandboxObservedFlags = 1;
 constexpr std::uint64_t guestMapWithLinkingSyscall = 550;
+constexpr std::array<std::uint32_t, 2> guestSysctlNameToOid{0, 3};
+constexpr std::array<std::uint32_t, 3> guestLockdownModeOid{103, 101, 101};
+constexpr std::string_view guestLockdownModeName =
+    "security.mac.lockdown_mode_state";
+constexpr std::uint32_t guestLockdownModeState = 0;
 
 struct GuestFsid {
     std::int32_t value[2];
@@ -232,6 +240,123 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         addressSpace.writeU64(guest::GuestAddress{request.resultAddress}, 0);
         setSuccess(state, 0);
         return {};
+    }
+    if (number == syscallSysctl) {
+        if (state.rsi > 12) {
+            setError(state, EINVAL);
+            return {};
+        }
+        std::vector<std::uint32_t> name;
+        name.reserve(static_cast<std::size_t>(state.rsi));
+        try {
+            for (std::size_t index = 0; index < state.rsi; ++index) {
+                name.push_back(addressSpace.readU32(guest::GuestAddress{
+                    state.rdi + index * sizeof(std::uint32_t)}));
+            }
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+
+        if (std::ranges::equal(name, guestSysctlNameToOid)) {
+            if (state.r8 == 0 || state.r9 != guestLockdownModeName.size() ||
+                state.rdx == 0 || state.r10 == 0) {
+                throw unsupported(
+                    state, syscallRip,
+                    "only the observed CTL_SYSCTL/CTL_SYSCTL_NAME2OID request is implemented");
+            }
+            std::string requestedName;
+            std::uint64_t outputCapacity = 0;
+            try {
+                const auto bytes = addressSpace.readBytes(
+                    guest::GuestAddress{state.r8},
+                    static_cast<std::size_t>(state.r9));
+                requestedName.assign(bytes.begin(), bytes.end());
+                outputCapacity = addressSpace.readU64(
+                    guest::GuestAddress{state.r10});
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            if (requestedName != guestLockdownModeName) {
+                std::ostringstream reason;
+                reason << "unsupported guest sysctl name \"" << requestedName
+                       << '"';
+                throw unsupported(state, syscallRip, reason.str());
+            }
+            constexpr auto resultSize = sizeof(guestLockdownModeOid);
+            if (outputCapacity < resultSize) {
+                setError(state, ENOMEM);
+                return {};
+            }
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdx}, resultSize,
+                    guest::Permission::Write);
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.r10}, sizeof(std::uint64_t),
+                    guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            std::array<std::uint8_t, resultSize> oidBytes{};
+            std::memcpy(oidBytes.data(), guestLockdownModeOid.data(),
+                        resultSize);
+            addressSpace.writeBytes(guest::GuestAddress{state.rdx}, oidBytes);
+            addressSpace.writeU64(guest::GuestAddress{state.r10}, resultSize);
+            setSuccess(state, 0);
+            return {};
+        }
+
+        if (std::ranges::equal(name, guestLockdownModeOid)) {
+            if (state.rdx == 0 || state.r10 == 0 || state.r8 != 0 ||
+                state.r9 != 0) {
+                throw unsupported(
+                    state, syscallRip,
+                    "only a read of the guest lockdown-mode sysctl is implemented");
+            }
+            std::uint64_t outputCapacity = 0;
+            try {
+                outputCapacity = addressSpace.readU64(
+                    guest::GuestAddress{state.r10});
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            if (outputCapacity < sizeof(guestLockdownModeState)) {
+                setError(state, ENOMEM);
+                return {};
+            }
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdx},
+                    sizeof(guestLockdownModeState), guest::Permission::Write);
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.r10}, sizeof(std::uint64_t),
+                    guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            std::array<std::uint8_t, sizeof(guestLockdownModeState)>
+                valueBytes{};
+            std::memcpy(valueBytes.data(), &guestLockdownModeState,
+                        sizeof(guestLockdownModeState));
+            addressSpace.writeBytes(guest::GuestAddress{state.rdx},
+                                    valueBytes);
+            addressSpace.writeU64(guest::GuestAddress{state.r10},
+                                  sizeof(guestLockdownModeState));
+            setSuccess(state, 0);
+            return {};
+        }
+
+        std::ostringstream reason;
+        reason << "unsupported guest sysctl MIB";
+        for (const auto component : name) {
+            reason << ' ' << std::dec << component;
+        }
+        throw unsupported(state, syscallRip, reason.str());
     }
     if (number == syscallGetpid) {
         // Rosa currently has one guest process hosted by one Rosa process, so

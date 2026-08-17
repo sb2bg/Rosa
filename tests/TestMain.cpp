@@ -14810,6 +14810,123 @@ void testDarwinSandboxSyscallCheck() {
                 "unsupported Sandbox check changed its output");
 }
 
+void testDarwinLockdownModeSysctl() {
+    constexpr auto sysctlNumber = UINT64_C(0x020000CA);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress mibAddress{0x8000};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8100};
+    constexpr rosa::guest::GuestAddress lengthAddress{0x8180};
+    constexpr rosa::guest::GuestAddress nameAddress{0x8200};
+    constexpr std::string_view lockdownName =
+        "security.mac.lockdown_mode_state";
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint32_t, 2> nameToOidMib{0, 3};
+    std::array<std::uint8_t, sizeof(nameToOidMib)> nameToOidBytes{};
+    std::memcpy(nameToOidBytes.data(), nameToOidMib.data(),
+                sizeof(nameToOidMib));
+    addressSpace.writeBytes(mibAddress, nameToOidBytes);
+    addressSpace.writeBytes(
+        nameAddress,
+        std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t *>(lockdownName.data()),
+            lockdownName.size()});
+    addressSpace.writeU64(lengthAddress, 48);
+    constexpr std::array<std::uint8_t, 16> outputSentinel{
+        0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5,
+        0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};
+    addressSpace.writeBytes(outputAddress, outputSentinel);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = nameToOidMib.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = nameAddress.value;
+    state.r9 = lockdownName.size();
+    state.rflags = 0x8D7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state,
+        rosa::guest::GuestAddress{0x7FF802AEEA88ULL});
+    expect(!outcome.exited, "name-to-OID sysctl terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "lockdown name-to-OID sysctl did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "name-to-OID sysctl did not clear BSD carry");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{12},
+                "name-to-OID sysctl returned the wrong byte length");
+    constexpr std::array<std::uint32_t, 3> expectedOid{103, 101, 101};
+    const auto oidBytes = addressSpace.readBytes(outputAddress, sizeof(expectedOid));
+    std::array<std::uint32_t, 3> actualOid{};
+    std::memcpy(actualOid.data(), oidBytes.data(), sizeof(actualOid));
+    expectEqual(actualOid, expectedOid,
+                "name-to-OID sysctl returned the wrong guest MIB");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{outputAddress.value + 12}, 4),
+                std::vector<std::uint8_t>(4, 0xA5),
+                "name-to-OID sysctl wrote beyond its result");
+
+    addressSpace.writeBytes(mibAddress, oidBytes);
+    addressSpace.writeU64(lengthAddress, sizeof(std::uint32_t));
+    constexpr std::array<std::uint8_t, 4> dwordSentinel{
+        0xFF, 0xFF, 0xFF, 0xFF};
+    addressSpace.writeBytes(outputAddress, dwordSentinel);
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = expectedOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = 0;
+    state.r9 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "lockdown-mode sysctl read did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "lockdown-mode sysctl read did not clear BSD carry");
+    expectEqual(addressSpace.readU32(outputAddress), std::uint32_t{0},
+                "guest lockdown-mode state differs");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{4},
+                "lockdown-mode sysctl returned the wrong value size");
+
+    addressSpace.writeBytes(mibAddress, nameToOidBytes);
+    addressSpace.writeU64(lengthAddress, 48);
+    addressSpace.writeBytes(outputAddress, outputSentinel);
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = nameToOidMib.size();
+    state.rdx = 0x9000;
+    state.r10 = lengthAddress.value;
+    state.r8 = nameAddress.value;
+    state.r9 = lockdownName.size();
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid name-to-OID output returned the wrong errno");
+    expectEqual(addressSpace.readBytes(outputAddress, outputSentinel.size()),
+                std::vector<std::uint8_t>(outputSentinel.begin(),
+                                          outputSentinel.end()),
+                "faulted name-to-OID sysctl changed guest output");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{48},
+                "faulted name-to-OID sysctl changed guest length");
+
+    state.rax = sysctlNumber;
+    state.rdi = 0x9000;
+    state.rsi = nameToOidMib.size();
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid sysctl MIB returned the wrong errno");
+}
+
 void testDarwinOpenCurrentDirectory() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr std::uint32_t openDirectory = 0x00100000;
@@ -20948,6 +21065,7 @@ int main() {
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin getpid", testDarwinGetpid},
         {"Darwin Sandbox syscall check", testDarwinSandboxSyscallCheck},
+        {"Darwin lockdown-mode sysctl", testDarwinLockdownModeSysctl},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
