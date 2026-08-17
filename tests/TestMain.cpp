@@ -16479,6 +16479,55 @@ void testDarwinOpenCurrentDirectory() {
                 "unsupported guest open allocated a descriptor");
 }
 
+void testDarwinOpenGuestRootDirectory() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr std::uint32_t openRootFlags = 0x20100000;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr std::array<std::uint8_t, 2> rootPath{'/', 0};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, rootPath);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = openRootFlags;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEE844ULL}));
+    expectEqual(state.rax, std::uint64_t{3},
+                "open guest root returned the wrong descriptor");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "open guest root did not clear BSD carry");
+    const auto *opened = dispatcher.fileSpace().lookup(
+        rosa::darwin::GuestFileDescriptor{3});
+    expect(opened != nullptr &&
+               opened->kind == rosa::darwin::GuestFileKind::RootDirectory &&
+               opened->guestPath == std::filesystem::path{"/"} &&
+               opened->flags == openRootFlags,
+           "open guest root stored the wrong synthetic metadata");
+
+    state.rax = openNumber;
+    state.rsi = openRootFlags & ~std::uint32_t{0x20000000};
+    bool rejectedFlags = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        rejectedFlags = std::string_view(error.what()).find("flags=0x100000") !=
+                        std::string_view::npos;
+    }
+    expect(rejectedFlags,
+           "guest root open accepted an unobserved flag combination");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+                "unsupported guest root open allocated a descriptor");
+}
+
 void testDarwinOpenReadOnlyUserFile() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -22714,6 +22763,8 @@ int main() {
         {"Darwin boot-arguments sysctl", testDarwinBootArgsSysctl},
         {"Darwin kernel-version sysctl", testDarwinKernelVersionSysctl},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
+        {"Darwin open guest root directory",
+         testDarwinOpenGuestRootDirectory},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
         {"Darwin close guest descriptor", testDarwinCloseGuestDescriptor},

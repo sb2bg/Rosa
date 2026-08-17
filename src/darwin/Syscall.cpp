@@ -59,6 +59,9 @@ constexpr std::size_t maximumControlledWrite = 16U * 1024U * 1024U;
 constexpr std::size_t maximumLongPath = 8192;
 constexpr std::size_t guestPathMaximum = 1024;
 constexpr std::uint32_t guestOpenDirectory = 0x00100000;
+constexpr std::uint32_t guestOpenNoFollowAny = 0x20000000;
+constexpr std::uint32_t guestOpenRootDirectory =
+    guestOpenDirectory | guestOpenNoFollowAny;
 constexpr std::uint32_t guestFcntlGetPath = 50;
 constexpr std::uint32_t guestSandboxCheckCall = 2;
 constexpr std::uint64_t guestSandboxSyscallFilterType = 0x41;
@@ -528,6 +531,11 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         const auto mode = static_cast<std::uint32_t>(state.rdx);
         if (*path == "." && flags == guestOpenDirectory && mode == 0) {
             const auto descriptor = fileSpace_.openCurrentDirectory(flags);
+            setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
+            return {};
+        }
+        if (*path == "/" && flags == guestOpenRootDirectory && mode == 0) {
+            const auto descriptor = fileSpace_.openRootDirectory(flags);
             setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
             return {};
         }

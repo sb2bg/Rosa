@@ -16,6 +16,7 @@ struct GuestFileDescriptor {
 
 enum class GuestFileKind {
     CurrentDirectory,
+    RootDirectory,
     HostReadOnlyFile,
 };
 
@@ -35,6 +36,7 @@ class GuestFileSpace {
 
     [[nodiscard]] GuestFileDescriptor openCurrentDirectory(
         std::uint32_t flags);
+    [[nodiscard]] GuestFileDescriptor openRootDirectory(std::uint32_t flags);
     [[nodiscard]] GuestFileDescriptor openReadOnlyFile(
         std::filesystem::path guestPath, std::uint32_t flags);
     [[nodiscard]] const GuestOpenFile *lookup(
