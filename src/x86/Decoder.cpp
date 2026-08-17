@@ -1946,6 +1946,54 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x66U && code.size() - cursor >= 2) {
+            const auto afterSizePrefix = cursor + 1;
+            const bool hasRex = code[afterSizePrefix] >= 0x40U &&
+                                code[afterSizePrefix] <= 0x4FU;
+            const auto opcodeOffset = afterSizePrefix + (hasRex ? 1U : 0U);
+            if (code.size() - opcodeOffset >= 3 &&
+                code[opcodeOffset] == 0x0FU &&
+                code[opcodeOffset + 1] == 0x3AU &&
+                code[opcodeOffset + 2] == 0x20U) {
+                if (code.size() - opcodeOffset < 5) {
+                    throw DecodeError(address, remaining,
+                                      "truncated PINSRB xmm, r32, imm8");
+                }
+                const auto rex = hasRex ? code[afterSizePrefix] : 0U;
+                const bool rexW = (rex & 0x8U) != 0;
+                const bool rexR = (rex & 0x4U) != 0;
+                const bool rexB = (rex & 0x1U) != 0;
+                const auto modrm = code[opcodeOffset + 3];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                if (rexW || mode != 0x3U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only register-direct PINSRB xmm, r32, imm8 is supported");
+                }
+                instruction.opcode = Opcode::PinsrbXmmReg;
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        ((modrm >> 3U) & 0x7U) | (rexR ? 8U : 0U)))});
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U),
+                                   rexB),
+                    32});
+                instruction.operands.push_back(
+                    ImmediateOperand{code[opcodeOffset + 4], 8});
+                const auto length = opcodeOffset + 5 - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(
+                    code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                    length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = opcodeOffset + 5;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
         if (code[cursor] == 0x66U && code.size() - cursor >= 4 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x3AU &&
             code[cursor + 3] == 0x0FU) {
