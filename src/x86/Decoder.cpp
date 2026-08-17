@@ -556,7 +556,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const auto setOpcodeOffset = cursor + (setHasRex ? 1U : 0U);
         if (code.size() - setOpcodeOffset >= 2 &&
             code[setOpcodeOffset] == 0x0FU &&
-            (code[setOpcodeOffset + 1] == 0x93U ||
+            (code[setOpcodeOffset + 1] == 0x92U ||
+             code[setOpcodeOffset + 1] == 0x93U ||
              code[setOpcodeOffset + 1] == 0x94U ||
              code[setOpcodeOffset + 1] == 0x95U ||
              code[setOpcodeOffset + 1] == 0x9FU)) {
@@ -577,10 +578,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 (mode == 0x3U && !setHasRex && rmEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register or byte [base+disp8/disp32] SETAE/SETE/SETNE/SETG is supported");
+                    "only register or byte [base+disp8/disp32] SETB/SETAE/SETE/SETNE/SETG is supported");
             }
             instruction.condition =
-                conditionOpcode == 0x93U   ? Condition::AboveOrEqual
+                conditionOpcode == 0x92U   ? Condition::Below
+                : conditionOpcode == 0x93U ? Condition::AboveOrEqual
                 : conditionOpcode == 0x94U ? Condition::Equal
                 : conditionOpcode == 0x95U ? Condition::NotEqual
                                            : Condition::Greater;

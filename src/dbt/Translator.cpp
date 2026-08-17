@@ -5029,10 +5029,11 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::EvaluateCondition: {
             if (*operation.condition != x86::Condition::Equal &&
                 *operation.condition != x86::Condition::NotEqual &&
+                *operation.condition != x86::Condition::Below &&
                 *operation.condition != x86::Condition::Greater &&
                 *operation.condition != x86::Condition::AboveOrEqual) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements equality/greater/above-or-equal condition values");
+                    "ARM64 backend only implements equality/below/greater/above-or-equal condition values");
             }
             constexpr std::uint8_t carryFlagBit = 0;
             constexpr std::uint8_t zeroFlagBit = 6;
@@ -5046,6 +5047,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 assembler.tbz(arm64::x16, zeroFlagBit, done);
             } else if (*operation.condition == x86::Condition::NotEqual) {
                 assembler.tbnz(arm64::x16, zeroFlagBit, done);
+            } else if (*operation.condition == x86::Condition::Below) {
+                assembler.tbz(arm64::x16, carryFlagBit, done);
             } else if (*operation.condition == x86::Condition::AboveOrEqual) {
                 assembler.tbnz(arm64::x16, carryFlagBit, done);
             } else {

@@ -2090,6 +2090,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("setb_low_byte_taken",
+                             CaseId::setb_low_byte_taken,
+                             differentialBytes_setb_low_byte_taken);
+        testCase.request.state.rbx = 0x1122334455667788ULL;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("setb_low_byte_not_taken",
+                             CaseId::setb_low_byte_not_taken,
+                             differentialBytes_setb_low_byte_not_taken);
+        testCase.request.state.rbx = 0xFFEEDDCCBBAA9988ULL;
+        testCase.request.state.rflags &= ~carryFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("setg_extended_taken",
                              CaseId::setg_extended_taken,
                              differentialBytes_setg_extended_taken);
@@ -20941,6 +20957,45 @@ void testRegisterIndirectJump() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "JMP register changed flags");
 }
 
+void testSetBelowLowByteRegister() {
+    constexpr std::uint64_t carry = std::uint64_t{1} << 0U;
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x92, 0xC3, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AEB6D1ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccReg &&
+               decoded[0].condition == rosa::x86::Condition::Below,
+           "SETB opcode or condition differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rbx &&
+               destination.width == 8,
+           "SETB BL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("setb bl") !=
+               std::string::npos,
+           "SETB dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AEB6D1ULL});
+    rosa::x86::X86State state;
+    state.rbx = 0x1122334455667788ULL;
+    state.rflags = 0x896 | carry;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rbx, std::uint64_t{0x1122334455667701ULL},
+                "taken SETB did not merge one into BL");
+    expectEqual(state.rflags, std::uint64_t{0x896 | carry},
+                "taken SETB changed flags");
+
+    state.rbx = 0xFFEEDDCCBBAA9988ULL;
+    state.rflags = 0x896 & ~carry;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rbx, std::uint64_t{0xFFEEDDCCBBAA9900ULL},
+                "not-taken SETB did not merge zero into BL");
+    expectEqual(state.rflags, std::uint64_t{0x896 & ~carry},
+                "not-taken SETB changed flags");
+}
+
 void testSetEqualLowByteRegister() {
     constexpr std::uint64_t zeroFlag = std::uint64_t{1} << 6U;
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x94, 0xC0, 0xC3};
@@ -22481,6 +22536,7 @@ int main() {
         {"unsigned-below conditional", testUnsignedBelowConditional},
         {"unsigned-below long conditional", testUnsignedBelowLongConditional},
         {"register-indirect jump", testRegisterIndirectJump},
+        {"set below low-byte register", testSetBelowLowByteRegister},
         {"set equal low-byte register", testSetEqualLowByteRegister},
         {"set not-equal low-byte register", testSetNotEqualLowByteRegister},
         {"set greater extended low-byte register",
