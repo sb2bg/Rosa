@@ -17476,7 +17476,8 @@ void testHotGuestBlockDiagnostics() {
 void testX86Commpage() {
     rosa::guest::AddressSpace addressSpace;
     constexpr std::uint64_t continuousTimebase = 0x0123456789ABCDEFULL;
-    rosa::darwin::mapX86Commpage(addressSpace, continuousTimebase);
+    constexpr std::uint64_t dyldFlags = 0xFEDCBA9876543210ULL;
+    rosa::darwin::mapX86Commpage(addressSpace, continuousTimebase, dyldFlags);
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageCpuCapabilities64Offset}),
@@ -17533,6 +17534,10 @@ void testX86Commpage() {
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageContinuousTimebaseOffset}),
                 continuousTimebase, "x86 commpage continuous-time base differs");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageDyldFlagsOffset}),
+                dyldFlags, "x86 commpage dyld flags differ");
     expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageNanotimeGenerationOffset}),

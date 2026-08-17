@@ -422,7 +422,8 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
         sharedCache ? cacheAwareStandaloneDyldSlide : standaloneDyldSlide,
         dyldString));
     rosa::darwin::mapX86Commpage(
-        addressSpace, rosa::darwin::sampleHostContinuousTimebase());
+        addressSpace, rosa::darwin::sampleHostContinuousTimebase(),
+        rosa::darwin::sampleHostDyldFlags());
     const std::vector<std::string> arguments{executableString};
     const std::vector<std::string> environment;
     std::vector<std::string> apple{"executable_path=" + executableString};

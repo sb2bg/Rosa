@@ -1,6 +1,7 @@
 #include "darwin/Commpage.h"
 
 #include <mach/mach_time.h>
+#include <sys/sysctl.h>
 
 #include <array>
 #include <limits>
@@ -37,7 +38,8 @@ std::uint64_t hostTicksToNanoseconds(std::uint64_t ticks) {
 } // namespace
 
 void mapX86Commpage(guest::AddressSpace &addressSpace,
-                    std::uint64_t continuousTimebase) {
+                    std::uint64_t continuousTimebase,
+                    std::uint64_t dyldFlags) {
     constexpr auto nanotimeDataSize =
         x86CommpageNanotimeGenerationOffset + sizeof(std::uint32_t) -
         x86CommpageNanotimeTscBaseOffset;
@@ -90,6 +92,14 @@ void mapX86Commpage(guest::AddressSpace &addressSpace,
     addressSpace.populateSparseReadOnly(
         guest::GuestAddress{x86CommpageBase.value + x86CommpageContinuousTimebaseOffset},
         continuousTimebaseBytes);
+    // XNU publishes the opaque kern.dyld_flags value here. The compatible
+    // guest cache should observe the current system-wide value, not an arm64
+    // commpage pointer or a guessed interpretation of its bits.
+    std::array<std::uint8_t, sizeof(dyldFlags)> dyldFlagBytes{};
+    writeLittleEndian(dyldFlagBytes, 0, dyldFlags, sizeof(dyldFlags));
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value + x86CommpageDyldFlagsOffset},
+        dyldFlagBytes);
 }
 
 std::uint64_t sampleHostContinuousTimebase() {
@@ -109,6 +119,16 @@ std::uint64_t sampleHostContinuousTimebase() {
         }
     }
     return hostTicksToNanoseconds(bestTimebase);
+}
+
+std::uint64_t sampleHostDyldFlags() {
+    std::uint64_t value{};
+    auto size = sizeof(value);
+    if (::sysctlbyname("kern.dyld_flags", &value, &size, nullptr, 0) != 0 ||
+        size != sizeof(value)) {
+        throw std::runtime_error("cannot query kern.dyld_flags");
+    }
+    return value;
 }
 
 std::uint64_t sampleX86TimestampCounter() {

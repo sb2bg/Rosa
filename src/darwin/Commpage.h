@@ -21,6 +21,7 @@ inline constexpr std::uint8_t x86CommpageKernelPageShift = 12;
 inline constexpr std::uint8_t x86CommpageUserPageShift = 12;
 inline constexpr std::size_t x86CommpageKdebugEnableOffset = 0x44;
 inline constexpr std::size_t x86CommpageContinuousTimebaseOffset = 0xC0;
+inline constexpr std::size_t x86CommpageDyldFlagsOffset = 0x100;
 inline constexpr std::size_t x86CommpageNanotimeTscBaseOffset = 0x50;
 inline constexpr std::size_t x86CommpageNanotimeScaleOffset = 0x58;
 inline constexpr std::size_t x86CommpageNanotimeShiftOffset = 0x5C;
@@ -28,8 +29,11 @@ inline constexpr std::size_t x86CommpageNanotimeNanosecondsBaseOffset = 0x60;
 inline constexpr std::size_t x86CommpageNanotimeGenerationOffset = 0x68;
 inline constexpr std::uint32_t x86CommpageNanotimeScale = 0x80000000U;
 
-void mapX86Commpage(guest::AddressSpace &addressSpace, std::uint64_t continuousTimebase);
+void mapX86Commpage(guest::AddressSpace &addressSpace,
+                    std::uint64_t continuousTimebase,
+                    std::uint64_t dyldFlags);
 [[nodiscard]] std::uint64_t sampleHostContinuousTimebase();
+[[nodiscard]] std::uint64_t sampleHostDyldFlags();
 [[nodiscard]] std::uint64_t sampleX86TimestampCounter();
 
 } // namespace rosa::darwin
