@@ -3289,6 +3289,25 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("movlhps_alias", CaseId::movlhps_alias,
+                             differentialBytes_movlhps_alias);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        run(testCase);
+    }
+    {
+        auto testCase = make("movlhps_distinct", CaseId::movlhps_distinct,
+                             differentialBytes_movlhps_distinct);
+        testCase.request.state.xmm[1] = {
+            .low = 0x1111222233334444ULL,
+            .high = 0x5555666677778888ULL};
+        testCase.request.state.xmm[2] = {
+            .low = 0xAABBCCDDEEFF0011ULL,
+            .high = 0x2233445566778899ULL};
+        run(testCase);
+    }
+    {
         auto testCase = make("movd_memory", CaseId::movd_memory,
                              differentialBytes_movd_memory);
         bindMemory(testCase, rosa::x86::Register::R14, 0);
@@ -14879,6 +14898,62 @@ void testMovqGuestMemoryToXmm() {
                 "faulted MOVQ load changed flags");
 }
 
+void testMovlhpsRegister() {
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x16, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802A8BE18ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovlhpsRegReg,
+           "MOVLHPS opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "MOVLHPS length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0,
+           "MOVLHPS xmm0, xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("movlhps xmm0, xmm0") !=
+               std::string::npos,
+           "MOVLHPS dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802A8BE18ULL});
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x0123456789ABCDEFULL,
+                    .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVLHPS changed the destination low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVLHPS copied the wrong source low lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVLHPS changed flags");
+
+    constexpr std::array<std::uint8_t, 5> extendedCode{
+        0x45, 0x0F, 0x16, 0xE8, 0xC3};
+    const auto extendedBlock = translator.translate(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State extendedState;
+    extendedState.xmm[13] = {.low = 0x1111222233334444ULL,
+                             .high = 0x5555666677778888ULL};
+    extendedState.xmm[8] = {.low = 0xAABBCCDDEEFF0011ULL,
+                            .high = 0x2233445566778899ULL};
+    extendedState.rflags = 0xAD7;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.xmm[13].low,
+                std::uint64_t{0x1111222233334444ULL},
+                "extended MOVLHPS changed the destination low lane");
+    expectEqual(extendedState.xmm[13].high,
+                std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                "extended MOVLHPS copied the wrong source lane");
+    expectEqual(extendedState.rflags, std::uint64_t{0xAD7},
+                "extended MOVLHPS changed flags");
+}
+
 void testMovdRegisterToXmm() {
     constexpr std::array<std::uint8_t, 5> code{
         0x66, 0x0F, 0x6E, 0xC0, 0xC3};
@@ -22175,6 +22250,7 @@ int main() {
         {"MOVDQU guest memory to register", testMovdquGuestMemoryToRegister},
         {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
+        {"MOVLHPS register execution", testMovlhpsRegister},
         {"MOVD register to XMM", testMovdRegisterToXmm},
         {"MOVD XMM to guest memory", testMovdXmmToGuestMemory},
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},
