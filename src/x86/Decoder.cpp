@@ -990,6 +990,62 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 continue;
             }
+            if (testOpcodeOffset < code.size() &&
+                code[testOpcodeOffset] == 0x0FU &&
+                code.size() - testOpcodeOffset >= 2 &&
+                code[testOpcodeOffset + 1] == 0x7EU) {
+                if (code.size() - testOpcodeOffset < 3) {
+                    throw DecodeError(address, remaining,
+                                      "truncated movd [memory], xmm");
+                }
+                const auto rex = testHasRex ? code[afterSizePrefix] : 0U;
+                const bool rexW = (rex & 0x8U) != 0;
+                const bool rexR = (rex & 0x4U) != 0;
+                const bool rexB = (rex & 0x1U) != 0;
+                const auto modrm = code[testOpcodeOffset + 2];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+                if (rexW || mode == 0x3U || rmEncoding == 0x4U ||
+                    (mode == 0 && rmEncoding == 0x5U && !rexB)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only MOVD dword [base+disp8/disp32], xmm is supported");
+                }
+                auto operandCursor = testOpcodeOffset + 3;
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated MOVD store disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[operandCursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - operandCursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated MOVD store disp32");
+                    }
+                    displacement = readI32(code.subspan(operandCursor, 4));
+                    operandCursor += 4;
+                }
+                instruction.opcode = Opcode::MovdMemXmm;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, rexB), displacement, 32});
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        ((modrm >> 3U) & 0x7U) | (rexR ? 8U : 0U)))});
+                const auto length = operandCursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(
+                    code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                    length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = operandCursor;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
             if (testOpcodeOffset < code.size() && code[testOpcodeOffset] == 0x85U) {
                 if (code.size() - testOpcodeOffset < 2) {
                     throw DecodeError(address, remaining,

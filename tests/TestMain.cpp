@@ -3156,6 +3156,31 @@ void testRosettaDifferentialSemantics() {
             .high = 0xFEDCBA9876543210ULL};
         run(testCase);
     }
+    {
+        auto testCase = make("movd_memory", CaseId::movd_memory,
+                             differentialBytes_movd_memory);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.state.xmm[0] = {
+            .low = 0x0123456789ABCDEFULL,
+            .high = 0xFEDCBA9876543210ULL};
+        std::fill_n(testCase.request.memory.begin() + 0x0F, 8, 0xA5);
+        testCase.memoryCompareOffset = 0x0F;
+        testCase.memoryCompareSize = 8;
+        run(testCase);
+    }
+    {
+        auto testCase = make("movd_memory_extended_xmm",
+                             CaseId::movd_memory_extended_xmm,
+                             differentialBytes_movd_memory_extended_xmm);
+        bindMemory(testCase, rosa::x86::Register::R14, 0);
+        testCase.request.state.xmm[13] = {
+            .low = 0xAABBCCDD80000001ULL,
+            .high = 0x1020304050607080ULL};
+        std::fill_n(testCase.request.memory.begin() + 0x0F, 8, 0x5A);
+        testCase.memoryCompareOffset = 0x0F;
+        testCase.memoryCompareSize = 8;
+        run(testCase);
+    }
 
     expectEqual(compared, static_cast<std::size_t>(CaseId::Count),
                 "not every differential case was executed");
@@ -14546,6 +14571,92 @@ void testMovdRegisterToXmm() {
     expect(rejectedMovq, "MOVD decoder silently accepted the MOVQ form");
 }
 
+void testMovdXmmToGuestMemory() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x66, 0x41, 0x0F, 0x7E, 0x46, 0x11, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AA0F43ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovdMemXmm,
+           "MOVD [memory], xmm opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6},
+                "MOVD [memory], xmm length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R14 &&
+               memory.displacement == 0x11 && memory.width == 32 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0,
+           "MOVD dword [r14+0x11], xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movd dword [r14+0x11], xmm0") != std::string::npos,
+           "MOVD [memory], xmm dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8111};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 8> sentinel{
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    addressSpace.writeBytes(
+        rosa::guest::GuestAddress{target.value - 2}, sentinel);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AA0F43ULL});
+    rosa::x86::X86State state;
+    state.r14 = target.value - 0x11;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    const auto stored = addressSpace.readBytes(
+        rosa::guest::GuestAddress{target.value - 2}, sentinel.size());
+    constexpr std::array<std::uint8_t, 8> expected{
+        0x11, 0x22, 0xEF, 0xCD, 0xAB, 0x89, 0x77, 0x88};
+    expect(stored == std::vector<std::uint8_t>(expected.begin(),
+                                               expected.end()),
+           "MOVD did not store exactly the low XMM dword");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVD store changed its low XMM source lane");
+    expectEqual(state.xmm[0].high,
+                std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVD store changed its high XMM source lane");
+    expectEqual(state.r14, target.value - 0x11,
+                "MOVD store changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVD store changed flags");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    std::array<std::uint8_t, rosa::guest::guestPageSize> pageBytes{};
+    std::memcpy(pageBytes.data() + (target.value - page.value),
+                sentinel.data(), sizeof(std::uint32_t));
+    readOnlyAddressSpace.mapSegment(page, pageBytes.size(),
+                                    rosa::guest::Permission::Read, pageBytes,
+                                    "read-only MOVD destination");
+    const auto readOnlyBefore = readOnlyAddressSpace.readU32(target);
+    rosa::x86::X86State faultState = state;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("mapping permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOVD store accepted read-only guest memory");
+    expectEqual(faultState.xmm[0].low,
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "faulted MOVD store changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted MOVD store changed flags");
+    expectEqual(readOnlyAddressSpace.readU32(target), readOnlyBefore,
+                "faulted MOVD store changed guest memory");
+}
+
 void testPinsrdGuestMemoryToXmm() {
     constexpr std::array<std::uint8_t, 8> code{
         0x66, 0x0F, 0x3A, 0x22, 0x4B, 0xF0, 0x02, 0xC3};
@@ -21475,6 +21586,7 @@ int main() {
         {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
         {"MOVD register to XMM", testMovdRegisterToXmm},
+        {"MOVD XMM to guest memory", testMovdXmmToGuestMemory},
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},
         {"PINSRB register to XMM", testPinsrbRegisterToXmm},
         {"PBLENDW registers", testPblendwRegisters},
