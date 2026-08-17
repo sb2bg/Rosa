@@ -1001,6 +1001,19 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]));
             break;
+        case x86::Opcode::SetccMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "set" << conditionName(*instruction.condition)
+                   << " byte [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::AndRegMem: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);

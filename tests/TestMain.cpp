@@ -2040,6 +2040,28 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("setae8_memory_taken",
+                             CaseId::setae8_memory_taken,
+                             differentialBytes_setae8_memory_taken);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.memory[0xCE] = 0xA5;
+        testCase.request.state.rflags &= ~carryFlag;
+        testCase.memoryCompareOffset = 0xCE;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
+        auto testCase = make("setae8_memory_not_taken",
+                             CaseId::setae8_memory_not_taken,
+                             differentialBytes_setae8_memory_not_taken);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.memory[0xCE] = 0xA5;
+        testCase.request.state.rflags |= carryFlag;
+        testCase.memoryCompareOffset = 0xCE;
+        testCase.memoryCompareSize = 1;
+        run(testCase);
+    }
+    {
         auto testCase = make("cmovb64_taken", CaseId::cmovb64_taken,
                              differentialBytes_cmovb64_taken);
         testCase.request.state.rax = 0x1122334455667788ULL;
@@ -19404,6 +19426,81 @@ void testSetGreaterExtendedLowByteRegister() {
            "SETG DH was silently treated as a low-byte register");
 }
 
+void testSetAboveOrEqualGuestByte() {
+    constexpr std::array<std::uint8_t, 8> observed{
+        0x0F, 0x93, 0x83, 0xCE, 0x00, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        observed, rosa::guest::GuestAddress{0x7FF802AA05C8ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccMem &&
+               decoded[0].condition == rosa::x86::Condition::AboveOrEqual,
+           "SETAE byte memory opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "SETAE byte memory length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rbx && memory.width == 8 &&
+               memory.displacement == 0xCE,
+           "SETAE byte [rbx+0xce] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "setae byte [rbx+0xce]") != std::string::npos,
+           "SETAE byte memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress destination{0x80CE};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(destination,
+                            std::array<std::uint8_t, 1>{0xA5});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        observed, rosa::guest::GuestAddress{0x7FF802AA05C8ULL});
+
+    rosa::x86::X86State taken;
+    taken.rbx = page.value;
+    taken.rflags = 0xAD6 & ~std::uint64_t{1};
+    static_cast<void>(block.execute(taken, &addressSpace));
+    expectEqual(addressSpace.readBytes(destination, 1).front(),
+                std::uint8_t{1}, "taken SETAE byte memory stored the wrong value");
+    expectEqual(taken.rbx, page.value,
+                "SETAE byte memory changed its base");
+    expectEqual(taken.rflags, std::uint64_t{0xAD6 & ~std::uint64_t{1}},
+                "taken SETAE byte memory changed flags");
+
+    addressSpace.writeBytes(destination,
+                            std::array<std::uint8_t, 1>{0xA5});
+    rosa::x86::X86State notTaken;
+    notTaken.rbx = page.value;
+    notTaken.rflags = 0xAD7 | 1U;
+    static_cast<void>(block.execute(notTaken, &addressSpace));
+    expectEqual(addressSpace.readBytes(destination, 1).front(),
+                std::uint8_t{0},
+                "not-taken SETAE byte memory stored the wrong value");
+    expectEqual(notTaken.rflags, std::uint64_t{0xAD7 | 1U},
+                "not-taken SETAE byte memory changed flags");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                                      rosa::guest::Permission::Read);
+    rosa::x86::X86State faultState;
+    faultState.rbx = page.value;
+    faultState.rflags = 0xAD6;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SETAE wrote a non-writable guest byte");
+    expectEqual(readOnlyAddressSpace.readBytes(destination, 1).front(),
+                std::uint8_t{0}, "faulted SETAE changed guest memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD6},
+                "faulted SETAE changed flags");
+}
+
 void testConditionalMoveBelow64() {
     constexpr std::array<std::uint8_t, 5> code{0x4C, 0x0F, 0x42, 0xE8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -20685,6 +20782,7 @@ int main() {
         {"set not-equal low-byte register", testSetNotEqualLowByteRegister},
         {"set greater extended low-byte register",
          testSetGreaterExtendedLowByteRegister},
+        {"set above-or-equal guest byte", testSetAboveOrEqualGuestByte},
         {"conditional move below 64-bit", testConditionalMoveBelow64},
         {"conditional move below 32-bit", testConditionalMoveBelow32},
         {"conditional move above-or-equal 64-bit",

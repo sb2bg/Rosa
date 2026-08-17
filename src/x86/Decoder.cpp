@@ -556,7 +556,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const auto setOpcodeOffset = cursor + (setHasRex ? 1U : 0U);
         if (code.size() - setOpcodeOffset >= 2 &&
             code[setOpcodeOffset] == 0x0FU &&
-            (code[setOpcodeOffset + 1] == 0x94U ||
+            (code[setOpcodeOffset + 1] == 0x93U ||
+             code[setOpcodeOffset + 1] == 0x94U ||
              code[setOpcodeOffset + 1] == 0x95U ||
              code[setOpcodeOffset + 1] == 0x9FU)) {
             if (code.size() - setOpcodeOffset < 3) {
@@ -569,24 +570,53 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode != 0x3U || extension != 0 ||
-                (!setHasRex && rmEncoding >= 0x4U)) {
+            if (extension != 0 ||
+                (mode != 0x3U &&
+                 (conditionOpcode != 0x93U || rmEncoding == 0x4U ||
+                  (mode == 0 && rmEncoding == 0x5U))) ||
+                (mode == 0x3U && !setHasRex && rmEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct SETE/SETNE/SETG to representable low-byte registers is supported");
+                    "only register SETAE/SETE/SETNE/SETG or SETAE byte [base+disp8/disp32] is supported");
             }
-            instruction.opcode = Opcode::SetccReg;
-            instruction.condition = conditionOpcode == 0x94U ? Condition::Equal
-                                    : conditionOpcode == 0x95U ? Condition::NotEqual
-                                                               : Condition::Greater;
-            instruction.operands.push_back(RegisterOperand{
-                decodeRegister(rmEncoding, (rex & 0x1U) != 0), 8});
-            const auto length = setOpcodeOffset + 3 - instructionStart;
+            instruction.condition =
+                conditionOpcode == 0x93U   ? Condition::AboveOrEqual
+                : conditionOpcode == 0x94U ? Condition::Equal
+                : conditionOpcode == 0x95U ? Condition::NotEqual
+                                           : Condition::Greater;
+            auto operandCursor = setOpcodeOffset + 3;
+            if (mode == 0x3U) {
+                instruction.opcode = Opcode::SetccReg;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, (rex & 0x1U) != 0), 8});
+            } else {
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated SETAE byte disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[operandCursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - operandCursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated SETAE byte disp32");
+                    }
+                    displacement = readI32(code.subspan(operandCursor, 4));
+                    operandCursor += 4;
+                }
+                instruction.opcode = Opcode::SetccMem;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, (rex & 0x1U) != 0),
+                    displacement, 8});
+            }
+            const auto length = operandCursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
                         length, instruction.bytes.begin());
             result.push_back(std::move(instruction));
-            cursor = setOpcodeOffset + 3;
+            cursor = operandCursor;
             if (result.size() == maximumInstructions) {
                 return result;
             }

@@ -4162,6 +4162,33 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::SetccMem: {
+            if (instruction.operands.size() != 1 || !instruction.condition) {
+                throw std::runtime_error(
+                    "internal decoder error: memory setcc operand");
+            }
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            if (memory.width != 8 || memory.index || !memory.hasBase ||
+                memory.ripRelative) {
+                throw std::runtime_error(
+                    "only based byte memory SETcc is implemented");
+            }
+            auto address = builder.readGuestRegister(
+                memory.base, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto value = builder.evaluateCondition(
+                *instruction.condition, instruction.address);
+            builder.storeGuest(address, value, ir::Width::I8,
+                               instruction.address);
+            break;
+        }
         case x86::Opcode::CmovccReg: {
             if (instruction.operands.size() != 2 || !instruction.condition) {
                 throw std::runtime_error("internal decoder error: cmovcc operand");
@@ -4642,10 +4669,12 @@ arm64::Program compileToArm64(const ir::Block &block) {
         case ir::Opcode::EvaluateCondition: {
             if (*operation.condition != x86::Condition::Equal &&
                 *operation.condition != x86::Condition::NotEqual &&
-                *operation.condition != x86::Condition::Greater) {
+                *operation.condition != x86::Condition::Greater &&
+                *operation.condition != x86::Condition::AboveOrEqual) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements equality/greater condition values");
+                    "ARM64 backend only implements equality/greater/above-or-equal condition values");
             }
+            constexpr std::uint8_t carryFlagBit = 0;
             constexpr std::uint8_t zeroFlagBit = 6;
             constexpr std::uint8_t signFlagBit = 7;
             const auto done = assembler.makeLabel();
@@ -4657,6 +4686,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 assembler.tbz(arm64::x16, zeroFlagBit, done);
             } else if (*operation.condition == x86::Condition::NotEqual) {
                 assembler.tbnz(arm64::x16, zeroFlagBit, done);
+            } else if (*operation.condition == x86::Condition::AboveOrEqual) {
+                assembler.tbnz(arm64::x16, carryFlagBit, done);
             } else {
                 assembler.tbnz(arm64::x16, zeroFlagBit, done);
                 // OF is bit 11; align it with SF at bit 7 and require equality.

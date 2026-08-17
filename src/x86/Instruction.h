@@ -82,6 +82,7 @@ enum class Opcode {
     LockIncMem,
     LockOrMemImm,
     SetccReg,
+    SetccMem,
     CmovccReg,
     XorpsRegReg,
     PxorRegReg,
