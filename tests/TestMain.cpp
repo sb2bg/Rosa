@@ -8454,6 +8454,89 @@ void testMovGuestGsMemoryTo32BitRegister() {
                 "failed GS MOV changed flags");
 }
 
+void testMov64BitRegisterToGuestGsMemory() {
+    constexpr std::array<std::uint8_t, 10> code{
+        0x65, 0x48, 0x89, 0x04, 0x25, 0x10, 0x00, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "GS MOV [memory], r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9},
+                "GS MOV store instruction length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.segment == rosa::x86::Segment::Gs && !memory.hasBase &&
+               !memory.index && !memory.ripRelative && memory.width == 64 &&
+               memory.displacement == 0x10,
+           "GS MOV store memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rax && source.width == 64,
+           "GS MOV store source differs");
+    expect(rosa::debug::dumpX86(decoded).find("mov [gs:0x10], rax") !=
+               std::string::npos,
+           "GS MOV store dump differs");
+
+    constexpr rosa::guest::GuestAddress tsdBase{0x8000};
+    constexpr std::uint64_t value = 0x0123456789ABCDEFULL;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        tsdBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("read_guest_gs_base.i64") != std::string::npos,
+           "GS MOV store did not lower guest GS base through IR");
+    rosa::x86::X86State state;
+    state.gsBase = tsdBase.value;
+    state.rax = value;
+    state.rsp = 0x2222222222222222ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(
+                    rosa::guest::GuestAddress{tsdBase.value + 0x10}),
+                value, "GS MOV stored the wrong guest qword");
+    expectEqual(state.rax, value, "GS MOV store changed its source register");
+    expectEqual(state.gsBase, tsdBase.value,
+                "GS MOV store changed the guest GS base");
+    expectEqual(state.rsp, std::uint64_t{0x2222222222222222ULL},
+                "GS MOV store used the guest or host stack");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "GS MOV store changed flags");
+
+    std::array<std::uint8_t, 24> readOnlyBytes{};
+    constexpr std::uint64_t sentinel = 0xAABBCCDDEEFF0011ULL;
+    std::memcpy(readOnlyBytes.data() + 0x10, &sentinel, sizeof(sentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(tsdBase, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes);
+    rosa::x86::X86State faultState;
+    faultState.gsBase = tsdBase.value;
+    faultState.rax = value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "GS MOV store to read-only guest memory did not fault");
+    expectEqual(readOnlyAddressSpace.readU64(
+                    rosa::guest::GuestAddress{tsdBase.value + 0x10}),
+                sentinel, "failed GS MOV store changed guest memory");
+    expectEqual(faultState.rax, value,
+                "failed GS MOV store changed its source register");
+    expectEqual(faultState.gsBase, tsdBase.value,
+                "failed GS MOV store changed the guest GS base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "failed GS MOV store changed flags");
+}
+
 void testMovGuestMemoryToRegisterWithNoIndexSib() {
     constexpr std::array<std::uint8_t, 6> code{
         0x49, 0x8B, 0x74, 0x24, 0xE0, 0xC3};
@@ -18669,6 +18752,8 @@ int main() {
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest GS memory to 32-bit register",
          testMovGuestGsMemoryTo32BitRegister},
+        {"MOV 64-bit register to guest GS memory",
+         testMov64BitRegisterToGuestGsMemory},
         {"MOV guest memory to register with no-index SIB",
          testMovGuestMemoryToRegisterWithNoIndexSib},
         {"MOV guest memory to 32-bit register with scaled index",

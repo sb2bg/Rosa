@@ -171,6 +171,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::MovMemReg: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << "mov [";
+            if (memory.segment == x86::Segment::Gs) {
+                stream << "gs:";
+            }
             if (memory.ripRelative) {
                 stream << "rip";
             } else if (memory.hasBase) {

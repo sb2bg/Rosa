@@ -2666,9 +2666,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto opcode = code[cursor++];
-        if (hasGsOverride && opcode != 0x8BU) {
+        if (hasGsOverride && opcode != 0x89U && opcode != 0x8BU) {
             throw DecodeError(address, remaining,
-                              "GS segment override is only supported for MOV r32, r/m32");
+                              "GS segment override is only supported for MOV register/memory");
         }
         if (!rexW && opcode != 0x05U && opcode != 0x24U && opcode != 0x34U &&
             opcode != 0x00U && opcode != 0x01U && opcode != 0x02U &&
@@ -4060,7 +4060,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
                     const bool hasIndex = indexEncoding != 0x4U || rexX;
                     const bool noBase = mode == 0 && baseEncoding == 0x5U;
-                    if (noBase && (!hasGsOverride || opcode != 0x8BU || hasIndex)) {
+                    if (noBase && (!hasGsOverride ||
+                                   (opcode != 0x89U && opcode != 0x8BU) ||
+                                   hasIndex)) {
                         throw DecodeError(
                             address, remaining,
                             "unsupported MOV SIB addressing form");
@@ -4099,7 +4101,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 if (opcode == 0x89U) {
                     instruction.opcode = Opcode::MovMemReg;
                     instruction.operands.push_back(
-                        MemoryOperand{base, displacement, operandWidth, index, scale});
+                        MemoryOperand{
+                            base, displacement, operandWidth, index, scale,
+                            hasBase, false,
+                            hasGsOverride ? Segment::Gs : Segment::None});
                     instruction.operands.push_back(RegisterOperand{reg, operandWidth});
                 } else {
                     instruction.opcode = Opcode::MovRegMem;

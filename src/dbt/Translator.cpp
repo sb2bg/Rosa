@@ -1938,13 +1938,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                : source.width == 16 ? ir::Width::I16
                                : source.width == 32 ? ir::Width::I32
                                                     : ir::Width::I64;
-            auto address = memory.ripRelative
-                               ? builder.constant(
-                                     instruction.address.value + instruction.length,
-                                     ir::Width::I64, instruction.address)
-                               : builder.readGuestRegister(
-                                     memory.base, ir::Width::I64,
-                                     instruction.address);
+            std::optional<ir::ValueId> address;
+            if (memory.ripRelative) {
+                address = builder.constant(
+                    instruction.address.value + instruction.length,
+                    ir::Width::I64, instruction.address);
+            } else if (memory.hasBase) {
+                address = builder.readGuestRegister(
+                    memory.base, ir::Width::I64, instruction.address);
+            }
             if (memory.index) {
                 auto index = builder.readGuestRegister(
                     *memory.index, ir::Width::I64, instruction.address);
@@ -1954,19 +1956,32 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                         static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
                         ir::Width::I64, instruction.address);
                 }
-                address = builder.add(address, index, ir::Width::I64,
-                                      instruction.address);
+                address = address ? builder.add(*address, index, ir::Width::I64,
+                                                instruction.address)
+                                  : index;
             }
             if (memory.displacement != 0) {
                 const auto displacement = builder.constant(
                     static_cast<std::uint64_t>(memory.displacement),
                     ir::Width::I64, instruction.address);
-                address = builder.add(address, displacement, ir::Width::I64,
-                                      instruction.address);
+                address = address ? builder.add(*address, displacement,
+                                                ir::Width::I64,
+                                                instruction.address)
+                                  : displacement;
+            }
+            if (memory.segment == x86::Segment::Gs) {
+                const auto gsBase = builder.readGuestGsBase(instruction.address);
+                address = address ? builder.add(gsBase, *address, ir::Width::I64,
+                                                instruction.address)
+                                  : gsBase;
+            }
+            if (!address) {
+                address = builder.constant(0, ir::Width::I64,
+                                           instruction.address);
             }
             const auto value =
                 builder.readGuestRegister(source.reg, width, instruction.address);
-            builder.storeGuest(address, value, width, instruction.address);
+            builder.storeGuest(*address, value, width, instruction.address);
             break;
         }
         case x86::Opcode::MovRegMem: {
