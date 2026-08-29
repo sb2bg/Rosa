@@ -88,6 +88,8 @@ class Assembler {
     };
 
     void emit(std::uint32_t word, std::string text);
+    void emitFixup(std::uint32_t word, std::string text, FixupKind kind,
+                   Label label);
     static void requireRegister(XRegister reg);
 
     std::vector<std::uint32_t> words_;
