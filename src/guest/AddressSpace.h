@@ -105,6 +105,8 @@ class AddressSpace {
     [[nodiscard]] const Mapping &find(GuestAddress address, std::size_t size,
                                       Permission required) const;
     [[nodiscard]] Mapping &find(GuestAddress address, std::size_t size, Permission required);
+    [[nodiscard]] const Mapping *mappingContaining(GuestAddress address) const noexcept;
+    void insertMapping(Mapping mapping);
     void addMapping(GuestAddress base, std::size_t size,
                     Permission permissions,
                     Permission maximumPermissions,
@@ -116,6 +118,8 @@ class AddressSpace {
     [[nodiscard]] std::span<std::uint8_t>
     mutablePrivateFileMappingBytes(GuestAddress base);
 
+    // Kept ordered by guest base address. Mapping creation is cold; lookups
+    // occur on every translated memory/code access and use binary search.
     std::vector<Mapping> mappings_;
 };
 
