@@ -5,39 +5,32 @@
 
 namespace rosa::dbt {
 
-const TranslatedBlock *BlockCache::find(std::uint64_t rip) const {
-    const auto it = lookup_.find(rip);
-    return it == lookup_.end() ? nullptr : it->second;
-}
-
-const TranslatedBlock &BlockCache::insert(std::uint64_t rip,
-                                          std::unique_ptr<TranslatedBlock> block) {
-    if (!block) {
-        throw std::runtime_error("cannot insert a null translated block");
+TranslatedBlock &BlockCache::getOrTranslate(guest::GuestAddress address,
+                                            std::span<const std::uint8_t> code,
+                                            std::size_t maximumInstructions) {
+    if (const auto existing = lookup_.find(address.value); existing != lookup_.end()) {
+        return *existing->second;
     }
-    const auto [it, inserted] = blocks_.emplace(rip, std::move(block));
+
+    auto block = std::make_unique<TranslatedBlock>(
+        translator_.translate(code, address, maximumInstructions));
+    const auto [ordered, inserted] =
+        blocks_.emplace(address.value, std::move(block));
     if (!inserted) {
-        throw std::runtime_error("translated block already exists");
+        throw std::logic_error("translated block ownership/index disagree");
     }
 
     try {
-        const auto indexed = lookup_.emplace(rip, it->second.get()).second;
+        const auto indexed =
+            lookup_.emplace(address.value, ordered->second.get()).second;
         if (!indexed) {
-            throw std::runtime_error("translated block index already exists");
+            throw std::logic_error("translated block index already exists");
         }
     } catch (...) {
-        blocks_.erase(it);
+        blocks_.erase(ordered);
         throw;
     }
-    return *it->second;
+    return *ordered->second;
 }
 
-std::size_t BlockCache::size() const {
-    return blocks_.size();
-}
-
-const std::map<std::uint64_t, std::unique_ptr<TranslatedBlock>> &BlockCache::blocks() const {
-    return blocks_;
-}
-
-}  // namespace rosa::dbt
+} // namespace rosa::dbt
