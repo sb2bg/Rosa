@@ -106,6 +106,7 @@ class AddressSpace {
                                       Permission required) const;
     [[nodiscard]] Mapping &find(GuestAddress address, std::size_t size, Permission required);
     [[nodiscard]] const Mapping *mappingContaining(GuestAddress address) const noexcept;
+    void readInto(GuestAddress address, std::span<std::uint8_t> destination) const;
     void insertMapping(Mapping mapping);
     void addMapping(GuestAddress base, std::size_t size,
                     Permission permissions,

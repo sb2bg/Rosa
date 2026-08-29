@@ -484,8 +484,42 @@ AddressSpace::Mapping &AddressSpace::find(GuestAddress address, std::size_t size
     return const_cast<Mapping &>(std::as_const(*this).find(address, size, required));
 }
 
+void AddressSpace::readInto(GuestAddress address,
+                            std::span<std::uint8_t> destination) const {
+    std::size_t copied = 0;
+    auto cursor = address;
+    while (copied < destination.size()) {
+        const auto &mapping = find(cursor, 1, Permission::Read);
+        const auto offset = static_cast<std::size_t>(cursor.value - mapping.base.value);
+        const auto chunk = std::min(destination.size() - copied, mapping.size - offset);
+        if (!mapping.readableBytes.empty()) {
+            const auto sparseBegin =
+                mapping.readableBytes.begin() + static_cast<std::ptrdiff_t>(offset);
+            const auto sparseEnd =
+                sparseBegin + static_cast<std::ptrdiff_t>(chunk);
+            if (std::find(sparseBegin, sparseEnd, std::uint8_t{0}) != sparseEnd) {
+                throw std::runtime_error(
+                    "guest read targets unsupported sparse mapping data");
+            }
+        }
+
+        auto output = destination.begin() + static_cast<std::ptrdiff_t>(copied);
+        if (mapping.fileBytes) {
+            const auto *source =
+                mapping.fileBytes->data() + mapping.fileDataOffset + offset;
+            std::copy_n(source, chunk, output);
+        } else {
+            std::copy_n(mapping.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+                        chunk, output);
+        }
+        copied += chunk;
+        cursor.value += chunk;
+    }
+}
+
 std::uint64_t AddressSpace::readU64(GuestAddress address) const {
-    const auto bytes = readBytes(address, sizeof(std::uint64_t));
+    std::array<std::uint8_t, sizeof(std::uint64_t)> bytes{};
+    readInto(address, bytes);
     std::uint64_t value = 0;
     for (std::size_t index = 0; index < sizeof(value); ++index) {
         value |= static_cast<std::uint64_t>(bytes[index]) << (index * 8U);
@@ -494,7 +528,8 @@ std::uint64_t AddressSpace::readU64(GuestAddress address) const {
 }
 
 std::uint32_t AddressSpace::readU32(GuestAddress address) const {
-    const auto bytes = readBytes(address, sizeof(std::uint32_t));
+    std::array<std::uint8_t, sizeof(std::uint32_t)> bytes{};
+    readInto(address, bytes);
     std::uint32_t value = 0;
     for (std::size_t index = 0; index < sizeof(value); ++index) {
         value |= static_cast<std::uint32_t>(bytes[index]) << (index * 8U);
@@ -502,34 +537,10 @@ std::uint32_t AddressSpace::readU32(GuestAddress address) const {
     return value;
 }
 
-std::vector<std::uint8_t> AddressSpace::readBytes(GuestAddress address, std::size_t size) const {
-    std::vector<std::uint8_t> result;
-    result.reserve(size);
-    auto cursor = address;
-    while (result.size() < size) {
-        const auto &mapping = find(cursor, 1, Permission::Read);
-        const auto offset = static_cast<std::size_t>(cursor.value - mapping.base.value);
-        const auto chunk = std::min(size - result.size(), mapping.size - offset);
-        if (!mapping.readableBytes.empty() &&
-            std::find(mapping.readableBytes.begin() + static_cast<std::ptrdiff_t>(offset),
-                      mapping.readableBytes.begin() +
-                          static_cast<std::ptrdiff_t>(offset + chunk),
-                      std::uint8_t{0}) !=
-                mapping.readableBytes.begin() +
-                    static_cast<std::ptrdiff_t>(offset + chunk)) {
-            throw std::runtime_error("guest read targets unsupported sparse mapping data");
-        }
-        if (mapping.fileBytes) {
-            const auto *source = mapping.fileBytes->data() + mapping.fileDataOffset + offset;
-            result.insert(result.end(), source, source + chunk);
-        } else {
-            result.insert(
-                result.end(),
-                mapping.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
-                mapping.bytes.begin() + static_cast<std::ptrdiff_t>(offset + chunk));
-        }
-        cursor.value += chunk;
-    }
+std::vector<std::uint8_t> AddressSpace::readBytes(GuestAddress address,
+                                                  std::size_t size) const {
+    std::vector<std::uint8_t> result(size);
+    readInto(address, result);
     return result;
 }
 
