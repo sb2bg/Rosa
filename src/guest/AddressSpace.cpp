@@ -12,7 +12,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <system_error>
+#include <type_traits>
 #include <utility>
 
 namespace rosa::guest {
@@ -77,6 +77,13 @@ bool rangeContains(GuestAddress base, std::size_t mappingSize, GuestAddress addr
     }
     const auto offset = address.value - base.value;
     return offset <= mappingSize - accessSize;
+}
+
+void addMappingCount(std::size_t &count, std::size_t amount) {
+    if (amount > std::numeric_limits<std::size_t>::max() - count) {
+        throw std::overflow_error("guest mapping transformation count overflows");
+    }
+    count += amount;
 }
 
 std::runtime_error fileMappingError(std::string_view operation,
@@ -280,32 +287,56 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
         return result;
     };
 
-    std::vector<Mapping> updated;
-    updated.reserve(mappings_.size() + 2);
-    for (auto &mapping : mappings_) {
+    struct Replacement {
+        bool applies{};
+        std::vector<Mapping> pieces;
+    };
+    std::vector<Replacement> replacements(mappings_.size());
+    std::size_t resultCount = 0;
+    for (std::size_t index = 0; index < mappings_.size(); ++index) {
+        const auto &mapping = mappings_[index];
         const auto currentStart = mapping.base.value;
         const auto currentEnd = currentStart + mapping.size;
         if (currentEnd <= start || currentStart >= end) {
-            updated.push_back(std::move(mapping));
+            addMappingCount(resultCount, 1);
             continue;
         }
+
+        auto &replacement = replacements[index];
+        replacement.applies = true;
+        replacement.pieces.reserve(3);
         if (currentStart < start) {
-            updated.push_back(slice(mapping, currentStart, start,
-                                    mapping.permissions,
-                                    mapping.maximumPermissions));
+            replacement.pieces.push_back(slice(
+                mapping, currentStart, start, mapping.permissions,
+                mapping.maximumPermissions));
         }
         const auto protectedStart = std::max(currentStart, start);
         const auto protectedEnd = std::min(currentEnd, end);
-        updated.push_back(slice(
+        replacement.pieces.push_back(slice(
             mapping, protectedStart, protectedEnd, permissions,
             makePrivateCopy ? permissions : mapping.maximumPermissions));
         if (protectedEnd < currentEnd) {
-            updated.push_back(slice(mapping, protectedEnd, currentEnd,
-                                    mapping.permissions,
-                                    mapping.maximumPermissions));
+            replacement.pieces.push_back(slice(
+                mapping, protectedEnd, currentEnd, mapping.permissions,
+                mapping.maximumPermissions));
+        }
+        addMappingCount(resultCount, replacement.pieces.size());
+    }
+
+    static_assert(std::is_nothrow_move_constructible_v<Mapping>);
+    std::vector<Mapping> updated;
+    updated.reserve(resultCount);
+    for (std::size_t index = 0; index < mappings_.size(); ++index) {
+        auto &replacement = replacements[index];
+        if (!replacement.applies) {
+            updated.push_back(std::move(mappings_[index]));
+            continue;
+        }
+        for (auto &piece : replacement.pieces) {
+            updated.push_back(std::move(piece));
         }
     }
-    mappings_ = std::move(updated);
+    mappings_.swap(updated);
     return ProtectResult::Success;
 }
 
@@ -346,7 +377,8 @@ DeallocateResult AddressSpace::deallocate(GuestAddress address,
         if (!source.bytes.empty()) {
             result.bytes.assign(
                 source.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
-                source.bytes.begin() + static_cast<std::ptrdiff_t>(offset + sliceSize));
+                source.bytes.begin() +
+                    static_cast<std::ptrdiff_t>(offset + sliceSize));
         }
         if (!source.readableBytes.empty()) {
             result.readableBytes.assign(
@@ -358,23 +390,47 @@ DeallocateResult AddressSpace::deallocate(GuestAddress address,
         return result;
     };
 
-    std::vector<Mapping> updated;
-    updated.reserve(mappings_.size() + 1);
-    for (auto &mapping : mappings_) {
+    struct Replacement {
+        bool applies{};
+        std::vector<Mapping> pieces;
+    };
+    std::vector<Replacement> replacements(mappings_.size());
+    std::size_t resultCount = 0;
+    for (std::size_t index = 0; index < mappings_.size(); ++index) {
+        const auto &mapping = mappings_[index];
         const auto mappingStart = mapping.base.value;
         const auto mappingEnd = mappingStart + mapping.size;
         if (mappingEnd <= start || mappingStart >= end) {
-            updated.push_back(std::move(mapping));
+            addMappingCount(resultCount, 1);
             continue;
         }
+
+        auto &replacement = replacements[index];
+        replacement.applies = true;
+        replacement.pieces.reserve(2);
         if (mappingStart < start) {
-            updated.push_back(slice(mapping, mappingStart, start));
+            replacement.pieces.push_back(slice(mapping, mappingStart, start));
         }
         if (end < mappingEnd) {
-            updated.push_back(slice(mapping, end, mappingEnd));
+            replacement.pieces.push_back(slice(mapping, end, mappingEnd));
+        }
+        addMappingCount(resultCount, replacement.pieces.size());
+    }
+
+    static_assert(std::is_nothrow_move_constructible_v<Mapping>);
+    std::vector<Mapping> updated;
+    updated.reserve(resultCount);
+    for (std::size_t index = 0; index < mappings_.size(); ++index) {
+        auto &replacement = replacements[index];
+        if (!replacement.applies) {
+            updated.push_back(std::move(mappings_[index]));
+            continue;
+        }
+        for (auto &piece : replacement.pieces) {
+            updated.push_back(std::move(piece));
         }
     }
-    mappings_ = std::move(updated);
+    mappings_.swap(updated);
     return DeallocateResult::Success;
 }
 
