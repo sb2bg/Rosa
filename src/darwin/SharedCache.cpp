@@ -82,6 +82,8 @@ class FileReader {
                                      ": " + std::strerror(error));
         }
         if (!S_ISREG(information.st_mode) || information.st_size < 0) {
+            ::close(descriptor_);
+            descriptor_ = -1;
             throw std::runtime_error("dyld shared cache is not a regular file: " +
                                      path.string());
         }

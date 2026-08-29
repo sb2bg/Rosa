@@ -31,6 +31,7 @@ add_library(rosa_core
     src/darwin/Syscall.cpp
     src/ir/IR.cpp
     src/guest/AddressSpace.cpp
+    src/guest/MappingBatch.cpp
     src/guest/StartupStack.cpp
     src/macho/MachOFile.cpp
     src/macho/Loader.cpp

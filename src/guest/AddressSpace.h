@@ -40,6 +40,15 @@ struct MappingInfo {
     std::string label;
 };
 
+struct SegmentMapping {
+    GuestAddress base{};
+    std::size_t size{};
+    Permission permissions{Permission::None};
+    Permission maximumPermissions{Permission::None};
+    std::span<const std::uint8_t> initialBytes;
+    std::string label;
+};
+
 enum class ProtectResult : std::uint8_t {
     Success,
     InvalidAddress,
@@ -62,6 +71,11 @@ class AddressSpace {
                       std::string_view label = {});
     void mapSegment(GuestAddress base, std::size_t size, Permission permissions,
                     std::span<const std::uint8_t> fileBytes, std::string_view label = {});
+    void mapSegment(GuestAddress base, std::size_t size,
+                    Permission permissions, Permission maximumPermissions,
+                    std::span<const std::uint8_t> fileBytes,
+                    std::string_view label = {});
+    void mapSegments(std::span<const SegmentMapping> mappings);
     void mapFileSegment(GuestAddress base, std::size_t size,
                         Permission permissions, Permission maximumPermissions,
                         const std::filesystem::path &path, std::uint64_t fileOffset,
@@ -105,6 +119,9 @@ class AddressSpace {
     [[nodiscard]] const Mapping &find(GuestAddress address, std::size_t size,
                                       Permission required) const;
     [[nodiscard]] Mapping &find(GuestAddress address, std::size_t size, Permission required);
+    [[nodiscard]] const Mapping *mappingContaining(GuestAddress address) const noexcept;
+    void readInto(GuestAddress address, std::span<std::uint8_t> destination) const;
+    void insertMapping(Mapping mapping);
     void addMapping(GuestAddress base, std::size_t size,
                     Permission permissions,
                     Permission maximumPermissions,
@@ -116,6 +133,8 @@ class AddressSpace {
     [[nodiscard]] std::span<std::uint8_t>
     mutablePrivateFileMappingBytes(GuestAddress base);
 
+    // Kept ordered by guest base address. Mapping creation is cold; lookups
+    // occur on every translated memory/code access and use binary search.
     std::vector<Mapping> mappings_;
 };
 

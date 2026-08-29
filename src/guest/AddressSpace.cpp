@@ -11,7 +11,8 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
-#include <system_error>
+#include <string>
+#include <type_traits>
 #include <utility>
 
 namespace rosa::guest {
@@ -23,6 +24,10 @@ class PrivateFileMapping {
 
     PrivateFileMapping(const PrivateFileMapping &) = delete;
     PrivateFileMapping &operator=(const PrivateFileMapping &) = delete;
+
+    PrivateFileMapping(PrivateFileMapping &&other) noexcept
+        : address_(std::exchange(other.address_, MAP_FAILED)),
+          size_(std::exchange(other.size_, 0)) {}
 
     ~PrivateFileMapping() {
         if (address_ != MAP_FAILED) {
@@ -41,6 +46,25 @@ class PrivateFileMapping {
 
 namespace {
 
+class FileDescriptor final {
+  public:
+    explicit FileDescriptor(int descriptor) : descriptor_(descriptor) {}
+
+    FileDescriptor(const FileDescriptor &) = delete;
+    FileDescriptor &operator=(const FileDescriptor &) = delete;
+
+    ~FileDescriptor() {
+        if (descriptor_ >= 0) {
+            ::close(descriptor_);
+        }
+    }
+
+    [[nodiscard]] int get() const noexcept { return descriptor_; }
+
+  private:
+    int descriptor_{-1};
+};
+
 bool hasPermission(Permission actual, Permission required) {
     return (static_cast<std::uint8_t>(actual) & static_cast<std::uint8_t>(required)) ==
            static_cast<std::uint8_t>(required);
@@ -53,6 +77,13 @@ bool rangeContains(GuestAddress base, std::size_t mappingSize, GuestAddress addr
     }
     const auto offset = address.value - base.value;
     return offset <= mappingSize - accessSize;
+}
+
+void addMappingCount(std::size_t &count, std::size_t amount) {
+    if (amount > std::numeric_limits<std::size_t>::max() - count) {
+        throw std::overflow_error("guest mapping transformation count overflows");
+    }
+    count += amount;
 }
 
 std::runtime_error fileMappingError(std::string_view operation,
@@ -76,12 +107,22 @@ void AddressSpace::mapAnonymous(GuestAddress base, std::size_t size,
     addMapping(base, size, permissions, maximumPermissions, {}, label);
 }
 
-void AddressSpace::mapSegment(GuestAddress base, std::size_t size, Permission permissions,
-                              std::span<const std::uint8_t> fileBytes, std::string_view label) {
+void AddressSpace::mapSegment(GuestAddress base, std::size_t size,
+                              Permission permissions,
+                              std::span<const std::uint8_t> fileBytes,
+                              std::string_view label) {
+    mapSegment(base, size, permissions, permissions, fileBytes, label);
+}
+
+void AddressSpace::mapSegment(GuestAddress base, std::size_t size,
+                              Permission permissions,
+                              Permission maximumPermissions,
+                              std::span<const std::uint8_t> fileBytes,
+                              std::string_view label) {
     if (fileBytes.size() > size) {
         throw std::invalid_argument("guest segment file bytes exceed virtual size");
     }
-    addMapping(base, size, permissions, permissions, fileBytes, label);
+    addMapping(base, size, permissions, maximumPermissions, fileBytes, label);
 }
 
 void AddressSpace::mapFileSegment(GuestAddress base, std::size_t size,
@@ -91,47 +132,55 @@ void AddressSpace::mapFileSegment(GuestAddress base, std::size_t size,
                                   std::uint64_t fileOffset,
                                   std::string_view label) {
     validateNewMapping(base, size, permissions, maximumPermissions);
-    const auto descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (descriptor < 0) {
+    const auto rawDescriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (rawDescriptor < 0) {
         throw fileMappingError("cannot open guest file backing", path, errno);
     }
+    const FileDescriptor descriptor(rawDescriptor);
 
     struct stat information {};
-    if (::fstat(descriptor, &information) != 0) {
-        const auto error = errno;
-        ::close(descriptor);
-        throw fileMappingError("cannot inspect guest file backing", path, error);
+    if (::fstat(descriptor.get(), &information) != 0) {
+        throw fileMappingError("cannot inspect guest file backing", path, errno);
     }
     if (information.st_size < 0 ||
         fileOffset > static_cast<std::uint64_t>(information.st_size) ||
         size > static_cast<std::uint64_t>(information.st_size) - fileOffset) {
-        ::close(descriptor);
         throw std::invalid_argument("guest file-backed mapping exceeds source file");
     }
 
-    const auto hostPageSize = static_cast<std::uint64_t>(::getpagesize());
-    const auto alignedOffset = fileOffset & ~(hostPageSize - 1U);
-    const auto prefix = static_cast<std::size_t>(fileOffset - alignedOffset);
+    const auto rawHostPageSize = ::sysconf(_SC_PAGESIZE);
+    if (rawHostPageSize <= 0) {
+        throw std::runtime_error("cannot query host page size for guest file backing");
+    }
+    const auto hostPageSize = static_cast<std::uint64_t>(rawHostPageSize);
+    const auto alignedOffset = fileOffset - (fileOffset % hostPageSize);
+    const auto prefixValue = fileOffset - alignedOffset;
+    if (prefixValue > std::numeric_limits<std::size_t>::max()) {
+        throw std::invalid_argument("guest file-backed mapping prefix overflows");
+    }
+    const auto prefix = static_cast<std::size_t>(prefixValue);
     if (prefix > std::numeric_limits<std::size_t>::max() - size) {
-        ::close(descriptor);
         throw std::invalid_argument("guest file-backed mapping size overflows");
     }
     const auto hostMappingSize = prefix + size;
     const auto hostAddress = ::mmap(nullptr, hostMappingSize, PROT_READ | PROT_WRITE,
-                                    MAP_PRIVATE, descriptor,
+                                    MAP_PRIVATE, descriptor.get(),
                                     static_cast<off_t>(alignedOffset));
-    const auto mapError = errno;
-    ::close(descriptor);
     if (hostAddress == MAP_FAILED) {
-        throw fileMappingError("cannot map guest file backing", path, mapError);
+        throw fileMappingError("cannot map guest file backing", path, errno);
     }
 
-    mappings_.push_back(Mapping{
+    // Keep the raw mapping owned while allocating the shared control block.
+    // If allocation throws, the stack owner unmaps it during unwinding.
+    PrivateFileMapping pendingMapping(hostAddress, hostMappingSize);
+    auto fileBytes =
+        std::make_shared<PrivateFileMapping>(std::move(pendingMapping));
+    insertMapping(Mapping{
         .base = base,
         .size = size,
         .permissions = permissions,
         .maximumPermissions = maximumPermissions,
-        .fileBytes = std::make_shared<PrivateFileMapping>(hostAddress, hostMappingSize),
+        .fileBytes = std::move(fileBytes),
         .fileDataOffset = prefix,
         .label = std::string(label),
     });
@@ -144,17 +193,30 @@ void AddressSpace::mapSparseReadOnly(GuestAddress base, std::size_t size,
     if (dataOffset > size || data.size() > size - dataOffset) {
         throw std::invalid_argument("sparse guest data lies outside its mapping");
     }
-    addMapping(base, size, Permission::Read, Permission::Read, {}, label);
-    auto &mapping = mappings_.back();
-    mapping.readableBytes.resize(size);
-    std::fill_n(mapping.readableBytes.begin() + static_cast<std::ptrdiff_t>(dataOffset),
+    validateNewMapping(base, size, Permission::Read, Permission::Read);
+
+    std::vector<std::uint8_t> backing(size);
+    std::vector<std::uint8_t> readableBytes(size);
+    std::fill_n(readableBytes.begin() + static_cast<std::ptrdiff_t>(dataOffset),
                 data.size(), std::uint8_t{1});
     std::copy(data.begin(), data.end(),
-              mapping.bytes.begin() + static_cast<std::ptrdiff_t>(dataOffset));
+              backing.begin() + static_cast<std::ptrdiff_t>(dataOffset));
+    insertMapping(Mapping{
+        .base = base,
+        .size = size,
+        .permissions = Permission::Read,
+        .maximumPermissions = Permission::Read,
+        .bytes = std::move(backing),
+        .readableBytes = std::move(readableBytes),
+        .label = std::string(label),
+    });
 }
 
 void AddressSpace::populateSparseReadOnly(GuestAddress address,
                                           std::span<const std::uint8_t> data) {
+    if (data.empty()) {
+        return;
+    }
     auto &mapping = find(address, data.size(), Permission::Read);
     if (mapping.readableBytes.empty()) {
         throw std::invalid_argument("guest mapping is not sparse read-only data");
@@ -186,11 +248,8 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
 
     auto cursor = start;
     while (cursor < end) {
-        const auto mapping = std::ranges::find_if(mappings_, [cursor](const Mapping &candidate) {
-            return candidate.base.value <= cursor &&
-                   cursor < candidate.base.value + candidate.size;
-        });
-        if (mapping == mappings_.end()) {
+        const auto *mapping = mappingContaining(GuestAddress{cursor});
+        if (mapping == nullptr) {
             return ProtectResult::InvalidAddress;
         }
         if (!makePrivateCopy &&
@@ -228,32 +287,56 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
         return result;
     };
 
-    std::vector<Mapping> updated;
-    updated.reserve(mappings_.size() + 2);
-    for (auto &mapping : mappings_) {
+    struct Replacement {
+        bool applies{};
+        std::vector<Mapping> pieces;
+    };
+    std::vector<Replacement> replacements(mappings_.size());
+    std::size_t resultCount = 0;
+    for (std::size_t index = 0; index < mappings_.size(); ++index) {
+        const auto &mapping = mappings_[index];
         const auto currentStart = mapping.base.value;
         const auto currentEnd = currentStart + mapping.size;
         if (currentEnd <= start || currentStart >= end) {
-            updated.push_back(std::move(mapping));
+            addMappingCount(resultCount, 1);
             continue;
         }
+
+        auto &replacement = replacements[index];
+        replacement.applies = true;
+        replacement.pieces.reserve(3);
         if (currentStart < start) {
-            updated.push_back(slice(mapping, currentStart, start,
-                                    mapping.permissions,
-                                    mapping.maximumPermissions));
+            replacement.pieces.push_back(slice(
+                mapping, currentStart, start, mapping.permissions,
+                mapping.maximumPermissions));
         }
         const auto protectedStart = std::max(currentStart, start);
         const auto protectedEnd = std::min(currentEnd, end);
-        updated.push_back(slice(
+        replacement.pieces.push_back(slice(
             mapping, protectedStart, protectedEnd, permissions,
             makePrivateCopy ? permissions : mapping.maximumPermissions));
         if (protectedEnd < currentEnd) {
-            updated.push_back(slice(mapping, protectedEnd, currentEnd,
-                                    mapping.permissions,
-                                    mapping.maximumPermissions));
+            replacement.pieces.push_back(slice(
+                mapping, protectedEnd, currentEnd, mapping.permissions,
+                mapping.maximumPermissions));
+        }
+        addMappingCount(resultCount, replacement.pieces.size());
+    }
+
+    static_assert(std::is_nothrow_move_constructible_v<Mapping>);
+    std::vector<Mapping> updated;
+    updated.reserve(resultCount);
+    for (std::size_t index = 0; index < mappings_.size(); ++index) {
+        auto &replacement = replacements[index];
+        if (!replacement.applies) {
+            updated.push_back(std::move(mappings_[index]));
+            continue;
+        }
+        for (auto &piece : replacement.pieces) {
+            updated.push_back(std::move(piece));
         }
     }
-    mappings_ = std::move(updated);
+    mappings_.swap(updated);
     return ProtectResult::Success;
 }
 
@@ -307,24 +390,57 @@ DeallocateResult AddressSpace::deallocate(GuestAddress address,
         return result;
     };
 
-    std::vector<Mapping> updated;
-    updated.reserve(mappings_.size() + 1);
-    for (auto &mapping : mappings_) {
+    struct Replacement {
+        bool applies{};
+        std::vector<Mapping> pieces;
+    };
+    std::vector<Replacement> replacements(mappings_.size());
+    std::size_t resultCount = 0;
+    for (std::size_t index = 0; index < mappings_.size(); ++index) {
+        const auto &mapping = mappings_[index];
         const auto mappingStart = mapping.base.value;
         const auto mappingEnd = mappingStart + mapping.size;
         if (mappingEnd <= start || mappingStart >= end) {
-            updated.push_back(std::move(mapping));
+            addMappingCount(resultCount, 1);
             continue;
         }
+
+        auto &replacement = replacements[index];
+        replacement.applies = true;
+        replacement.pieces.reserve(2);
         if (mappingStart < start) {
-            updated.push_back(slice(mapping, mappingStart, start));
+            replacement.pieces.push_back(slice(mapping, mappingStart, start));
         }
         if (end < mappingEnd) {
-            updated.push_back(slice(mapping, end, mappingEnd));
+            replacement.pieces.push_back(slice(mapping, end, mappingEnd));
+        }
+        addMappingCount(resultCount, replacement.pieces.size());
+    }
+
+    static_assert(std::is_nothrow_move_constructible_v<Mapping>);
+    std::vector<Mapping> updated;
+    updated.reserve(resultCount);
+    for (std::size_t index = 0; index < mappings_.size(); ++index) {
+        auto &replacement = replacements[index];
+        if (!replacement.applies) {
+            updated.push_back(std::move(mappings_[index]));
+            continue;
+        }
+        for (auto &piece : replacement.pieces) {
+            updated.push_back(std::move(piece));
         }
     }
-    mappings_ = std::move(updated);
+    mappings_.swap(updated);
     return DeallocateResult::Success;
+}
+
+void AddressSpace::insertMapping(Mapping mapping) {
+    const auto position = std::lower_bound(
+        mappings_.begin(), mappings_.end(), mapping.base.value,
+        [](const Mapping &candidate, std::uint64_t value) {
+            return candidate.base.value < value;
+        });
+    mappings_.insert(position, std::move(mapping));
 }
 
 void AddressSpace::addMapping(GuestAddress base, std::size_t size,
@@ -338,7 +454,7 @@ void AddressSpace::addMapping(GuestAddress base, std::size_t size,
         backing.resize(size);
         std::copy(initialBytes.begin(), initialBytes.end(), backing.begin());
     }
-    mappings_.push_back(Mapping{
+    insertMapping(Mapping{
         .base = base,
         .size = size,
         .permissions = permissions,
@@ -355,17 +471,26 @@ void AddressSpace::validateNewMapping(GuestAddress base, std::size_t size,
         throw std::invalid_argument("guest mappings must be nonempty and 4 KiB aligned");
     }
     if (base.value > std::numeric_limits<std::uint64_t>::max() - size) {
-        throw std::invalid_argument("guest anonymous mapping address overflows");
+        throw std::invalid_argument("guest mapping address overflows");
     }
     if (!hasPermission(maximumPermissions, permissions)) {
         throw std::invalid_argument(
             "guest mapping permissions exceed maximum permissions");
     }
+
     const auto end = base.value + size;
-    for (const auto &mapping : mappings_) {
-        const auto existingEnd = mapping.base.value + mapping.size;
-        if (base.value < existingEnd && mapping.base.value < end) {
-            throw std::invalid_argument("guest anonymous mapping overlaps an existing mapping");
+    const auto next = std::lower_bound(
+        mappings_.begin(), mappings_.end(), base.value,
+        [](const Mapping &candidate, std::uint64_t value) {
+            return candidate.base.value < value;
+        });
+    if (next != mappings_.end() && end > next->base.value) {
+        throw std::invalid_argument("guest mapping overlaps an existing mapping");
+    }
+    if (next != mappings_.begin()) {
+        const auto previous = next - 1;
+        if (previous->base.value + previous->size > base.value) {
+            throw std::invalid_argument("guest mapping overlaps an existing mapping");
         }
     }
 }
@@ -385,14 +510,35 @@ std::vector<MappingInfo> AddressSpace::mappingInfos() const {
     return result;
 }
 
+const AddressSpace::Mapping *
+AddressSpace::mappingContaining(GuestAddress address) const noexcept {
+    auto next = std::upper_bound(
+        mappings_.begin(), mappings_.end(), address.value,
+        [](std::uint64_t value, const Mapping &candidate) {
+            return value < candidate.base.value;
+        });
+    if (next == mappings_.begin()) {
+        return nullptr;
+    }
+    --next;
+    return rangeContains(next->base, next->size, address, 1) ? &*next : nullptr;
+}
+
 const AddressSpace::Mapping &AddressSpace::find(GuestAddress address, std::size_t size,
                                                 Permission required) const {
-    for (const auto &mapping : mappings_) {
-        if (rangeContains(mapping.base, mapping.size, address, size)) {
-            if (!hasPermission(mapping.permissions, required)) {
-                throw std::runtime_error("guest memory access violates mapping permissions");
+    auto next = std::upper_bound(
+        mappings_.begin(), mappings_.end(), address.value,
+        [](std::uint64_t value, const Mapping &candidate) {
+            return value < candidate.base.value;
+        });
+    if (next != mappings_.begin()) {
+        --next;
+        if (rangeContains(next->base, next->size, address, size)) {
+            if (!hasPermission(next->permissions, required)) {
+                throw std::runtime_error(
+                    "guest memory access violates mapping permissions");
             }
-            return mapping;
+            return *next;
         }
     }
     throw std::runtime_error("guest memory access is unmapped");
@@ -403,8 +549,42 @@ AddressSpace::Mapping &AddressSpace::find(GuestAddress address, std::size_t size
     return const_cast<Mapping &>(std::as_const(*this).find(address, size, required));
 }
 
+void AddressSpace::readInto(GuestAddress address,
+                            std::span<std::uint8_t> destination) const {
+    std::size_t copied = 0;
+    auto cursor = address;
+    while (copied < destination.size()) {
+        const auto &mapping = find(cursor, 1, Permission::Read);
+        const auto offset = static_cast<std::size_t>(cursor.value - mapping.base.value);
+        const auto chunk = std::min(destination.size() - copied, mapping.size - offset);
+        if (!mapping.readableBytes.empty()) {
+            const auto sparseBegin =
+                mapping.readableBytes.begin() + static_cast<std::ptrdiff_t>(offset);
+            const auto sparseEnd =
+                sparseBegin + static_cast<std::ptrdiff_t>(chunk);
+            if (std::find(sparseBegin, sparseEnd, std::uint8_t{0}) != sparseEnd) {
+                throw std::runtime_error(
+                    "guest read targets unsupported sparse mapping data");
+            }
+        }
+
+        auto output = destination.begin() + static_cast<std::ptrdiff_t>(copied);
+        if (mapping.fileBytes) {
+            const auto *source =
+                mapping.fileBytes->data() + mapping.fileDataOffset + offset;
+            std::copy_n(source, chunk, output);
+        } else {
+            std::copy_n(mapping.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+                        chunk, output);
+        }
+        copied += chunk;
+        cursor.value += chunk;
+    }
+}
+
 std::uint64_t AddressSpace::readU64(GuestAddress address) const {
-    const auto bytes = readBytes(address, sizeof(std::uint64_t));
+    std::array<std::uint8_t, sizeof(std::uint64_t)> bytes{};
+    readInto(address, bytes);
     std::uint64_t value = 0;
     for (std::size_t index = 0; index < sizeof(value); ++index) {
         value |= static_cast<std::uint64_t>(bytes[index]) << (index * 8U);
@@ -413,7 +593,8 @@ std::uint64_t AddressSpace::readU64(GuestAddress address) const {
 }
 
 std::uint32_t AddressSpace::readU32(GuestAddress address) const {
-    const auto bytes = readBytes(address, sizeof(std::uint32_t));
+    std::array<std::uint8_t, sizeof(std::uint32_t)> bytes{};
+    readInto(address, bytes);
     std::uint32_t value = 0;
     for (std::size_t index = 0; index < sizeof(value); ++index) {
         value |= static_cast<std::uint32_t>(bytes[index]) << (index * 8U);
@@ -421,34 +602,10 @@ std::uint32_t AddressSpace::readU32(GuestAddress address) const {
     return value;
 }
 
-std::vector<std::uint8_t> AddressSpace::readBytes(GuestAddress address, std::size_t size) const {
-    std::vector<std::uint8_t> result;
-    result.reserve(size);
-    auto cursor = address;
-    while (result.size() < size) {
-        const auto &mapping = find(cursor, 1, Permission::Read);
-        const auto offset = static_cast<std::size_t>(cursor.value - mapping.base.value);
-        const auto chunk = std::min(size - result.size(), mapping.size - offset);
-        if (!mapping.readableBytes.empty() &&
-            std::find(mapping.readableBytes.begin() + static_cast<std::ptrdiff_t>(offset),
-                      mapping.readableBytes.begin() +
-                          static_cast<std::ptrdiff_t>(offset + chunk),
-                      std::uint8_t{0}) !=
-                mapping.readableBytes.begin() +
-                    static_cast<std::ptrdiff_t>(offset + chunk)) {
-            throw std::runtime_error("guest read targets unsupported sparse mapping data");
-        }
-        if (mapping.fileBytes) {
-            const auto *source = mapping.fileBytes->data() + mapping.fileDataOffset + offset;
-            result.insert(result.end(), source, source + chunk);
-        } else {
-            result.insert(
-                result.end(),
-                mapping.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
-                mapping.bytes.begin() + static_cast<std::ptrdiff_t>(offset + chunk));
-        }
-        cursor.value += chunk;
-    }
+std::vector<std::uint8_t> AddressSpace::readBytes(GuestAddress address,
+                                                  std::size_t size) const {
+    std::vector<std::uint8_t> result(size);
+    readInto(address, result);
     return result;
 }
 
@@ -514,11 +671,13 @@ std::span<const std::uint8_t> AddressSpace::executableBytes(GuestAddress address
 
 std::span<std::uint8_t>
 AddressSpace::mutablePrivateFileMappingBytes(GuestAddress base) {
-    const auto mapping = std::ranges::find_if(
-        mappings_, [base](const Mapping &candidate) {
-            return candidate.base == base;
+    const auto mapping = std::lower_bound(
+        mappings_.begin(), mappings_.end(), base.value,
+        [](const Mapping &candidate, std::uint64_t value) {
+            return candidate.base.value < value;
         });
-    if (mapping == mappings_.end() || !mapping->fileBytes) {
+    if (mapping == mappings_.end() || mapping->base != base ||
+        !mapping->fileBytes) {
         throw std::runtime_error(
             "guest loader requested a non-file-backed mapping");
     }

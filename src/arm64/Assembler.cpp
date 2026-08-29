@@ -26,7 +26,25 @@ void Assembler::requireRegister(XRegister reg) {
 
 void Assembler::emit(std::uint32_t word, std::string text) {
     words_.push_back(word);
-    listing_.push_back(std::move(text));
+    try {
+        listing_.push_back(std::move(text));
+    } catch (...) {
+        words_.pop_back();
+        throw;
+    }
+}
+
+void Assembler::emitFixup(std::uint32_t word, std::string text,
+                          FixupKind kind, Label label) {
+    const auto index = words_.size();
+    emit(word, std::move(text));
+    try {
+        fixups_.push_back(Fixup{kind, index, label});
+    } catch (...) {
+        listing_.pop_back();
+        words_.pop_back();
+        throw;
+    }
 }
 
 void Assembler::mov(XRegister destination, XRegister source) {
@@ -306,6 +324,10 @@ void Assembler::blr(XRegister target) {
 }
 
 Label Assembler::makeLabel() {
+    if (labelPositions_.size() >
+        std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error("ARM64 label identifier space is exhausted");
+    }
     const auto id = static_cast<std::uint32_t>(labelPositions_.size());
     labelPositions_.push_back(std::nullopt);
     return Label{id};
@@ -325,9 +347,8 @@ void Assembler::b(Label label) {
     if (label.id >= labelPositions_.size()) {
         throw std::invalid_argument("cannot branch to an unknown ARM64 label");
     }
-    const auto index = words_.size();
-    emit(0x14000000U, "b L" + std::to_string(label.id));
-    fixups_.push_back(Fixup{FixupKind::Branch26, index, label});
+    emitFixup(0x14000000U, "b L" + std::to_string(label.id),
+              FixupKind::Branch26, label);
 }
 
 void Assembler::cbz(XRegister value, Label label) {
@@ -335,10 +356,10 @@ void Assembler::cbz(XRegister value, Label label) {
     if (label.id >= labelPositions_.size()) {
         throw std::invalid_argument("cannot compare-branch to an unknown ARM64 label");
     }
-    const auto index = words_.size();
     const auto word = 0xB4000000U | static_cast<std::uint32_t>(value.encoding);
-    emit(word, "cbz " + regName(value) + ", L" + std::to_string(label.id));
-    fixups_.push_back(Fixup{FixupKind::CompareBranch19, index, label});
+    emitFixup(word, "cbz " + regName(value) + ", L" +
+                        std::to_string(label.id),
+              FixupKind::CompareBranch19, label);
 }
 
 void Assembler::tbz(XRegister value, std::uint8_t bit, Label label) {
@@ -346,13 +367,13 @@ void Assembler::tbz(XRegister value, std::uint8_t bit, Label label) {
     if (bit >= 64U || label.id >= labelPositions_.size()) {
         throw std::invalid_argument("invalid TBZ operand or label");
     }
-    const auto index = words_.size();
     const auto word = 0x36000000U | (static_cast<std::uint32_t>(bit >> 5U) << 31U) |
                       (static_cast<std::uint32_t>(bit & 0x1FU) << 19U) |
                       static_cast<std::uint32_t>(value.encoding);
-    emit(word,
-         "tbz " + regName(value) + ", #" + std::to_string(bit) + ", L" + std::to_string(label.id));
-    fixups_.push_back(Fixup{FixupKind::TestBranch14, index, label});
+    emitFixup(word,
+              "tbz " + regName(value) + ", #" + std::to_string(bit) +
+                  ", L" + std::to_string(label.id),
+              FixupKind::TestBranch14, label);
 }
 
 void Assembler::tbnz(XRegister value, std::uint8_t bit, Label label) {
@@ -360,13 +381,13 @@ void Assembler::tbnz(XRegister value, std::uint8_t bit, Label label) {
     if (bit >= 64U || label.id >= labelPositions_.size()) {
         throw std::invalid_argument("invalid TBNZ operand or label");
     }
-    const auto index = words_.size();
     const auto word = 0x37000000U | (static_cast<std::uint32_t>(bit >> 5U) << 31U) |
                       (static_cast<std::uint32_t>(bit & 0x1FU) << 19U) |
                       static_cast<std::uint32_t>(value.encoding);
-    emit(word,
-         "tbnz " + regName(value) + ", #" + std::to_string(bit) + ", L" + std::to_string(label.id));
-    fixups_.push_back(Fixup{FixupKind::TestBranch14, index, label});
+    emitFixup(word,
+              "tbnz " + regName(value) + ", #" + std::to_string(bit) +
+                  ", L" + std::to_string(label.id),
+              FixupKind::TestBranch14, label);
 }
 
 void Assembler::pushFrameRecord() { emit(0xA9BF7BFDU, "stp x29, x30, [sp, #-16]!"); }
@@ -388,6 +409,10 @@ void Assembler::isb() { emit(0xD5033FDFU, "isb"); }
 void Assembler::ret() { emit(0xD65F03C0U, "ret"); }
 
 Program Assembler::finish() && {
+    if (words_.size() >
+        static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
+        throw std::overflow_error("ARM64 program is too large to resolve branches");
+    }
     for (const auto &fixup : fixups_) {
         if (!labelPositions_[fixup.label.id]) {
             throw std::runtime_error("ARM64 branch targets an unbound label");
@@ -420,6 +445,10 @@ Program Assembler::finish() && {
         }
     }
 
+    if (words_.size() >
+        std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t)) {
+        throw std::overflow_error("ARM64 program byte size overflows");
+    }
     Program program;
     program.bytes.reserve(words_.size() * sizeof(std::uint32_t));
     for (const auto word : words_) {

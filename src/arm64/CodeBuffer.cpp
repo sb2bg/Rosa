@@ -7,6 +7,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -15,7 +16,18 @@ namespace rosa::arm64 {
 namespace {
 
 std::size_t roundUp(std::size_t value, std::size_t alignment) {
-    return ((value + alignment - 1U) / alignment) * alignment;
+    if (alignment == 0) {
+        throw std::invalid_argument("executable code alignment must be nonzero");
+    }
+    const auto remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+    const auto padding = alignment - remainder;
+    if (value > std::numeric_limits<std::size_t>::max() - padding) {
+        throw std::overflow_error("executable code mapping size overflows");
+    }
+    return value + padding;
 }
 
 class JitWriteScope {

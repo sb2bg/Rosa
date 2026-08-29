@@ -11,6 +11,7 @@ namespace {
 
 constexpr std::uint32_t machMagic64 = 0xFEEDFACFU;
 constexpr std::uint32_t cpuTypeX86_64 = 0x01000007U;
+constexpr std::uint32_t vmProtectionMask = 0x7U;
 constexpr std::size_t headerSize64 = 32;
 constexpr std::size_t segmentCommandSize64 = 72;
 constexpr std::size_t sectionSize64 = 80;
@@ -179,6 +180,15 @@ MachOFile MachOFile::parse(std::vector<std::uint8_t> bytes) {
                 addOverflows(segment.fileOffset, segment.fileSize) ||
                 segment.fileOffset + segment.fileSize > view.size()) {
                 throw std::runtime_error("malformed Mach-O: invalid segment range");
+            }
+            if ((segment.maximumProtection & ~vmProtectionMask) != 0 ||
+                (segment.initialProtection & ~vmProtectionMask) != 0) {
+                throw std::runtime_error(
+                    "malformed Mach-O: segment contains unsupported protection bits");
+            }
+            if ((segment.initialProtection & ~segment.maximumProtection) != 0) {
+                throw std::runtime_error(
+                    "malformed Mach-O: segment initial protection exceeds maximum protection");
             }
             file.segments_.push_back(std::move(segment));
         } else if (command == lcMain) {
