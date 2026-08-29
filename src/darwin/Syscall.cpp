@@ -89,7 +89,8 @@ std::runtime_error unsupportedMachdep(const x86::X86State &state,
 
 } // namespace
 
-SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
+SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
+                                           x86::X86State &state,
                                            guest::GuestAddress syscallRip) {
     const auto number = state.rax;
     if (MachDispatcher::isMachTrap(number)) {
@@ -298,13 +299,18 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace, x8
         throw unsupported(state, syscallRip, "controlled write exceeds the 16 MiB limit");
     }
 
-    const auto bytes =
-        addressSpace.readBytes(guest::GuestAddress{state.rsi}, static_cast<std::size_t>(state.rdx));
-    const auto result = ::write(static_cast<int>(state.rdi), bytes.data(), bytes.size());
-    if (result < 0) {
-        setError(state, errno);
-    } else {
-        setSuccess(state, static_cast<std::uint64_t>(result));
+    try {
+        const auto bytes = addressSpace.readBytes(
+            guest::GuestAddress{state.rsi}, static_cast<std::size_t>(state.rdx));
+        const auto result =
+            ::write(static_cast<int>(state.rdi), bytes.data(), bytes.size());
+        if (result < 0) {
+            setError(state, errno);
+        } else {
+            setSuccess(state, static_cast<std::uint64_t>(result));
+        }
+    } catch (const std::runtime_error &) {
+        setError(state, EFAULT);
     }
     return {};
 }
