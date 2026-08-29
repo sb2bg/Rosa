@@ -40,6 +40,15 @@ struct MappingInfo {
     std::string label;
 };
 
+struct SegmentMapping {
+    GuestAddress base{};
+    std::size_t size{};
+    Permission permissions{Permission::None};
+    Permission maximumPermissions{Permission::None};
+    std::span<const std::uint8_t> initialBytes;
+    std::string label;
+};
+
 enum class ProtectResult : std::uint8_t {
     Success,
     InvalidAddress,
@@ -66,6 +75,7 @@ class AddressSpace {
                     Permission permissions, Permission maximumPermissions,
                     std::span<const std::uint8_t> fileBytes,
                     std::string_view label = {});
+    void mapSegments(std::span<const SegmentMapping> mappings);
     void mapFileSegment(GuestAddress base, std::size_t size,
                         Permission permissions, Permission maximumPermissions,
                         const std::filesystem::path &path, std::uint64_t fileOffset,
