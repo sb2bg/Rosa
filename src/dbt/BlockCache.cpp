@@ -21,7 +21,7 @@ const TranslatedBlock &BlockCache::insert(std::uint64_t rip,
     }
 
     try {
-        const auto [_, indexed] = lookup_.emplace(rip, it->second.get());
+        const auto indexed = lookup_.emplace(rip, it->second.get()).second;
         if (!indexed) {
             throw std::runtime_error("translated block index already exists");
         }
