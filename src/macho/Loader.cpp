@@ -48,10 +48,12 @@ LoadedImage Loader::mapImage(const MachOFile &file, guest::AddressSpace &address
         const auto mappingLabel = imageName.empty()
                                       ? segment.name
                                       : std::string(imageName) + ":" + segment.name;
-        addressSpace.mapSegment(slidAddress(segment.virtualAddress, slide),
-                                static_cast<std::size_t>(segment.virtualSize),
-                                translatePermissions(segment.initialProtection),
-                                bytes.subspan(begin, size), mappingLabel);
+        addressSpace.mapSegment(
+            slidAddress(segment.virtualAddress, slide),
+            static_cast<std::size_t>(segment.virtualSize),
+            translatePermissions(segment.initialProtection),
+            translatePermissions(segment.maximumProtection),
+            bytes.subspan(begin, size), mappingLabel);
         if (segment.fileOffset == 0 && segment.fileSize >= 32) {
             if (loadAddress) {
                 throw std::runtime_error(

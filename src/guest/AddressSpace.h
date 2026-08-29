@@ -62,6 +62,10 @@ class AddressSpace {
                       std::string_view label = {});
     void mapSegment(GuestAddress base, std::size_t size, Permission permissions,
                     std::span<const std::uint8_t> fileBytes, std::string_view label = {});
+    void mapSegment(GuestAddress base, std::size_t size,
+                    Permission permissions, Permission maximumPermissions,
+                    std::span<const std::uint8_t> fileBytes,
+                    std::string_view label = {});
     void mapFileSegment(GuestAddress base, std::size_t size,
                         Permission permissions, Permission maximumPermissions,
                         const std::filesystem::path &path, std::uint64_t fileOffset,

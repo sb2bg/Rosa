@@ -100,12 +100,22 @@ void AddressSpace::mapAnonymous(GuestAddress base, std::size_t size,
     addMapping(base, size, permissions, maximumPermissions, {}, label);
 }
 
-void AddressSpace::mapSegment(GuestAddress base, std::size_t size, Permission permissions,
-                              std::span<const std::uint8_t> fileBytes, std::string_view label) {
+void AddressSpace::mapSegment(GuestAddress base, std::size_t size,
+                              Permission permissions,
+                              std::span<const std::uint8_t> fileBytes,
+                              std::string_view label) {
+    mapSegment(base, size, permissions, permissions, fileBytes, label);
+}
+
+void AddressSpace::mapSegment(GuestAddress base, std::size_t size,
+                              Permission permissions,
+                              Permission maximumPermissions,
+                              std::span<const std::uint8_t> fileBytes,
+                              std::string_view label) {
     if (fileBytes.size() > size) {
         throw std::invalid_argument("guest segment file bytes exceed virtual size");
     }
-    addMapping(base, size, permissions, permissions, fileBytes, label);
+    addMapping(base, size, permissions, maximumPermissions, fileBytes, label);
 }
 
 void AddressSpace::mapFileSegment(GuestAddress base, std::size_t size,
@@ -336,8 +346,7 @@ DeallocateResult AddressSpace::deallocate(GuestAddress address,
         if (!source.bytes.empty()) {
             result.bytes.assign(
                 source.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
-                source.bytes.begin() +
-                    static_cast<std::ptrdiff_t>(offset + sliceSize));
+                source.bytes.begin() + static_cast<std::ptrdiff_t>(offset + sliceSize));
         }
         if (!source.readableBytes.empty()) {
             result.readableBytes.assign(
