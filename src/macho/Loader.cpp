@@ -4,6 +4,8 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace rosa::macho {
 namespace {
@@ -22,6 +24,12 @@ guest::Permission translatePermissions(std::uint32_t machProtection) {
     return result;
 }
 
+bool hasPermission(guest::Permission actual, guest::Permission required) {
+    return (static_cast<std::uint8_t>(actual) &
+            static_cast<std::uint8_t>(required)) ==
+           static_cast<std::uint8_t>(required);
+}
+
 guest::GuestAddress slidAddress(guest::GuestAddress address, std::uint64_t slide) {
     if (address.value > std::numeric_limits<std::uint64_t>::max() - slide) {
         throw std::runtime_error("Mach-O slide overflows a guest virtual address");
@@ -33,9 +41,12 @@ guest::GuestAddress slidAddress(guest::GuestAddress address, std::uint64_t slide
 
 LoadedImage Loader::mapImage(const MachOFile &file, guest::AddressSpace &addressSpace,
                              std::uint64_t slide, std::string_view imageName) const {
-    std::size_t mappedSegments = 0;
-    std::optional<guest::GuestAddress> loadAddress;
     const auto bytes = file.bytes();
+    std::vector<guest::SegmentMapping> mappings;
+    mappings.reserve(file.segments().size());
+    std::optional<guest::GuestAddress> loadAddress;
+
+    // Preflight every fallible property before installing any guest mapping.
     for (const auto &segment : file.segments()) {
         if (segment.virtualSize == 0) {
             continue;
@@ -43,35 +54,57 @@ LoadedImage Loader::mapImage(const MachOFile &file, guest::AddressSpace &address
         if (segment.virtualSize > std::numeric_limits<std::size_t>::max()) {
             throw std::runtime_error("Mach-O segment is too large for this host");
         }
+        const auto mappedAddress = slidAddress(segment.virtualAddress, slide);
         const auto begin = static_cast<std::size_t>(segment.fileOffset);
         const auto size = static_cast<std::size_t>(segment.fileSize);
-        const auto mappingLabel = imageName.empty()
-                                      ? segment.name
-                                      : std::string(imageName) + ":" + segment.name;
-        addressSpace.mapSegment(
-            slidAddress(segment.virtualAddress, slide),
-            static_cast<std::size_t>(segment.virtualSize),
-            translatePermissions(segment.initialProtection),
-            translatePermissions(segment.maximumProtection),
-            bytes.subspan(begin, size), mappingLabel);
+        auto mappingLabel = imageName.empty()
+                                ? segment.name
+                                : std::string(imageName) + ":" + segment.name;
+        mappings.push_back(guest::SegmentMapping{
+            .base = mappedAddress,
+            .size = static_cast<std::size_t>(segment.virtualSize),
+            .permissions = translatePermissions(segment.initialProtection),
+            .maximumPermissions =
+                translatePermissions(segment.maximumProtection),
+            .initialBytes = bytes.subspan(begin, size),
+            .label = std::move(mappingLabel),
+        });
         if (segment.fileOffset == 0 && segment.fileSize >= 32) {
             if (loadAddress) {
                 throw std::runtime_error(
                     "Mach-O has multiple segments containing its header");
             }
-            loadAddress = slidAddress(segment.virtualAddress, slide);
+            loadAddress = mappedAddress;
         }
-        ++mappedSegments;
     }
     if (!loadAddress) {
         throw std::runtime_error("Mach-O has no mapped segment containing its header");
     }
+
     const auto entry = slidAddress(file.entryPoint(), slide);
-    static_cast<void>(addressSpace.executableBytes(entry));
-    return LoadedImage{.loadAddress = *loadAddress,
-                       .entryPoint = entry,
-                       .slide = slide,
-                       .mappedSegments = mappedSegments};
+    bool entryIsExecutable = false;
+    for (const auto &mapping : mappings) {
+        if (!hasPermission(mapping.permissions, guest::Permission::Execute) ||
+            entry.value < mapping.base.value) {
+            continue;
+        }
+        if (entry.value - mapping.base.value < mapping.size) {
+            entryIsExecutable = true;
+            break;
+        }
+    }
+    if (!entryIsExecutable) {
+        throw std::runtime_error(
+            "Mach-O entry point is not inside an executable segment");
+    }
+
+    addressSpace.mapSegments(mappings);
+    return LoadedImage{
+        .loadAddress = *loadAddress,
+        .entryPoint = entry,
+        .slide = slide,
+        .mappedSegments = mappings.size(),
+    };
 }
 
 LoadedImage Loader::mapImage(const std::filesystem::path &path, guest::AddressSpace &addressSpace,
