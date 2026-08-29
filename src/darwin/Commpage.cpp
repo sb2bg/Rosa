@@ -31,7 +31,14 @@ std::uint64_t hostTicksToNanoseconds(std::uint64_t ticks) {
     if (whole > std::numeric_limits<std::uint64_t>::max() / timebase.numer) {
         throw std::runtime_error("host Mach time conversion overflows");
     }
-    return (whole * timebase.numer) + ((remainder * timebase.numer) / timebase.denom);
+    const auto wholeNanoseconds = whole * timebase.numer;
+    const auto remainderNanoseconds =
+        (remainder * timebase.numer) / timebase.denom;
+    if (wholeNanoseconds > std::numeric_limits<std::uint64_t>::max() -
+                               remainderNanoseconds) {
+        throw std::runtime_error("host Mach time conversion overflows");
+    }
+    return wholeNanoseconds + remainderNanoseconds;
 }
 
 } // namespace
