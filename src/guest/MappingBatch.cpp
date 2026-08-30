@@ -46,8 +46,12 @@ void AddressSpace::mapSegments(std::span<const SegmentMapping> requests) {
     // Materialize every fallible allocation before moving a live mapping.
     std::vector<Mapping> pending;
     pending.reserve(requests.size());
+    bool addsExecutableMapping = false;
     for (const auto index : order) {
         const auto &request = requests[index];
+        addsExecutableMapping |=
+            (static_cast<std::uint8_t>(request.permissions) &
+             static_cast<std::uint8_t>(Permission::Execute)) != 0;
         std::vector<std::uint8_t> backing;
         if (request.maximumPermissions != Permission::None) {
             backing.resize(request.size);
@@ -80,6 +84,9 @@ void AddressSpace::mapSegments(std::span<const SegmentMapping> requests) {
         }
     }
     mappings_.swap(updated);
+    if (addsExecutableMapping) {
+        ++executableVersion_;
+    }
 }
 
 } // namespace rosa::guest

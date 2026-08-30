@@ -31,7 +31,7 @@ Rosa is built to make the whole compatibility path observable. It owns the x86 d
 
 | Layer        | Current capability                                                                                                           |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| Translation  | Decodes an encoding-specific x86_64 subset, lowers it through a typed SSA-like IR, and emits AArch64 with a custom assembler |
+| Translation  | Decodes an encoding-specific x86_64 subset, lowers it through a typed SSA-like IR, and emits AArch64 with a custom assembler; an optional LLVM tier optimizes supported hot loops |
 | Execution    | Caches translated blocks, maintains explicit x86 register/flag/XMM state, and dispatches guest control flow                  |
 | Memory       | Enforces a 4 KiB guest-page model with sparse, anonymous, Mach-O, commpage, and shared-cache mappings                        |
 | Mach-O       | Selects x86_64 universal slices, validates load commands, maps complete segments, and builds the initial Darwin stack        |
@@ -68,6 +68,7 @@ See the [milestone ledger](docs/milestones.md) for the exact implemented scope a
 - CMake 3.25 or newer;
 - Ninja;
 - Apple Clang from Xcode or the Command Line Tools;
+- optionally, Homebrew LLVM for the optimizing JIT tier;
 - optionally, Rosetta 2 for the independent differential-test oracle only.
 
 Configure, build, and run the test suite:
@@ -167,9 +168,10 @@ The current probe recognizes and enters the intact cache at slide zero, executes
         Mach-O loader + Darwin startup stack
                    │
                    ▼
- x86 decoder → typed IR → AArch64 emitter → MAP_JIT block cache
-                   │                           │
-                   └──── explicit X86State ◀───┘
+ x86 decoder → typed IR ─┬→ baseline AArch64 emitter → MAP_JIT block cache
+                         └→ LLVM O2 hot-loop tier ────→ ORC JIT
+                   │                                  │
+                   └──────── explicit X86State ◀──────┘
                                 │
                                 ▼
              guest memory + Darwin compatibility
@@ -199,6 +201,20 @@ ctest --preset ubsan
 ```
 
 An AddressSanitizer preset is also provided. See the [verification notes](docs/milestones.md#verification-notes) for the current host-runtime caveat.
+
+For a repeatable dispatcher benchmark, configure a release build and run the
+200-million-iteration x86 entrypoint fixture:
+
+```bash
+cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/release --target benchmark_entrypoint
+```
+
+When Homebrew LLVM is installed, CMake reports `Rosa LLVM optimizing JIT` and
+the benchmark's 64-bit `DEC`/`JNE` self-loop is lowered from Rosa IR into LLVM
+SSA, optimized at `-O2`, and executed through ORC. All other IR shapes continue
+through the baseline emitter. Pass `-DROSA_ENABLE_LLVM_JIT=OFF` to measure or
+test the fallback path explicitly.
 
 ## Documentation
 

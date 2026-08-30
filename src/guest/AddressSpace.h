@@ -99,6 +99,9 @@ class AddressSpace {
     void writeBytes(GuestAddress address, std::span<const std::uint8_t> bytes);
 
     [[nodiscard]] std::span<const std::uint8_t> executableBytes(GuestAddress address) const;
+    [[nodiscard]] std::uint64_t executableVersion() const noexcept {
+        return executableVersion_;
+    }
     [[nodiscard]] std::size_t mappingCount() const noexcept { return mappings_.size(); }
     [[nodiscard]] std::vector<MappingInfo> mappingInfos() const;
 
@@ -137,6 +140,9 @@ class AddressSpace {
     // Kept ordered by guest base address. Mapping creation is cold; lookups
     // occur on every translated memory/code access and use binary search.
     std::vector<Mapping> mappings_;
+    // Changes only when executable bytes may have changed. The block cache can
+    // therefore trust a matching version without re-reading guest code.
+    std::uint64_t executableVersion_{};
 };
 
 } // namespace rosa::guest

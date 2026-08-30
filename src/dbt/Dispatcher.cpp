@@ -5,11 +5,24 @@
 
 namespace rosa::dbt {
 
+std::vector<guest::GuestAddress> Dispatcher::recentBlocks() const {
+    std::vector<guest::GuestAddress> result;
+    result.reserve(recentBlockCount_);
+    const auto first =
+        (nextRecentBlock_ + recentBlockCapacity - recentBlockCount_) %
+        recentBlockCapacity;
+    for (std::size_t index = 0; index < recentBlockCount_; ++index) {
+        result.push_back(recentBlocks_[(first + index) % recentBlockCapacity]);
+    }
+    return result;
+}
+
 std::vector<BlockExecutionCount>
 Dispatcher::hotBlocks(std::size_t minimumExecutions, std::size_t limit) const {
     std::vector<BlockExecutionCount> result;
-    result.reserve(blockExecutionCounts_.size());
-    for (const auto &[address, count] : blockExecutionCounts_) {
+    result.reserve(cache_.size());
+    for (const auto &[address, block] : cache_.blocks()) {
+        const auto count = block->executionCount();
         if (count >= minimumExecutions) {
             result.push_back(BlockExecutionCount{guest::GuestAddress{address}, count});
         }
@@ -34,14 +47,29 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
                                std::optional<guest::GuestAddress> returnSentinel) {
     DispatchResult result;
     executedBlocks_ = 0;
-    recentBlocks_.clear();
-    blockExecutionCounts_.clear();
+    recentBlockCount_ = 0;
+    nextRecentBlock_ = 0;
+    cache_.resetExecutionCounts();
     executedCacheImageIndexes_.clear();
     cacheImageExecutions_.clear();
     while (result.executedBlocks < maximumBlocks) {
         const auto blockAddress = guest::GuestAddress{state.rip};
-        auto &block =
-            cache_.getOrTranslate(blockAddress, codeAt(blockAddress), maximumInstructionsPerBlock_);
+        const auto executableVersion = addressSpace_.executableVersion();
+        auto &dispatchEntry = dispatchCache_[
+            (blockAddress.value >> 1U) & (dispatchCacheSize - 1U)];
+        auto *block =
+            dispatchEntry.block != nullptr &&
+                    dispatchEntry.address == blockAddress.value &&
+                    dispatchEntry.executableVersion == executableVersion
+                ? dispatchEntry.block
+                : cache_.findCurrent(blockAddress, executableVersion);
+        if (block == nullptr) {
+            block = &cache_.getOrTranslate(
+                blockAddress, codeAt(blockAddress),
+                maximumInstructionsPerBlock_, executableVersion);
+        }
+        dispatchEntry = DispatchCacheEntry{blockAddress.value,
+                                           executableVersion, block};
         if (sharedCache_ != nullptr) {
             if (const auto *image = sharedCache_->imageForAddress(blockAddress);
                 image != nullptr &&
@@ -53,19 +81,33 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
                 });
             }
         }
-        ++result.executedBlocks;
-        ++executedBlocks_;
-        ++blockExecutionCounts_[blockAddress.value];
-        recentBlocks_.push_back(blockAddress);
-        if (recentBlocks_.size() > 16) {
-            recentBlocks_.pop_front();
+        const auto execution = block->executeRepeated(
+            state, addressSpace_, timestampCounterReader_,
+            maximumBlocks - result.executedBlocks);
+        result.executedBlocks += execution.executionCount;
+        executedBlocks_ += execution.executionCount;
+        block->recordExecutions(execution.executionCount);
+        if (execution.executionCount >= recentBlockCapacity) {
+            recentBlocks_.fill(blockAddress);
+            recentBlockCount_ = recentBlockCapacity;
+            nextRecentBlock_ = 0;
+        } else {
+            for (std::size_t repeated = 0;
+                 repeated < execution.executionCount; ++repeated) {
+                recentBlocks_[nextRecentBlock_] = blockAddress;
+                nextRecentBlock_ =
+                    (nextRecentBlock_ + 1) % recentBlockCapacity;
+                if (recentBlockCount_ < recentBlockCapacity) {
+                    ++recentBlockCount_;
+                }
+            }
         }
 
-        switch (block.execute(state, &addressSpace_, timestampCounterReader_)) {
+        switch (execution.exit) {
         case BlockExit::Continue:
             break;
         case BlockExit::Call: {
-            if (!block.callReturnAddress()) {
+            if (!block->callReturnAddress()) {
                 throw std::runtime_error("call block has no return-address metadata");
             }
             if (state.rsp < sizeof(std::uint64_t)) {
@@ -74,7 +116,7 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
             const auto newStackPointer = state.rsp - sizeof(std::uint64_t);
             try {
                 addressSpace_.writeU64(guest::GuestAddress{newStackPointer},
-                                       block.callReturnAddress()->value);
+                                       block->callReturnAddress()->value);
             } catch (...) {
                 state.rip = blockAddress.value;
                 throw;
@@ -94,7 +136,8 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
         }
         case BlockExit::Syscall: {
             const auto outcome =
-                syscallDispatcher_.dispatch(addressSpace_, state, block.decoded().back().address);
+                syscallDispatcher_.dispatch(addressSpace_, state,
+                                            block->decoded().back().address);
             if (outcome.exited) {
                 result.translatedBlocks = cache_.size();
                 result.exited = true;

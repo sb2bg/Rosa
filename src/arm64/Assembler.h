@@ -57,7 +57,14 @@ class Assembler {
     void extract(XRegister destination, XRegister high, XRegister low, std::uint8_t lsb);
     void bitAnd(XRegister destination, XRegister lhs, XRegister rhs);
     void bitOr(XRegister destination, XRegister lhs, XRegister rhs);
+    void bitOrShiftedLeft(XRegister destination, XRegister lhs,
+                          XRegister rhs, std::uint8_t shift);
     void bitXor(XRegister destination, XRegister lhs, XRegister rhs);
+    void bitXorShiftedRight(XRegister destination, XRegister lhs,
+                            XRegister rhs, std::uint8_t shift);
+    void compare(XRegister lhs, XRegister rhs);
+    void conditionalSelectEqual(XRegister destination, XRegister ifEqual,
+                                XRegister ifNotEqual);
     void ldr(XRegister destination, XRegister base, std::uint32_t byteOffset);
     void ldr32(XRegister destination, XRegister base, std::uint32_t byteOffset);
     void str(XRegister source, XRegister base, std::uint32_t byteOffset);
@@ -66,6 +73,7 @@ class Assembler {
     void bind(Label label);
     void b(Label label);
     void cbz(XRegister value, Label label);
+    void cbnz(XRegister value, Label label);
     void tbz(XRegister value, std::uint8_t bit, Label label);
     void tbnz(XRegister value, std::uint8_t bit, Label label);
     void pushFrameRecord();

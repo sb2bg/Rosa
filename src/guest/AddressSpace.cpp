@@ -70,6 +70,10 @@ bool hasPermission(Permission actual, Permission required) {
            static_cast<std::uint8_t>(required);
 }
 
+bool isExecutable(Permission permissions) {
+    return hasPermission(permissions, Permission::Execute);
+}
+
 bool rangeContains(GuestAddress base, std::size_t mappingSize, GuestAddress address,
                    std::size_t accessSize) {
     if (address.value < base.value || accessSize > mappingSize) {
@@ -289,6 +293,7 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
                      ~(static_cast<std::uint64_t>(guestPageSize) - 1U);
 
     auto cursor = start;
+    bool changesExecutableMapping = isExecutable(permissions);
     while (cursor < end) {
         const auto *mapping = mappingContaining(GuestAddress{cursor});
         if (mapping == nullptr) {
@@ -298,6 +303,7 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
             !hasPermission(mapping->maximumPermissions, permissions)) {
             return ProtectResult::ProtectionFailure;
         }
+        changesExecutableMapping |= isExecutable(mapping->permissions);
         cursor = std::min(end, mapping->base.value + mapping->size);
     }
 
@@ -379,6 +385,9 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
         }
     }
     mappings_.swap(updated);
+    if (changesExecutableMapping) {
+        ++executableVersion_;
+    }
     return ProtectResult::Success;
 }
 
@@ -438,6 +447,7 @@ DeallocateResult AddressSpace::deallocate(GuestAddress address,
     };
     std::vector<Replacement> replacements(mappings_.size());
     std::size_t resultCount = 0;
+    bool removedExecutableMapping = false;
     for (std::size_t index = 0; index < mappings_.size(); ++index) {
         const auto &mapping = mappings_[index];
         const auto mappingStart = mapping.base.value;
@@ -449,6 +459,7 @@ DeallocateResult AddressSpace::deallocate(GuestAddress address,
 
         auto &replacement = replacements[index];
         replacement.applies = true;
+        removedExecutableMapping |= isExecutable(mapping.permissions);
         replacement.pieces.reserve(2);
         if (mappingStart < start) {
             replacement.pieces.push_back(slice(mapping, mappingStart, start));
@@ -473,16 +484,23 @@ DeallocateResult AddressSpace::deallocate(GuestAddress address,
         }
     }
     mappings_.swap(updated);
+    if (removedExecutableMapping) {
+        ++executableVersion_;
+    }
     return DeallocateResult::Success;
 }
 
 void AddressSpace::insertMapping(Mapping mapping) {
+    const auto executable = isExecutable(mapping.permissions);
     const auto position = std::lower_bound(
         mappings_.begin(), mappings_.end(), mapping.base.value,
         [](const Mapping &candidate, std::uint64_t value) {
             return candidate.base.value < value;
         });
     mappings_.insert(position, std::move(mapping));
+    if (executable) {
+        ++executableVersion_;
+    }
 }
 
 void AddressSpace::addMapping(GuestAddress base, std::size_t size,
@@ -684,8 +702,10 @@ void AddressSpace::writeU32(GuestAddress address, std::uint32_t value) {
 void AddressSpace::writeBytes(GuestAddress address, std::span<const std::uint8_t> bytes) {
     std::size_t validated = 0;
     auto validationCursor = address;
+    bool changesExecutableBytes = false;
     while (validated < bytes.size()) {
         const auto &mapping = std::as_const(*this).find(validationCursor, 1, Permission::Write);
+        changesExecutableBytes |= isExecutable(mapping.permissions);
         const auto offset = static_cast<std::size_t>(validationCursor.value - mapping.base.value);
         const auto chunk = std::min(bytes.size() - validated, mapping.size - offset);
         validated += chunk;
@@ -707,6 +727,9 @@ void AddressSpace::writeBytes(GuestAddress address, std::span<const std::uint8_t
         }
         copied += chunk;
         cursor.value += chunk;
+    }
+    if (changesExecutableBytes) {
+        ++executableVersion_;
     }
 }
 
@@ -731,6 +754,9 @@ AddressSpace::mutablePrivateFileMappingBytes(GuestAddress base) {
         !mapping->fileBytes) {
         throw std::runtime_error(
             "guest loader requested a non-file-backed mapping");
+    }
+    if (isExecutable(mapping->permissions)) {
+        ++executableVersion_;
     }
     return {mapping->fileBytes->data() + mapping->fileDataOffset,
             mapping->size};

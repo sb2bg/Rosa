@@ -2,6 +2,7 @@
 
 #include "arm64/Assembler.h"
 #include "arm64/CodeBuffer.h"
+#include "dbt/LlvmBackend.h"
 #include "guest/Address.h"
 #include "guest/AddressSpace.h"
 #include "ir/IR.h"
@@ -10,6 +11,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -27,6 +29,11 @@ enum class BlockExit : std::uint64_t {
     ExecutionFault,
 };
 
+struct BlockExecutionResult {
+    BlockExit exit{BlockExit::Continue};
+    std::size_t executionCount{};
+};
+
 class TranslatedBlock {
   public:
     TranslatedBlock(std::vector<x86::DecodedInstruction> decoded, ir::Block ir,
@@ -35,6 +42,10 @@ class TranslatedBlock {
     [[nodiscard]] BlockExit execute(x86::X86State &state,
                                     guest::AddressSpace *addressSpace = nullptr,
                                     TimestampCounterReader timestampCounterReader = nullptr) const;
+    [[nodiscard]] BlockExecutionResult executeRepeated(
+        x86::X86State &state, guest::AddressSpace &addressSpace,
+        TimestampCounterReader timestampCounterReader,
+        std::size_t maximumExecutions) const;
 
     [[nodiscard]] const std::vector<x86::DecodedInstruction> &decoded() const noexcept {
         return decoded_;
@@ -44,6 +55,14 @@ class TranslatedBlock {
     [[nodiscard]] std::optional<guest::GuestAddress> callReturnAddress() const noexcept {
         return callReturnAddress_;
     }
+    void resetExecutionCount() noexcept { executionCount_ = 0; }
+    void recordExecutions(std::size_t count) noexcept { executionCount_ += count; }
+    [[nodiscard]] std::size_t executionCount() const noexcept {
+        return executionCount_;
+    }
+    [[nodiscard]] bool usesOptimizedLoop() const noexcept {
+        return optimizedLoop_ != nullptr;
+    }
 
   private:
     std::vector<x86::DecodedInstruction> decoded_;
@@ -51,6 +70,9 @@ class TranslatedBlock {
     arm64::Program program_;
     arm64::ExecutableCode executable_;
     std::optional<guest::GuestAddress> callReturnAddress_;
+    std::size_t executionCount_{};
+    bool hasInternalSelfEdge_{};
+    std::unique_ptr<OptimizedLoop> optimizedLoop_;
 };
 
 class Translator {

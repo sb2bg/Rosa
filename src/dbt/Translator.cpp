@@ -1,4 +1,5 @@
 #include "dbt/Translator.h"
+#include "dbt/LlvmBackend.h"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,8 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <memory>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -28,13 +31,51 @@ constexpr std::uint64_t flagDirection = 1U << 10U;
 constexpr std::uint64_t arithmeticFlagMask =
     flagCarry | flagParity | flagAuxiliaryCarry | flagZero | flagSign | flagOverflow;
 
+class LazyException {
+  public:
+    LazyException() = default;
+    LazyException(const LazyException &) = delete;
+    LazyException &operator=(const LazyException &) = delete;
+
+    LazyException &operator=(std::exception_ptr fault) {
+        if (present_) {
+            std::destroy_at(pointer());
+        }
+        std::construct_at(pointer(), std::move(fault));
+        present_ = true;
+        return *this;
+    }
+
+    [[nodiscard]] explicit operator bool() const noexcept { return present_; }
+
+    [[nodiscard]] std::exception_ptr take() {
+        auto result = std::move(*pointer());
+        std::destroy_at(pointer());
+        present_ = false;
+        return result;
+    }
+
+  private:
+    [[nodiscard]] std::exception_ptr *pointer() noexcept {
+        return std::launder(
+            reinterpret_cast<std::exception_ptr *>(storage_.data()));
+    }
+
+    alignas(std::exception_ptr)
+        std::array<std::byte, sizeof(std::exception_ptr)> storage_{};
+    bool present_{};
+};
+
+static_assert(std::is_trivially_destructible_v<LazyException>);
+
 struct GuestExecutionContext {
     guest::AddressSpace *addressSpace{};
-    std::exception_ptr fault;
+    LazyException fault;
     guest::GuestAddress faultAddress{};
     std::size_t faultSize{};
     std::uint64_t loadedValue{};
     TimestampCounterReader timestampCounterReader{};
+    std::size_t remainingBlockExecutions{1};
 };
 
 extern "C" x86::X86State *
@@ -7730,6 +7771,60 @@ allocateHostRegisters(const ir::Block &block) {
     return assignments;
 }
 
+bool isSafelyRepeatableOperation(const ir::Operation &operation) {
+    switch (operation.opcode) {
+    case ir::Opcode::Constant:
+    case ir::Opcode::ReadGuestReg:
+    case ir::Opcode::WriteGuestReg:
+    case ir::Opcode::Add:
+    case ir::Opcode::Sub:
+    case ir::Opcode::ShiftLeft:
+    case ir::Opcode::ShiftRightLogical:
+    case ir::Opcode::ShiftRightArithmetic:
+    case ir::Opcode::MultiplyLow:
+    case ir::Opcode::MultiplyHighUnsigned:
+    case ir::Opcode::ShiftRightDouble:
+    case ir::Opcode::And:
+    case ir::Opcode::Or:
+    case ir::Opcode::Xor:
+    case ir::Opcode::SignExtend32:
+    case ir::Opcode::ByteSwap:
+    case ir::Opcode::EvaluateCondition:
+    case ir::Opcode::UpdateAddFlags:
+    case ir::Opcode::UpdateAdcFlags:
+    case ir::Opcode::UpdateIncFlags:
+    case ir::Opcode::UpdateDecFlags:
+    case ir::Opcode::UpdateSubFlags:
+    case ir::Opcode::UpdateLogicFlags:
+    case ir::Opcode::UpdateShiftLeftFlags:
+    case ir::Opcode::UpdateShiftRightFlags:
+    case ir::Opcode::UpdateShiftRightArithmeticFlags:
+    case ir::Opcode::UpdateRotateLeftFlags:
+    case ir::Opcode::UpdateRotateRightFlags:
+    case ir::Opcode::UpdateMultiplyFlags:
+    case ir::Opcode::UpdateSignedMultiplyFlags:
+    case ir::Opcode::UpdateShiftRightDoubleFlags:
+    case ir::Opcode::UpdateBitTestFlags:
+    case ir::Opcode::ExitBlock:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool hasInternalSelfEdge(const ir::Block &block) {
+    if (!std::ranges::all_of(block.operations,
+                             isSafelyRepeatableOperation)) {
+        return false;
+    }
+    return std::ranges::any_of(block.operations, [&block](const auto &operation) {
+        return operation.opcode == ir::Opcode::ExitBlock &&
+               ((operation.target && *operation.target == block.start) ||
+                (operation.fallthrough &&
+                 *operation.fallthrough == block.start));
+    });
+}
+
 arm64::Program compileToArm64(const ir::Block &block) {
     arm64::Assembler assembler;
     const auto hostRegisters = allocateHostRegisters(block);
@@ -7740,13 +7835,15 @@ arm64::Program compileToArm64(const ir::Block &block) {
         }
         return hostRegisters[value.value];
     };
+    const auto internalSelfEdge = hasInternalSelfEdge(block);
     bool hasHelperCall = false;
     bool hasExecutionContextCall = false;
     for (const auto &operation : block.operations) {
         hasHelperCall |= operation.opcode == ir::Opcode::UpdateAddFlags ||
                          operation.opcode == ir::Opcode::UpdateAdcFlags ||
                          operation.opcode == ir::Opcode::UpdateIncFlags ||
-                         operation.opcode == ir::Opcode::UpdateDecFlags ||
+                         (operation.opcode == ir::Opcode::UpdateDecFlags &&
+                          operation.width != ir::Width::I64) ||
                          operation.opcode == ir::Opcode::UpdateSubFlags ||
                          operation.opcode == ir::Opcode::UpdateLogicFlags ||
                          operation.opcode == ir::Opcode::UpdateShiftLeftFlags ||
@@ -7864,6 +7961,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
                                    operation.opcode == ir::Opcode::LoadGuest ||
                                    operation.opcode == ir::Opcode::ReadTimestampCounter;
     }
+    hasExecutionContextCall |= internalSelfEdge;
     if (hasHelperCall) {
         assembler.pushFrameRecord();
     }
@@ -7871,6 +7969,8 @@ arm64::Program compileToArm64(const ir::Block &block) {
         assembler.pushCalleeSaved19And20();
         assembler.mov(arm64::x19, arm64::x1);
     }
+    const auto repeatedEntry = assembler.makeLabel();
+    assembler.bind(repeatedEntry);
 
     const auto emitEpilogue = [&] {
         if (hasExecutionContextCall) {
@@ -9285,16 +9385,71 @@ arm64::Program compileToArm64(const ir::Block &block) {
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateDecFlags:
-            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
-            assembler.mov(arm64::x2, hostRegister(*operation.rhs));
-            assembler.movImmediate(
-                arm64::x16,
-                operation.width == ir::Width::I8
-                    ? pointerBits(&updateDecFlags8)
-                : operation.width == ir::Width::I32
-                    ? pointerBits(&updateDecFlags32)
-                    : pointerBits(&updateDecFlags64));
-            assembler.blr(arm64::x16);
+            if (operation.width == ir::Width::I64) {
+                const auto original = hostRegister(*operation.lhs);
+                const auto result = hostRegister(*operation.rhs);
+                const auto parityDone = assembler.makeLabel();
+                const auto auxiliaryDone = assembler.makeLabel();
+                const auto zeroDone = assembler.makeLabel();
+
+                assembler.ldr(
+                    arm64::x16, arm64::x0,
+                    static_cast<std::uint32_t>(offsetof(x86::X86State,
+                                                        rflags)));
+                assembler.movImmediate(
+                    arm64::x17,
+                    ~(arithmeticFlagMask & ~flagCarry));
+                assembler.bitAnd(arm64::x16, arm64::x16, arm64::x17);
+                assembler.movImmediate(arm64::x17, flagReservedOne);
+                assembler.bitOr(arm64::x16, arm64::x16, arm64::x17);
+
+                assembler.mov(arm64::x17, result);
+                assembler.bitXorShiftedRight(
+                    arm64::x17, arm64::x17, arm64::x17, 4);
+                assembler.bitXorShiftedRight(
+                    arm64::x17, arm64::x17, arm64::x17, 2);
+                assembler.bitXorShiftedRight(
+                    arm64::x17, arm64::x17, arm64::x17, 1);
+                assembler.tbnz(arm64::x17, 0, parityDone);
+                assembler.movImmediate(arm64::x17, flagParity);
+                assembler.bitOr(arm64::x16, arm64::x16, arm64::x17);
+                assembler.bind(parityDone);
+
+                assembler.bitXor(arm64::x17, original, result);
+                assembler.tbz(arm64::x17, 4, auxiliaryDone);
+                assembler.movImmediate(arm64::x17, flagAuxiliaryCarry);
+                assembler.bitOr(arm64::x16, arm64::x16, arm64::x17);
+                assembler.bind(auxiliaryDone);
+
+                assembler.cbnz(result, zeroDone);
+                assembler.movImmediate(arm64::x17, flagZero);
+                assembler.bitOr(arm64::x16, arm64::x16, arm64::x17);
+                assembler.bind(zeroDone);
+
+                assembler.lsrImmediate(arm64::x17, result, 63);
+                assembler.bitOrShiftedLeft(
+                    arm64::x16, arm64::x16, arm64::x17, 7);
+
+                assembler.movImmediate(arm64::x17, UINT64_C(1) << 63U);
+                assembler.compare(original, arm64::x17);
+                assembler.movImmediate(arm64::x17, flagOverflow);
+                assembler.bitOr(arm64::x17, arm64::x16, arm64::x17);
+                assembler.conditionalSelectEqual(
+                    arm64::x16, arm64::x17, arm64::x16);
+                assembler.str(
+                    arm64::x16, arm64::x0,
+                    static_cast<std::uint32_t>(offsetof(x86::X86State,
+                                                        rflags)));
+            } else {
+                assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+                assembler.mov(arm64::x2, hostRegister(*operation.rhs));
+                assembler.movImmediate(
+                    arm64::x16,
+                    operation.width == ir::Width::I8
+                        ? pointerBits(&updateDecFlags8)
+                        : pointerBits(&updateDecFlags32));
+                assembler.blr(arm64::x16);
+            }
             break;
         case ir::Opcode::UpdateLogicFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
@@ -9504,6 +9659,25 @@ arm64::Program compileToArm64(const ir::Block &block) {
             }
             assembler.str(arm64::x16, arm64::x0,
                           static_cast<std::uint32_t>(offsetof(x86::X86State, rip)));
+            if (internalSelfEdge && exit == BlockExit::Continue) {
+                const auto returnToDispatcher = assembler.makeLabel();
+                assembler.ldr(
+                    arm64::x17, arm64::x19,
+                    static_cast<std::uint32_t>(offsetof(
+                        GuestExecutionContext, remainingBlockExecutions)));
+                assembler.movImmediate(arm64::x1, 1);
+                assembler.sub(arm64::x17, arm64::x17, arm64::x1);
+                assembler.str(
+                    arm64::x17, arm64::x19,
+                    static_cast<std::uint32_t>(offsetof(
+                        GuestExecutionContext, remainingBlockExecutions)));
+                assembler.cbz(arm64::x17, returnToDispatcher);
+                assembler.movImmediate(arm64::x1, block.start.value);
+                assembler.bitXor(arm64::x1, arm64::x16, arm64::x1);
+                assembler.cbnz(arm64::x1, returnToDispatcher);
+                assembler.b(repeatedEntry);
+                assembler.bind(returnToDispatcher);
+            }
             emitEpilogue();
             assembler.movImmediate(arm64::x0, static_cast<std::uint64_t>(exit));
             assembler.ret();
@@ -9520,6 +9694,8 @@ TranslatedBlock::TranslatedBlock(std::vector<x86::DecodedInstruction> decoded, i
                                  arm64::Program program)
     : decoded_(std::move(decoded)), ir_(std::move(ir)), program_(std::move(program)),
       executable_(program_.bytes) {
+    hasInternalSelfEdge_ = hasInternalSelfEdge(ir_);
+    optimizedLoop_ = compileOptimizedLoop(ir_);
     for (const auto &operation : ir_.operations) {
         if (operation.opcode == ir::Opcode::ExitBlock && operation.exitKind == ir::ExitKind::Call) {
             callReturnAddress_ = operation.fallthrough;
@@ -9530,23 +9706,78 @@ TranslatedBlock::TranslatedBlock(std::vector<x86::DecodedInstruction> decoded, i
 BlockExit TranslatedBlock::execute(x86::X86State &state,
                                    guest::AddressSpace *addressSpace,
                                    TimestampCounterReader timestampCounterReader) const {
+    if (optimizedLoop_ != nullptr) {
+        const auto executionCount = optimizedLoop_->entry()(&state, 1);
+        if (executionCount != 1) {
+            throw std::runtime_error(
+                "optimized loop executed an invalid number of blocks");
+        }
+        return BlockExit::Continue;
+    }
     GuestExecutionContext context{
         .addressSpace = addressSpace,
         .timestampCounterReader = timestampCounterReader,
     };
     using Entry = std::uint64_t (*)(x86::X86State *, GuestExecutionContext *);
     const auto rawExit = executable_.entry<Entry>()(&state, &context);
+    if (context.fault) {
+        std::rethrow_exception(context.fault.take());
+    }
     if (rawExit > static_cast<std::uint64_t>(BlockExit::ExecutionFault)) {
         throw std::runtime_error("generated block returned an invalid exit reason");
     }
     if (rawExit == static_cast<std::uint64_t>(BlockExit::MemoryFault) ||
         rawExit == static_cast<std::uint64_t>(BlockExit::ExecutionFault)) {
-        if (context.fault) {
-            std::rethrow_exception(context.fault);
-        }
         throw std::runtime_error("generated block reported a guest-memory fault");
     }
     return static_cast<BlockExit>(rawExit);
+}
+
+BlockExecutionResult TranslatedBlock::executeRepeated(
+    x86::X86State &state, guest::AddressSpace &addressSpace,
+    TimestampCounterReader timestampCounterReader,
+    std::size_t maximumExecutions) const {
+    if (maximumExecutions == 0) {
+        throw std::invalid_argument(
+            "repeated block execution requires a nonzero limit");
+    }
+    if (optimizedLoop_ != nullptr) {
+        const auto executionCount =
+            optimizedLoop_->entry()(&state, maximumExecutions);
+        if (executionCount == 0 || executionCount > maximumExecutions) {
+            throw std::runtime_error(
+                "optimized loop executed an invalid number of blocks");
+        }
+        return BlockExecutionResult{BlockExit::Continue, executionCount};
+    }
+    if (!hasInternalSelfEdge_) {
+        return BlockExecutionResult{
+            execute(state, &addressSpace, timestampCounterReader), 1};
+    }
+
+    GuestExecutionContext context{
+        .addressSpace = &addressSpace,
+        .timestampCounterReader = timestampCounterReader,
+        .remainingBlockExecutions = maximumExecutions,
+    };
+    using Entry = std::uint64_t (*)(x86::X86State *, GuestExecutionContext *);
+    const auto entry = executable_.entry<Entry>();
+    const auto rawExit = entry(&state, &context);
+    const auto executionCount =
+        maximumExecutions - context.remainingBlockExecutions;
+
+    if (context.fault) {
+        std::rethrow_exception(context.fault.take());
+    }
+    if (rawExit > static_cast<std::uint64_t>(BlockExit::ExecutionFault)) {
+        throw std::runtime_error("generated block returned an invalid exit reason");
+    }
+    if (rawExit == static_cast<std::uint64_t>(BlockExit::MemoryFault) ||
+        rawExit == static_cast<std::uint64_t>(BlockExit::ExecutionFault)) {
+        throw std::runtime_error("generated block reported a guest-memory fault");
+    }
+    return BlockExecutionResult{static_cast<BlockExit>(rawExit),
+                                executionCount};
 }
 
 TranslatedBlock Translator::translate(std::span<const std::uint8_t> code, guest::GuestAddress start,

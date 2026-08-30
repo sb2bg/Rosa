@@ -1,6 +1,7 @@
 #include "arm64/Assembler.h"
 #include "arm64/CodeBuffer.h"
 #include "dbt/Dispatcher.h"
+#include "dbt/LlvmBackend.h"
 #include "dbt/Translator.h"
 #include "darwin/Commpage.h"
 #include "darwin/Mach.h"
@@ -3448,6 +3449,14 @@ void testAssemblerEncodings() {
     for (std::size_t index = 0; index < expected.size(); ++index) {
         expectEqual(assembler.words()[index], expected[index], "ARM64 encoding differs");
     }
+
+    rosa::arm64::Assembler complementAssembler;
+    complementAssembler.movImmediate(rosa::arm64::x0,
+                                     ~std::uint64_t{0x8D4});
+    expectEqual(complementAssembler.words().size(), std::size_t{1},
+                "MOVN immediate was not encoded compactly");
+    expectEqual(complementAssembler.words().front(), std::uint32_t{0x92811A80},
+                "MOVN immediate encoding differs");
 }
 
 void testR0ExecutesGeneratedCode() {
@@ -32617,6 +32626,172 @@ void testHotGuestBlockDiagnostics() {
            "guest failure report omitted hot-block diagnostics");
 }
 
+void testConditionalSelfEdgeBatching() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x8000};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 16> code{
+        0x48, 0xB9, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, // mov rcx, 5
+        0x48, 0xFF, 0xC9, // dec rcx
+        0x75, 0xFB, // jne back to dec
+        0xC3, // ret
+    };
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(
+        codeBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Execute,
+        code, "conditional-self-edge:__TEXT");
+    addressSpace.mapAnonymous(
+        stackBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "conditional-self-edge stack");
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize -
+                sizeof(std::uint64_t);
+    state.rflags = 0x203;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp},
+                          sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 16, sentinel);
+    expectEqual(result.executedBlocks, std::size_t{6},
+                "conditional self-edge block count differs");
+    expectEqual(result.translatedBlocks, std::size_t{3},
+                "conditional self-edge translation count differs");
+    expectEqual(state.rcx, std::uint64_t{0},
+                "conditional self-edge loop produced the wrong counter");
+    expectEqual(state.rflags & std::uint64_t{0x8D5},
+                std::uint64_t{0x45},
+                "inlined DEC flags differ after conditional self-edge loop");
+    const auto hot = dispatcher.hotBlocks(1, 8);
+    const auto loop = std::ranges::find_if(hot, [](const auto &block) {
+        return block.address.value == codeBase.value + 10;
+    });
+    expect(loop != hot.end() && loop->count == 4,
+           "conditional self-edge diagnostics lost batched executions");
+    if (rosa::dbt::llvmBackendAvailable()) {
+        const auto translatedLoop =
+            dispatcher.cache().blocks().find(codeBase.value + 10);
+        expect(translatedLoop != dispatcher.cache().blocks().end() &&
+                   translatedLoop->second->usesOptimizedLoop(),
+               "conditional self-edge did not use the LLVM tier");
+    }
+}
+
+void testOptimizedDecrementLoopEdges() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr std::array<std::uint8_t, 5> code{
+        0x48, 0xFF, 0xC9, // dec rcx
+        0x75, 0xFB,       // jne back to dec
+    };
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeBase);
+    expectEqual(block.usesOptimizedLoop(), rosa::dbt::llvmBackendAvailable(),
+                "optimized decrement-loop availability differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rcx = 5;
+    state.rflags = 0x203;
+    auto result = block.executeRepeated(state, addressSpace, nullptr, 3);
+    expectEqual(result.exit, rosa::dbt::BlockExit::Continue,
+                "budgeted optimized loop returned the wrong exit");
+    expectEqual(result.executionCount, std::size_t{3},
+                "budgeted optimized loop executed the wrong block count");
+    expectEqual(state.rcx, std::uint64_t{2},
+                "budgeted optimized loop produced the wrong counter");
+    expectEqual(state.rip, codeBase.value,
+                "budgeted optimized loop produced the wrong self edge");
+    expectEqual(state.rflags & UINT64_C(0x8D5), UINT64_C(0x1),
+                "budgeted optimized loop produced the wrong DEC flags");
+
+    state = {};
+    state.rcx = 2;
+    state.rflags = 0x203;
+    result = block.executeRepeated(state, addressSpace, nullptr, 10);
+    expectEqual(result.executionCount, std::size_t{2},
+                "terminating optimized loop executed the wrong block count");
+    expectEqual(state.rcx, std::uint64_t{0},
+                "terminating optimized loop produced the wrong counter");
+    expectEqual(state.rip, codeBase.value + code.size(),
+                "terminating optimized loop produced the wrong fallthrough");
+    expectEqual(state.rflags & UINT64_C(0x8D5), UINT64_C(0x45),
+                "terminating optimized loop produced the wrong DEC flags");
+
+    state = {};
+    state.rcx = UINT64_C(1) << 63U;
+    state.rflags = 0x202;
+    result = block.executeRepeated(state, addressSpace, nullptr, 1);
+    expectEqual(result.executionCount, std::size_t{1},
+                "overflow optimized loop executed the wrong block count");
+    expectEqual(state.rcx, (UINT64_C(1) << 63U) - 1U,
+                "overflow optimized loop produced the wrong counter");
+    expectEqual(state.rflags & UINT64_C(0x8D5), UINT64_C(0x814),
+                "overflow optimized loop produced the wrong DEC flags");
+
+    state = {};
+    state.rcx = 0;
+    state.rflags = 0x203;
+    result = block.executeRepeated(state, addressSpace, nullptr, 1);
+    expectEqual(result.executionCount, std::size_t{1},
+                "wrapping optimized loop executed the wrong block count");
+    expectEqual(state.rcx, UINT64_MAX,
+                "wrapping optimized loop produced the wrong counter");
+    expectEqual(state.rflags & UINT64_C(0x8D5), UINT64_C(0x95),
+                "wrapping optimized loop produced the wrong DEC flags");
+}
+
+void testTranslatedBlockInvalidationAfterExecutableWrite() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x8000};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 11> firstCode{
+        0x48, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xC3,
+    };
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(
+        codeBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write |
+            rosa::guest::Permission::Execute,
+        firstCode, "mutable-code:__TEXT");
+    addressSpace.mapAnonymous(
+        stackBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "mutable-code stack");
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    rosa::x86::X86State state;
+    const auto resetState = [&] {
+        state = {};
+        state.rip = codeBase.value;
+        state.rsp = stackBase.value + rosa::guest::guestPageSize -
+                    sizeof(std::uint64_t);
+        addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp},
+                              sentinel.value);
+    };
+
+    resetState();
+    static_cast<void>(dispatcher.run(state, 2, sentinel));
+    expectEqual(state.rax, std::uint64_t{1},
+                "initial mutable block produced the wrong value");
+
+    constexpr std::array replacementImmediate{std::uint8_t{2}};
+    addressSpace.writeBytes(
+        rosa::guest::GuestAddress{codeBase.value + 2},
+        replacementImmediate);
+    resetState();
+    static_cast<void>(dispatcher.run(state, 2, sentinel));
+    expectEqual(state.rax, std::uint64_t{2},
+                "dispatcher reused stale translated executable bytes");
+    expectEqual(dispatcher.translatedBlocks(), std::size_t{1},
+                "mutable block replacement grew the translation cache");
+}
+
 void testX86Commpage() {
     rosa::guest::AddressSpace addressSpace;
     constexpr std::uint64_t continuousTimebase = 0x0123456789ABCDEFULL;
@@ -36140,6 +36315,10 @@ int main() {
          testGeneratedDarwinSharedRegionCheckWithCache},
         {"guest failure report", testGuestFailureReport},
         {"hot guest block diagnostics", testHotGuestBlockDiagnostics},
+        {"conditional self-edge batching", testConditionalSelfEdgeBatching},
+        {"optimized decrement-loop edges", testOptimizedDecrementLoopEdges},
+        {"translated block invalidation after executable write",
+         testTranslatedBlockInvalidationAfterExecutableWrite},
         {"x86 commpage", testX86Commpage},
         {"initial Darwin stack", testInitialDarwinStack},
         {"initial dyld stack", testInitialDyldStack},

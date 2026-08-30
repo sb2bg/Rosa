@@ -284,6 +284,9 @@ void dumpCachedBlocks(const rosa::dbt::Dispatcher &dispatcher, const DumpOptions
     }
     for (const auto &[address, block] : dispatcher.cache().blocks()) {
         std::cout << "Translated block 0x" << std::hex << address << std::dec << '\n';
+        if (block->usesOptimizedLoop()) {
+            std::cout << "Execution tier: LLVM O2 hot loop\n";
+        }
         if (options.x86) {
             std::cout << "x86_64\n" << rosa::debug::dumpX86(block->decoded());
         }

@@ -1,5 +1,6 @@
 #include "arm64/Assembler.h"
 
+#include <array>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -58,19 +59,39 @@ void Assembler::mov(XRegister destination, XRegister source) {
 void Assembler::movImmediate(XRegister destination, std::uint64_t value) {
     requireRegister(destination);
 
-    bool emittedFirst = false;
-    for (std::uint32_t halfword = 0; halfword < 4; ++halfword) {
+    std::array<std::uint16_t, 4> halfwords{};
+    std::size_t nonzeroCount = 0;
+    std::size_t nonOnesCount = 0;
+    for (std::uint32_t halfword = 0; halfword < halfwords.size(); ++halfword) {
         const auto shift = halfword * 16U;
-        const auto immediate = static_cast<std::uint16_t>((value >> shift) & 0xFFFFU);
-        if (immediate == 0 && (emittedFirst || value != 0)) {
+        halfwords[halfword] =
+            static_cast<std::uint16_t>((value >> shift) & 0xFFFFU);
+        nonzeroCount += halfwords[halfword] != 0 ? 1U : 0U;
+        nonOnesCount += halfwords[halfword] != UINT16_MAX ? 1U : 0U;
+    }
+    const auto useMovn = nonOnesCount < nonzeroCount;
+    bool emittedFirst = false;
+    for (std::uint32_t halfword = 0; halfword < halfwords.size(); ++halfword) {
+        const auto shift = halfword * 16U;
+        const auto desired = halfwords[halfword];
+        const auto fill = useMovn ? UINT16_MAX : 0U;
+        if (desired == fill &&
+            (emittedFirst || (useMovn ? value != UINT64_MAX : value != 0))) {
             continue;
         }
 
-        const auto base = emittedFirst ? 0xF2800000U : 0xD2800000U;
+        const auto immediate =
+            static_cast<std::uint16_t>(useMovn && !emittedFirst
+                                           ? static_cast<std::uint16_t>(~desired)
+                                           : desired);
+        const auto base = emittedFirst
+                              ? 0xF2800000U
+                              : useMovn ? 0x92800000U : 0xD2800000U;
         const auto word = base | (halfword << 21U) | (static_cast<std::uint32_t>(immediate) << 5U) |
                           static_cast<std::uint32_t>(destination.encoding);
-        auto text = std::string(emittedFirst ? "movk " : "movz ") + regName(destination) + ", " +
-                    hexImmediate(immediate);
+        auto text = std::string(emittedFirst ? "movk "
+                                             : useMovn ? "movn " : "movz ") +
+                    regName(destination) + ", " + hexImmediate(immediate);
         if (shift != 0) {
             text += ", lsl #" + std::to_string(shift);
         }
@@ -265,6 +286,23 @@ void Assembler::bitOr(XRegister destination, XRegister lhs, XRegister rhs) {
     emit(word, "orr " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
 }
 
+void Assembler::bitOrShiftedLeft(XRegister destination, XRegister lhs,
+                                 XRegister rhs, std::uint8_t shift) {
+    requireRegister(destination);
+    requireRegister(lhs);
+    requireRegister(rhs);
+    if (shift >= 64U) {
+        throw std::invalid_argument("64-bit ORR shift must be less than 64");
+    }
+    const auto word = 0xAA000000U |
+                      (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
+                      (static_cast<std::uint32_t>(shift) << 10U) |
+                      (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "orr " + regName(destination) + ", " + regName(lhs) + ", " +
+                   regName(rhs) + ", lsl #" + std::to_string(shift));
+}
+
 void Assembler::bitXor(XRegister destination, XRegister lhs, XRegister rhs) {
     requireRegister(destination);
     requireRegister(lhs);
@@ -273,6 +311,46 @@ void Assembler::bitXor(XRegister destination, XRegister lhs, XRegister rhs) {
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
     emit(word, "eor " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
+}
+
+void Assembler::bitXorShiftedRight(XRegister destination, XRegister lhs,
+                                   XRegister rhs, std::uint8_t shift) {
+    requireRegister(destination);
+    requireRegister(lhs);
+    requireRegister(rhs);
+    if (shift >= 64U) {
+        throw std::invalid_argument("64-bit EOR shift must be less than 64");
+    }
+    const auto word = 0xCA400000U |
+                      (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
+                      (static_cast<std::uint32_t>(shift) << 10U) |
+                      (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "eor " + regName(destination) + ", " + regName(lhs) + ", " +
+                   regName(rhs) + ", lsr #" + std::to_string(shift));
+}
+
+void Assembler::compare(XRegister lhs, XRegister rhs) {
+    requireRegister(lhs);
+    requireRegister(rhs);
+    const auto word = 0xEB00001FU |
+                      (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
+                      (static_cast<std::uint32_t>(lhs.encoding) << 5U);
+    emit(word, "cmp " + regName(lhs) + ", " + regName(rhs));
+}
+
+void Assembler::conditionalSelectEqual(XRegister destination,
+                                       XRegister ifEqual,
+                                       XRegister ifNotEqual) {
+    requireRegister(destination);
+    requireRegister(ifEqual);
+    requireRegister(ifNotEqual);
+    const auto word = 0x9A800000U |
+                      (static_cast<std::uint32_t>(ifNotEqual.encoding) << 16U) |
+                      (static_cast<std::uint32_t>(ifEqual.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, "csel " + regName(destination) + ", " + regName(ifEqual) +
+                   ", " + regName(ifNotEqual) + ", eq");
 }
 
 void Assembler::ldr(XRegister destination, XRegister base, std::uint32_t byteOffset) {
@@ -358,6 +436,17 @@ void Assembler::cbz(XRegister value, Label label) {
     }
     const auto word = 0xB4000000U | static_cast<std::uint32_t>(value.encoding);
     emitFixup(word, "cbz " + regName(value) + ", L" +
+                        std::to_string(label.id),
+              FixupKind::CompareBranch19, label);
+}
+
+void Assembler::cbnz(XRegister value, Label label) {
+    requireRegister(value);
+    if (label.id >= labelPositions_.size()) {
+        throw std::invalid_argument("cannot compare-branch to an unknown ARM64 label");
+    }
+    const auto word = 0xB5000000U | static_cast<std::uint32_t>(value.encoding);
+    emitFixup(word, "cbnz " + regName(value) + ", L" +
                         std::to_string(label.id),
               FixupKind::CompareBranch19, label);
 }

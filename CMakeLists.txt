@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(Rosa VERSION 0.1.0 LANGUAGES CXX)
+project(Rosa VERSION 0.1.0 LANGUAGES C CXX)
 
 if(NOT APPLE)
     message(FATAL_ERROR "Rosa's initial JIT backend currently requires macOS")
@@ -15,11 +15,29 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(ROSA_SANITIZERS "" CACHE STRING "Comma-separated Clang host sanitizers")
+option(ROSA_ENABLE_LLVM_JIT
+       "Use LLVM as an optimizing JIT tier when development libraries are available"
+       ON)
+
+set(ROSA_HAS_LLVM OFF)
+if(ROSA_ENABLE_LLVM_JIT)
+    find_package(LLVM CONFIG QUIET PATHS
+        "/opt/homebrew/opt/llvm/lib/cmake/llvm"
+        "/usr/local/opt/llvm/lib/cmake/llvm"
+    )
+    if(LLVM_FOUND)
+        set(ROSA_HAS_LLVM ON)
+        message(STATUS "Rosa LLVM optimizing JIT: LLVM ${LLVM_PACKAGE_VERSION}")
+    else()
+        message(STATUS "Rosa LLVM optimizing JIT: unavailable; using baseline JIT")
+    endif()
+endif()
 
 add_library(rosa_core
     src/arm64/Assembler.cpp
     src/arm64/CodeBuffer.cpp
     src/dbt/Translator.cpp
+    src/dbt/LlvmBackend.cpp
     src/dbt/BlockCache.cpp
     src/dbt/Dispatcher.cpp
     src/debug/Dump.cpp
@@ -39,6 +57,19 @@ add_library(rosa_core
 )
 
 target_include_directories(rosa_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_definitions(rosa_core PRIVATE
+    ROSA_HAS_LLVM=$<BOOL:${ROSA_HAS_LLVM}>
+)
+if(ROSA_HAS_LLVM)
+    target_include_directories(rosa_core SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+    llvm_map_components_to_libnames(ROSA_LLVM_LIBRARIES
+        Core
+        OrcJIT
+        Passes
+        nativecodegen
+    )
+    target_link_libraries(rosa_core PRIVATE ${ROSA_LLVM_LIBRARIES})
+endif()
 target_compile_options(rosa_core PRIVATE
     -Wall
     -Wextra
@@ -56,6 +87,34 @@ endif()
 
 add_executable(rosa src/main.cpp)
 target_link_libraries(rosa PRIVATE rosa_core)
+
+set(ROSA_BENCHMARK_ENTRYPOINT
+    "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/entrypoint-x86_64")
+add_custom_command(
+    OUTPUT "${ROSA_BENCHMARK_ENTRYPOINT}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/benchmarks"
+    COMMAND "${CMAKE_CXX_COMPILER}"
+            -target x86_64-apple-macos11
+            -nostdlib
+            -Wl,-e,_start
+            -Wl,-no_pie
+            "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/entrypoint-x86_64.s"
+            -lSystem
+            -o "${ROSA_BENCHMARK_ENTRYPOINT}"
+    DEPENDS benchmarks/entrypoint-x86_64.s
+    VERBATIM
+)
+add_custom_target(rosa_benchmark_entrypoint_fixture
+                  DEPENDS "${ROSA_BENCHMARK_ENTRYPOINT}")
+add_custom_target(
+    benchmark_entrypoint
+    COMMAND "${CMAKE_COMMAND}" -E time "$<TARGET_FILE:rosa>" run
+            --max-blocks 200000010 "${ROSA_BENCHMARK_ENTRYPOINT}"
+    DEPENDS rosa rosa_benchmark_entrypoint_fixture
+    USES_TERMINAL
+    VERBATIM
+)
 
 include(CTest)
 if(BUILD_TESTING)

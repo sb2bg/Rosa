@@ -28,13 +28,32 @@ bool sourceMatches(const TranslatedBlock &block,
 
 } // namespace
 
+TranslatedBlock *BlockCache::findCurrent(
+    guest::GuestAddress address, std::uint64_t executableVersion) noexcept {
+    const auto existing = lookup_.find(address.value);
+    if (existing == lookup_.end() ||
+        existing->second.executableVersion != executableVersion) {
+        return nullptr;
+    }
+    return existing->second.block;
+}
+
+void BlockCache::resetExecutionCounts() noexcept {
+    for (const auto &[address, block] : blocks_) {
+        static_cast<void>(address);
+        block->resetExecutionCount();
+    }
+}
+
 TranslatedBlock &BlockCache::getOrTranslate(guest::GuestAddress address,
                                             std::span<const std::uint8_t> code,
-                                            std::size_t maximumInstructions) {
+                                            std::size_t maximumInstructions,
+                                            std::uint64_t executableVersion) {
     if (const auto existing = lookup_.find(address.value);
         existing != lookup_.end()) {
-        if (sourceMatches(*existing->second, code)) {
-            return *existing->second;
+        if (sourceMatches(*existing->second.block, code)) {
+            existing->second.executableVersion = executableVersion;
+            return *existing->second.block;
         }
 
         // Guest code may be writable, deallocated, and remapped at the same
@@ -44,12 +63,13 @@ TranslatedBlock &BlockCache::getOrTranslate(guest::GuestAddress address,
             translator_.translate(code, address, maximumInstructions));
         const auto ordered = blocks_.find(address.value);
         if (ordered == blocks_.end() ||
-            ordered->second.get() != existing->second) {
+            ordered->second.get() != existing->second.block) {
             throw std::logic_error(
                 "translated block ownership/index disagree");
         }
         ordered->second.swap(replacement);
-        existing->second = ordered->second.get();
+        existing->second = LookupEntry{ordered->second.get(),
+                                       executableVersion};
         return *ordered->second;
     }
 
@@ -63,7 +83,10 @@ TranslatedBlock &BlockCache::getOrTranslate(guest::GuestAddress address,
 
     try {
         const auto indexed =
-            lookup_.emplace(address.value, ordered->second.get()).second;
+            lookup_
+                .emplace(address.value,
+                         LookupEntry{ordered->second.get(), executableVersion})
+                .second;
         if (!indexed) {
             throw std::logic_error("translated block index already exists");
         }

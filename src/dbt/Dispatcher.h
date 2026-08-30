@@ -10,11 +10,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <limits>
 #include <optional>
 #include <span>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -59,9 +57,7 @@ class Dispatcher {
     [[nodiscard]] const BlockCache &cache() const noexcept { return cache_; }
     [[nodiscard]] std::size_t executedBlocks() const noexcept { return executedBlocks_; }
     [[nodiscard]] std::size_t translatedBlocks() const noexcept { return cache_.size(); }
-    [[nodiscard]] const std::deque<guest::GuestAddress> &recentBlocks() const noexcept {
-        return recentBlocks_;
-    }
+    [[nodiscard]] std::vector<guest::GuestAddress> recentBlocks() const;
     [[nodiscard]] std::vector<BlockExecutionCount>
     hotBlocks(std::size_t minimumExecutions = 16, std::size_t limit = 8) const;
     [[nodiscard]] const darwin::MachDispatcher &machDispatcher() const noexcept {
@@ -75,15 +71,26 @@ class Dispatcher {
   private:
     [[nodiscard]] std::span<const std::uint8_t> codeAt(guest::GuestAddress address) const;
 
+    struct DispatchCacheEntry {
+        std::uint64_t address{};
+        std::uint64_t executableVersion{};
+        TranslatedBlock *block{};
+    };
+
+    static constexpr std::size_t dispatchCacheSize = 256;
+
     guest::AddressSpace &addressSpace_;
     BlockCache cache_;
+    std::array<DispatchCacheEntry, dispatchCacheSize> dispatchCache_{};
     darwin::SyscallDispatcher syscallDispatcher_;
     const darwin::GuestSharedCache *sharedCache_{};
     std::size_t maximumInstructionsPerBlock_;
     TimestampCounterReader timestampCounterReader_{};
     std::size_t executedBlocks_{};
-    std::deque<guest::GuestAddress> recentBlocks_;
-    std::unordered_map<std::uint64_t, std::size_t> blockExecutionCounts_;
+    static constexpr std::size_t recentBlockCapacity = 16;
+    std::array<guest::GuestAddress, recentBlockCapacity> recentBlocks_{};
+    std::size_t recentBlockCount_{};
+    std::size_t nextRecentBlock_{};
     std::unordered_set<std::size_t> executedCacheImageIndexes_;
     std::vector<CacheImageExecution> cacheImageExecutions_;
 };
