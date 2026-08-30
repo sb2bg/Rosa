@@ -25,6 +25,7 @@ constexpr std::uint64_t kernInvalidName = 15;
 constexpr std::uint64_t kernInvalidRight = 17;
 constexpr std::uint64_t kernInvalidValue = 18;
 constexpr std::uint64_t kernUrefsOverflow = 19;
+constexpr std::uint64_t kernResourceShortage = 6;
 constexpr std::uint64_t machSendInvalidDestination = 0x10000003U;
 constexpr std::uint64_t vmProtectionMask = 0x7U;
 constexpr std::uint64_t vmProtectionCopy = 0x10U;
@@ -36,8 +37,13 @@ constexpr std::uint32_t machPortRightSend = 0;
 constexpr std::uint32_t machPortRightCount = 6;
 constexpr std::uint32_t machPortUrefsMaximum = 0xFFFF;
 constexpr std::uint32_t machPortQlimitDefault = 5;
+constexpr std::uint32_t mpoContextAsGuard = 0x01;
+constexpr std::uint32_t mpoInsertSendRight = 0x10;
+constexpr std::uint32_t mpoStrict = 0x20;
 constexpr std::uint32_t mpoReplyPort = 0x1000;
 constexpr std::uint32_t observedDyldPortOptions = mpoReplyPort;
+constexpr std::uint32_t observedTracePortOptions =
+    mpoContextAsGuard | mpoInsertSendRight | mpoStrict;
 constexpr std::uint64_t mach64SendMessage = 0x1U;
 constexpr std::uint64_t mach64ReceiveMessage = 0x2U;
 constexpr std::uint64_t mach64SendKobjectCall = 0x0000000200000000ULL;
@@ -46,6 +52,7 @@ constexpr std::uint64_t observedMachMessage2Options =
 constexpr std::uint32_t machMessageHeaderComplex = 0x80000000U;
 constexpr std::uint32_t machMessageTypeCopySend = 19U;
 constexpr std::uint32_t machMessageTypeMakeSendOnce = 21U;
+constexpr std::uint32_t machMessageTypeMoveSend = 17U;
 constexpr std::uint32_t machMessageTypeMoveSendOnce = 18U;
 constexpr std::uint32_t machMessagePortDescriptor = 0U;
 constexpr std::int32_t machVmMapMessageId = 4811;
@@ -62,6 +69,62 @@ constexpr std::uint32_t hostInfoReplySize = 88U;
 constexpr std::uint32_t hostInfoReceiveSize = 320U;
 constexpr std::uint32_t hostBasicInfoFlavor = 1U;
 constexpr std::uint32_t hostBasicInfoCount = 12U;
+constexpr std::uint32_t hostPriorityInfoFlavor = 5U;
+constexpr std::uint32_t hostPriorityInfoCount = 8U;
+constexpr std::uint32_t hostPriorityInfoReplySize = 72U;
+constexpr std::int32_t hostGetClockServiceMessageId = 206;
+constexpr std::int32_t hostGetClockServiceReplyId =
+    hostGetClockServiceMessageId + 100;
+constexpr std::uint32_t hostGetClockServiceRequestSize = 36U;
+constexpr std::uint32_t hostGetClockServiceReplySize = 40U;
+constexpr std::uint32_t hostGetClockServiceReceiveSize =
+    hostGetClockServiceReplySize + machMessageTrailerSize;
+constexpr std::uint32_t systemClockId = 0U;
+constexpr std::int32_t taskInfoMessageId = 3405;
+constexpr std::int32_t taskInfoReplyId = taskInfoMessageId + 100;
+constexpr std::uint32_t taskInfoRequestSize = 40U;
+constexpr std::uint32_t taskInfoReceiveCapacity = 424U;
+constexpr std::uint32_t taskInfoReplyBaseSize = 40U;
+constexpr std::uint32_t taskAuditTokenFlavor = 15U;
+constexpr std::uint32_t taskAuditTokenCount = 8U;
+constexpr std::uint32_t taskAuditTokenReplySize =
+    taskInfoReplyBaseSize + taskAuditTokenCount * sizeof(std::uint32_t);
+constexpr std::uint32_t taskAuditTokenReceiveSize =
+    taskAuditTokenReplySize + machMessageTrailerSize;
+constexpr std::int32_t taskGetSpecialPortMessageId = 3409;
+constexpr std::int32_t taskGetSpecialPortReplyId =
+    taskGetSpecialPortMessageId + 100;
+constexpr std::uint32_t taskGetSpecialPortRequestSize = 36U;
+constexpr std::uint32_t taskGetSpecialPortReplySize = 40U;
+constexpr std::uint32_t taskGetSpecialPortReceiveSize =
+    taskGetSpecialPortReplySize + machMessageTrailerSize;
+constexpr std::uint32_t taskBootstrapPortSelector = 4U;
+constexpr std::int32_t taskSetSpecialPortMessageId = 3410;
+constexpr std::int32_t taskSetSpecialPortReplyId =
+    taskSetSpecialPortMessageId + 100;
+constexpr std::uint32_t taskSetSpecialPortRequestSize = 52U;
+constexpr std::uint32_t taskSetSpecialPortReplySize = 36U;
+constexpr std::uint32_t taskSetSpecialPortReceiveSize =
+    taskSetSpecialPortReplySize + machMessageTrailerSize;
+constexpr std::uint32_t taskDebugControlPortSelector = 10U;
+constexpr std::int32_t semaphoreCreateMessageId = 3418;
+constexpr std::int32_t semaphoreCreateReplyId =
+    semaphoreCreateMessageId + 100;
+constexpr std::uint32_t semaphoreCreateRequestSize = 40U;
+constexpr std::uint32_t semaphoreCreateReplySize = 40U;
+constexpr std::uint32_t semaphoreCreateReceiveSize =
+    semaphoreCreateReplySize + machMessageTrailerSize;
+constexpr std::uint32_t syncPolicyFifo = 0U;
+constexpr std::int32_t restartableRangesRegisterMessageId = 8000;
+constexpr std::int32_t restartableRangesRegisterReplyId =
+    restartableRangesRegisterMessageId + 100;
+constexpr std::uint32_t restartableRangesRequestHeaderSize = 36U;
+constexpr std::uint32_t restartableRangeSize = 16U;
+constexpr std::uint32_t restartableRangesMaximumCount = 64U;
+constexpr std::uint32_t restartableRangesReplySize = 36U;
+constexpr std::uint32_t restartableRangesReceiveSize =
+    restartableRangesReplySize + machMessageTrailerSize;
+constexpr std::uint16_t restartableRangeOffsetMaximum = 4096U;
 constexpr std::int32_t guestCpuTypeX86 = 7;
 constexpr std::int32_t guestCpuSubtypeX86Arch1 = 4;
 
@@ -158,12 +221,26 @@ struct GuestHostBasicInfo {
     std::uint64_t maximumMemory{};
 };
 
+struct GuestHostPriorityInfo {
+    std::int32_t kernelPriority{};
+    std::int32_t systemPriority{};
+    std::int32_t serverPriority{};
+    std::int32_t userPriority{};
+    std::int32_t depressPriority{};
+    std::int32_t idlePriority{};
+    std::int32_t minimumPriority{};
+    std::int32_t maximumPriority{};
+};
+
 static_assert(sizeof(GuestHostBasicInfo) == hostBasicInfoCount * sizeof(std::uint32_t));
+static_assert(sizeof(GuestHostPriorityInfo) ==
+              hostPriorityInfoCount * sizeof(std::uint32_t));
 
 std::optional<GuestMachPortName> decodeObservedHostInfoRequest(
     std::span<const std::uint8_t> message, const x86::X86State &state,
     std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
-    const GuestPortSpace &portSpace) {
+    const GuestPortSpace &portSpace, std::uint32_t expectedFlavor,
+    std::uint32_t expectedCount) {
     constexpr std::array<std::uint8_t, 8> nativeNdr{
         0, 0, 0, 0, 1, 0, 0, 0};
     constexpr auto observedBits =
@@ -201,10 +278,349 @@ std::optional<GuestMachPortName> decodeObservedHostInfoRequest(
         decodeGuestInteger<std::int32_t>(message, 20) != hostInfoMessageId ||
         !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr) ||
         decodeGuestInteger<std::uint32_t>(message, 32) !=
-            hostBasicInfoFlavor ||
+            expectedFlavor ||
         decodeGuestInteger<std::uint32_t>(message, 36) !=
-            hostBasicInfoCount) {
+            expectedCount) {
         return std::nullopt;
+    }
+    return GuestMachPortName{receiveName};
+}
+
+std::optional<GuestMachPortName> decodeObservedHostClockServiceRequest(
+    std::span<const std::uint8_t> message, const x86::X86State &state,
+    std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
+    const GuestPortSpace &portSpace) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    constexpr auto observedBits =
+        machMessageTypeCopySend | (machMessageTypeMakeSendOnce << 8U);
+    const auto remoteName = static_cast<std::uint32_t>(state.r10);
+    const auto localName = static_cast<std::uint32_t>(state.r10 >> 32U);
+    const auto receiveName = static_cast<std::uint32_t>(state.r9 >> 32U);
+    const auto *hostPort = portSpace.lookup(GuestMachPortName{remoteName});
+    const auto *replyPort = portSpace.lookup(GuestMachPortName{localName});
+    if (state.rsi != observedMachMessage2Options ||
+        static_cast<std::uint32_t>(state.rdx) != observedBits ||
+        static_cast<std::uint32_t>(state.rdx >> 32U) !=
+            hostGetClockServiceRequestSize ||
+        localName != receiveName || static_cast<std::uint32_t>(state.r8) != 0 ||
+        static_cast<std::int32_t>(state.r8 >> 32U) !=
+            hostGetClockServiceMessageId ||
+        static_cast<std::uint32_t>(state.r9) != 0 ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority) !=
+            hostGetClockServiceReceiveSize ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority >> 32U) != 0 ||
+        timeout != 0 || message.size() != hostGetClockServiceRequestSize ||
+        hostPort == nullptr || hostPort->type != GuestPortType::Host ||
+        hostPort->sendUrefs == 0 || replyPort == nullptr ||
+        replyPort->type != GuestPortType::Reply ||
+        !replyPort->hasReceiveRight) {
+        return std::nullopt;
+    }
+    if (decodeGuestInteger<std::uint32_t>(message, 0) != observedBits ||
+        decodeGuestInteger<std::uint32_t>(message, 4) !=
+            hostGetClockServiceRequestSize ||
+        decodeGuestInteger<std::uint32_t>(message, 8) != remoteName ||
+        decodeGuestInteger<std::uint32_t>(message, 12) != localName ||
+        decodeGuestInteger<std::uint32_t>(message, 16) != 0 ||
+        decodeGuestInteger<std::int32_t>(message, 20) !=
+            hostGetClockServiceMessageId ||
+        !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr) ||
+        decodeGuestInteger<std::uint32_t>(message, 32) != systemClockId) {
+        return std::nullopt;
+    }
+    return GuestMachPortName{receiveName};
+}
+
+std::optional<GuestMachPortName> decodeObservedTaskGetSpecialPortRequest(
+    std::span<const std::uint8_t> message, const x86::X86State &state,
+    std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
+    const GuestPortSpace &portSpace) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    constexpr auto observedBits =
+        machMessageTypeCopySend | (machMessageTypeMakeSendOnce << 8U);
+    const auto remoteName = static_cast<std::uint32_t>(state.r10);
+    const auto localName = static_cast<std::uint32_t>(state.r10 >> 32U);
+    const auto receiveName = static_cast<std::uint32_t>(state.r9 >> 32U);
+    const auto *taskPort = portSpace.lookup(GuestMachPortName{remoteName});
+    const auto *replyPort = portSpace.lookup(GuestMachPortName{localName});
+    if (state.rsi != observedMachMessage2Options ||
+        static_cast<std::uint32_t>(state.rdx) != observedBits ||
+        static_cast<std::uint32_t>(state.rdx >> 32U) !=
+            taskGetSpecialPortRequestSize ||
+        localName != receiveName || static_cast<std::uint32_t>(state.r8) != 0 ||
+        static_cast<std::int32_t>(state.r8 >> 32U) !=
+            taskGetSpecialPortMessageId ||
+        static_cast<std::uint32_t>(state.r9) != 0 ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority) !=
+            taskGetSpecialPortReceiveSize ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority >> 32U) != 0 ||
+        timeout != 0 || message.size() != taskGetSpecialPortRequestSize ||
+        remoteName != GuestPortSpace::taskSelfName.value ||
+        taskPort == nullptr || taskPort->sendUrefs == 0 ||
+        replyPort == nullptr || replyPort->type != GuestPortType::Reply ||
+        !replyPort->hasReceiveRight) {
+        return std::nullopt;
+    }
+    if (decodeGuestInteger<std::uint32_t>(message, 0) != observedBits ||
+        decodeGuestInteger<std::uint32_t>(message, 4) !=
+            taskGetSpecialPortRequestSize ||
+        decodeGuestInteger<std::uint32_t>(message, 8) != remoteName ||
+        decodeGuestInteger<std::uint32_t>(message, 12) != localName ||
+        decodeGuestInteger<std::uint32_t>(message, 16) != 0 ||
+        decodeGuestInteger<std::int32_t>(message, 20) !=
+            taskGetSpecialPortMessageId ||
+        !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr) ||
+        decodeGuestInteger<std::uint32_t>(message, 32) !=
+            taskBootstrapPortSelector) {
+        return std::nullopt;
+    }
+    return GuestMachPortName{receiveName};
+}
+
+std::optional<GuestMachPortName> decodeObservedTaskAuditTokenRequest(
+    std::span<const std::uint8_t> message, const x86::X86State &state,
+    std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
+    const GuestPortSpace &portSpace) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    constexpr auto observedBits =
+        machMessageTypeCopySend | (machMessageTypeMakeSendOnce << 8U);
+    const auto remoteName = static_cast<std::uint32_t>(state.r10);
+    const auto localName = static_cast<std::uint32_t>(state.r10 >> 32U);
+    const auto receiveName = static_cast<std::uint32_t>(state.r9 >> 32U);
+    const auto *taskPort = portSpace.lookup(GuestMachPortName{remoteName});
+    const auto *replyPort = portSpace.lookup(GuestMachPortName{localName});
+    if (state.rsi != observedMachMessage2Options ||
+        static_cast<std::uint32_t>(state.rdx) != observedBits ||
+        static_cast<std::uint32_t>(state.rdx >> 32U) !=
+            taskInfoRequestSize ||
+        localName != receiveName || static_cast<std::uint32_t>(state.r8) != 0 ||
+        static_cast<std::int32_t>(state.r8 >> 32U) != taskInfoMessageId ||
+        static_cast<std::uint32_t>(state.r9) != 0 ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority) !=
+            taskInfoReceiveCapacity ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority >> 32U) != 0 ||
+        timeout != 0 || message.size() != taskInfoRequestSize ||
+        remoteName != GuestPortSpace::taskSelfName.value ||
+        taskPort == nullptr || taskPort->sendUrefs == 0 ||
+        replyPort == nullptr || replyPort->type != GuestPortType::Reply ||
+        !replyPort->hasReceiveRight) {
+        return std::nullopt;
+    }
+    if (decodeGuestInteger<std::uint32_t>(message, 0) != observedBits ||
+        decodeGuestInteger<std::uint32_t>(message, 4) !=
+            taskInfoRequestSize ||
+        decodeGuestInteger<std::uint32_t>(message, 8) != remoteName ||
+        decodeGuestInteger<std::uint32_t>(message, 12) != localName ||
+        decodeGuestInteger<std::uint32_t>(message, 16) != 0 ||
+        decodeGuestInteger<std::int32_t>(message, 20) != taskInfoMessageId ||
+        !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr) ||
+        decodeGuestInteger<std::uint32_t>(message, 32) !=
+            taskAuditTokenFlavor ||
+        decodeGuestInteger<std::uint32_t>(message, 36) !=
+            taskAuditTokenCount) {
+        return std::nullopt;
+    }
+    return GuestMachPortName{receiveName};
+}
+
+struct GuestTaskSetSpecialPortRequest {
+    GuestMachPortName receiveName;
+    GuestMachPortName specialPortName;
+};
+
+std::optional<GuestTaskSetSpecialPortRequest>
+decodeObservedTaskSetSpecialPortRequest(
+    std::span<const std::uint8_t> message, const x86::X86State &state,
+    std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
+    const GuestPortSpace &portSpace) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    constexpr auto observedBits =
+        machMessageHeaderComplex | machMessageTypeCopySend |
+        (machMessageTypeMakeSendOnce << 8U);
+    const auto remoteName = static_cast<std::uint32_t>(state.r10);
+    const auto localName = static_cast<std::uint32_t>(state.r10 >> 32U);
+    const auto receiveName = static_cast<std::uint32_t>(state.r9 >> 32U);
+    const auto *taskPort = portSpace.lookup(GuestMachPortName{remoteName});
+    const auto *replyPort = portSpace.lookup(GuestMachPortName{localName});
+    if (state.rsi != observedMachMessage2Options ||
+        static_cast<std::uint32_t>(state.rdx) != observedBits ||
+        static_cast<std::uint32_t>(state.rdx >> 32U) !=
+            taskSetSpecialPortRequestSize ||
+        localName != receiveName || static_cast<std::uint32_t>(state.r8) != 0 ||
+        static_cast<std::int32_t>(state.r8 >> 32U) !=
+            taskSetSpecialPortMessageId ||
+        static_cast<std::uint32_t>(state.r9) != 1 ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority) !=
+            taskSetSpecialPortReceiveSize ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority >> 32U) != 0 ||
+        timeout != 0 || message.size() != taskSetSpecialPortRequestSize ||
+        remoteName != GuestPortSpace::taskSelfName.value ||
+        taskPort == nullptr || taskPort->sendUrefs == 0 ||
+        replyPort == nullptr || replyPort->type != GuestPortType::Reply ||
+        !replyPort->hasReceiveRight) {
+        return std::nullopt;
+    }
+    const auto specialPortName =
+        decodeGuestInteger<std::uint32_t>(message, 28);
+    const auto *specialPort =
+        portSpace.lookup(GuestMachPortName{specialPortName});
+    if (decodeGuestInteger<std::uint32_t>(message, 0) != observedBits ||
+        decodeGuestInteger<std::uint32_t>(message, 4) !=
+            taskSetSpecialPortRequestSize ||
+        decodeGuestInteger<std::uint32_t>(message, 8) != remoteName ||
+        decodeGuestInteger<std::uint32_t>(message, 12) != localName ||
+        decodeGuestInteger<std::uint32_t>(message, 16) != 0 ||
+        decodeGuestInteger<std::int32_t>(message, 20) !=
+            taskSetSpecialPortMessageId ||
+        decodeGuestInteger<std::uint32_t>(message, 24) != 1 ||
+        specialPort == nullptr || specialPort->sendUrefs == 0 ||
+        message[38] != machMessageTypeCopySend ||
+        message[39] != machMessagePortDescriptor ||
+        !std::ranges::equal(message.subspan(40, nativeNdr.size()), nativeNdr) ||
+        decodeGuestInteger<std::uint32_t>(message, 48) !=
+            taskDebugControlPortSelector) {
+        return std::nullopt;
+    }
+    return GuestTaskSetSpecialPortRequest{
+        .receiveName = GuestMachPortName{receiveName},
+        .specialPortName = GuestMachPortName{specialPortName},
+    };
+}
+
+std::optional<GuestMachPortName> decodeObservedSemaphoreCreateRequest(
+    std::span<const std::uint8_t> message, const x86::X86State &state,
+    std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
+    const GuestPortSpace &portSpace) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    constexpr auto observedBits =
+        machMessageTypeCopySend | (machMessageTypeMakeSendOnce << 8U);
+    const auto remoteName = static_cast<std::uint32_t>(state.r10);
+    const auto localName = static_cast<std::uint32_t>(state.r10 >> 32U);
+    const auto receiveName = static_cast<std::uint32_t>(state.r9 >> 32U);
+    const auto *taskPort = portSpace.lookup(GuestMachPortName{remoteName});
+    const auto *replyPort = portSpace.lookup(GuestMachPortName{localName});
+    if (state.rsi != observedMachMessage2Options ||
+        static_cast<std::uint32_t>(state.rdx) != observedBits ||
+        static_cast<std::uint32_t>(state.rdx >> 32U) !=
+            semaphoreCreateRequestSize ||
+        localName != receiveName || static_cast<std::uint32_t>(state.r8) != 0 ||
+        static_cast<std::int32_t>(state.r8 >> 32U) !=
+            semaphoreCreateMessageId ||
+        static_cast<std::uint32_t>(state.r9) != 0 ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority) !=
+            semaphoreCreateReceiveSize ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority >> 32U) != 0 ||
+        timeout != 0 || message.size() != semaphoreCreateRequestSize ||
+        remoteName != GuestPortSpace::taskSelfName.value ||
+        taskPort == nullptr || taskPort->sendUrefs == 0 ||
+        replyPort == nullptr || replyPort->type != GuestPortType::Reply ||
+        !replyPort->hasReceiveRight) {
+        return std::nullopt;
+    }
+    if (decodeGuestInteger<std::uint32_t>(message, 0) != observedBits ||
+        decodeGuestInteger<std::uint32_t>(message, 4) !=
+            semaphoreCreateRequestSize ||
+        decodeGuestInteger<std::uint32_t>(message, 8) != remoteName ||
+        decodeGuestInteger<std::uint32_t>(message, 12) != localName ||
+        decodeGuestInteger<std::uint32_t>(message, 16) != 0 ||
+        decodeGuestInteger<std::int32_t>(message, 20) !=
+            semaphoreCreateMessageId ||
+        !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr) ||
+        decodeGuestInteger<std::uint32_t>(message, 32) != syncPolicyFifo ||
+        decodeGuestInteger<std::int32_t>(message, 36) != 0) {
+        return std::nullopt;
+    }
+    return GuestMachPortName{receiveName};
+}
+
+struct GuestRestartableRange {
+    std::uint64_t location{};
+    std::uint16_t length{};
+    std::uint16_t recoveryOffset{};
+    std::uint32_t flags{};
+};
+
+std::optional<GuestMachPortName>
+decodeObservedRestartableRangesRegisterRequest(
+    std::span<const std::uint8_t> message, const x86::X86State &state,
+    std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
+    const GuestPortSpace &portSpace) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    constexpr auto observedBits =
+        machMessageTypeCopySend | (machMessageTypeMakeSendOnce << 8U);
+    const auto remoteName = static_cast<std::uint32_t>(state.r10);
+    const auto localName = static_cast<std::uint32_t>(state.r10 >> 32U);
+    const auto receiveName = static_cast<std::uint32_t>(state.r9 >> 32U);
+    const auto *taskPort = portSpace.lookup(GuestMachPortName{remoteName});
+    const auto *replyPort = portSpace.lookup(GuestMachPortName{localName});
+    if (message.size() < restartableRangesRequestHeaderSize ||
+        state.rsi != observedMachMessage2Options ||
+        static_cast<std::uint32_t>(state.rdx) != observedBits ||
+        static_cast<std::uint32_t>(state.rdx >> 32U) != message.size() ||
+        localName != receiveName || static_cast<std::uint32_t>(state.r8) != 0 ||
+        static_cast<std::int32_t>(state.r8 >> 32U) !=
+            restartableRangesRegisterMessageId ||
+        static_cast<std::uint32_t>(state.r9) != 0 ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority) !=
+            restartableRangesReceiveSize ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority >> 32U) != 0 ||
+        timeout != 0 || remoteName != GuestPortSpace::taskSelfName.value ||
+        taskPort == nullptr || taskPort->sendUrefs == 0 ||
+        replyPort == nullptr || replyPort->type != GuestPortType::Reply ||
+        !replyPort->hasReceiveRight) {
+        return std::nullopt;
+    }
+    if (decodeGuestInteger<std::uint32_t>(message, 0) != observedBits ||
+        decodeGuestInteger<std::uint32_t>(message, 4) != message.size() ||
+        decodeGuestInteger<std::uint32_t>(message, 8) != remoteName ||
+        decodeGuestInteger<std::uint32_t>(message, 12) != localName ||
+        decodeGuestInteger<std::uint32_t>(message, 16) != 0 ||
+        decodeGuestInteger<std::int32_t>(message, 20) !=
+            restartableRangesRegisterMessageId ||
+        !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr)) {
+        return std::nullopt;
+    }
+    const auto count = decodeGuestInteger<std::uint32_t>(message, 32);
+    if (count == 0 || count > restartableRangesMaximumCount ||
+        message.size() != restartableRangesRequestHeaderSize +
+                              static_cast<std::size_t>(count) *
+                                  restartableRangeSize) {
+        return std::nullopt;
+    }
+    std::vector<GuestRestartableRange> ranges;
+    ranges.reserve(count);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto offset = restartableRangesRequestHeaderSize +
+                            static_cast<std::size_t>(index) *
+                                restartableRangeSize;
+        ranges.push_back(GuestRestartableRange{
+            .location = decodeGuestInteger<std::uint64_t>(message, offset),
+            .length = decodeGuestInteger<std::uint16_t>(message, offset + 8U),
+            .recoveryOffset =
+                decodeGuestInteger<std::uint16_t>(message, offset + 10U),
+            .flags = decodeGuestInteger<std::uint32_t>(message, offset + 12U),
+        });
+    }
+    std::ranges::sort(ranges, {}, &GuestRestartableRange::location);
+    for (std::size_t index = 0; index < ranges.size(); ++index) {
+        const auto &range = ranges[index];
+        if (range.length > restartableRangeOffsetMaximum ||
+            range.recoveryOffset > restartableRangeOffsetMaximum ||
+            range.flags != 0 ||
+            range.location >
+                std::numeric_limits<std::uint64_t>::max() - range.length ||
+            range.location > std::numeric_limits<std::uint64_t>::max() -
+                                 range.recoveryOffset ||
+            (index + 1U < ranges.size() &&
+             range.location + range.length > ranges[index + 1U].location)) {
+            return std::nullopt;
+        }
     }
     return GuestMachPortName{receiveName};
 }
@@ -242,6 +658,50 @@ GuestHostBasicInfo queryGuestHostBasicInfo() {
     };
 }
 
+GuestHostPriorityInfo queryGuestHostPriorityInfo() {
+    host_priority_info_data_t native{};
+    mach_msg_type_number_t count = HOST_PRIORITY_INFO_COUNT;
+    const auto host = mach_host_self();
+    const auto result = host_info(host, HOST_PRIORITY_INFO,
+                                  reinterpret_cast<host_info_t>(&native),
+                                  &count);
+    static_cast<void>(mach_port_deallocate(mach_task_self(), host));
+    if (result != KERN_SUCCESS || count < HOST_PRIORITY_INFO_COUNT) {
+        std::ostringstream stream;
+        stream << "host_info(HOST_PRIORITY_INFO) failed for guest translation: "
+               << result << " count=" << count;
+        throw std::runtime_error(stream.str());
+    }
+    return GuestHostPriorityInfo{
+        .kernelPriority = native.kernel_priority,
+        .systemPriority = native.system_priority,
+        .serverPriority = native.server_priority,
+        .userPriority = native.user_priority,
+        .depressPriority = native.depress_priority,
+        .idlePriority = native.idle_priority,
+        .minimumPriority = native.minimum_priority,
+        .maximumPriority = native.maximum_priority,
+    };
+}
+
+std::array<std::uint32_t, taskAuditTokenCount>
+queryGuestTaskAuditToken() {
+    audit_token_t native{};
+    mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
+    const auto result = task_info(
+        mach_task_self(), TASK_AUDIT_TOKEN,
+        reinterpret_cast<task_info_t>(&native), &count);
+    if (result != KERN_SUCCESS || count != taskAuditTokenCount) {
+        std::ostringstream stream;
+        stream << "task_info(TASK_AUDIT_TOKEN) failed for guest translation: "
+               << result << " count=" << count;
+        throw std::runtime_error(stream.str());
+    }
+    std::array<std::uint32_t, taskAuditTokenCount> token{};
+    std::ranges::copy(native.val, token.begin());
+    return token;
+}
+
 std::array<std::uint8_t, hostInfoReplySize + machMessageTrailerSize>
 encodeHostInfoReply(GuestMachPortName receiveName,
                     const GuestHostBasicInfo &info) {
@@ -272,6 +732,190 @@ encodeHostInfoReply(GuestMachPortName receiveName,
     encodeGuestInteger<std::uint64_t>(reply, 80, info.maximumMemory);
     encodeGuestInteger<std::uint32_t>(reply, 88, 0);
     encodeGuestInteger<std::uint32_t>(reply, 92, machMessageTrailerSize);
+    return reply;
+}
+
+std::array<std::uint8_t,
+           hostPriorityInfoReplySize + machMessageTrailerSize>
+encodeHostPriorityInfoReply(GuestMachPortName receiveName,
+                            const GuestHostPriorityInfo &info) {
+    std::array<std::uint8_t,
+               hostPriorityInfoReplySize + machMessageTrailerSize> reply{};
+    encodeGuestInteger<std::uint32_t>(
+        reply, 0, machMessageTypeMoveSendOnce << 8U);
+    encodeGuestInteger<std::uint32_t>(reply, 4,
+                                      hostPriorityInfoReplySize);
+    encodeGuestInteger<std::uint32_t>(reply, 8, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 12, receiveName.value);
+    encodeGuestInteger<std::uint32_t>(reply, 16, 0);
+    encodeGuestInteger<std::int32_t>(reply, 20, hostInfoReplyId);
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    std::ranges::copy(nativeNdr, reply.begin() + 24);
+    encodeGuestInteger<std::uint32_t>(reply, 32, kernSuccess);
+    encodeGuestInteger<std::uint32_t>(reply, 36, hostPriorityInfoCount);
+    encodeGuestInteger<std::int32_t>(reply, 40, info.kernelPriority);
+    encodeGuestInteger<std::int32_t>(reply, 44, info.systemPriority);
+    encodeGuestInteger<std::int32_t>(reply, 48, info.serverPriority);
+    encodeGuestInteger<std::int32_t>(reply, 52, info.userPriority);
+    encodeGuestInteger<std::int32_t>(reply, 56, info.depressPriority);
+    encodeGuestInteger<std::int32_t>(reply, 60, info.idlePriority);
+    encodeGuestInteger<std::int32_t>(reply, 64, info.minimumPriority);
+    encodeGuestInteger<std::int32_t>(reply, 68, info.maximumPriority);
+    encodeGuestInteger<std::uint32_t>(reply, 72, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 76,
+                                      machMessageTrailerSize);
+    return reply;
+}
+
+std::array<std::uint8_t, hostGetClockServiceReceiveSize>
+encodeHostClockServiceReply(GuestMachPortName receiveName,
+                            GuestMachPortName clockServiceName) {
+    std::array<std::uint8_t, hostGetClockServiceReceiveSize> reply{};
+    encodeGuestInteger<std::uint32_t>(
+        reply, 0, machMessageHeaderComplex |
+                      (machMessageTypeMoveSendOnce << 8U));
+    encodeGuestInteger<std::uint32_t>(reply, 4,
+                                      hostGetClockServiceReplySize);
+    encodeGuestInteger<std::uint32_t>(reply, 8, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 12, receiveName.value);
+    encodeGuestInteger<std::uint32_t>(reply, 16, 0);
+    encodeGuestInteger<std::int32_t>(reply, 20,
+                                     hostGetClockServiceReplyId);
+    encodeGuestInteger<std::uint32_t>(reply, 24, 1);
+    encodeGuestInteger<std::uint32_t>(reply, 28,
+                                      clockServiceName.value);
+    reply[38] = machMessageTypeMoveSend;
+    reply[39] = machMessagePortDescriptor;
+    encodeGuestInteger<std::uint32_t>(reply, 40, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 44,
+                                      machMessageTrailerSize);
+    return reply;
+}
+
+std::array<std::uint8_t, taskGetSpecialPortReceiveSize>
+encodeTaskGetSpecialPortReply(GuestMachPortName receiveName,
+                              GuestMachPortName specialPortName) {
+    std::array<std::uint8_t, taskGetSpecialPortReceiveSize> reply{};
+    encodeGuestInteger<std::uint32_t>(
+        reply, 0, machMessageHeaderComplex |
+                      (machMessageTypeMoveSendOnce << 8U));
+    encodeGuestInteger<std::uint32_t>(reply, 4,
+                                      taskGetSpecialPortReplySize);
+    encodeGuestInteger<std::uint32_t>(reply, 8, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 12, receiveName.value);
+    encodeGuestInteger<std::uint32_t>(reply, 16, 0);
+    encodeGuestInteger<std::int32_t>(reply, 20,
+                                     taskGetSpecialPortReplyId);
+    encodeGuestInteger<std::uint32_t>(reply, 24, 1);
+    encodeGuestInteger<std::uint32_t>(reply, 28, specialPortName.value);
+    reply[38] = machMessageTypeMoveSend;
+    reply[39] = machMessagePortDescriptor;
+    encodeGuestInteger<std::uint32_t>(reply, 40, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 44,
+                                      machMessageTrailerSize);
+    return reply;
+}
+
+std::array<std::uint8_t, taskAuditTokenReceiveSize>
+encodeTaskAuditTokenReply(
+    GuestMachPortName receiveName,
+    const std::array<std::uint32_t, taskAuditTokenCount> &token) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    std::array<std::uint8_t, taskAuditTokenReceiveSize> reply{};
+    encodeGuestInteger<std::uint32_t>(
+        reply, 0, machMessageTypeMoveSendOnce << 8U);
+    encodeGuestInteger<std::uint32_t>(reply, 4,
+                                      taskAuditTokenReplySize);
+    encodeGuestInteger<std::uint32_t>(reply, 8, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 12, receiveName.value);
+    encodeGuestInteger<std::uint32_t>(reply, 16, 0);
+    encodeGuestInteger<std::int32_t>(reply, 20, taskInfoReplyId);
+    std::ranges::copy(nativeNdr, reply.begin() + 24);
+    encodeGuestInteger<std::uint32_t>(reply, 32,
+                                      static_cast<std::uint32_t>(kernSuccess));
+    encodeGuestInteger<std::uint32_t>(reply, 36,
+                                      taskAuditTokenCount);
+    for (std::size_t index = 0; index < token.size(); ++index) {
+        encodeGuestInteger<std::uint32_t>(reply, 40 + index * 4U,
+                                          token[index]);
+    }
+    encodeGuestInteger<std::uint32_t>(reply, taskAuditTokenReplySize, 0);
+    encodeGuestInteger<std::uint32_t>(
+        reply, taskAuditTokenReplySize + sizeof(std::uint32_t),
+        machMessageTrailerSize);
+    return reply;
+}
+
+std::array<std::uint8_t, taskSetSpecialPortReceiveSize>
+encodeTaskSetSpecialPortReply(GuestMachPortName receiveName) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    std::array<std::uint8_t, taskSetSpecialPortReceiveSize> reply{};
+    encodeGuestInteger<std::uint32_t>(
+        reply, 0, machMessageTypeMoveSendOnce << 8U);
+    encodeGuestInteger<std::uint32_t>(reply, 4,
+                                      taskSetSpecialPortReplySize);
+    encodeGuestInteger<std::uint32_t>(reply, 8, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 12, receiveName.value);
+    encodeGuestInteger<std::uint32_t>(reply, 16, 0);
+    encodeGuestInteger<std::int32_t>(reply, 20,
+                                     taskSetSpecialPortReplyId);
+    std::ranges::copy(nativeNdr, reply.begin() + 24);
+    encodeGuestInteger<std::uint32_t>(reply, 32,
+                                      static_cast<std::uint32_t>(kernSuccess));
+    encodeGuestInteger<std::uint32_t>(reply, 36, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 40,
+                                      machMessageTrailerSize);
+    return reply;
+}
+
+std::array<std::uint8_t, semaphoreCreateReceiveSize>
+encodeSemaphoreCreateReply(GuestMachPortName receiveName,
+                           GuestMachPortName semaphoreName) {
+    std::array<std::uint8_t, semaphoreCreateReceiveSize> reply{};
+    encodeGuestInteger<std::uint32_t>(
+        reply, 0, machMessageHeaderComplex |
+                      (machMessageTypeMoveSendOnce << 8U));
+    encodeGuestInteger<std::uint32_t>(reply, 4,
+                                      semaphoreCreateReplySize);
+    encodeGuestInteger<std::uint32_t>(reply, 8, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 12, receiveName.value);
+    encodeGuestInteger<std::uint32_t>(reply, 16, 0);
+    encodeGuestInteger<std::int32_t>(reply, 20,
+                                     semaphoreCreateReplyId);
+    encodeGuestInteger<std::uint32_t>(reply, 24, 1);
+    encodeGuestInteger<std::uint32_t>(reply, 28, semaphoreName.value);
+    reply[38] = machMessageTypeMoveSend;
+    reply[39] = machMessagePortDescriptor;
+    encodeGuestInteger<std::uint32_t>(reply, 40, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 44,
+                                      machMessageTrailerSize);
+    return reply;
+}
+
+std::array<std::uint8_t, restartableRangesReceiveSize>
+encodeRestartableRangesRegisterReply(GuestMachPortName receiveName) {
+    std::array<std::uint8_t, restartableRangesReceiveSize> reply{};
+    encodeGuestInteger<std::uint32_t>(
+        reply, 0, machMessageTypeMoveSendOnce << 8U);
+    encodeGuestInteger<std::uint32_t>(reply, 4,
+                                      restartableRangesReplySize);
+    encodeGuestInteger<std::uint32_t>(reply, 8, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 12, receiveName.value);
+    encodeGuestInteger<std::uint32_t>(reply, 16, 0);
+    encodeGuestInteger<std::int32_t>(
+        reply, 20, restartableRangesRegisterReplyId);
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    std::ranges::copy(nativeNdr, reply.begin() + 24);
+    // XNU's CONFIG_ROSETTA path rejects registration for translated tasks so
+    // libobjc uses its translated-process fallback synchronization strategy.
+    encodeGuestInteger<std::uint32_t>(
+        reply, 32, static_cast<std::uint32_t>(kernResourceShortage));
+    encodeGuestInteger<std::uint32_t>(reply, 36, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 40, machMessageTrailerSize);
     return reply;
 }
 
@@ -556,6 +1200,56 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
     // XNU's x86_64 mach_call_munger64 writes only the trap result to saved RAX. In particular,
     // Mach traps do not use the BSD carry-flag error convention.
     switch (trapNumber(state.rax)) {
+    case 10U: {
+        // XNU trap 10 is _kernelrpc_mach_vm_allocate_trap. Its second
+        // argument points to an in/out mach_vm_address_t. Anonymous task
+        // allocations begin read/write and retain VM_PROT_ALL as their
+        // maximum protection.
+        if (state.rdi != taskSelfPortName().value) {
+            state.rax = machSendInvalidDestination;
+            return;
+        }
+        constexpr auto guestPageMask = guest::guestPageSize - 1U;
+        const auto placementFlags = state.r10 & ~vmFlagsAliasMask;
+        if (placementFlags != vmFlagsAnywhere || state.rdx == 0 ||
+            state.rdx > std::numeric_limits<std::size_t>::max() ||
+            state.rdx > std::numeric_limits<std::uint64_t>::max() -
+                            guestPageMask) {
+            state.rax = kernInvalidArgument;
+            return;
+        }
+        std::uint64_t hint = 0;
+        try {
+            addressSpace.validateAccess(
+                guest::GuestAddress{state.rsi}, sizeof(hint),
+                guest::Permission::Read | guest::Permission::Write);
+            hint = addressSpace.readU64(guest::GuestAddress{state.rsi});
+        } catch (const std::runtime_error &) {
+            state.rax = kernInvalidAddress;
+            return;
+        }
+        const auto roundedSize =
+            (state.rdx + guestPageMask) &
+            ~static_cast<std::uint64_t>(guestPageMask);
+        const auto mappedAddress = findAnywhereRange(
+            addressSpace, hint, roundedSize, guestPageMask);
+        if (!mappedAddress) {
+            state.rax = kernNoSpace;
+            return;
+        }
+        constexpr auto currentPermissions =
+            guest::Permission::Read | guest::Permission::Write;
+        constexpr auto maximumPermissions =
+            currentPermissions | guest::Permission::Execute;
+        addressSpace.mapAnonymous(
+            *mappedAddress, static_cast<std::size_t>(roundedSize),
+            currentPermissions, maximumPermissions,
+            "mach_vm_allocate anonymous anywhere");
+        addressSpace.writeU64(guest::GuestAddress{state.rsi},
+                              mappedAddress->value);
+        state.rax = kernSuccess;
+        return;
+    }
     case 12U: {
         // XNU trap 12 is _kernelrpc_mach_vm_deallocate_trap. The operation
         // removes the page-rounded address range from the target task's map;
@@ -616,9 +1310,23 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             state.rax = machSendInvalidDestination;
             return;
         }
-        if ((state.r8 & ~vmFlagsAliasMask) != vmFlagsAnywhere ||
-            state.r10 != guest::guestPageSize - 1U) {
+        constexpr auto guestPageMask = guest::guestPageSize - 1U;
+        const auto placementFlags = state.r8 & ~vmFlagsAliasMask;
+        const bool anywhere = placementFlags == vmFlagsAnywhere;
+        const bool fixed = placementFlags == 0;
+        if ((!anywhere && !fixed) || (fixed && state.r10 != 0)) {
             throw unsupported(state, syscallRip);
+        }
+        const auto alignmentMask =
+            state.r10 == 0 ? static_cast<std::uint64_t>(guestPageMask)
+                           : state.r10;
+        if (anywhere &&
+            (alignmentMask < guestPageMask ||
+             alignmentMask >= maximumUserMapEnd ||
+             (alignmentMask & guestPageMask) != guestPageMask ||
+             (alignmentMask & (alignmentMask + 1U)) != 0)) {
+            state.rax = kernInvalidArgument;
+            return;
         }
         if ((state.r9 & ~vmProtectionMask) != 0 || state.rdx == 0 ||
             state.rdx > std::numeric_limits<std::size_t>::max() ||
@@ -637,11 +1345,36 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         const auto roundedSize =
             (state.rdx + guest::guestPageSize - 1U) &
             ~(static_cast<std::uint64_t>(guest::guestPageSize) - 1U);
-        const auto mappedAddress = findAnywhereRange(
-            addressSpace, hint, roundedSize, state.r10);
-        if (!mappedAddress) {
-            state.rax = kernNoSpace;
-            return;
+        std::optional<guest::GuestAddress> mappedAddress;
+        if (anywhere) {
+            mappedAddress = findAnywhereRange(
+                addressSpace, hint, roundedSize, alignmentMask);
+            if (!mappedAddress) {
+                state.rax = kernNoSpace;
+                return;
+            }
+        } else {
+            const auto fixedBase =
+                hint & ~(static_cast<std::uint64_t>(guestPageMask));
+            if (fixedBase > std::numeric_limits<std::uint64_t>::max() -
+                                roundedSize) {
+                state.rax = kernInvalidArgument;
+                return;
+            }
+            const auto fixedEnd = fixedBase + roundedSize;
+            const auto overlaps = std::ranges::any_of(
+                addressSpace.mappingInfos(),
+                [fixedBase, fixedEnd](const guest::MappingInfo &mapping) {
+                    const auto mappingEnd =
+                        mapping.base.value + mapping.size;
+                    return fixedBase < mappingEnd &&
+                           mapping.base.value < fixedEnd;
+                });
+            if (overlaps) {
+                state.rax = kernNoSpace;
+                return;
+            }
+            mappedAddress = guest::GuestAddress{fixedBase};
         }
         const auto currentPermissions = permissionsFromProtection(state.r9);
         constexpr auto maximumPermissions =
@@ -650,7 +1383,8 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         addressSpace.mapAnonymous(
             *mappedAddress, static_cast<std::size_t>(roundedSize),
             currentPermissions, maximumPermissions,
-            "mach_vm_map anonymous");
+            anywhere ? "mach_vm_map anonymous anywhere"
+                     : "mach_vm_map anonymous fixed");
         try {
             addressSpace.writeU64(guest::GuestAddress{state.rsi},
                                   mappedAddress->value);
@@ -752,10 +1486,11 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             .outputPointer = guest::GuestAddress{state.r10},
         };
 
-        // This is the exact reply-port type requested by the cached macOS
-        // 26.5 dyld. Other option combinations remain loud until their rights
-        // and policy semantics have been observed and understood.
-        if (options.flags != observedDyldPortOptions) {
+        // These are the two combinations observed so far: dyld's reply port,
+        // and libsystem_trace's strictly guarded ordinary port with an
+        // inserted send right. Keep other policy-bearing combinations loud.
+        if (options.flags != observedDyldPortOptions &&
+            options.flags != observedTracePortOptions) {
             throw unsupported(state, syscallRip);
         }
 
@@ -769,10 +1504,18 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         }
 
         GuestPort port;
-        port.type = GuestPortType::Reply;
+        port.type = options.flags == observedDyldPortOptions
+                        ? GuestPortType::Reply
+                        : GuestPortType::Ordinary;
         port.context = state.rdx;
         port.queueLimit = machPortQlimitDefault;
         port.optionFlags = options.flags;
+        if (options.flags == observedTracePortOptions) {
+            port.sendUrefs = 1;
+            port.guarded = true;
+            port.guard = state.rdx;
+            port.strictGuard = true;
+        }
         const auto name = portSpace_.allocateReceiveRight(port);
         if (!name) {
             state.rax = kernNoSpace;
@@ -802,6 +1545,15 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             return;
         }
         state.rax = name->value;
+        return;
+    }
+    case 27U: {
+        // thread_self_trap has no arguments. Rosa currently has one guest
+        // thread, so every copyout names the same thread object and adds one
+        // guest send uref without exposing the host thread or its Mach port.
+        const auto name =
+            portSpace_.copyoutThreadSendRight(machPortUrefsMaximum);
+        state.rax = name ? name->value : 0;
         return;
     }
     case 28U: {
@@ -853,7 +1605,8 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         }
 
         if (const auto receiveName = decodeObservedHostInfoRequest(
-                message, state, receiveSizeAndPriority, timeout, portSpace_)) {
+                message, state, receiveSizeAndPriority, timeout, portSpace_,
+                hostBasicInfoFlavor, hostBasicInfoCount)) {
             constexpr auto replySize =
                 hostInfoReplySize + machMessageTrailerSize;
             try {
@@ -866,6 +1619,162 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             }
             const auto reply =
                 encodeHostInfoReply(*receiveName, queryGuestHostBasicInfo());
+            addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
+            state.rax = kernSuccess;
+            return;
+        }
+
+        if (const auto receiveName = decodeObservedHostInfoRequest(
+                message, state, receiveSizeAndPriority, timeout, portSpace_,
+                hostPriorityInfoFlavor, hostPriorityInfoCount)) {
+            constexpr auto replySize =
+                hostPriorityInfoReplySize + machMessageTrailerSize;
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdi}, replySize,
+                    guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto reply = encodeHostPriorityInfoReply(
+                *receiveName, queryGuestHostPriorityInfo());
+            addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
+            state.rax = kernSuccess;
+            return;
+        }
+
+        if (const auto receiveName =
+                decodeObservedHostClockServiceRequest(
+                    message, state, receiveSizeAndPriority, timeout,
+                    portSpace_)) {
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdi},
+                    hostGetClockServiceReceiveSize,
+                    guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto clockService =
+                portSpace_.copyoutClockSendRight(systemClockId,
+                                                 machPortUrefsMaximum);
+            if (!clockService) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto reply = encodeHostClockServiceReply(
+                *receiveName, *clockService);
+            addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
+            state.rax = kernSuccess;
+            return;
+        }
+
+        if (const auto receiveName =
+                decodeObservedTaskGetSpecialPortRequest(
+                    message, state, receiveSizeAndPriority, timeout,
+                    portSpace_)) {
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdi},
+                    taskGetSpecialPortReceiveSize,
+                    guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto bootstrap = portSpace_.copyoutBootstrapSendRight(
+                machPortUrefsMaximum);
+            if (!bootstrap) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto reply = encodeTaskGetSpecialPortReply(
+                *receiveName, *bootstrap);
+            addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
+            state.rax = kernSuccess;
+            return;
+        }
+
+        if (const auto receiveName = decodeObservedTaskAuditTokenRequest(
+                message, state, receiveSizeAndPriority, timeout,
+                portSpace_)) {
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdi},
+                    taskAuditTokenReceiveSize,
+                    guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto reply = encodeTaskAuditTokenReply(
+                *receiveName, queryGuestTaskAuditToken());
+            addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
+            state.rax = kernSuccess;
+            return;
+        }
+
+        if (const auto request = decodeObservedTaskSetSpecialPortRequest(
+                message, state, receiveSizeAndPriority, timeout,
+                portSpace_)) {
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdi},
+                    taskSetSpecialPortReceiveSize,
+                    guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto reply =
+                encodeTaskSetSpecialPortReply(request->receiveName);
+            addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
+            taskDebugControlPort_ = request->specialPortName;
+            state.rax = kernSuccess;
+            return;
+        }
+
+        if (const auto receiveName = decodeObservedSemaphoreCreateRequest(
+                message, state, receiveSizeAndPriority, timeout,
+                portSpace_)) {
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdi},
+                    semaphoreCreateReceiveSize, guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto semaphore = portSpace_.allocateSemaphoreSendRight(
+                syncPolicyFifo, 0);
+            if (!semaphore) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto reply =
+                encodeSemaphoreCreateReply(*receiveName, *semaphore);
+            addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
+            state.rax = kernSuccess;
+            return;
+        }
+
+        if (const auto receiveName =
+                decodeObservedRestartableRangesRegisterRequest(
+                    message, state, receiveSizeAndPriority, timeout,
+                    portSpace_)) {
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdi},
+                    restartableRangesReceiveSize,
+                    guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto reply =
+                encodeRestartableRangesRegisterReply(*receiveName);
             addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
             state.rax = kernSuccess;
             return;

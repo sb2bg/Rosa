@@ -19,6 +19,10 @@ enum class GuestPortType : std::uint8_t {
     Ordinary,
     Reply,
     Host,
+    Thread,
+    Bootstrap,
+    Clock,
+    Semaphore,
 };
 
 enum class GuestPortDeallocateResult : std::uint8_t {
@@ -55,6 +59,14 @@ class GuestPortSpace {
     allocateReceiveRight(GuestPort attributes = {});
     [[nodiscard]] std::optional<GuestMachPortName>
     copyoutHostSendRight(std::uint32_t maximumUrefs);
+    [[nodiscard]] std::optional<GuestMachPortName>
+    copyoutThreadSendRight(std::uint32_t maximumUrefs);
+    [[nodiscard]] std::optional<GuestMachPortName>
+    copyoutBootstrapSendRight(std::uint32_t maximumUrefs);
+    [[nodiscard]] std::optional<GuestMachPortName>
+    copyoutClockSendRight(std::uint32_t clockId, std::uint32_t maximumUrefs);
+    [[nodiscard]] std::optional<GuestMachPortName>
+    allocateSemaphoreSendRight(std::uint32_t policy, std::int32_t value);
     [[nodiscard]] GuestPortDeallocateResult
     deallocateUref(GuestMachPortName name);
     void rollbackLastAllocation(GuestMachPortName name) noexcept;
@@ -71,6 +83,9 @@ class GuestPortSpace {
     std::map<std::uint32_t, GuestPort> ports_;
     std::uint32_t nextSyntheticName_{0x203U};
     std::optional<GuestMachPortName> hostSelfName_;
+    std::optional<GuestMachPortName> threadSelfName_;
+    std::optional<GuestMachPortName> bootstrapName_;
+    std::map<std::uint32_t, GuestMachPortName> clockServiceNames_;
 };
 
 } // namespace rosa::darwin

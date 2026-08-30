@@ -97,14 +97,47 @@ std::runtime_error fileMappingError(std::string_view operation,
 
 void AddressSpace::mapAnonymous(GuestAddress base, std::size_t size, Permission permissions,
                                 std::string_view label) {
-    addMapping(base, size, permissions, permissions, {}, label);
+    mapAnonymous(base, size, permissions, permissions, label);
 }
 
 void AddressSpace::mapAnonymous(GuestAddress base, std::size_t size,
                                 Permission permissions,
                                 Permission maximumPermissions,
                                 std::string_view label) {
-    addMapping(base, size, permissions, maximumPermissions, {}, label);
+    validateNewMapping(base, size, permissions, maximumPermissions);
+    if (maximumPermissions == Permission::None) {
+        insertMapping(Mapping{
+            .base = base,
+            .size = size,
+            .permissions = permissions,
+            .maximumPermissions = maximumPermissions,
+            .label = std::string(label),
+        });
+        return;
+    }
+
+    // A private anonymous host mapping keeps large guest VM reservations lazy:
+    // virtual capacity is reserved now, while physical pages are committed only
+    // when the guest touches them. Small mappings retain identical zero-fill and
+    // copy-on-write behavior through the same backing abstraction.
+    const auto hostAddress = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (hostAddress == MAP_FAILED) {
+        throw std::runtime_error(
+            std::string("cannot reserve anonymous guest backing: ") +
+            std::strerror(errno));
+    }
+    PrivateFileMapping pendingMapping(hostAddress, size);
+    auto backing =
+        std::make_shared<PrivateFileMapping>(std::move(pendingMapping));
+    insertMapping(Mapping{
+        .base = base,
+        .size = size,
+        .permissions = permissions,
+        .maximumPermissions = maximumPermissions,
+        .fileBytes = std::move(backing),
+        .label = std::string(label),
+    });
 }
 
 void AddressSpace::mapSegment(GuestAddress base, std::size_t size,
@@ -142,17 +175,15 @@ void AddressSpace::mapFileSegment(GuestAddress base, std::size_t size,
     if (::fstat(descriptor.get(), &information) != 0) {
         throw fileMappingError("cannot inspect guest file backing", path, errno);
     }
-    if (information.st_size < 0 ||
-        fileOffset > static_cast<std::uint64_t>(information.st_size) ||
-        size > static_cast<std::uint64_t>(information.st_size) - fileOffset) {
-        throw std::invalid_argument("guest file-backed mapping exceeds source file");
-    }
-
     const auto rawHostPageSize = ::sysconf(_SC_PAGESIZE);
     if (rawHostPageSize <= 0) {
         throw std::runtime_error("cannot query host page size for guest file backing");
     }
     const auto hostPageSize = static_cast<std::uint64_t>(rawHostPageSize);
+    if (information.st_size < 0 ||
+        fileOffset > static_cast<std::uint64_t>(information.st_size)) {
+        throw std::invalid_argument("guest file-backed mapping exceeds source file");
+    }
     const auto alignedOffset = fileOffset - (fileOffset % hostPageSize);
     const auto prefixValue = fileOffset - alignedOffset;
     if (prefixValue > std::numeric_limits<std::size_t>::max()) {
@@ -163,6 +194,17 @@ void AddressSpace::mapFileSegment(GuestAddress base, std::size_t size,
         throw std::invalid_argument("guest file-backed mapping size overflows");
     }
     const auto hostMappingSize = prefix + size;
+    const auto available =
+        static_cast<std::uint64_t>(information.st_size) - fileOffset;
+    const auto sourceExtent = prefixValue + available;
+    const auto sourceRemainder = sourceExtent % hostPageSize;
+    const auto roundedSourceExtent =
+        sourceRemainder == 0
+            ? sourceExtent
+            : sourceExtent + (hostPageSize - sourceRemainder);
+    if (hostMappingSize > roundedSourceExtent) {
+        throw std::invalid_argument("guest file-backed mapping exceeds source file pages");
+    }
     const auto hostAddress = ::mmap(nullptr, hostMappingSize, PROT_READ | PROT_WRITE,
                                     MAP_PRIVATE, descriptor.get(),
                                     static_cast<off_t>(alignedOffset));
@@ -626,6 +668,15 @@ void AddressSpace::writeU64(GuestAddress address, std::uint64_t value) {
     std::array<std::uint8_t, sizeof(value)> bytes{};
     for (std::size_t index = 0; index < sizeof(value); ++index) {
         bytes[index] = static_cast<std::uint8_t>((value >> (index * 8U)) & 0xFFU);
+    }
+    writeBytes(address, bytes);
+}
+
+void AddressSpace::writeU32(GuestAddress address, std::uint32_t value) {
+    std::array<std::uint8_t, sizeof(value)> bytes{};
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        bytes[index] =
+            static_cast<std::uint8_t>((value >> (index * 8U)) & 0xFFU);
     }
     writeBytes(address, bytes);
 }

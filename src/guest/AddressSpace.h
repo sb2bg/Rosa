@@ -95,6 +95,7 @@ class AddressSpace {
     void validateAccess(GuestAddress address, std::size_t size,
                         Permission required) const;
     void writeU64(GuestAddress address, std::uint64_t value);
+    void writeU32(GuestAddress address, std::uint32_t value);
     void writeBytes(GuestAddress address, std::span<const std::uint8_t> bytes);
 
     [[nodiscard]] std::span<const std::uint8_t> executableBytes(GuestAddress address) const;

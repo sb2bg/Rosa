@@ -2,6 +2,7 @@
 
 #include <mach/mach_time.h>
 #include <sys/sysctl.h>
+#include <sys/time.h>
 
 #include <array>
 #include <limits>
@@ -46,6 +47,7 @@ std::uint64_t hostTicksToNanoseconds(std::uint64_t ticks) {
 
 void mapX86Commpage(guest::AddressSpace &addressSpace,
                     std::uint64_t continuousTimebase,
+                    std::uint64_t bootTimeUsec,
                     std::uint64_t dyldFlags) {
     constexpr auto nanotimeDataSize =
         x86CommpageNanotimeGenerationOffset + sizeof(std::uint32_t) -
@@ -75,6 +77,44 @@ void mapX86Commpage(guest::AddressSpace &addressSpace,
     addressSpace.populateSparseReadOnly(
         guest::GuestAddress{x86CommpageBase.value + x86CommpageVersionOffset},
         versionBytes);
+    // XNU retains a 32-bit capabilities view for compatibility. Its CPU-count
+    // byte at +0x22 overlaps kNumCPUs in this word, so publish the low half of
+    // the same coherent 64-bit value rather than an independent copy.
+    std::array<std::uint8_t, sizeof(std::uint32_t)>
+        legacyCpuCapabilitiesBytes{};
+    writeLittleEndian(legacyCpuCapabilitiesBytes, 0,
+                      x86CommpageCpuCapabilities64,
+                      legacyCpuCapabilitiesBytes.size());
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value +
+                            x86CommpageCpuCapabilitiesOffset},
+        legacyCpuCapabilitiesBytes);
+    // Rosa exposes one executable guest thread. Publish a coherent one-CPU,
+    // one-cluster topology so allocators size per-CPU metadata conservatively.
+    constexpr std::array<std::uint8_t, 4> cpuTopology{
+        x86CommpageActiveCpuCount, x86CommpagePhysicalCpuCount,
+        x86CommpageLogicalCpuCount, x86CommpageCpuClusterCount};
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value +
+                            x86CommpageActiveCpuCountOffset},
+        cpuTopology);
+    std::array<std::uint8_t, sizeof(x86CommpageMemorySize)>
+        memorySizeBytes{};
+    writeLittleEndian(memorySizeBytes, 0, x86CommpageMemorySize,
+                      sizeof(x86CommpageMemorySize));
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value +
+                            x86CommpageMemorySizeOffset},
+        memorySizeBytes);
+    // An unknown x86 CPU family selects libsystem_platform's conservative
+    // resolver. Do not claim a particular Intel microarchitecture until Rosa
+    // implements every instruction used by that family's optimized routines.
+    constexpr std::array<std::uint8_t, sizeof(x86CommpageCpuFamily)>
+        cpuFamilyBytes{};
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value +
+                            x86CommpageCpuFamilyOffset},
+        cpuFamilyBytes);
     constexpr std::array<std::uint8_t, 1> kernelPageShift{
         x86CommpageKernelPageShift};
     addressSpace.populateSparseReadOnly(
@@ -107,6 +147,23 @@ void mapX86Commpage(guest::AddressSpace &addressSpace,
     addressSpace.populateSparseReadOnly(
         guest::GuestAddress{x86CommpageBase.value + x86CommpageContinuousTimebaseOffset},
         continuousTimebaseBytes);
+    // XNU exposes the wall-clock boot timestamp in microseconds. libsystem
+    // reads it directly when constructing boot-unique state.
+    std::array<std::uint8_t, sizeof(bootTimeUsec)> bootTimeUsecBytes{};
+    writeLittleEndian(bootTimeUsecBytes, 0, bootTimeUsec,
+                      sizeof(bootTimeUsec));
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value + x86CommpageBootTimeUsecOffset},
+        bootTimeUsecBytes);
+    // A zero TimeStamp_tick is XNU's defined "timestamp unavailable" state.
+    // Publish the complete record so libsystem can take its syscall fallback
+    // while still rejecting reads from genuinely unsupported commpage slots.
+    constexpr std::array<std::uint8_t, x86CommpageNewTimeOfDayDataSize>
+        disabledTimeOfDayData{};
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value +
+                            x86CommpageNewTimeOfDayDataOffset},
+        disabledTimeOfDayData);
     // XNU publishes the opaque kern.dyld_flags value here. The compatible
     // guest cache should observe the current system-wide value, not an arm64
     // commpage pointer or a guessed interpretation of its bits.
@@ -134,6 +191,23 @@ std::uint64_t sampleHostContinuousTimebase() {
         }
     }
     return hostTicksToNanoseconds(bestTimebase);
+}
+
+std::uint64_t sampleHostBootTimeUsec() {
+    timeval bootTime{};
+    auto size = sizeof(bootTime);
+    if (::sysctlbyname("kern.boottime", &bootTime, &size, nullptr, 0) != 0 ||
+        size != sizeof(bootTime) || bootTime.tv_sec < 0 ||
+        bootTime.tv_usec < 0 || bootTime.tv_usec >= 1'000'000) {
+        throw std::runtime_error("cannot query kern.boottime");
+    }
+    const auto seconds = static_cast<std::uint64_t>(bootTime.tv_sec);
+    const auto microseconds = static_cast<std::uint64_t>(bootTime.tv_usec);
+    if (seconds > (std::numeric_limits<std::uint64_t>::max() - microseconds) /
+                      1'000'000U) {
+        throw std::runtime_error("host boot time conversion overflows");
+    }
+    return seconds * 1'000'000U + microseconds;
 }
 
 std::uint64_t sampleHostDyldFlags() {

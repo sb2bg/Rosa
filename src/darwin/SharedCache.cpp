@@ -813,6 +813,15 @@ GuestSharedCache GuestSharedCache::open(const std::filesystem::path &path) {
         .uuid = main.uuid,
         .mappings = main.mappings,
     });
+    struct stat information {};
+    if (::stat(path.c_str(), &information) != 0) {
+        throw std::runtime_error("cannot inspect guest shared-cache identity: " +
+                                 std::string(std::strerror(errno)));
+    }
+    result.fileSystemId_[0] = static_cast<std::int32_t>(information.st_dev);
+    result.fileSystemId_[1] = 0;
+    result.objectId_ = static_cast<std::uint64_t>(information.st_ino);
+    result.canonicalPath_ = std::filesystem::canonical(path).string();
 
     const FileReader mainReader(path);
     const auto subcacheRecordSize = main.hasModernSubcaches ? modernSubcacheRecordSize
@@ -947,23 +956,18 @@ void GuestSharedCache::mapInto(guest::AddressSpace &addressSpace) const {
     constexpr std::string_view dynamicMagic = "dyld_data    v3";
     std::copy(dynamicMagic.begin(), dynamicMagic.end(), dynamicData.begin());
 
-    struct stat information {};
-    if (::stat(files_.front().path.c_str(), &information) != 0) {
-        throw std::runtime_error("cannot inspect guest shared-cache identity: " +
-                                 std::string(std::strerror(errno)));
-    }
     // Guest FileIdTuple: fsid_t (two 32-bit words), then fsobj_id_t (8 bytes).
-    writeU32(dynamicData, 16, static_cast<std::uint32_t>(information.st_dev));
-    writeU32(dynamicData, 20, 0);
-    writeU64(dynamicData, 24, static_cast<std::uint64_t>(information.st_ino));
+    writeU32(dynamicData, 16, static_cast<std::uint32_t>(fileSystemId_[0]));
+    writeU32(dynamicData, 20, static_cast<std::uint32_t>(fileSystemId_[1]));
+    writeU64(dynamicData, 24, objectId_);
     constexpr std::uint32_t dynamicRegionStructureSize = 80;
     writeU32(dynamicData, 32, 0); // no OS cryptex prefix
     writeU32(dynamicData, 36, dynamicRegionStructureSize);
-    const auto cachePath = std::filesystem::canonical(files_.front().path).string();
-    if (cachePath.size() + 1U > dynamicData.size() - dynamicRegionStructureSize) {
+    if (canonicalPath_.size() + 1U >
+        dynamicData.size() - dynamicRegionStructureSize) {
         throw std::runtime_error("guest shared-cache path exceeds dynamic-data page");
     }
-    std::copy(cachePath.begin(), cachePath.end(),
+    std::copy(canonicalPath_.begin(), canonicalPath_.end(),
               dynamicData.begin() + dynamicRegionStructureSize);
     addressSpace.mapSegment(dynamicDataAddress_, static_cast<std::size_t>(dynamicDataSize_),
                             guest::Permission::Read, dynamicData,
@@ -988,6 +992,15 @@ const SharedCacheImage *GuestSharedCache::imageForAddress(
         return nullptr;
     }
     return &image;
+}
+
+std::optional<std::string_view> GuestSharedCache::pathForFileIdentity(
+    const std::array<std::int32_t, 2> &fileSystemId,
+    std::uint64_t objectId) const noexcept {
+    if (fileSystemId != fileSystemId_ || objectId != objectId_) {
+        return std::nullopt;
+    }
+    return canonicalPath_;
 }
 
 std::string formatSharedCacheUuid(const std::array<std::uint8_t, 16> &uuid) {

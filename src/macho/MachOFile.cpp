@@ -196,6 +196,18 @@ MachOFile MachOFile::parse(std::vector<std::uint8_t> bytes) {
                 throw std::runtime_error("malformed Mach-O: short LC_MAIN");
             }
             file.mainEntryFileOffset_ = readU64(view, cursor + 8);
+        } else if (command == lcUuid) {
+            if (commandSize < 24) {
+                throw std::runtime_error("malformed Mach-O: short LC_UUID");
+            }
+            if (file.uuid_) {
+                throw std::runtime_error("malformed Mach-O: duplicate LC_UUID");
+            }
+            std::array<std::uint8_t, 16> uuid{};
+            std::copy_n(view.begin() +
+                            static_cast<std::ptrdiff_t>(cursor + 8),
+                        uuid.size(), uuid.begin());
+            file.uuid_ = uuid;
         } else if (command == lcUnixThread) {
             // x86_THREAD_STATE64: flavor/count followed by 16 GPRs, then RIP.
             constexpr std::size_t ripOffset = 16 + (16 * sizeof(std::uint64_t));
@@ -244,7 +256,7 @@ std::string loadCommandName(std::uint32_t command) {
         return "LC_LOAD_DYLIB";
     case 0xEU:
         return "LC_LOAD_DYLINKER";
-    case 0x1BU:
+    case lcUuid:
         return "LC_UUID";
     case 0x32U:
         return "LC_BUILD_VERSION";

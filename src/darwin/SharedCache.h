@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -95,6 +96,9 @@ class GuestSharedCache {
     }
     [[nodiscard]] const SharedCacheImage *
     imageForAddress(guest::GuestAddress address) const noexcept;
+    [[nodiscard]] std::optional<std::string_view> pathForFileIdentity(
+        const std::array<std::int32_t, 2> &fileSystemId,
+        std::uint64_t objectId) const noexcept;
 
   private:
     SharedCacheArchitecture architecture_{SharedCacheArchitecture::X86_64};
@@ -113,6 +117,9 @@ class GuestSharedCache {
     std::vector<SharedCacheFile> files_;
     std::vector<SharedCacheMapping> mappings_;
     std::vector<SharedCacheImage> images_;
+    std::array<std::int32_t, 2> fileSystemId_{};
+    std::uint64_t objectId_{};
+    std::string canonicalPath_;
 };
 
 [[nodiscard]] std::string formatSharedCacheUuid(

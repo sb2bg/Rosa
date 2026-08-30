@@ -19,6 +19,8 @@ enum class GuestFileKind {
     RootDirectory,
     SyntheticDirectory,
     HostReadOnlyFile,
+    RandomDevice,
+    UnixDatagramSocket,
 };
 
 struct GuestOpenFile {
@@ -43,6 +45,8 @@ class GuestFileSpace {
         std::filesystem::path guestPath, std::uint32_t flags);
     [[nodiscard]] GuestFileDescriptor openReadOnlyFile(
         std::filesystem::path guestPath, std::uint32_t flags);
+    [[nodiscard]] GuestFileDescriptor openRandomDevice(std::uint32_t flags);
+    [[nodiscard]] GuestFileDescriptor openUnixDatagramSocket();
     [[nodiscard]] std::optional<GuestFileDescriptor> duplicate(
         GuestFileDescriptor descriptor);
     [[nodiscard]] const GuestOpenFile *lookup(

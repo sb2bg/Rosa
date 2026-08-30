@@ -27,6 +27,7 @@ class MachDispatcher {
     static constexpr std::uint64_t syscallClass = 1U << 24U;
     static constexpr std::uint64_t syscallClassMask = 0xFF000000U;
     static constexpr std::uint64_t syscallNumberMask = 0x00FFFFFFU;
+    static constexpr std::uint64_t vmAllocateTrapNumber = syscallClass | 10U;
     static constexpr std::uint64_t vmDeallocateTrapNumber = syscallClass | 12U;
     static constexpr std::uint64_t vmProtectTrapNumber = syscallClass | 14U;
     static constexpr std::uint64_t vmMapTrapNumber = syscallClass | 15U;
@@ -34,6 +35,7 @@ class MachDispatcher {
     static constexpr std::uint64_t portModRefsTrapNumber = syscallClass | 19U;
     static constexpr std::uint64_t portConstructTrapNumber = syscallClass | 24U;
     static constexpr std::uint64_t replyPortTrapNumber = syscallClass | 26U;
+    static constexpr std::uint64_t threadSelfTrapNumber = syscallClass | 27U;
     static constexpr std::uint64_t taskSelfTrapNumber = syscallClass | 28U;
     static constexpr std::uint64_t hostSelfTrapNumber = syscallClass | 29U;
     static constexpr std::uint64_t machMessage2TrapNumber = syscallClass | 47U;
@@ -58,6 +60,10 @@ class MachDispatcher {
     lastPortConstruct() const noexcept {
         return lastPortConstruct_;
     }
+    [[nodiscard]] const std::optional<GuestMachPortName> &
+    taskDebugControlPort() const noexcept {
+        return taskDebugControlPort_;
+    }
     [[nodiscard]] std::string portSpaceSummary() const;
 
     void dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
@@ -68,6 +74,7 @@ class MachDispatcher {
     // are ever passed to host Mach APIs or confused with mach_port_t.
     GuestPortSpace portSpace_;
     std::optional<GuestPortConstructObservation> lastPortConstruct_;
+    std::optional<GuestMachPortName> taskDebugControlPort_;
 };
 
 } // namespace rosa::darwin

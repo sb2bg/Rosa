@@ -30,7 +30,9 @@ enum class Opcode {
     WriteGuestReg,
     ConditionalMoveGuestReg,
     ReadGuestXmmLane,
+    ReadGuestYmmUpperLane,
     WriteGuestXmmLane,
+    WriteGuestYmmUpperLane,
     WriteGuestXmmByte,
     WriteGuestXmmDword,
     Add,
@@ -50,25 +52,39 @@ enum class Opcode {
     LoadGuest,
     StoreGuest,
     StoreGuestXmm,
+    StoreGuestYmm,
     LoadGuestXmm,
+    LoadGuestYmm,
+    LoadGuestSignExtendedBytesXmm,
+    LoadGuestSignExtendedDwordsXmm,
     XorGuestMemoryXmm,
     AndGuestMemoryXmm,
     TestXmmBits,
     CompareEqualGuestBytesXmm,
     CompareEqualXmmBytes,
     CompareEqualXmmDwords,
+    ShiftLeftXmmDwords,
+    AddXmmDwords,
+    HorizontalAddXmmDwords,
     AndNotXmm,
     MoveXmmByteMask,
     ShuffleXmmBytes,
     ShuffleXmmDwords,
     AlignRightXmmBytes,
     BlendXmmWords,
+    UnpackLowXmmWords,
     BitScanForward,
     BitScanReverse,
     RepeatMoveByte,
+    DivideUnsignedByte,
+    DivideUnsignedDword,
+    DivideUnsignedQword,
+    DivideSignedDword,
     Push,
     AddGuestMemory,
+    SubGuestMemory,
     OrGuestMemory,
+    AndGuestMemory,
     ShiftLeftGuestMemory,
     IncrementGuestMemory,
     DecrementGuestMemory,
@@ -78,10 +94,13 @@ enum class Opcode {
     LockedAddGuestMemory,
     LockedExchangeAddGuestMemory,
     LockedIncrementGuestMemory,
+    LockedDecrementGuestMemory,
     LockedOrGuestMemory,
+    StoreGuestIdtr,
     LoadFence,
     ReadTimestampCounter,
     UpdateAddFlags,
+    UpdateAdcFlags,
     UpdateIncFlags,
     UpdateDecFlags,
     UpdateSubFlags,
@@ -90,6 +109,7 @@ enum class Opcode {
     UpdateShiftRightFlags,
     UpdateShiftRightArithmeticFlags,
     UpdateRotateLeftFlags,
+    UpdateRotateRightFlags,
     UpdateMultiplyFlags,
     UpdateSignedMultiplyFlags,
     UpdateShiftRightDoubleFlags,
@@ -141,9 +161,17 @@ class Builder {
                                       x86::Register source,
                                       x86::Condition condition, Width width,
                                       guest::GuestAddress rip);
+    void conditionalMoveGuestRegister(x86::Register destination,
+                                      ValueId source,
+                                      x86::Condition condition, Width width,
+                                      guest::GuestAddress rip);
     ValueId readGuestXmmLane(x86::XmmRegister reg, bool high, guest::GuestAddress rip);
+    ValueId readGuestYmmUpperLane(x86::XmmRegister reg, bool high,
+                                  guest::GuestAddress rip);
     void writeGuestXmmLane(x86::XmmRegister reg, bool high, ValueId value,
                            guest::GuestAddress rip);
+    void writeGuestYmmUpperLane(x86::XmmRegister reg, bool high,
+                                ValueId value, guest::GuestAddress rip);
     void writeGuestXmmByte(x86::XmmRegister reg, std::uint8_t lane,
                            ValueId value, guest::GuestAddress rip);
     void writeGuestXmmDword(x86::XmmRegister reg, std::uint8_t lane,
@@ -174,8 +202,18 @@ class Builder {
     void storeGuest(ValueId address, ValueId value, Width width, guest::GuestAddress rip);
     void storeGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
                        guest::GuestAddress rip);
+    void storeGuestYmm(ValueId address, x86::XmmRegister reg, bool aligned,
+                       guest::GuestAddress rip);
     void loadGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
                       guest::GuestAddress rip);
+    void loadGuestYmm(ValueId address, x86::XmmRegister reg, bool aligned,
+                      guest::GuestAddress rip);
+    void loadGuestSignExtendedBytesXmm(ValueId address,
+                                       x86::XmmRegister reg,
+                                       guest::GuestAddress rip);
+    void loadGuestSignExtendedDwordsXmm(ValueId address,
+                                        x86::XmmRegister reg,
+                                        guest::GuestAddress rip);
     void xorGuestMemoryXmm(ValueId address, x86::XmmRegister reg,
                            guest::GuestAddress rip);
     void andGuestMemoryXmm(ValueId address, x86::XmmRegister reg,
@@ -190,12 +228,24 @@ class Builder {
     void compareEqualXmmDwords(x86::XmmRegister destination,
                                x86::XmmRegister source,
                                guest::GuestAddress rip);
+    void shiftLeftXmmDwords(x86::XmmRegister destination,
+                            std::uint8_t count,
+                            guest::GuestAddress rip);
+    void addXmmDwords(x86::XmmRegister destination,
+                      x86::XmmRegister source,
+                      guest::GuestAddress rip);
+    void horizontalAddXmmDwords(x86::XmmRegister destination,
+                                x86::XmmRegister source,
+                                guest::GuestAddress rip);
     void andNotXmm(x86::XmmRegister destination, x86::XmmRegister source,
                    guest::GuestAddress rip);
     void moveXmmByteMask(x86::Register destination, x86::XmmRegister source,
                          guest::GuestAddress rip);
     void shuffleXmmBytes(x86::XmmRegister destination,
                          x86::XmmRegister source, guest::GuestAddress rip);
+    void shuffleGuestMemoryXmmBytes(ValueId address,
+                                    x86::XmmRegister destination,
+                                    guest::GuestAddress rip);
     void shuffleXmmDwords(x86::XmmRegister destination,
                           x86::XmmRegister source, std::uint8_t control,
                           guest::GuestAddress rip);
@@ -205,16 +255,27 @@ class Builder {
     void blendXmmWords(x86::XmmRegister destination,
                        x86::XmmRegister source, std::uint8_t mask,
                        guest::GuestAddress rip);
+    void unpackLowXmmWords(x86::XmmRegister destination,
+                           x86::XmmRegister source,
+                           guest::GuestAddress rip);
     void bitScanForward(x86::Register destination, x86::Register source,
                         Width width, guest::GuestAddress rip);
     void bitScanReverse(x86::Register destination, x86::Register source,
                         Width width, guest::GuestAddress rip);
     void repeatMoveByte(guest::GuestAddress rip);
+    void divideUnsignedByte(ValueId divisor, guest::GuestAddress rip);
+    void divideUnsignedDword(ValueId divisor, guest::GuestAddress rip);
+    void divideUnsignedQword(ValueId divisor, guest::GuestAddress rip);
+    void divideSignedDword(ValueId divisor, guest::GuestAddress rip);
     void push(ValueId newStackPointer, ValueId value, Width width, guest::GuestAddress rip);
     void addGuestMemory(ValueId address, ValueId source, Width width,
                         guest::GuestAddress rip);
+    void subGuestMemory(ValueId address, ValueId source, Width width,
+                        guest::GuestAddress rip);
     void orGuestMemory(ValueId address, ValueId source, Width width,
                        guest::GuestAddress rip);
+    void andGuestMemory(ValueId address, ValueId source, Width width,
+                        guest::GuestAddress rip);
     void shiftLeftGuestMemory(ValueId address, std::uint8_t count, Width width,
                               guest::GuestAddress rip);
     void incrementGuestMemory(ValueId address, Width width,
@@ -234,11 +295,16 @@ class Builder {
                                       Width width, guest::GuestAddress rip);
     void lockedIncrementGuestMemory(ValueId address, Width width,
                                     guest::GuestAddress rip);
+    void lockedDecrementGuestMemory(ValueId address, Width width,
+                                    guest::GuestAddress rip);
     void lockedOrGuestMemory(ValueId address, ValueId immediate,
                              Width width, guest::GuestAddress rip);
+    void storeGuestIdtr(ValueId address, guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
     void readTimestampCounter(guest::GuestAddress rip);
     void updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
+                        guest::GuestAddress rip);
+    void updateAdcFlags(ValueId lhs, ValueId rhs, ValueId carry, Width width,
                         guest::GuestAddress rip);
     void updateIncFlags(ValueId original, ValueId result, Width width,
                         guest::GuestAddress rip);
@@ -260,6 +326,10 @@ class Builder {
                                          guest::GuestAddress rip);
     void updateRotateLeftFlags(ValueId result, std::uint8_t count, Width width,
                                guest::GuestAddress rip);
+    void updateRotateLeftFlags(ValueId result, ValueId count, Width width,
+                               guest::GuestAddress rip);
+    void updateRotateRightFlags(ValueId result, std::uint8_t count,
+                                Width width, guest::GuestAddress rip);
     void updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip);
     void updateSignedMultiplyFlags(ValueId lhs, ValueId rhs, Width width,
                                    guest::GuestAddress rip);

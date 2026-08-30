@@ -54,6 +54,14 @@ constexpr std::string_view xmmRegisterName(XmmRegister reg) {
     return names.at(static_cast<std::size_t>(reg));
 }
 
+constexpr std::string_view ymmRegisterName(XmmRegister reg) {
+    constexpr std::array names{
+        "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7",
+        "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm14", "ymm15",
+    };
+    return names.at(static_cast<std::size_t>(reg));
+}
+
 constexpr std::string_view registerName(Register reg) {
     constexpr std::array names{
         "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
@@ -89,6 +97,7 @@ struct alignas(16) X86State {
         std::uint64_t high{};
     };
     std::array<XmmValue, 16> xmm{};
+    std::array<XmmValue, 16> ymmUpper{};
 
     // Architectural guest TLS state. This is never a host segment base.
     std::uint64_t gsBase{};
@@ -138,6 +147,13 @@ constexpr std::size_t xmmLaneOffset(XmmRegister reg, bool high) {
     return offsetof(X86State, xmm) +
            static_cast<std::size_t>(reg) * sizeof(X86State::XmmValue) +
            (high ? offsetof(X86State::XmmValue, high) : offsetof(X86State::XmmValue, low));
+}
+
+constexpr std::size_t ymmUpperLaneOffset(XmmRegister reg, bool high) {
+    return offsetof(X86State, ymmUpper) +
+           static_cast<std::size_t>(reg) * sizeof(X86State::XmmValue) +
+           (high ? offsetof(X86State::XmmValue, high)
+                 : offsetof(X86State::XmmValue, low));
 }
 
 } // namespace rosa::x86

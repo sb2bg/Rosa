@@ -1,5 +1,6 @@
 #include "darwin/PortSpace.h"
 
+#include <bit>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -55,6 +56,86 @@ GuestPortSpace::copyoutHostSendRight(std::uint32_t maximumUrefs) {
     return hostSelfName_;
 }
 
+std::optional<GuestMachPortName>
+GuestPortSpace::copyoutThreadSendRight(std::uint32_t maximumUrefs) {
+    if (threadSelfName_) {
+        auto *port = lookup(*threadSelfName_);
+        if (port == nullptr || port->type != GuestPortType::Thread ||
+            port->sendUrefs == 0) {
+            return std::nullopt;
+        }
+        if (port->sendUrefs == maximumUrefs) {
+            return std::nullopt;
+        }
+        ++port->sendUrefs;
+        return threadSelfName_;
+    }
+
+    GuestPort thread;
+    thread.type = GuestPortType::Thread;
+    thread.sendUrefs = 1;
+    threadSelfName_ = allocatePort(thread);
+    return threadSelfName_;
+}
+
+std::optional<GuestMachPortName>
+GuestPortSpace::copyoutBootstrapSendRight(std::uint32_t maximumUrefs) {
+    if (bootstrapName_) {
+        auto *port = lookup(*bootstrapName_);
+        if (port == nullptr || port->type != GuestPortType::Bootstrap ||
+            port->sendUrefs == 0 || port->sendUrefs == maximumUrefs) {
+            return std::nullopt;
+        }
+        ++port->sendUrefs;
+        return bootstrapName_;
+    }
+
+    GuestPort bootstrap;
+    bootstrap.type = GuestPortType::Bootstrap;
+    bootstrap.sendUrefs = 1;
+    bootstrapName_ = allocatePort(bootstrap);
+    return bootstrapName_;
+}
+
+std::optional<GuestMachPortName>
+GuestPortSpace::copyoutClockSendRight(std::uint32_t clockId,
+                                     std::uint32_t maximumUrefs) {
+    const auto existing = clockServiceNames_.find(clockId);
+    if (existing != clockServiceNames_.end()) {
+        auto *port = lookup(existing->second);
+        if (port == nullptr || port->type != GuestPortType::Clock ||
+            port->context != clockId || port->sendUrefs == 0) {
+            return std::nullopt;
+        }
+        if (port->sendUrefs == maximumUrefs) {
+            return std::nullopt;
+        }
+        ++port->sendUrefs;
+        return existing->second;
+    }
+
+    GuestPort clock;
+    clock.type = GuestPortType::Clock;
+    clock.context = clockId;
+    clock.sendUrefs = 1;
+    const auto name = allocatePort(clock);
+    if (name) {
+        clockServiceNames_.emplace(clockId, *name);
+    }
+    return name;
+}
+
+std::optional<GuestMachPortName>
+GuestPortSpace::allocateSemaphoreSendRight(std::uint32_t policy,
+                                           std::int32_t value) {
+    GuestPort semaphore;
+    semaphore.type = GuestPortType::Semaphore;
+    semaphore.sendUrefs = 1;
+    semaphore.context = std::bit_cast<std::uint32_t>(value);
+    semaphore.optionFlags = policy;
+    return allocatePort(semaphore);
+}
+
 GuestPortDeallocateResult
 GuestPortSpace::deallocateUref(GuestMachPortName name) {
     // MACH_PORT_NULL and MACH_PORT_DEAD are accepted no-ops by XNU's
@@ -79,6 +160,15 @@ GuestPortSpace::deallocateUref(GuestMachPortName name) {
         port.sendUrefs == 0 && port.sendOnceUrefs == 0) {
         if (hostSelfName_ == name) {
             hostSelfName_.reset();
+        }
+        if (threadSelfName_ == name) {
+            threadSelfName_.reset();
+        }
+        if (bootstrapName_ == name) {
+            bootstrapName_.reset();
+        }
+        if (port.type == GuestPortType::Clock) {
+            clockServiceNames_.erase(static_cast<std::uint32_t>(port.context));
         }
         ports_.erase(found);
     }
@@ -111,9 +201,19 @@ void GuestPortSpace::rollbackLastAllocation(GuestMachPortName name) noexcept {
     if (found == ports_.end() || name == taskSelfName) {
         return;
     }
+    if (found->second.type == GuestPortType::Clock) {
+        clockServiceNames_.erase(
+            static_cast<std::uint32_t>(found->second.context));
+    }
     ports_.erase(found);
     if (hostSelfName_ == name) {
         hostSelfName_.reset();
+    }
+    if (threadSelfName_ == name) {
+        threadSelfName_.reset();
+    }
+    if (bootstrapName_ == name) {
+        bootstrapName_.reset();
     }
     if (name.value <= std::numeric_limits<std::uint32_t>::max() -
                           syntheticNameStride &&
@@ -126,9 +226,14 @@ std::string GuestPortSpace::summary() const {
     std::ostringstream stream;
     stream << "ports=" << ports_.size();
     for (const auto &[name, port] : ports_) {
-        const auto type = port.type == GuestPortType::Reply   ? "reply"
-                          : port.type == GuestPortType::Host ? "host"
-                                                             : "ordinary";
+        const auto type =
+            port.type == GuestPortType::Reply       ? "reply"
+            : port.type == GuestPortType::Host      ? "host"
+            : port.type == GuestPortType::Thread    ? "thread"
+            : port.type == GuestPortType::Bootstrap ? "bootstrap"
+            : port.type == GuestPortType::Clock     ? "clock"
+            : port.type == GuestPortType::Semaphore ? "semaphore"
+                                                     : "ordinary";
         stream << "\n    name=0x" << std::hex << name << std::dec
                << " type=" << type
                << " receive=" << (port.hasReceiveRight ? "yes" : "no")

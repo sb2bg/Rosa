@@ -67,6 +67,20 @@ void Builder::conditionalMoveGuestRegister(x86::Register destination,
     });
 }
 
+void Builder::conditionalMoveGuestRegister(x86::Register destination,
+                                           ValueId source,
+                                           x86::Condition condition, Width width,
+                                           guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ConditionalMoveGuestReg,
+        .width = width,
+        .guestRip = rip,
+        .lhs = source,
+        .guestRegister = destination,
+        .condition = condition,
+    });
+}
+
 ValueId Builder::readGuestXmmLane(x86::XmmRegister reg, bool high,
                                   guest::GuestAddress rip) {
     const auto result = nextValue();
@@ -81,10 +95,36 @@ ValueId Builder::readGuestXmmLane(x86::XmmRegister reg, bool high,
     return result;
 }
 
+ValueId Builder::readGuestYmmUpperLane(x86::XmmRegister reg, bool high,
+                                       guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ReadGuestYmmUpperLane,
+        .width = Width::I64,
+        .guestRip = rip,
+        .result = result,
+        .guestXmmRegister = reg,
+        .immediate = high ? 1U : 0U,
+    });
+    return result;
+}
+
 void Builder::writeGuestXmmLane(x86::XmmRegister reg, bool high, ValueId value,
                                 guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::WriteGuestXmmLane,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = value,
+        .guestXmmRegister = reg,
+        .immediate = high ? 1U : 0U,
+    });
+}
+
+void Builder::writeGuestYmmUpperLane(x86::XmmRegister reg, bool high,
+                                     ValueId value, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::WriteGuestYmmUpperLane,
         .width = Width::I64,
         .guestRip = rip,
         .lhs = value,
@@ -369,6 +409,18 @@ void Builder::storeGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
     });
 }
 
+void Builder::storeGuestYmm(ValueId address, x86::XmmRegister reg,
+                            bool aligned, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::StoreGuestYmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = reg,
+        .immediate = aligned ? 1U : 0U,
+    });
+}
+
 void Builder::loadGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
                            guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -378,6 +430,40 @@ void Builder::loadGuestXmm(ValueId address, x86::XmmRegister reg, bool aligned,
         .lhs = address,
         .guestXmmRegister = reg,
         .immediate = aligned ? 1U : 0U,
+    });
+}
+
+void Builder::loadGuestYmm(ValueId address, x86::XmmRegister reg, bool aligned,
+                           guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LoadGuestYmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = reg,
+        .immediate = aligned ? 1U : 0U,
+    });
+}
+
+void Builder::loadGuestSignExtendedBytesXmm(
+    ValueId address, x86::XmmRegister reg, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LoadGuestSignExtendedBytesXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = reg,
+    });
+}
+
+void Builder::loadGuestSignExtendedDwordsXmm(
+    ValueId address, x86::XmmRegister reg, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LoadGuestSignExtendedDwordsXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = reg,
     });
 }
 
@@ -450,6 +536,42 @@ void Builder::compareEqualXmmDwords(x86::XmmRegister destination,
     });
 }
 
+void Builder::shiftLeftXmmDwords(x86::XmmRegister destination,
+                                 std::uint8_t count,
+                                 guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShiftLeftXmmDwords,
+        .width = Width::I32,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .immediate = count,
+    });
+}
+
+void Builder::addXmmDwords(x86::XmmRegister destination,
+                           x86::XmmRegister source,
+                           guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::AddXmmDwords,
+        .width = Width::I32,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+    });
+}
+
+void Builder::horizontalAddXmmDwords(x86::XmmRegister destination,
+                                     x86::XmmRegister source,
+                                     guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::HorizontalAddXmmDwords,
+        .width = Width::I32,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+    });
+}
+
 void Builder::andNotXmm(x86::XmmRegister destination,
                         x86::XmmRegister source, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -481,6 +603,18 @@ void Builder::shuffleXmmBytes(x86::XmmRegister destination,
         .guestRip = rip,
         .guestXmmRegister = destination,
         .sourceGuestXmmRegister = source,
+    });
+}
+
+void Builder::shuffleGuestMemoryXmmBytes(ValueId address,
+                                         x86::XmmRegister destination,
+                                         guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShuffleXmmBytes,
+        .width = Width::I8,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = destination,
     });
 }
 
@@ -525,6 +659,18 @@ void Builder::blendXmmWords(x86::XmmRegister destination,
     });
 }
 
+void Builder::unpackLowXmmWords(x86::XmmRegister destination,
+                                x86::XmmRegister source,
+                                guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UnpackLowXmmWords,
+        .width = Width::I16,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+    });
+}
+
 void Builder::bitScanForward(x86::Register destination, x86::Register source,
                              Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -555,6 +701,45 @@ void Builder::repeatMoveByte(guest::GuestAddress rip) {
     });
 }
 
+void Builder::divideUnsignedByte(ValueId divisor, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::DivideUnsignedByte,
+        .width = Width::I8,
+        .guestRip = rip,
+        .lhs = divisor,
+    });
+}
+
+void Builder::divideUnsignedDword(ValueId divisor,
+                                  guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::DivideUnsignedDword,
+        .width = Width::I32,
+        .guestRip = rip,
+        .lhs = divisor,
+    });
+}
+
+void Builder::divideUnsignedQword(ValueId divisor,
+                                  guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::DivideUnsignedQword,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = divisor,
+    });
+}
+
+void Builder::divideSignedDword(ValueId divisor,
+                                guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::DivideSignedDword,
+        .width = Width::I32,
+        .guestRip = rip,
+        .lhs = divisor,
+    });
+}
+
 void Builder::push(ValueId newStackPointer, ValueId value, Width width,
                    guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -577,10 +762,32 @@ void Builder::addGuestMemory(ValueId address, ValueId source, Width width,
     });
 }
 
+void Builder::subGuestMemory(ValueId address, ValueId source, Width width,
+                             guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::SubGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+        .rhs = source,
+    });
+}
+
 void Builder::orGuestMemory(ValueId address, ValueId source, Width width,
                             guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::OrGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+        .rhs = source,
+    });
+}
+
+void Builder::andGuestMemory(ValueId address, ValueId source, Width width,
+                             guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::AndGuestMemory,
         .width = width,
         .guestRip = rip,
         .lhs = address,
@@ -687,6 +894,16 @@ void Builder::lockedIncrementGuestMemory(ValueId address, Width width,
     });
 }
 
+void Builder::lockedDecrementGuestMemory(ValueId address, Width width,
+                                         guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LockedDecrementGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+    });
+}
+
 void Builder::lockedOrGuestMemory(ValueId address, ValueId immediate,
                                   Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -695,6 +912,14 @@ void Builder::lockedOrGuestMemory(ValueId address, ValueId immediate,
         .guestRip = rip,
         .lhs = address,
         .rhs = immediate,
+    });
+}
+
+void Builder::storeGuestIdtr(ValueId address, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::StoreGuestIdtr,
+        .guestRip = rip,
+        .lhs = address,
     });
 }
 
@@ -723,6 +948,18 @@ void Builder::updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width wid
         .lhs = lhs,
         .rhs = rhs,
         .third = result,
+    });
+}
+
+void Builder::updateAdcFlags(ValueId lhs, ValueId rhs, ValueId carry,
+                             Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateAdcFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = lhs,
+        .rhs = rhs,
+        .third = carry,
     });
 }
 
@@ -834,6 +1071,28 @@ void Builder::updateRotateLeftFlags(ValueId result, std::uint8_t count,
                                     Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::UpdateRotateLeftFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = result,
+        .immediate = count,
+    });
+}
+
+void Builder::updateRotateLeftFlags(ValueId result, ValueId count,
+                                    Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateRotateLeftFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = result,
+        .rhs = count,
+    });
+}
+
+void Builder::updateRotateRightFlags(ValueId result, std::uint8_t count,
+                                     Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateRotateRightFlags,
         .width = width,
         .guestRip = rip,
         .lhs = result,
@@ -992,6 +1251,12 @@ std::vector<std::string> verify(const Block &block) {
                 errors.emplace_back("read_guest_xmm_lane has no register");
             }
             break;
+        case Opcode::ReadGuestYmmUpperLane:
+            if (!operation.guestXmmRegister || operation.immediate > 1) {
+                errors.emplace_back(
+                    "read_guest_ymm_upper_lane is incomplete");
+            }
+            break;
         case Opcode::WriteGuestReg:
             checkUse(operation.lhs, "source");
             if (!operation.guestRegister) {
@@ -1000,14 +1265,24 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::ConditionalMoveGuestReg:
             if (!operation.guestRegister || !operation.condition ||
-                operation.immediate >= 16) {
+                (!operation.lhs && operation.immediate >= 16)) {
                 errors.emplace_back("conditional_move_guest_reg is incomplete");
+            }
+            if (operation.lhs) {
+                checkUse(operation.lhs, "source");
             }
             break;
         case Opcode::WriteGuestXmmLane:
             checkUse(operation.lhs, "source");
             if (!operation.guestXmmRegister) {
                 errors.emplace_back("write_guest_xmm_lane has no register");
+            }
+            break;
+        case Opcode::WriteGuestYmmUpperLane:
+            checkUse(operation.lhs, "source");
+            if (!operation.guestXmmRegister || operation.immediate > 1) {
+                errors.emplace_back(
+                    "write_guest_ymm_upper_lane is incomplete");
             }
             break;
         case Opcode::WriteGuestXmmByte:
@@ -1075,15 +1350,40 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::AddGuestMemory:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "source");
-            if (operation.width != Width::I64) {
-                errors.emplace_back("add_guest_memory currently requires i64");
+            if (operation.width != Width::I32 &&
+                operation.width != Width::I64) {
+                errors.emplace_back(
+                    "add_guest_memory currently requires i32 or i64");
+            }
+            break;
+        case Opcode::SubGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            checkUse(operation.rhs, "source");
+            if (operation.width != Width::I32 &&
+                operation.width != Width::I64) {
+                errors.emplace_back(
+                    "sub_guest_memory currently requires i32 or i64");
             }
             break;
         case Opcode::OrGuestMemory:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "source");
-            if (operation.width != Width::I8) {
-                errors.emplace_back("or_guest_memory currently requires i8");
+            if (operation.width != Width::I8 &&
+                operation.width != Width::I32 &&
+                operation.width != Width::I64) {
+                errors.emplace_back(
+                    "or_guest_memory currently requires i8, i32, or i64");
+            }
+            break;
+        case Opcode::AndGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            checkUse(operation.rhs, "source");
+            if (operation.width != Width::I8 &&
+                operation.width != Width::I16 &&
+                operation.width != Width::I32 &&
+                operation.width != Width::I64) {
+                errors.emplace_back(
+                    "and_guest_memory currently requires i8, i16, i32, or i64");
             }
             break;
         case Opcode::ShiftLeftGuestMemory:
@@ -1100,9 +1400,10 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::CompareExchangeGuestMemory:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "source");
-            if (operation.width != Width::I32) {
+            if (operation.width != Width::I32 &&
+                operation.width != Width::I64) {
                 errors.emplace_back(
-                    "compare_exchange_guest_memory currently requires i32");
+                    "compare_exchange_guest_memory currently requires i32 or i64");
             }
             break;
         case Opcode::CompareExchangeGuestPair:
@@ -1140,9 +1441,10 @@ std::vector<std::string> verify(const Block &block) {
                 errors.emplace_back(
                     "locked_exchange_add_guest_memory lacks a source register");
             }
-            if (operation.width != Width::I32) {
+            if (operation.width != Width::I32 &&
+                operation.width != Width::I64) {
                 errors.emplace_back(
-                    "locked_exchange_add_guest_memory currently requires i32");
+                    "locked_exchange_add_guest_memory currently requires i32 or i64");
             }
             break;
         case Opcode::LockedIncrementGuestMemory:
@@ -1152,13 +1454,24 @@ std::vector<std::string> verify(const Block &block) {
                     "locked_increment_guest_memory currently requires i32");
             }
             break;
+        case Opcode::LockedDecrementGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            if (operation.width != Width::I32) {
+                errors.emplace_back(
+                    "locked_decrement_guest_memory currently requires i32");
+            }
+            break;
         case Opcode::LockedOrGuestMemory:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "immediate");
-            if (operation.width != Width::I32) {
+            if (operation.width != Width::I16 &&
+                operation.width != Width::I32) {
                 errors.emplace_back(
-                    "locked_or_guest_memory currently requires i32");
+                    "locked_or_guest_memory currently requires i16 or i32");
             }
+            break;
+        case Opcode::StoreGuestIdtr:
+            checkUse(operation.lhs, "guest address");
             break;
         case Opcode::StoreGuest:
             checkUse(operation.lhs, "guest address");
@@ -1170,10 +1483,36 @@ std::vector<std::string> verify(const Block &block) {
                 errors.emplace_back("store_guest_xmm has no register");
             }
             break;
+        case Opcode::StoreGuestYmm:
+            checkUse(operation.lhs, "guest address");
+            if (!operation.guestXmmRegister) {
+                errors.emplace_back("store_guest_ymm has no register");
+            }
+            break;
         case Opcode::LoadGuestXmm:
             checkUse(operation.lhs, "guest address");
             if (!operation.guestXmmRegister) {
                 errors.emplace_back("load_guest_xmm has no register");
+            }
+            break;
+        case Opcode::LoadGuestYmm:
+            checkUse(operation.lhs, "guest address");
+            if (!operation.guestXmmRegister) {
+                errors.emplace_back("load_guest_ymm has no register");
+            }
+            break;
+        case Opcode::LoadGuestSignExtendedBytesXmm:
+            checkUse(operation.lhs, "guest address");
+            if (!operation.guestXmmRegister) {
+                errors.emplace_back(
+                    "load_guest_sign_extended_bytes_xmm has no register");
+            }
+            break;
+        case Opcode::LoadGuestSignExtendedDwordsXmm:
+            checkUse(operation.lhs, "guest address");
+            if (!operation.guestXmmRegister) {
+                errors.emplace_back(
+                    "load_guest_sign_extended_dwords_xmm has no register");
             }
             break;
         case Opcode::XorGuestMemoryXmm:
@@ -1214,6 +1553,29 @@ std::vector<std::string> verify(const Block &block) {
                     "compare_equal_xmm_dwords has incomplete registers");
             }
             break;
+        case Opcode::ShiftLeftXmmDwords:
+            if (!operation.guestXmmRegister ||
+                operation.width != Width::I32) {
+                errors.emplace_back(
+                    "shift_left_xmm_dwords has incomplete operands");
+            }
+            break;
+        case Opcode::AddXmmDwords:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister ||
+                operation.width != Width::I32) {
+                errors.emplace_back(
+                    "add_xmm_dwords has incomplete registers");
+            }
+            break;
+        case Opcode::HorizontalAddXmmDwords:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister ||
+                operation.width != Width::I32) {
+                errors.emplace_back(
+                    "horizontal_add_xmm_dwords has incomplete registers");
+            }
+            break;
         case Opcode::AndNotXmm:
             if (!operation.guestXmmRegister ||
                 !operation.sourceGuestXmmRegister) {
@@ -1227,8 +1589,12 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::ShuffleXmmBytes:
             if (!operation.guestXmmRegister ||
-                !operation.sourceGuestXmmRegister) {
+                operation.lhs.has_value() ==
+                    operation.sourceGuestXmmRegister.has_value()) {
                 errors.emplace_back("shuffle_xmm_bytes has incomplete registers");
+            }
+            if (operation.lhs) {
+                checkUse(operation.lhs, "guest address");
             }
             break;
         case Opcode::ShuffleXmmDwords:
@@ -1251,6 +1617,14 @@ std::vector<std::string> verify(const Block &block) {
                 errors.emplace_back("blend_xmm_words is incomplete");
             }
             break;
+        case Opcode::UnpackLowXmmWords:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister ||
+                operation.width != Width::I16) {
+                errors.emplace_back(
+                    "unpack_low_xmm_words has incomplete registers");
+            }
+            break;
         case Opcode::BitScanForward:
             if (!operation.guestRegister) {
                 errors.emplace_back("bit_scan_forward has no destination register");
@@ -1259,6 +1633,33 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::BitScanReverse:
             if (!operation.guestRegister) {
                 errors.emplace_back("bit_scan_reverse has no destination register");
+            }
+            break;
+        case Opcode::DivideUnsignedByte:
+            checkUse(operation.lhs, "divisor");
+            if (operation.width != Width::I8) {
+                errors.emplace_back("divide_unsigned_byte has the wrong width");
+            }
+            break;
+        case Opcode::DivideUnsignedDword:
+            checkUse(operation.lhs, "divisor");
+            if (operation.width != Width::I32) {
+                errors.emplace_back(
+                    "divide_unsigned_dword has the wrong width");
+            }
+            break;
+        case Opcode::DivideUnsignedQword:
+            checkUse(operation.lhs, "divisor");
+            if (operation.width != Width::I64) {
+                errors.emplace_back(
+                    "divide_unsigned_qword has the wrong width");
+            }
+            break;
+        case Opcode::DivideSignedDword:
+            checkUse(operation.lhs, "divisor");
+            if (operation.width != Width::I32) {
+                errors.emplace_back(
+                    "divide_signed_dword has the wrong width");
             }
             break;
         case Opcode::LoadGuest:
@@ -1272,6 +1673,15 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "left");
             checkUse(operation.rhs, "right");
             checkUse(operation.third, "result");
+            break;
+        case Opcode::UpdateAdcFlags:
+            checkUse(operation.lhs, "left");
+            checkUse(operation.rhs, "right");
+            checkUse(operation.third, "carry");
+            if (operation.width != Width::I32 &&
+                operation.width != Width::I64) {
+                errors.emplace_back("update_adc_flags requires i32 or i64");
+            }
             break;
         case Opcode::UpdateIncFlags:
         case Opcode::UpdateDecFlags:
@@ -1287,6 +1697,11 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::UpdateSignedMultiplyFlags:
             checkUse(operation.lhs, "left");
             checkUse(operation.rhs, "right");
+            if (operation.width != Width::I32 &&
+                operation.width != Width::I64) {
+                errors.emplace_back(
+                    "update_signed_multiply_flags requires i32 or i64");
+            }
             break;
         case Opcode::UpdateShiftRightDoubleFlags:
             checkUse(operation.lhs, "original");
@@ -1294,9 +1709,10 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::UpdateBitTestFlags:
             checkUse(operation.lhs, "tested value");
-            if (operation.width != Width::I32) {
+            if (operation.width != Width::I32 &&
+                operation.width != Width::I64) {
                 errors.emplace_back(
-                    "update_bit_test_flags currently requires i32");
+                    "update_bit_test_flags requires i32 or i64");
             }
             break;
         case Opcode::UpdateShiftLeftFlags:
@@ -1316,9 +1732,21 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::UpdateRotateLeftFlags:
             checkUse(operation.lhs, "result");
-            if (operation.width != Width::I16) {
+            if (operation.rhs) {
+                checkUse(operation.rhs, "rotate count");
+            }
+            if (operation.width != Width::I16 &&
+                operation.width != Width::I32 &&
+                operation.width != Width::I64) {
                 errors.emplace_back(
-                    "update_rotate_left_flags currently requires i16");
+                    "update_rotate_left_flags currently requires i16, i32, or i64");
+            }
+            break;
+        case Opcode::UpdateRotateRightFlags:
+            checkUse(operation.lhs, "result");
+            if (operation.width != Width::I64) {
+                errors.emplace_back(
+                    "update_rotate_right_flags currently requires i64");
             }
             break;
         case Opcode::ExitBlock:

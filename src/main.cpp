@@ -3,6 +3,7 @@
 #include "dbt/Dispatcher.h"
 #include "dbt/Translator.h"
 #include "darwin/Commpage.h"
+#include "darwin/Process.h"
 #include "darwin/SharedCache.h"
 #include "debug/Dump.h"
 #include "guest/Address.h"
@@ -342,17 +343,18 @@ void inspectMachO(int argc, char **argv) {
 int runMachO(const std::filesystem::path &path, const DumpOptions &options,
              std::size_t maximumBlocks) {
     const rosa::macho::Loader loader;
-    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
-    constexpr std::size_t stackSize = 1024U * 1024U;
     rosa::guest::AddressSpace addressSpace;
     const auto image = loader.mapImage(path, addressSpace);
     const auto pathString = path.string();
     const std::vector<std::string> arguments{pathString};
     const std::vector<std::string> environment;
-    const std::vector<std::string> apple{"executable_path=" + pathString};
+    const std::vector<std::string> apple{
+        "executable_path=" + pathString,
+        std::string(rosa::darwin::pointerMungeApple)};
     const rosa::guest::StartupStackBuilder stackBuilder;
-    const auto stack =
-        stackBuilder.build(addressSpace, stackBase, stackSize, arguments, environment, apple);
+    const auto stack = stackBuilder.build(
+        addressSpace, rosa::darwin::initialUserStackBase,
+        rosa::darwin::initialUserStackSize, arguments, environment, apple);
     rosa::x86::X86State state;
     state.rip = image.entryPoint.value;
     state.rsp = stack.stackPointer.value;
@@ -383,9 +385,6 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
     constexpr std::uint64_t standaloneDyldSlide = 0x00007FF800000000ULL;
     constexpr std::uint64_t cacheAwareStandaloneDyldSlide =
         0x00007FF700000000ULL;
-    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
-    constexpr std::size_t stackSize = 1024U * 1024U;
-
     const auto executableFile = rosa::macho::MachOFile::open(executablePath);
     std::optional<rosa::macho::MachOFile> dyldFile;
     if (dyldPath) {
@@ -423,16 +422,20 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
         dyldString));
     rosa::darwin::mapX86Commpage(
         addressSpace, rosa::darwin::sampleHostContinuousTimebase(),
+        rosa::darwin::sampleHostBootTimeUsec(),
         rosa::darwin::sampleHostDyldFlags());
     const std::vector<std::string> arguments{executableString};
     const std::vector<std::string> environment;
-    std::vector<std::string> apple{"executable_path=" + executableString};
+    std::vector<std::string> apple{
+        "executable_path=" + executableString,
+        std::string(rosa::darwin::pointerMungeApple)};
     if (dyldPath) {
         apple.push_back("dyld_file=" + dyldPath->string());
     }
     const rosa::guest::StartupStackBuilder stackBuilder;
     const auto stack =
-        stackBuilder.build(addressSpace, stackBase, stackSize, arguments,
+        stackBuilder.build(addressSpace, rosa::darwin::initialUserStackBase,
+                           rosa::darwin::initialUserStackSize, arguments,
                            environment, apple, executable.loadAddress);
 
     rosa::x86::X86State state;
@@ -450,7 +453,9 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
     // after every preceding supported instruction has executed as generated ARM64.
     rosa::dbt::Dispatcher dispatcher(addressSpace, 1,
                                      &rosa::darwin::sampleX86TimestampCounter,
-                                     sharedCache ? &*sharedCache : nullptr);
+                                     sharedCache ? &*sharedCache : nullptr,
+                                     executableFile.uuid().value_or(
+                                         std::array<std::uint8_t, 16>{}));
     try {
         const auto result = dispatcher.run(state, maximumProbeBlocks);
         dumpCachedBlocks(dispatcher, options);

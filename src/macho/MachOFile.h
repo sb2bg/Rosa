@@ -2,6 +2,7 @@
 
 #include "guest/Address.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -14,6 +15,7 @@ namespace rosa::macho {
 
 inline constexpr std::uint32_t lcSegment64 = 0x19;
 inline constexpr std::uint32_t lcUnixThread = 0x5;
+inline constexpr std::uint32_t lcUuid = 0x1B;
 inline constexpr std::uint32_t lcMain = 0x80000028U;
 inline constexpr std::uint32_t mhExecute = 0x2;
 inline constexpr std::uint32_t mhDylinker = 0x7;
@@ -45,6 +47,10 @@ class MachOFile {
     [[nodiscard]] const std::vector<LoadCommand> &loadCommands() const noexcept {
         return loadCommands_;
     }
+    [[nodiscard]] const std::optional<std::array<std::uint8_t, 16>> &
+    uuid() const noexcept {
+        return uuid_;
+    }
     [[nodiscard]] guest::GuestAddress entryPoint() const;
     [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept { return bytes_; }
 
@@ -54,6 +60,7 @@ class MachOFile {
     std::uint32_t fileType_{};
     std::vector<Segment> segments_;
     std::vector<LoadCommand> loadCommands_;
+    std::optional<std::array<std::uint8_t, 16>> uuid_;
     std::optional<std::uint64_t> mainEntryFileOffset_;
     std::optional<guest::GuestAddress> unixThreadEntry_;
 };

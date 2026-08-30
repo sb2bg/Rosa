@@ -7,6 +7,7 @@
 #include "guest/AddressSpace.h"
 #include "x86/Registers.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -43,8 +44,10 @@ class Dispatcher {
         guest::AddressSpace &addressSpace,
         std::size_t maximumInstructionsPerBlock = std::numeric_limits<std::size_t>::max(),
         TimestampCounterReader timestampCounterReader = nullptr,
-        const darwin::GuestSharedCache *sharedCache = nullptr)
-        : addressSpace_(addressSpace), syscallDispatcher_(sharedCache),
+        const darwin::GuestSharedCache *sharedCache = nullptr,
+        const std::array<std::uint8_t, 16> &executableUuid = {})
+        : addressSpace_(addressSpace),
+          syscallDispatcher_(sharedCache, executableUuid),
           sharedCache_(sharedCache),
           maximumInstructionsPerBlock_(maximumInstructionsPerBlock),
           timestampCounterReader_(timestampCounterReader) {}

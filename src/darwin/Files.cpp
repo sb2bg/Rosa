@@ -78,6 +78,38 @@ GuestFileDescriptor GuestFileSpace::openReadOnlyFile(
     return descriptor;
 }
 
+GuestFileDescriptor GuestFileSpace::openRandomDevice(std::uint32_t flags) {
+    if (nextDescriptor_ == std::numeric_limits<std::int32_t>::max()) {
+        throw std::runtime_error("guest file-descriptor namespace exhausted");
+    }
+    const GuestFileDescriptor descriptor{nextDescriptor_++};
+    files_.emplace(descriptor,
+                   GuestOpenFile{
+                       .descriptor = descriptor,
+                       .descriptionId = nextDescriptionId_++,
+                       .kind = GuestFileKind::RandomDevice,
+                       .guestPath = "/dev/urandom",
+                       .flags = flags,
+                   });
+    return descriptor;
+}
+
+GuestFileDescriptor GuestFileSpace::openUnixDatagramSocket() {
+    if (nextDescriptor_ == std::numeric_limits<std::int32_t>::max()) {
+        throw std::runtime_error("guest file-descriptor namespace exhausted");
+    }
+    const GuestFileDescriptor descriptor{nextDescriptor_++};
+    files_.emplace(descriptor,
+                   GuestOpenFile{
+                       .descriptor = descriptor,
+                       .descriptionId = nextDescriptionId_++,
+                       .kind = GuestFileKind::UnixDatagramSocket,
+                       .guestPath = {},
+                       .flags = 0,
+                   });
+    return descriptor;
+}
+
 std::optional<GuestFileDescriptor> GuestFileSpace::duplicate(
     GuestFileDescriptor descriptor) {
     const auto *source = lookup(descriptor);

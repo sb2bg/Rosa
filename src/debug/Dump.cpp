@@ -31,6 +31,13 @@ std::string valueName(ir::ValueId value) { return "%" + std::to_string(value.val
 
 std::string registerOperandName(x86::RegisterOperand operand) {
     if (operand.width == 8) {
+        if (operand.byteOffset == 1) {
+            constexpr std::array highByteNames{"ah", "ch", "dh", "bh"};
+            const auto encoding = static_cast<std::size_t>(operand.reg);
+            if (encoding < highByteNames.size()) {
+                return highByteNames[encoding];
+            }
+        }
         constexpr std::array byteNames{
             "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil"};
         const auto encoding = static_cast<std::size_t>(operand.reg);
@@ -61,6 +68,8 @@ std::string registerOperandName(x86::RegisterOperand operand) {
 
 const char *conditionName(x86::Condition condition) {
     switch (condition) {
+    case x86::Condition::Overflow:
+        return "o";
     case x86::Condition::Equal:
         return "e";
     case x86::Condition::NotEqual:
@@ -180,7 +189,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 stream << x86::registerName(memory.base);
             }
             if (memory.index) {
-                stream << '+' << x86::registerName(*memory.index) << '*'
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
             }
             if (memory.displacement < 0) {
@@ -216,7 +228,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 stream << x86::registerName(memory.base);
             }
             if (memory.index) {
-                stream << '+' << x86::registerName(*memory.index) << '*'
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
             }
             if (memory.displacement < 0) {
@@ -257,27 +272,73 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << "movsx " << registerOperandName(destination)
-                   << ", byte [" << x86::registerName(memory.base);
+                   << (memory.width == 8 ? ", byte [" : ", word [");
+            if (memory.segment == x86::Segment::Gs) {
+                stream << "gs:";
+            }
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
-                stream << "+0x" << memory.displacement;
+                if (memory.hasBase || memory.index || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                const auto target = instruction.address.value +
+                                    instruction.length +
+                                    static_cast<std::uint64_t>(
+                                        memory.displacement);
+                stream << " ; 0x" << target;
+            }
             break;
         }
         case x86::Opcode::CmpxchgMemReg: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "lock cmpxchg dword [" << x86::registerName(memory.base);
+            stream << "lock cmpxchg "
+                   << (memory.width == 32 ? "dword" : "qword") << " [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
-                stream << "+0x" << memory.displacement;
+                if (memory.hasBase || memory.index || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
             }
             stream << "], "
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::Cmpxchg16bMem: {
@@ -297,15 +358,37 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << "xchg " << (memory.width == 32 ? "dword" : "qword")
-                   << " [" << x86::registerName(memory.base);
+                   << " [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.ripRelative || memory.hasBase) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
-                stream << "+0x" << memory.displacement;
+                if (memory.ripRelative || memory.hasBase || memory.index) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
             }
             stream << "], "
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::LockAddMemReg: {
@@ -316,6 +399,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 stream << "rip";
             } else {
                 stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
             }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
@@ -331,7 +420,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::LockXaddMemReg: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "lock xadd dword [" << x86::registerName(memory.base);
+            stream << "lock xadd "
+                   << (memory.width == 32 ? "dword" : "qword") << " ["
+                   << x86::registerName(memory.base);
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
@@ -348,7 +439,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto immediate =
                 std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            stream << "lock or dword [" << x86::registerName(memory.base);
+            stream << (memory.width == 16 ? "lock or word ["
+                                          : "lock or dword [")
+                   << x86::registerName(memory.base);
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
@@ -357,10 +450,15 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "], 0x" << immediate.value;
             break;
         }
-        case x86::Opcode::LockIncMem: {
+        case x86::Opcode::LockIncMem:
+        case x86::Opcode::LockDecMem: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "lock inc dword [" << x86::registerName(memory.base);
+            stream << (instruction.opcode == x86::Opcode::LockIncMem
+                           ? "lock inc dword ["
+                           : "lock dec dword [")
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
@@ -375,7 +473,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", " << (memory.width == 8 ? "byte" : "word") << " ["
-                   << x86::registerName(memory.base);
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
@@ -401,7 +500,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "movsxd "
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
-                   << ", dword [" << x86::registerName(memory.base);
+                   << ", dword ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
@@ -422,17 +523,29 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << (memory.width == 8    ? "mov byte ["
                        : memory.width == 16 ? "mov word ["
                        : memory.width == 32 ? "mov dword ["
-                                            : "mov qword [")
-                   << (memory.ripRelative ? "rip"
-                                          : x86::registerName(memory.base));
+                                            : "mov qword [");
+            if (memory.segment == x86::Segment::Gs) {
+                stream << "gs:";
+            }
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
             if (memory.index) {
-                stream << '+' << x86::registerName(*memory.index) << '*'
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
             }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
-                stream << "+0x" << memory.displacement;
+                if (memory.hasBase || memory.index || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
             }
             stream << "], 0x"
                    << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
@@ -496,7 +609,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "add "
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
-                   << ", [" << x86::registerName(memory.base);
+                   << ", ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
@@ -507,20 +622,46 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 stream << "+0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::AddMemReg: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "add qword [" << x86::registerName(memory.base);
+            stream << (memory.width == 32 ? "add dword [" : "add qword [");
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
-                stream << "+0x" << memory.displacement;
+                if (memory.hasBase || memory.index || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
             }
             stream << "], "
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(
+                                  memory.displacement);
+            }
             break;
         }
         case x86::Opcode::IncMem: {
@@ -529,22 +670,39 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                                   : memory.width == 16 ? "word"
                                   : memory.width == 32 ? "dword"
                                                        : "qword")
-                   << " [" << x86::registerName(memory.base);
+                   << " ["
+                   << (memory.ripRelative
+                           ? "rip"
+                           : memory.hasBase ? x86::registerName(memory.base)
+                                            : "");
             if (memory.index) {
-                stream << '+' << x86::registerName(*memory.index) << '*'
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
             }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
-                stream << "+0x" << memory.displacement;
+                if (memory.hasBase || memory.index || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::DecMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "dec " << (memory.width == 8 ? "byte" : "qword")
+            stream << "dec " << (memory.width == 8   ? "byte"
+                                  : memory.width == 32 ? "dword"
+                                                       : "qword")
                    << " [" << x86::registerName(memory.base);
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
@@ -573,6 +731,36 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::registerName(std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
                    << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::AdcRegImm:
+            stream << "adc "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]))
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[1])
+                          .value;
+            break;
+        case x86::Opcode::SbbRegImm:
+            stream << "sbb "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]))
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[1])
+                          .value;
+            break;
+        case x86::Opcode::SbbRegReg:
+            stream << "sbb "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]))
+                   << ", "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[1]));
+            break;
         case x86::Opcode::SubRegReg:
             stream << "sub "
                    << registerOperandName(
@@ -586,7 +774,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "sub "
                    << x86::registerName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]).reg)
-                   << ", [" << x86::registerName(memory.base);
+                   << ", ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index);
             }
@@ -596,6 +786,48 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 stream << "+0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
+            break;
+        }
+        case x86::Opcode::SubMemReg: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "sub "
+                   << (memory.width == 32 ? "dword" : "qword") << " [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                if (memory.hasBase || memory.index || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
+            }
+            stream << "], "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[1]));
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(
+                                  memory.displacement);
+            }
             break;
         }
         case x86::Opcode::ShlRegImm:
@@ -649,6 +881,20 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << ", 0x"
                    << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::RolRegCl:
+            stream << "rol "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]))
+                   << ", cl";
+            break;
+        case x86::Opcode::RorRegImm:
+            stream << "ror "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
+            break;
         case x86::Opcode::BswapReg:
             stream << "bswap "
                    << registerOperandName(
@@ -666,9 +912,32 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         case x86::Opcode::MulReg:
             stream << "mul "
-                   << x86::registerName(
-                          std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]));
             break;
+        case x86::Opcode::DivReg:
+            stream << "div "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]));
+            break;
+        case x86::Opcode::IdivReg:
+            stream << "idiv "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]));
+            break;
+        case x86::Opcode::DivMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "div dword [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::ImulRegReg:
             stream << "imul "
                    << registerOperandName(
@@ -704,6 +973,29 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << std::get<x86::ImmediateOperand>(
                           instruction.operands[2]).value;
             break;
+        case x86::Opcode::ImulRegMemImm: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "imul "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", " << (memory.width == 64 ? "qword" : "dword")
+                   << " [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[2]).value;
+            break;
+        }
         case x86::Opcode::ShrdRegRegImm:
             stream << "shrd "
                    << x86::registerName(
@@ -713,6 +1005,19 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(instruction.operands[1]).reg)
                    << ", 0x"
                    << std::get<x86::ImmediateOperand>(instruction.operands[2]).value;
+            break;
+        case x86::Opcode::ShldRegRegImm:
+            stream << "shld "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]))
+                   << ", "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[1]))
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[2]).value;
             break;
         case x86::Opcode::OrRegReg:
             stream << "or "
@@ -730,7 +1035,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(
                               instruction.operands[0]))
                    << ", " << (memory.width == 8 ? "byte" : "dword")
-                   << " [" << x86::registerName(memory.base);
+                   << " ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
@@ -741,14 +1048,31 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 stream << "+0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                const auto target = instruction.address.value +
+                                    instruction.length +
+                                    static_cast<std::uint64_t>(
+                                        memory.displacement);
+                stream << " ; 0x" << target;
+            }
             break;
         }
         case x86::Opcode::OrMemReg: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "or byte [" << x86::registerName(memory.base);
+            stream << (memory.width == 8    ? "or byte ["
+                       : memory.width == 32 ? "or dword ["
+                                            : "or qword [");
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
             if (memory.index) {
-                stream << '+' << x86::registerName(*memory.index);
+                if (memory.ripRelative || memory.hasBase) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index);
                 if (memory.scale != 1) {
                     stream << '*' << static_cast<unsigned>(memory.scale);
                 }
@@ -767,7 +1091,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::OrMemImm: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "or byte [" << x86::registerName(memory.base);
+            stream << "or byte ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
@@ -776,6 +1102,13 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "], 0x"
                    << std::get<x86::ImmediateOperand>(
                           instruction.operands[1]).value;
+            if (memory.ripRelative) {
+                const auto target = instruction.address.value +
+                                    instruction.length +
+                                    static_cast<std::uint64_t>(
+                                        memory.displacement);
+                stream << " ; 0x" << target;
+            }
             break;
         }
         case x86::Opcode::OrRegImm:
@@ -826,6 +1159,35 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
+        case x86::Opcode::AndMemReg: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << (memory.width == 32 ? "and dword [" : "and qword [");
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.ripRelative || memory.hasBase) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[1]));
+            break;
+        }
         case x86::Opcode::BitScanForwardRegReg:
             stream << "bsf "
                    << registerOperandName(
@@ -840,6 +1202,19 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", 0x"
                    << std::get<x86::ImmediateOperand>(instruction.operands[1])
+                          .value;
+            break;
+        case x86::Opcode::BitSetRegImm:
+        case x86::Opcode::BitResetRegImm:
+            stream << (instruction.opcode == x86::Opcode::BitSetRegImm
+                           ? "bts "
+                           : "btr ")
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]))
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[1])
                           .value;
             break;
         case x86::Opcode::BitTestRegReg:
@@ -880,6 +1255,44 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", 0x" << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::AndMemImm: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << (memory.width == 8   ? "and byte ["
+                       : memory.width == 16 ? "and word ["
+                                            : "and qword [");
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                if (memory.hasBase || memory.index || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
+            }
+            stream << "], 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[1])
+                          .value;
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(
+                                  memory.displacement);
+            }
+            break;
+        }
         case x86::Opcode::TestRegReg:
             stream << "test "
                    << registerOperandName(
@@ -896,6 +1309,42 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
+        case x86::Opcode::TestMemReg: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "test "
+                   << (memory.width == 8   ? "byte"
+                       : memory.width == 32 ? "dword"
+                                            : "qword")
+                   << " [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                if (memory.hasBase || memory.ripRelative || memory.index) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
+            }
+            stream << "], "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[1]));
+            break;
+        }
         case x86::Opcode::TestRegImm:
             stream << "test "
                    << registerOperandName(
@@ -953,6 +1402,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
                    << ", [";
+            if (memory.segment == x86::Segment::Gs) {
+                stream << "gs:";
+            }
             if (memory.ripRelative) {
                 stream << "rip";
             } else if (memory.hasBase) {
@@ -983,13 +1435,28 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         }
         case x86::Opcode::CmpMemReg: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "cmp " << (memory.width == 8 ? "byte " : "") << '['
-                   << x86::registerName(memory.base);
+            stream << "cmp "
+                   << (memory.width == 8    ? "byte "
+                       : memory.width == 16 ? "word "
+                                            : "")
+                   << '[';
+            if (memory.segment == x86::Segment::Gs) {
+                stream << "gs:";
+            }
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
             }
-            if (memory.displacement < 0) {
+            if (!memory.hasBase && !memory.ripRelative && !memory.index &&
+                memory.displacement != 0) {
+                stream << "0x"
+                       << static_cast<std::uint64_t>(memory.displacement);
+            } else if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
                 stream << "+0x" << memory.displacement;
@@ -997,6 +1464,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "], "
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::CmpMemImm: {
@@ -1069,6 +1541,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             } else {
                 stream << x86::registerName(memory.base);
             }
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
@@ -1092,6 +1570,44 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[1]));
             break;
+        case x86::Opcode::CmovccRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "cmov" << conditionName(*instruction.condition) << ' '
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", "
+                   << (memory.width == 32 ? "dword" : "qword") << " [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.ripRelative || memory.hasBase) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                if (memory.ripRelative || memory.hasBase || memory.index) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
+            }
+            stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
+            break;
+        }
         case x86::Opcode::XorpsRegReg:
             stream << "xorps "
                    << x86::xmmRegisterName(
@@ -1099,6 +1615,43 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << ", "
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
+            break;
+        case x86::Opcode::VxorpsRegRegReg:
+        case x86::Opcode::VxorpsYmmRegRegReg: {
+            const auto ymm =
+                instruction.opcode == x86::Opcode::VxorpsYmmRegRegReg;
+            const auto registerName = [ymm](x86::XmmRegister reg) {
+                return ymm ? x86::ymmRegisterName(reg)
+                           : x86::xmmRegisterName(reg);
+            };
+            stream << "vxorps "
+                   << registerName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << registerName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg)
+                   << ", "
+                   << registerName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[2])
+                              .reg);
+            break;
+        }
+        case x86::Opcode::VbroadcastssYmmReg:
+            stream << "vbroadcastss "
+                   << x86::ymmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
             break;
         case x86::Opcode::PxorRegReg:
             stream << "pxor "
@@ -1115,13 +1668,20 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0]).reg)
-                   << ", [" << x86::registerName(memory.base);
+                   << ", ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
                 stream << "+0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::PtestRegReg:
@@ -1158,6 +1718,78 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         case x86::Opcode::PcmpeqdRegReg:
             stream << "pcmpeqd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
+        case x86::Opcode::PslldRegImm:
+            stream << "pslld "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << std::dec
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[1])
+                          .value;
+            break;
+        case x86::Opcode::PsrlqRegImm:
+            stream << "psrlq "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << std::dec
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[1])
+                          .value;
+            break;
+        case x86::Opcode::PadddRegReg:
+            stream << "paddd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
+        case x86::Opcode::PaddqRegReg:
+            stream << "paddq "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
+        case x86::Opcode::PhadddRegReg:
+            stream << "phaddd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
+        case x86::Opcode::PandRegReg:
+            stream << "pand "
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0])
@@ -1216,6 +1848,44 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
+        case x86::Opcode::PmovsxbdRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "pmovsxbd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", dword [rip";
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "] ; 0x"
+                   << instruction.address.value + instruction.length +
+                          static_cast<std::uint64_t>(memory.displacement);
+            break;
+        }
+        case x86::Opcode::PmovsxdqRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "pmovsxdq "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", qword [rip";
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "] ; 0x"
+                   << instruction.address.value + instruction.length +
+                          static_cast<std::uint64_t>(memory.displacement);
+            break;
+        }
         case x86::Opcode::PshufbRegReg:
             stream << "pshufb "
                    << x86::xmmRegisterName(
@@ -1226,6 +1896,24 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[1]).reg);
             break;
+        case x86::Opcode::PshufbRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "pshufb "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0]).reg)
+                   << ", [rip";
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "] ; 0x"
+                   << instruction.address.value + instruction.length +
+                          static_cast<std::uint64_t>(memory.displacement);
+            break;
+        }
         case x86::Opcode::PshufdRegRegImm:
             stream << "pshufd "
                    << x86::xmmRegisterName(
@@ -1235,6 +1923,34 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg)
                    << ", 0x"
                    << std::get<x86::ImmediateOperand>(instruction.operands[2]).value;
+            break;
+        case x86::Opcode::ShufpdRegRegImm:
+            stream << "shufpd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg)
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[2])
+                          .value;
+            break;
+        case x86::Opcode::PunpcklwdRegReg:
+            stream << "punpcklwd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
             break;
         case x86::Opcode::PinsrbXmmReg:
             stream << "pinsrb "
@@ -1269,6 +1985,45 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           instruction.operands[2]).value;
             break;
         }
+        case x86::Opcode::PinsrdXmmReg:
+            stream << (std::get<x86::RegisterOperand>(
+                              instruction.operands[1])
+                                  .width == 64
+                           ? "pinsrq "
+                           : "pinsrd ")
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[1]))
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[2])
+                          .value;
+            break;
+        case x86::Opcode::ExtractpsMemXmmImm: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "extractps dword [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg)
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[2])
+                          .value;
+            break;
+        }
         case x86::Opcode::PblendwRegRegImm:
             stream << "pblendw "
                    << x86::xmmRegisterName(
@@ -1298,13 +2053,20 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           instruction.operands[2])
                           .value;
             break;
-        case x86::Opcode::MovapsMemReg: {
+        case x86::Opcode::MovapsMemReg:
+        case x86::Opcode::MovapdMemReg: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "movaps [";
+            stream << (instruction.opcode == x86::Opcode::MovapdMemReg
+                           ? "movapd ["
+                           : "movaps [");
             if (memory.ripRelative) {
                 stream << "rip";
             } else {
                 stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
             }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
@@ -1338,8 +2100,86 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
         }
+        case x86::Opcode::VmovupsMemReg: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "vmovups ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
+        }
+        case x86::Opcode::VmovupsYmmRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "vmovups "
+                   << x86::ymmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
+            break;
+        }
+        case x86::Opcode::VmovupsYmmMemReg:
+        case x86::Opcode::VmovapsYmmMemReg: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << (instruction.opcode == x86::Opcode::VmovapsYmmMemReg
+                           ? "vmovaps ["
+                           : "vmovups [")
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], "
+                   << x86::ymmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
+        }
+        case x86::Opcode::MovapdRegReg:
         case x86::Opcode::MovdqaRegReg:
-            stream << "movdqa "
+            stream << (instruction.opcode == x86::Opcode::MovapdRegReg
+                           ? "movapd "
+                           : "movdqa ")
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0])
@@ -1376,10 +2216,46 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(
                               instruction.operands[1]));
             break;
-        case x86::Opcode::MovdMemXmm: {
+        case x86::Opcode::MovdXmmMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "movd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", dword ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
+        case x86::Opcode::MovdMemXmm:
+        case x86::Opcode::MovssMemXmm: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "movd dword [" << x86::registerName(memory.base);
+            stream << (instruction.opcode == x86::Opcode::MovssMemXmm
+                           ? "movss dword ["
+                           : "movd dword [")
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
@@ -1392,6 +2268,17 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               .reg);
             break;
         }
+        case x86::Opcode::MovdRegXmm:
+            stream << "movd "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]))
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
         case x86::Opcode::MovdqaMemReg: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
@@ -1431,13 +2318,39 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         }
         case x86::Opcode::MovapsRegMem:
+        case x86::Opcode::MovapdRegMem:
         case x86::Opcode::MovupsRegMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << (instruction.opcode == x86::Opcode::MovapsRegMem
                            ? "movaps "
+                       : instruction.opcode == x86::Opcode::MovapdRegMem
+                           ? "movapd "
                            : "movups ")
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg)
+                   << ", ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
+        case x86::Opcode::VmovupsRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "vmovups "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
                    << ", ["
                    << (memory.ripRelative ? "rip"
                                           : x86::registerName(memory.base));
@@ -1458,7 +2371,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "movdqu "
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg)
-                   << ", [" << x86::registerName(memory.base);
+                   << ", ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
@@ -1469,6 +2384,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 stream << "+0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::RepMovsb:
@@ -1477,6 +2397,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::MovqMemXmm: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << "movq [" << x86::registerName(memory.base);
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index) << '*'
+                       << static_cast<unsigned>(memory.scale);
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
@@ -1494,18 +2418,45 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0]).reg)
-                   << ", qword [" << x86::registerName(memory.base);
+                   << ", qword [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.ripRelative || memory.hasBase) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
                 stream << "+0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::MovdquMemReg: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "movdqu [" << x86::registerName(memory.base);
+            stream << "movdqu ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
@@ -1514,6 +2465,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "], "
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::Push:
@@ -1521,9 +2477,26 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             if (std::holds_alternative<x86::ImmediateOperand>(instruction.operands[0])) {
                 stream << "0x"
                        << std::get<x86::ImmediateOperand>(instruction.operands[0]).value;
-            } else {
+            } else if (std::holds_alternative<x86::RegisterOperand>(
+                           instruction.operands[0])) {
                 stream << x86::registerName(
                     std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[0]);
+                stream << '[' << x86::registerName(memory.base);
+                if (memory.index) {
+                    stream << '+' << x86::registerName(*memory.index);
+                    if (memory.scale != 1) {
+                        stream << '*' << static_cast<unsigned>(memory.scale);
+                    }
+                }
+                if (memory.displacement < 0) {
+                    stream << "-0x" << std::hex << -memory.displacement;
+                } else if (memory.displacement > 0) {
+                    stream << "+0x" << std::hex << memory.displacement;
+                }
+                stream << ']';
             }
             break;
         case x86::Opcode::Pop:
@@ -1531,12 +2504,30 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::registerName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
             break;
+        case x86::Opcode::Leave:
+            stream << "leave";
+            break;
         case x86::Opcode::Nop:
             stream << "nop";
+            break;
+        case x86::Opcode::Vzeroupper:
+            stream << "vzeroupper";
             break;
         case x86::Opcode::Lfence:
             stream << "lfence";
             break;
+        case x86::Opcode::SidtMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "sidt [" << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::Rdtsc:
             stream << "rdtsc";
             break;
@@ -1548,6 +2539,28 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::registerName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]).reg);
             break;
+        case x86::Opcode::JmpMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "jmp qword [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
+            break;
+        }
         case x86::Opcode::JccRelative:
             stream << 'j' << conditionName(*instruction.condition) << " 0x"
                    << instruction.branchTarget->value;
@@ -1562,13 +2575,26 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         case x86::Opcode::CallMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "call [" << x86::registerName(memory.base);
+            stream << "call qword ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {
                 stream << "+0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
             break;
         }
         case x86::Opcode::Syscall:
@@ -1608,6 +2634,11 @@ std::string dumpIr(const ir::Block &block) {
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << '.'
                    << (operation.immediate == 0 ? "low" : "high");
             break;
+        case ir::Opcode::ReadGuestYmmUpperLane:
+            stream << "read_guest_ymm_upper_lane.i64 "
+                   << x86::ymmRegisterName(*operation.guestXmmRegister) << '.'
+                   << (operation.immediate == 0 ? "low" : "high");
+            break;
         case ir::Opcode::WriteGuestReg:
             stream << "write_guest_reg." << widthName(operation.width) << ' '
                    << x86::registerName(*operation.guestRegister) << ", "
@@ -1617,13 +2648,23 @@ std::string dumpIr(const ir::Block &block) {
             stream << "conditional_move_guest_reg."
                    << conditionName(*operation.condition) << '.'
                    << widthName(operation.width) << ' '
-                   << x86::registerName(*operation.guestRegister) << ", "
-                   << x86::registerName(
-                          static_cast<x86::Register>(operation.immediate));
+                   << x86::registerName(*operation.guestRegister) << ", ";
+            if (operation.lhs) {
+                stream << valueName(*operation.lhs);
+            } else {
+                stream << x86::registerName(
+                    static_cast<x86::Register>(operation.immediate));
+            }
             break;
         case ir::Opcode::WriteGuestXmmLane:
             stream << "write_guest_xmm_lane.i64 "
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << '.'
+                   << (operation.immediate == 0 ? "low" : "high") << ", "
+                   << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::WriteGuestYmmUpperLane:
+            stream << "write_guest_ymm_upper_lane.i64 "
+                   << x86::ymmRegisterName(*operation.guestXmmRegister) << '.'
                    << (operation.immediate == 0 ? "low" : "high") << ", "
                    << valueName(*operation.lhs);
             break;
@@ -1717,8 +2758,18 @@ std::string dumpIr(const ir::Block &block) {
                    << valueName(*operation.lhs) << ", "
                    << valueName(*operation.rhs);
             break;
+        case ir::Opcode::SubGuestMemory:
+            stream << "sub_guest_memory." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", "
+                   << valueName(*operation.rhs);
+            break;
         case ir::Opcode::OrGuestMemory:
             stream << "or_guest_memory." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", "
+                   << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::AndGuestMemory:
+            stream << "and_guest_memory." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", "
                    << valueName(*operation.rhs);
             break;
@@ -1774,6 +2825,14 @@ std::string dumpIr(const ir::Block &block) {
                    << widthName(operation.width) << ' '
                    << valueName(*operation.lhs);
             break;
+        case ir::Opcode::LockedDecrementGuestMemory:
+            stream << "locked_decrement_guest_memory."
+                   << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::StoreGuestIdtr:
+            stream << "store_guest_idtr " << valueName(*operation.lhs);
+            break;
         case ir::Opcode::StoreGuest:
             stream << "store_guest." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", " << valueName(*operation.rhs);
@@ -1783,9 +2842,32 @@ std::string dumpIr(const ir::Block &block) {
                    << x86::xmmRegisterName(*operation.guestXmmRegister)
                    << (operation.immediate != 0 ? ", aligned" : ", unaligned");
             break;
+        case ir::Opcode::LoadGuestSignExtendedBytesXmm:
+            stream << "load_guest_sign_extended_bytes_xmm "
+                   << valueName(*operation.lhs) << ", "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::LoadGuestSignExtendedDwordsXmm:
+            stream << "load_guest_sign_extended_dwords_xmm "
+                   << valueName(*operation.lhs) << ", "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::StoreGuestYmm:
+            stream << "store_guest_ymm.i256 " << valueName(*operation.lhs)
+                   << ", "
+                   << x86::ymmRegisterName(*operation.guestXmmRegister)
+                   << (operation.immediate != 0 ? ", aligned"
+                                                : ", unaligned");
+            break;
         case ir::Opcode::LoadGuestXmm:
             stream << "load_guest_xmm.i128 "
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
+                   << valueName(*operation.lhs)
+                   << (operation.immediate != 0 ? ", aligned" : ", unaligned");
+            break;
+        case ir::Opcode::LoadGuestYmm:
+            stream << "load_guest_ymm.i256 "
+                   << x86::ymmRegisterName(*operation.guestXmmRegister) << ", "
                    << valueName(*operation.lhs)
                    << (operation.immediate != 0 ? ", aligned" : ", unaligned");
             break;
@@ -1819,6 +2901,25 @@ std::string dumpIr(const ir::Block &block) {
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
                    << x86::xmmRegisterName(*operation.sourceGuestXmmRegister);
             break;
+        case ir::Opcode::ShiftLeftXmmDwords:
+            stream << "shift_left_xmm_dwords.i32 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister)
+                   << ", " << operation.immediate;
+            break;
+        case ir::Opcode::AddXmmDwords:
+            stream << "add_xmm_dwords.i32 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          *operation.sourceGuestXmmRegister);
+            break;
+        case ir::Opcode::HorizontalAddXmmDwords:
+            stream << "horizontal_add_xmm_dwords.i32 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          *operation.sourceGuestXmmRegister);
+            break;
         case ir::Opcode::AndNotXmm:
             stream << "and_not_xmm "
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
@@ -1832,9 +2933,13 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::ShuffleXmmBytes:
             stream << "shuffle_xmm_bytes "
                    << x86::xmmRegisterName(*operation.guestXmmRegister)
-                   << ", "
-                   << x86::xmmRegisterName(
-                          *operation.sourceGuestXmmRegister);
+                   << ", ";
+            if (operation.lhs) {
+                stream << '%' << operation.lhs->value;
+            } else {
+                stream << x86::xmmRegisterName(
+                    *operation.sourceGuestXmmRegister);
+            }
             break;
         case ir::Opcode::ShuffleXmmDwords:
             stream << "shuffle_xmm_dwords "
@@ -1858,6 +2963,13 @@ std::string dumpIr(const ir::Block &block) {
                           *operation.sourceGuestXmmRegister)
                    << ", 0x" << operation.immediate;
             break;
+        case ir::Opcode::UnpackLowXmmWords:
+            stream << "unpack_low_xmm_words.i16 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          *operation.sourceGuestXmmRegister);
+            break;
         case ir::Opcode::BitScanForward:
             stream << "bit_scan_forward." << widthName(operation.width) << ' '
                    << x86::registerName(*operation.guestRegister) << ", "
@@ -1868,6 +2980,18 @@ std::string dumpIr(const ir::Block &block) {
                    << x86::registerName(*operation.guestRegister) << ", "
                    << x86::registerName(
                           static_cast<x86::Register>(operation.immediate));
+            break;
+        case ir::Opcode::DivideUnsignedByte:
+            stream << "divide_unsigned_byte " << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::DivideUnsignedDword:
+            stream << "divide_unsigned_dword " << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::DivideUnsignedQword:
+            stream << "divide_unsigned_qword " << valueName(*operation.lhs);
+            break;
+        case ir::Opcode::DivideSignedDword:
+            stream << "divide_signed_dword " << valueName(*operation.lhs);
             break;
         case ir::Opcode::LoadGuest:
             stream << "load_guest." << widthName(operation.width) << ' '
@@ -1882,6 +3006,12 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::UpdateAddFlags:
             stream << "update_add_flags." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", " << valueName(*operation.rhs) << ", "
+                   << valueName(*operation.third);
+            break;
+        case ir::Opcode::UpdateAdcFlags:
+            stream << "update_adc_flags." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", "
+                   << valueName(*operation.rhs) << ", "
                    << valueName(*operation.third);
             break;
         case ir::Opcode::UpdateIncFlags:
@@ -1930,6 +3060,15 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::UpdateRotateLeftFlags:
             stream << "update_rotate_left_flags." << widthName(operation.width)
+                   << ' ' << valueName(*operation.lhs) << ", ";
+            if (operation.rhs) {
+                stream << valueName(*operation.rhs);
+            } else {
+                stream << std::dec << operation.immediate;
+            }
+            break;
+        case ir::Opcode::UpdateRotateRightFlags:
+            stream << "update_rotate_right_flags." << widthName(operation.width)
                    << ' ' << valueName(*operation.lhs) << ", " << std::dec
                    << operation.immediate;
             break;

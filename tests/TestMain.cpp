@@ -29,12 +29,15 @@
 #include <fcntl.h>
 #include <iomanip>
 #include <iostream>
+#include <mach/mach.h>
 #include <sstream>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <utility>
@@ -3543,6 +3546,60 @@ void testLegacyMov32ImmediateGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "legacy MOV r32 changed flags");
 }
 
+void testLegacyMov16ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0xBA, 0x01, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AA5731ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegImm,
+           "legacy MOV r16, imm16 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "legacy MOV r16, imm16 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx &&
+               destination.width == 16,
+           "legacy MOV DX destination differs");
+    expect(immediate.width == 16 && immediate.value == 0x101,
+           "legacy MOV DX immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("mov dx, 0x101") !=
+               std::string::npos,
+           "legacy MOV DX dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AA5731ULL});
+    rosa::x86::X86State state;
+    state.rdx = 0xAABBCCDDEEFF7788ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdx, std::uint64_t{0xAABBCCDDEEFF0101ULL},
+                "legacy MOV DX did not preserve upper register bits");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "legacy MOV DX changed flags");
+
+    constexpr std::array<std::uint8_t, 6> extendedCode{
+        0x66, 0x41, 0xBC, 0xEF, 0xBE, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    const auto extendedDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            extendedDecoded[0].operands[0]);
+    expect(extendedDestination.reg == rosa::x86::Register::R12 &&
+               extendedDestination.width == 16,
+           "REX.B MOV R12W destination differs");
+    const auto extendedBlock = translator.translate(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State extendedState;
+    extendedState.r12 = 0x1122334455667788ULL;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.r12, std::uint64_t{0x112233445566BEEFULL},
+                "REX.B MOV R12W did not preserve upper register bits");
+}
+
 void testLegacyMovLowByteImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 3> code{0xB1, 0x01, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3848,6 +3905,80 @@ void testPushRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "register PUSH changed guest flags");
 }
 
+void testPushGuestMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> observedCode{
+        0x41, 0xFF, 0x74, 0x24, 0x10, 0xC3}; // push qword [r12+0x10]
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802AC0D22ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::Push,
+           "PUSH guest memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "PUSH guest memory length differs");
+    const auto source =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(source.base == rosa::x86::Register::R12 &&
+               source.displacement == 0x10 && source.width == 64 &&
+               !source.index,
+           "PUSH [r12+disp8] source differs");
+    expect(rosa::debug::dumpX86(decoded).find("push [r12+0x10]") !=
+               std::string::npos,
+           "PUSH guest memory dump differs");
+
+    constexpr rosa::guest::GuestAddress dataBase{0x5000};
+    constexpr rosa::guest::GuestAddress stackBase{0x8000};
+    constexpr auto stackTop = stackBase.value + rosa::guest::guestPageSize;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(dataBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::uint64_t pushedValue = 0x0123456789ABCDEFULL;
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{dataBase.value + 0x10}, pushedValue);
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    rosa::x86::X86State state;
+    state.rip = observedRip.value;
+    state.r12 = dataBase.value;
+    state.rsp = stackTop;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rsp, stackTop - 8,
+                "PUSH guest memory did not decrement RSP");
+    expectEqual(addressSpace.readU64(
+                    rosa::guest::GuestAddress{stackTop - 8}),
+                pushedValue, "PUSH guest memory stored the wrong value");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PUSH guest memory changed flags");
+
+    state.rip = observedRip.value;
+    state.r12 = 0xA000;
+    state.rsp = stackTop;
+    state.rflags = 0x202;
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackTop - 8}, UINT64_MAX);
+    bool sourceFaulted = false;
+    try {
+        static_cast<void>(block.execute(state, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        sourceFaulted = std::string_view(error.what()).find("unmapped") !=
+                        std::string_view::npos;
+    }
+    expect(sourceFaulted, "PUSH guest memory accepted an unmapped source");
+    expectEqual(state.rsp, stackTop,
+                "source-faulted PUSH guest memory changed RSP");
+    expectEqual(addressSpace.readU64(
+                    rosa::guest::GuestAddress{stackTop - 8}),
+                UINT64_MAX,
+                "source-faulted PUSH guest memory changed the stack");
+    expectEqual(state.rflags, std::uint64_t{0x202},
+                "source-faulted PUSH guest memory changed flags");
+}
+
 void testPopRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 2> popRbpCode{0x5D, 0xC3};
     constexpr std::array<std::uint8_t, 2> popRspCode{0x5C, 0xC3};
@@ -3905,6 +4036,62 @@ void testPopRegisterGeneratedExecution() {
                 "failed POP changed flags");
 }
 
+void testLeaveGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 2> code{0xC9, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802BEF23EULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::Leave,
+           "LEAVE opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{1},
+                "LEAVE length differs");
+    expect(rosa::debug::dumpX86(decoded).find("leave") != std::string::npos,
+           "LEAVE dump differs");
+
+    constexpr rosa::guest::GuestAddress stackPage{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress frame{
+        stackPage.value + 0x180};
+    constexpr std::uint64_t savedFrame = 0x0123456789ABCDEFULL;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        stackPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(frame, savedFrame);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State state;
+    state.rsp = stackPage.value + 0x80;
+    state.rbp = frame.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rsp, frame.value + sizeof(std::uint64_t),
+                "LEAVE produced the wrong stack pointer");
+    expectEqual(state.rbp, savedFrame,
+                "LEAVE popped the wrong frame pointer");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "LEAVE changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rsp = stackPage.value + 0x80;
+    faultState.rbp = frame.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "LEAVE accepted an unmapped saved-frame address");
+    expectEqual(faultState.rsp, frame.value,
+                "faulted LEAVE did not commit RSP = RBP first");
+    expectEqual(faultState.rbp, frame.value,
+                "faulted LEAVE changed RBP");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted LEAVE changed flags");
+}
+
 void testSubRegImm32GeneratedExecution() {
     constexpr std::array<std::uint8_t, 8> positive{
         0x48, 0x81, 0xEC, 0x58, 0x06, 0x00, 0x00, 0xC3,
@@ -3940,6 +4127,46 @@ void testSubRegImm32GeneratedExecution() {
                 "SUB r8, negative imm32 did not use sign extension");
     expectEqual(negativeState.rflags, std::uint64_t{0x13},
                 "SUB r8, negative imm32 flags differ");
+
+    constexpr std::array<std::uint8_t, 7> accumulatorCode{
+        0x48, 0x2D, 0x00, 0x10, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802B0C788ULL};
+    const auto accumulatorDecoded = decoder.decodeBlock(
+        accumulatorCode, observedRip);
+    expect(accumulatorDecoded[0].opcode == rosa::x86::Opcode::SubRegImm,
+           "SUB RAX, imm32 accumulator opcode differs");
+    expectEqual(accumulatorDecoded[0].length, std::uint8_t{6},
+                "SUB RAX, imm32 accumulator length differs");
+    const auto accumulatorDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            accumulatorDecoded[0].operands[0]);
+    expect(accumulatorDestination.reg == rosa::x86::Register::Rax &&
+               accumulatorDestination.width == 64,
+           "SUB RAX, imm32 accumulator destination differs");
+    expect(rosa::debug::dumpX86(accumulatorDecoded).find(
+               "sub rax, 0x1000") != std::string::npos,
+           "SUB RAX, imm32 accumulator dump differs");
+    const auto accumulatorBlock = translator.translate(
+        accumulatorCode, observedRip);
+    rosa::x86::X86State accumulatorState;
+    accumulatorState.rax = 0x2078;
+    accumulatorState.rflags = 0x8D7;
+    static_cast<void>(accumulatorBlock.execute(accumulatorState));
+    expectEqual(accumulatorState.rax, std::uint64_t{0x1078},
+                "SUB RAX, imm32 accumulator result differs");
+    expectEqual(accumulatorState.rflags, std::uint64_t{0x6},
+                "SUB RAX, imm32 accumulator flags differ");
+
+    constexpr std::array<std::uint8_t, 6> legacyAccumulatorCode{
+        0x2D, 0x00, 0x10, 0x00, 0x00, 0xC3};
+    const auto legacyAccumulatorBlock = translator.translate(
+        legacyAccumulatorCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State legacyAccumulatorState;
+    legacyAccumulatorState.rax = 0xAABBCCDD00002078ULL;
+    static_cast<void>(legacyAccumulatorBlock.execute(
+        legacyAccumulatorState));
+    expectEqual(legacyAccumulatorState.rax, std::uint64_t{0x1078},
+                "SUB EAX, imm32 accumulator did not zero-extend");
 }
 
 void testSubRegImm8GeneratedExecution() {
@@ -3958,6 +4185,329 @@ void testSubRegImm8GeneratedExecution() {
     static_cast<void>(block.execute(state));
     expectEqual(state.rsp, std::uint64_t{0xE8}, "SUB rsp, imm8 result differs");
     expectEqual(state.rflags, std::uint64_t{0x16}, "SUB rsp, imm8 flags differ");
+}
+
+void testSbbRegisterZeroGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x83, 0xD8, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802B05F33ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SbbRegImm,
+           "SBB EAX, 0 opcode differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 32 && immediate.value == 0,
+           "SBB EAX, 0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("sbb eax, 0x0") !=
+               std::string::npos,
+           "SBB EAX, 0 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802B05F33ULL});
+    rosa::x86::X86State borrowState;
+    borrowState.rax = 0xFFFFFFFF00000004ULL;
+    borrowState.rflags = 0x93;
+    static_cast<void>(block.execute(borrowState));
+    expectEqual(borrowState.rax, std::uint64_t{3},
+                "SBB EAX, 0 did not consume incoming carry");
+    expectEqual(borrowState.rflags, std::uint64_t{0x6},
+                "SBB EAX, 0 borrow result flags differ");
+
+    rosa::x86::X86State clearState;
+    clearState.rax = 0xFFFFFFFF00000004ULL;
+    clearState.rflags = 0x92;
+    static_cast<void>(block.execute(clearState));
+    expectEqual(clearState.rax, std::uint64_t{4},
+                "SBB EAX, 0 subtracted with carry clear");
+    expectEqual(clearState.rflags, std::uint64_t{0x2},
+                "SBB EAX, 0 carry-clear flags differ");
+
+    constexpr std::array<std::uint8_t, 5> observedCode{
+        0x48, 0x83, 0xDA, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C75C8CULL};
+    const auto observed = decoder.decodeBlock(observedCode, observedRip);
+    expect(observed[0].opcode == rosa::x86::Opcode::SbbRegImm,
+           "SBB RDX, 0 opcode differs");
+    expectEqual(observed[0].length, std::uint8_t{4},
+                "SBB RDX, 0 length differs");
+    const auto observedDestination =
+        std::get<rosa::x86::RegisterOperand>(observed[0].operands[0]);
+    expect(observedDestination.reg == rosa::x86::Register::Rdx &&
+               observedDestination.width == 64,
+           "SBB RDX, 0 destination differs");
+    expect(rosa::debug::dumpX86(observed).find("sbb rdx, 0x0") !=
+               std::string::npos,
+           "SBB RDX, 0 dump differs");
+
+    const auto observedBlock = translator.translate(observedCode, observedRip);
+    rosa::x86::X86State observedBorrowState;
+    observedBorrowState.rdx = 2;
+    observedBorrowState.rflags = 0x87;
+    static_cast<void>(observedBlock.execute(observedBorrowState));
+    expectEqual(observedBorrowState.rdx, std::uint64_t{1},
+                "SBB RDX, 0 did not consume incoming carry");
+    expectEqual(observedBorrowState.rflags, std::uint64_t{0x2},
+                "SBB RDX, 0 borrow result flags differ");
+
+    rosa::x86::X86State observedWrapState;
+    observedWrapState.rdx = 0;
+    observedWrapState.rflags = 0x87;
+    static_cast<void>(observedBlock.execute(observedWrapState));
+    expectEqual(observedWrapState.rdx, UINT64_MAX,
+                "SBB RDX, 0 wrap result differs");
+    expectEqual(observedWrapState.rflags, std::uint64_t{0x97},
+                "SBB RDX, 0 wrap flags differ");
+}
+
+void testSbbRegisterFromItselfGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0x19, 0xC0, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802D107F0ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SbbRegReg,
+           "SBB r32, r32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2},
+                "SBB r32, r32 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 32 && source.reg == destination.reg &&
+               source.width == destination.width,
+           "SBB EAX, EAX operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("sbb eax, eax") !=
+               std::string::npos,
+           "SBB EAX, EAX dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State clearState;
+    clearState.rax = 0xAABBCCDD12345678ULL;
+    clearState.rflags = 0x8D6;
+    static_cast<void>(block.execute(clearState));
+    expectEqual(clearState.rax, std::uint64_t{0},
+                "SBB EAX, EAX with clear carry did not produce zero");
+    expectEqual(clearState.rflags, std::uint64_t{0x46},
+                "SBB EAX, EAX clear-carry flags differ");
+
+    rosa::x86::X86State setState;
+    setState.rax = 0xAABBCCDD12345678ULL;
+    setState.rflags = 0x8D7;
+    static_cast<void>(block.execute(setState));
+    expectEqual(setState.rax, std::uint64_t{UINT32_MAX},
+                "SBB EAX, EAX with set carry did not produce -1");
+    expectEqual(setState.rflags, std::uint64_t{0x97},
+                "SBB EAX, EAX set-carry flags differ");
+}
+
+void testAdcRegisterZeroGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x41, 0x83, 0xD4, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{
+        0x7FF802C71B79ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AdcRegImm,
+           "ADC r12d, 0 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "ADC r12d, 0 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R12 &&
+               destination.width == 32 && immediate.value == 0,
+           "ADC r12d, 0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("adc r12d, 0x0") !=
+               std::string::npos,
+           "ADC r12d, 0 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State carryState;
+    carryState.r12 = 0xFFFFFFFFFFFFFFFFULL;
+    carryState.rflags = 0x8D7;
+    static_cast<void>(block.execute(carryState));
+    expectEqual(carryState.r12, std::uint64_t{0},
+                "ADC r12d, 0 did not consume incoming carry or zero-extend");
+    expectEqual(carryState.rflags, std::uint64_t{0x57},
+                "ADC r12d, 0 carry result flags differ");
+
+    rosa::x86::X86State clearState;
+    clearState.r12 = 0xFFFFFFFF00000001ULL;
+    clearState.rflags = 0x8D6;
+    static_cast<void>(block.execute(clearState));
+    expectEqual(clearState.r12, std::uint64_t{1},
+                "ADC r12d, 0 added with carry clear or failed to zero-extend");
+    expectEqual(clearState.rflags, std::uint64_t{0x2},
+                "ADC r12d, 0 carry-clear flags differ");
+
+    rosa::x86::X86State overflowState;
+    overflowState.r12 = 0xFFFFFFFF7FFFFFFFULL;
+    overflowState.rflags = 0x3;
+    static_cast<void>(block.execute(overflowState));
+    expectEqual(overflowState.r12, std::uint64_t{0x80000000},
+                "ADC r12d, 0 signed-overflow result differs");
+    expectEqual(overflowState.rflags, std::uint64_t{0x896},
+                "ADC r12d, 0 signed-overflow flags differ");
+
+    constexpr std::array<std::uint8_t, 4> shortImmediateCode{
+        0x83, 0xD0, 0x01, 0xC3};
+    constexpr rosa::guest::GuestAddress shortImmediateRip{
+        0x7FF802CC0219ULL};
+    const auto shortImmediateDecoded = decoder.decodeBlock(
+        shortImmediateCode, shortImmediateRip);
+    expect(shortImmediateDecoded[0].opcode ==
+               rosa::x86::Opcode::AdcRegImm,
+           "ADC EAX, 1 opcode differs");
+    expectEqual(shortImmediateDecoded[0].length, std::uint8_t{3},
+                "ADC EAX, 1 length differs");
+    const auto shortImmediateDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            shortImmediateDecoded[0].operands[0]);
+    const auto shortImmediate =
+        std::get<rosa::x86::ImmediateOperand>(
+            shortImmediateDecoded[0].operands[1]);
+    expect(shortImmediateDestination.reg == rosa::x86::Register::Rax &&
+               shortImmediateDestination.width == 32 &&
+               shortImmediate.width == 8 && shortImmediate.value == 1,
+           "ADC EAX, 1 operands differ");
+    expect(rosa::debug::dumpX86(shortImmediateDecoded).find(
+               "adc eax, 0x1") != std::string::npos,
+           "ADC EAX, 1 dump differs");
+    const auto shortImmediateBlock = translator.translate(
+        shortImmediateCode, shortImmediateRip);
+    rosa::x86::X86State shortImmediateState;
+    shortImmediateState.rax = 0xFFFFFFFF00000000ULL;
+    shortImmediateState.rflags = 0x46;
+    static_cast<void>(shortImmediateBlock.execute(shortImmediateState));
+    expectEqual(shortImmediateState.rax, std::uint64_t{1},
+                "ADC EAX, 1 live result or zero extension differs");
+    expectEqual(shortImmediateState.rflags, std::uint64_t{0x2},
+                "ADC EAX, 1 live flags differ");
+
+    rosa::x86::X86State shortOverflowState;
+    shortOverflowState.rax = 0xFFFFFFFF7FFFFFFEULL;
+    shortOverflowState.rflags = 0x3;
+    static_cast<void>(shortImmediateBlock.execute(shortOverflowState));
+    expectEqual(shortOverflowState.rax, std::uint64_t{0x80000000},
+                "ADC EAX, 1 carry-in overflow result differs");
+    expectEqual(shortOverflowState.rflags, std::uint64_t{0x896},
+                "ADC EAX, 1 carry-in overflow flags differ");
+
+    rosa::x86::X86State shortWrapState;
+    shortWrapState.rax = 0xFFFFFFFFFFFFFFFEULL;
+    shortWrapState.rflags = 0x3;
+    static_cast<void>(shortImmediateBlock.execute(shortWrapState));
+    expectEqual(shortWrapState.rax, std::uint64_t{0},
+                "ADC EAX, 1 carry-in wrap result differs");
+    expectEqual(shortWrapState.rflags, std::uint64_t{0x57},
+                "ADC EAX, 1 carry-in wrap flags differ");
+
+    constexpr std::array<std::uint8_t, 8> immediateCode{
+        0x41, 0x81, 0xD4, 0xFB, 0x07, 0x00, 0x80, 0xC3};
+    constexpr rosa::guest::GuestAddress immediateRip{0x7FF802C68527ULL};
+    const auto immediateDecoded = decoder.decodeBlock(immediateCode,
+                                                       immediateRip);
+    expect(immediateDecoded[0].opcode == rosa::x86::Opcode::AdcRegImm,
+           "ADC r12d, imm32 opcode differs");
+    expectEqual(immediateDecoded[0].length, std::uint8_t{7},
+                "ADC r12d, imm32 length differs");
+    const auto immediateDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            immediateDecoded[0].operands[0]);
+    const auto fullImmediate =
+        std::get<rosa::x86::ImmediateOperand>(
+            immediateDecoded[0].operands[1]);
+    expect(immediateDestination.reg == rosa::x86::Register::R12 &&
+               immediateDestination.width == 32 &&
+               fullImmediate.value == 0x800007FB &&
+               fullImmediate.width == 32,
+           "ADC r12d, 0x800007fb operands differ");
+    expect(rosa::debug::dumpX86(immediateDecoded).find(
+               "adc r12d, 0x800007fb") != std::string::npos,
+           "ADC r12d, imm32 dump differs");
+
+    const auto immediateBlock = translator.translate(immediateCode,
+                                                       immediateRip);
+    expect(rosa::debug::dumpIr(immediateBlock.intermediateRepresentation())
+                   .find("update_adc_flags.i32") != std::string::npos,
+           "ADC r12d, imm32 did not lower through ADC flags IR");
+    rosa::x86::X86State immediateClearState;
+    immediateClearState.r12 = 0xFFFFFFFF0027F000ULL;
+    immediateClearState.rflags = 0x2;
+    static_cast<void>(immediateBlock.execute(immediateClearState));
+    expectEqual(immediateClearState.r12, std::uint64_t{0x8027F7FB},
+                "ADC r12d, imm32 carry-clear result differs");
+    expectEqual(immediateClearState.rflags, std::uint64_t{0x82},
+                "ADC r12d, imm32 carry-clear flags differ");
+
+    rosa::x86::X86State immediateCarryState;
+    immediateCarryState.r12 = 0xFFFFFFFF0027F000ULL;
+    immediateCarryState.rflags = 0x3;
+    static_cast<void>(immediateBlock.execute(immediateCarryState));
+    expectEqual(immediateCarryState.r12, std::uint64_t{0x8027F7FC},
+                "ADC r12d, imm32 carry-set result differs");
+    expectEqual(immediateCarryState.rflags, std::uint64_t{0x86},
+                "ADC r12d, imm32 carry-set flags differ");
+
+    constexpr std::array<std::uint8_t, 5> qwordCode{
+        0x48, 0x83, 0xD0, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress qwordRip{0x7FF802C6E43EULL};
+    const auto qwordDecoded = decoder.decodeBlock(qwordCode, qwordRip);
+    expect(qwordDecoded[0].opcode == rosa::x86::Opcode::AdcRegImm,
+           "ADC RAX, 0 opcode differs");
+    expectEqual(qwordDecoded[0].length, std::uint8_t{4},
+                "ADC RAX, 0 length differs");
+    const auto qwordDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            qwordDecoded[0].operands[0]);
+    expect(qwordDestination.reg == rosa::x86::Register::Rax &&
+               qwordDestination.width == 64,
+           "ADC RAX, 0 destination differs");
+    expect(rosa::debug::dumpX86(qwordDecoded).find("adc rax, 0x0") !=
+               std::string::npos,
+           "ADC RAX, 0 dump differs");
+
+    const auto qwordBlock = translator.translate(qwordCode, qwordRip);
+    expect(rosa::debug::dumpIr(qwordBlock.intermediateRepresentation())
+                   .find("update_adc_flags.i64") != std::string::npos,
+           "ADC RAX, 0 did not lower through 64-bit ADC flags IR");
+
+    rosa::x86::X86State qwordClearState;
+    qwordClearState.rax = 0x40;
+    qwordClearState.rflags = 0x2;
+    static_cast<void>(qwordBlock.execute(qwordClearState));
+    expectEqual(qwordClearState.rax, std::uint64_t{0x40},
+                "ADC RAX, 0 carry-clear result differs");
+    expectEqual(qwordClearState.rflags, std::uint64_t{0x2},
+                "ADC RAX, 0 carry-clear flags differ");
+
+    rosa::x86::X86State qwordCarryState;
+    qwordCarryState.rax = UINT64_MAX;
+    qwordCarryState.rflags = 0x3;
+    static_cast<void>(qwordBlock.execute(qwordCarryState));
+    expectEqual(qwordCarryState.rax, std::uint64_t{0},
+                "ADC RAX, 0 carry-set result differs");
+    expectEqual(qwordCarryState.rflags, std::uint64_t{0x57},
+                "ADC RAX, 0 carry-set flags differ");
+
+    rosa::x86::X86State qwordOverflowState;
+    qwordOverflowState.rax = INT64_MAX;
+    qwordOverflowState.rflags = 0x3;
+    static_cast<void>(qwordBlock.execute(qwordOverflowState));
+    expectEqual(qwordOverflowState.rax,
+                std::uint64_t{0x8000000000000000ULL},
+                "ADC RAX, 0 signed-overflow result differs");
+    expectEqual(qwordOverflowState.rflags, std::uint64_t{0x896},
+                "ADC RAX, 0 signed-overflow flags differ");
 }
 
 void testSubRegisterFromRegister() {
@@ -4126,6 +4676,69 @@ void testSubRegisterFromGuestMemory() {
                 "failed memory SUB changed its destination register");
     expectEqual(faultState.rflags, std::uint64_t{0x8D7},
                 "failed memory SUB changed flags");
+
+    constexpr std::array<std::uint8_t, 8> observedCode{
+        0x48, 0x2B, 0x1D, 0xD8, 0x26, 0x61, 0x3D, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802A43559ULL};
+    constexpr rosa::guest::GuestAddress observedTarget{0x7FF840055C38ULL};
+    const auto observed = decoder.decodeBlock(observedCode, observedRip);
+    expect(observed[0].opcode == rosa::x86::Opcode::SubRegMem,
+           "RIP-relative SUB opcode differs");
+    expectEqual(observed[0].length, std::uint8_t{7},
+                "RIP-relative SUB length differs");
+    const auto observedDestination =
+        std::get<rosa::x86::RegisterOperand>(observed[0].operands[0]);
+    const auto observedMemory =
+        std::get<rosa::x86::MemoryOperand>(observed[0].operands[1]);
+    expect(observedDestination.reg == rosa::x86::Register::Rbx &&
+               observedDestination.width == 64 &&
+               observedMemory.ripRelative && !observedMemory.hasBase &&
+               !observedMemory.index && observedMemory.width == 64 &&
+               observedMemory.displacement == 0x3D6126D8,
+           "RIP-relative SUB operands differ");
+    expectEqual(observedRip.value + observed[0].length +
+                    observedMemory.displacement,
+                observedTarget.value,
+                "RIP-relative SUB target differs");
+    expect(rosa::debug::dumpX86(observed).find(
+               "sub rbx, [rip+0x3d6126d8] ; 0x7ff840055c38") !=
+               std::string::npos,
+           "RIP-relative SUB dump differs");
+
+    constexpr rosa::guest::GuestAddress observedPage{
+        observedTarget.value & ~(rosa::guest::guestPageSize - 1)};
+    rosa::guest::AddressSpace observedAddressSpace;
+    observedAddressSpace.mapAnonymous(
+        observedPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    observedAddressSpace.writeU64(observedTarget, 0x7FF800000000ULL);
+    const auto observedBlock = translator.translate(observedCode, observedRip);
+    rosa::x86::X86State observedState;
+    observedState.rbx = 0x7FF802A561E2ULL;
+    observedState.rflags = 0x6;
+    static_cast<void>(observedBlock.execute(observedState,
+                                            &observedAddressSpace));
+    expectEqual(observedState.rbx, std::uint64_t{0x2A561E2},
+                "RIP-relative SUB result differs");
+    expectEqual(observedState.rflags, std::uint64_t{0x6},
+                "RIP-relative SUB flags differ");
+
+    rosa::guest::AddressSpace observedUnmappedAddressSpace;
+    observedState.rbx = 0x7FF802A561E2ULL;
+    observedState.rflags = 0xAD7;
+    bool observedFaulted = false;
+    try {
+        static_cast<void>(observedBlock.execute(
+            observedState, &observedUnmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        observedFaulted = std::string_view(error.what()).find("unmapped") !=
+                          std::string_view::npos;
+    }
+    expect(observedFaulted, "RIP-relative SUB accepted unmapped memory");
+    expectEqual(observedState.rbx, std::uint64_t{0x7FF802A561E2ULL},
+                "faulted RIP-relative SUB changed RBX");
+    expectEqual(observedState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative SUB changed flags");
 }
 
 void testSub32BitRegisterFromGuestMemory() {
@@ -4251,6 +4864,85 @@ void testSub64BitRegisterFromIndexedGuestMemory() {
                 "faulted indexed SUB r64 changed flags");
 }
 
+void testSubtractRegisterFromGuestMemoryDestination() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x49, 0x29, 0x86, 0x68, 0x08, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C6C972ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SubMemReg,
+           "SUB qword [R14+0x868], RAX opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "SUB qword [R14+0x868], RAX length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R14 && memory.hasBase &&
+               !memory.ripRelative && !memory.index &&
+               memory.displacement == 0x868 && memory.width == 64 &&
+               source.reg == rosa::x86::Register::Rax &&
+               source.width == 64,
+           "SUB qword [R14+0x868], RAX operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "sub qword [r14+0x868], rax") != std::string::npos,
+           "SUB qword [R14+0x868], RAX dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8868};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("sub_guest_memory.i64") != std::string::npos,
+           "SUB qword memory destination did not lower through RMW IR");
+    rosa::x86::X86State state;
+    state.r14 = page.value;
+    state.rax = 1;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), UINT64_MAX,
+                "SUB qword memory destination stored the wrong result");
+    expectEqual(state.r14, page.value,
+                "SUB qword memory destination changed R14");
+    expectEqual(state.rax, std::uint64_t{1},
+                "SUB qword memory destination changed RAX");
+    expectEqual(state.rflags, std::uint64_t{0x97},
+                "SUB qword memory destination flags differ");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    constexpr std::uint64_t sentinel = 7;
+    std::memcpy(readOnlyBytes.data() + 0x868, &sentinel, sizeof(sentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        page, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        readOnlyBytes, "read-only SUB qword target");
+    rosa::x86::X86State faultState;
+    faultState.r14 = page.value;
+    faultState.rax = 1;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SUB qword accepted a read-only destination");
+    expectEqual(readOnlyAddressSpace.readU64(target), sentinel,
+                "faulted SUB qword changed memory");
+    expectEqual(faultState.r14, page.value,
+                "faulted SUB qword changed R14");
+    expectEqual(faultState.rax, std::uint64_t{1},
+                "faulted SUB qword changed RAX");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted SUB qword changed flags");
+}
+
 void testAddRegisterFromGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x03, 0x46, 0x10, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -4278,6 +4970,73 @@ void testAddRegisterFromGuestMemory() {
     expectEqual(state.rax, std::uint64_t{4}, "ADD r64, [base+disp8] result differs");
     expectEqual(state.rflags, std::uint64_t{0x13},
                 "ADD r64, [base+disp8] flags differ");
+
+    constexpr std::array<std::uint8_t, 4> dwordCode{
+        0x03, 0x42, 0x18, 0xC3};
+    const auto dwordDecoded = decoder.decodeBlock(
+        dwordCode, rosa::guest::GuestAddress{0x7FF802ACF770ULL});
+    expect(dwordDecoded[0].opcode == rosa::x86::Opcode::AddRegMem,
+           "ADD r32, [base+disp8] opcode differs");
+    const auto dwordDestination = std::get<rosa::x86::RegisterOperand>(
+        dwordDecoded[0].operands[0]);
+    const auto dwordMemory = std::get<rosa::x86::MemoryOperand>(
+        dwordDecoded[0].operands[1]);
+    expect(dwordDestination.reg == rosa::x86::Register::Rax &&
+               dwordDestination.width == 32 &&
+               dwordMemory.base == rosa::x86::Register::Rdx &&
+               dwordMemory.displacement == 0x18 &&
+               dwordMemory.width == 32,
+           "ADD eax, [rdx+0x18] operands differ");
+    expect(rosa::debug::dumpX86(dwordDecoded).find(
+               "add eax, [rdx+0x18]") != std::string::npos,
+           "ADD eax, [rdx+0x18] dump differs");
+    constexpr std::array<std::uint8_t, 4> eight{8, 0, 0, 0};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8118}, eight);
+    const auto dwordBlock = translator.translate(
+        dwordCode, rosa::guest::GuestAddress{0x7FF802ACF770ULL});
+    state.rax = 0xAAAAAAAA00001000ULL;
+    state.rdx = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(dwordBlock.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0x1008},
+                "ADD r32, [base+disp8] did not zero-extend");
+    expectEqual(state.rflags, std::uint64_t{0x2},
+                "ADD r32, [base+disp8] flags differ");
+
+    constexpr std::array<std::uint8_t, 8> ripRelativeCode{
+        0x48, 0x03, 0x3D, 0xF4, 0x4B, 0x21, 0x3D, 0xC3};
+    constexpr rosa::guest::GuestAddress ripRelativeAddress{
+        0x7FF802E7D14DULL};
+    constexpr rosa::guest::GuestAddress ripRelativeTarget{
+        0x7FF840091D48ULL};
+    const auto ripRelativeDecoded = decoder.decodeBlock(
+        ripRelativeCode, ripRelativeAddress);
+    const auto ripRelativeMemory = std::get<rosa::x86::MemoryOperand>(
+        ripRelativeDecoded[0].operands[1]);
+    expect(ripRelativeDecoded[0].opcode == rosa::x86::Opcode::AddRegMem &&
+               ripRelativeMemory.ripRelative &&
+               !ripRelativeMemory.hasBase && !ripRelativeMemory.index &&
+               ripRelativeMemory.displacement == 0x3D214BF4 &&
+               ripRelativeMemory.width == 64,
+           "ADD rdi, [rip+disp32] operands differ");
+    expect(rosa::debug::dumpX86(ripRelativeDecoded).find(
+               "add rdi, [rip+0x3d214bf4] ; 0x7ff840091d48") !=
+               std::string::npos,
+           "ADD rdi, [rip+disp32] dump differs");
+    addressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{ripRelativeTarget.value & ~UINT64_C(0xFFF)},
+        rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(ripRelativeTarget, 7);
+    const auto ripRelativeBlock = translator.translate(
+        ripRelativeCode, ripRelativeAddress);
+    state.rdi = 0x150;
+    state.rflags = 0x8D7;
+    static_cast<void>(ripRelativeBlock.execute(state, &addressSpace));
+    expectEqual(state.rdi, std::uint64_t{0x157},
+                "ADD rdi, [rip+disp32] result differs");
+    expectEqual(state.rflags, std::uint64_t{0x2},
+                "ADD rdi, [rip+disp32] flags differ");
 
     rosa::guest::AddressSpace unmappedAddressSpace;
     rosa::x86::X86State faultState;
@@ -4446,6 +5205,152 @@ void testAddRegisterToGuestMemory() {
                 "faulted ADD qword changed its source");
     expectEqual(state.rflags, std::uint64_t{0xAD7},
                 "faulted ADD qword changed flags");
+
+    constexpr std::array<std::uint8_t, 7> dwordCode{
+        0x01, 0x85, 0x08, 0xFF, 0xFF, 0xFF, 0xC3};
+    const auto dwordDecoded = decoder.decodeBlock(
+        dwordCode, rosa::guest::GuestAddress{0x7FF802A180BAULL});
+    expect(dwordDecoded[0].opcode == rosa::x86::Opcode::AddMemReg &&
+               dwordDecoded[0].length == 6,
+           "ADD dword [memory], r32 opcode or length differs");
+    const auto dwordMemory =
+        std::get<rosa::x86::MemoryOperand>(dwordDecoded[0].operands[0]);
+    const auto dwordSource =
+        std::get<rosa::x86::RegisterOperand>(dwordDecoded[0].operands[1]);
+    expect(dwordMemory.base == rosa::x86::Register::Rbp &&
+               dwordMemory.displacement == -0xF8 &&
+               dwordMemory.width == 32 &&
+               dwordSource.reg == rosa::x86::Register::Rax &&
+               dwordSource.width == 32,
+           "ADD dword [rbp-0xf8], eax operands differ");
+    expect(rosa::debug::dumpX86(dwordDecoded).find(
+               "add dword [rbp-0xf8], eax") != std::string::npos,
+           "ADD dword [memory], r32 dump differs");
+
+    constexpr rosa::guest::GuestAddress dwordTarget{0x8108};
+    addressSpace.writeU64(dwordTarget, 0x11223344FFFFFFFFULL);
+    const auto dwordBlock = translator.translate(
+        dwordCode, rosa::guest::GuestAddress{0x7FF802A180BAULL});
+    rosa::x86::X86State dwordState;
+    dwordState.rbp = 0x8200;
+    dwordState.rax = 0xAABBCCDD00000001ULL;
+    dwordState.rflags = 0x8D7;
+    static_cast<void>(dwordBlock.execute(dwordState, &addressSpace));
+    expectEqual(addressSpace.readU64(dwordTarget),
+                std::uint64_t{0x1122334400000000ULL},
+                "ADD dword changed its adjacent bytes or stored the wrong result");
+    expectEqual(dwordState.rbp, std::uint64_t{0x8200},
+                "ADD dword changed its base");
+    expectEqual(dwordState.rax, std::uint64_t{0xAABBCCDD00000001ULL},
+                "ADD dword changed its source");
+    expectEqual(dwordState.rflags, std::uint64_t{0x57},
+                "ADD dword carry/zero flags differ");
+
+    constexpr rosa::guest::GuestAddress boundaryPage{0x9000};
+    constexpr rosa::guest::GuestAddress boundaryTarget{0x9FFE};
+    constexpr std::array<std::uint8_t, 2> boundaryBytes{0xFF, 0xFF};
+    rosa::guest::AddressSpace boundaryAddressSpace;
+    boundaryAddressSpace.mapAnonymous(
+        boundaryPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    boundaryAddressSpace.writeBytes(boundaryTarget, boundaryBytes);
+    rosa::x86::X86State boundaryState;
+    boundaryState.rbp = boundaryTarget.value + 0xF8;
+    boundaryState.rax = 1;
+    boundaryState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(
+            dwordBlock.execute(boundaryState, &boundaryAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page ADD dword did not fault");
+    expect(boundaryAddressSpace.readBytes(boundaryTarget, 2) ==
+               std::vector<std::uint8_t>(boundaryBytes.begin(),
+                                         boundaryBytes.end()),
+           "faulted cross-page ADD dword partially changed memory");
+    expectEqual(boundaryState.rax, std::uint64_t{1},
+                "faulted cross-page ADD dword changed its source");
+    expectEqual(boundaryState.rflags, std::uint64_t{0xAD7},
+                "faulted cross-page ADD dword changed flags");
+}
+
+void testAddRegisterToSibGuestMemory() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x4D, 0x01, 0xBC, 0x24, 0x68, 0x08, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802C6AA17ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddMemReg,
+           "SIB ADD qword [memory], r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "SIB ADD qword [memory], r64 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R12 && !memory.index &&
+               memory.displacement == 0x868 && memory.width == 64 &&
+               source.reg == rosa::x86::Register::R15 &&
+               source.width == 64,
+           "SIB ADD qword [r12+0x868], r15 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "add qword [r12+0x868], r15") != std::string::npos,
+           "SIB ADD qword [memory], r64 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8868};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, UINT64_C(0xFFFFFFFFFFFFFF00));
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.r12 = page.value;
+    state.r15 = 0x140;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0x40},
+                "SIB ADD qword stored the wrong result");
+    expectEqual(state.r12, page.value,
+                "SIB ADD qword changed its base");
+    expectEqual(state.r15, std::uint64_t{0x140},
+                "SIB ADD qword changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "SIB ADD qword flags differ");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    constexpr std::uint64_t sentinel = 7;
+    std::memcpy(readOnlyBytes.data() + 0x868, &sentinel, sizeof(sentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        page, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        readOnlyBytes, "read-only SIB ADD qword target");
+    rosa::x86::X86State faultState;
+    faultState.r12 = page.value;
+    faultState.r15 = 0x140;
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("permissions") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "SIB ADD qword accepted read-only memory");
+    expectEqual(readOnlyAddressSpace.readU64(target), sentinel,
+                "faulted SIB ADD qword changed memory");
+    expectEqual(faultState.r12, page.value,
+                "faulted SIB ADD qword changed its base");
+    expectEqual(faultState.r15, std::uint64_t{0x140},
+                "faulted SIB ADD qword changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted SIB ADD qword changed flags");
 }
 
 void testAddRegisterToRegister() {
@@ -4515,6 +5420,39 @@ void testAddRegisterToRegister() {
                 "ADD r32, r32 overflow result differs");
     expectEqual(overflowState.rflags, std::uint64_t{0x896},
                 "ADD r32, r32 overflow flags differ");
+
+    constexpr std::array<std::uint8_t, 4> code16{
+        0x66, 0x01, 0xCA, 0xC3};
+    const auto decoded16 = decoder.decodeBlock(
+        code16, rosa::guest::GuestAddress{0x7FF802B05FD0ULL});
+    const auto destination16 =
+        std::get<rosa::x86::RegisterOperand>(decoded16[0].operands[0]);
+    const auto source16 =
+        std::get<rosa::x86::RegisterOperand>(decoded16[0].operands[1]);
+    expect(decoded16[0].opcode == rosa::x86::Opcode::AddRegReg &&
+               decoded16[0].length == 3 &&
+               destination16.reg == rosa::x86::Register::Rdx &&
+               destination16.width == 16 &&
+               source16.reg == rosa::x86::Register::Rcx &&
+               source16.width == 16,
+           "ADD DX, CX decode differs");
+    expect(rosa::debug::dumpX86(decoded16).find("add dx, cx") !=
+               std::string::npos,
+           "ADD r16, r16 dump differs");
+
+    const auto block16 = translator.translate(
+        code16, rosa::guest::GuestAddress{0x7FF802B05FD0ULL});
+    rosa::x86::X86State state16;
+    state16.rdx = 0x112233445566FFFFULL;
+    state16.rcx = 0xFFEEDDCCBBAA0001ULL;
+    state16.rflags = 0x8D7;
+    static_cast<void>(block16.execute(state16));
+    expectEqual(state16.rdx, std::uint64_t{0x1122334455660000ULL},
+                "ADD r16, r16 did not preserve upper destination bits");
+    expectEqual(state16.rcx, std::uint64_t{0xFFEEDDCCBBAA0001ULL},
+                "ADD r16, r16 changed its source");
+    expectEqual(state16.rflags, std::uint64_t{0x57},
+                "ADD r16, r16 carry/zero flags differ");
 }
 
 void testAddLowByteRegisters() {
@@ -5048,7 +5986,40 @@ void testIncrement16BitGuestMemory() {
     expectEqual(state.rflags, std::uint64_t{0x56},
                 "INC word wrap flags differ or CF changed");
 
+    constexpr std::array<std::uint8_t, 7> sibCode{
+        0x66, 0x41, 0xFF, 0x44, 0x24, 0x0C, 0xC3};
+    constexpr rosa::guest::GuestAddress sibRip{0x7FF802A30D66ULL};
+    const auto sibDecoded = decoder.decodeBlock(sibCode, sibRip);
+    expect(sibDecoded[0].opcode == rosa::x86::Opcode::IncMem,
+           "SIB INC word opcode differs");
+    expectEqual(sibDecoded[0].length, std::uint8_t{6},
+                "SIB INC word length differs");
+    const auto sibMemory =
+        std::get<rosa::x86::MemoryOperand>(sibDecoded[0].operands[0]);
+    expect(sibMemory.base == rosa::x86::Register::R12 &&
+               !sibMemory.index && sibMemory.displacement == 0x0C &&
+               sibMemory.width == 16,
+           "INC word [r12+0xc] operand differs");
+    expect(rosa::debug::dumpX86(sibDecoded).find(
+               "inc word [r12+0xc]") != std::string::npos,
+           "SIB INC word dump differs");
+    const auto sibBlock = translator.translate(sibCode, sibRip);
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x810C}, wrapValue);
+    rosa::x86::X86State sibState;
+    sibState.r12 = 0x8100;
+    sibState.rflags = 0x3;
+    static_cast<void>(sibBlock.execute(sibState, &addressSpace));
+    expect(addressSpace.readBytes(rosa::guest::GuestAddress{0x810C}, 2) ==
+               std::vector<std::uint8_t>({0, 0}),
+           "SIB INC word result differs");
+    expectEqual(sibState.r12, std::uint64_t{0x8100},
+                "SIB INC word changed R12");
+    expectEqual(sibState.rflags, std::uint64_t{0x57},
+                "SIB INC word flags differ or CF changed");
+
     std::array<std::uint8_t, 0x1A> readOnlyBytes{};
+    readOnlyBytes[0x0C] = 0x34;
+    readOnlyBytes[0x0D] = 0x12;
     readOnlyBytes[0x18] = 0x34;
     readOnlyBytes[0x19] = 0x12;
     rosa::guest::AddressSpace readOnlyAddressSpace;
@@ -5073,6 +6044,27 @@ void testIncrement16BitGuestMemory() {
                 "failed INC word changed high memory byte");
     expectEqual(state.rflags, std::uint64_t{0xAD7},
                 "failed INC word changed flags");
+
+    rosa::x86::X86State sibFaultState;
+    sibFaultState.r12 = 0x9000;
+    sibFaultState.rflags = 0xBD7;
+    rejected = false;
+    try {
+        static_cast<void>(
+            sibBlock.execute(sibFaultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SIB INC word accepted read-only guest memory");
+    expect(readOnlyAddressSpace.readBytes(
+               rosa::guest::GuestAddress{0x900C}, 2) ==
+               std::vector<std::uint8_t>({0x34, 0x12}),
+           "faulted SIB INC word changed guest memory");
+    expectEqual(sibFaultState.r12, std::uint64_t{0x9000},
+                "faulted SIB INC word changed R12");
+    expectEqual(sibFaultState.rflags, std::uint64_t{0xBD7},
+                "faulted SIB INC word changed flags");
 }
 
 void testIncrement32BitGuestMemory() {
@@ -5157,6 +6149,72 @@ void testIncrement32BitGuestMemory() {
                 "faulted INC dword changed flags");
 }
 
+void testIncrement32BitSibGuestMemory() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x41, 0xFF, 0x84, 0x24, 0x78, 0x08, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802C6AA0BULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::IncMem,
+           "SIB INC dword opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "SIB INC dword length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::R12 && !memory.index &&
+               memory.hasBase && !memory.ripRelative &&
+               memory.displacement == 0x878 && memory.width == 32,
+           "SIB INC dword operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "inc dword [r12+0x878]") != std::string::npos,
+           "SIB INC dword dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8878};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 8);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.r12 = page.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{9},
+                "SIB INC dword stored the wrong result");
+    expectEqual(state.r12, page.value,
+                "SIB INC dword changed its base");
+    expectEqual(state.rflags, std::uint64_t{0x7},
+                "SIB INC dword flags differ or changed CF");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[0x878] = 8;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        page, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        readOnlyBytes, "read-only SIB INC dword target");
+    rosa::x86::X86State faultState;
+    faultState.r12 = page.value;
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("permissions") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "SIB INC dword accepted read-only memory");
+    expectEqual(readOnlyAddressSpace.readU32(target), std::uint32_t{8},
+                "faulted SIB INC dword changed memory");
+    expectEqual(faultState.r12, page.value,
+                "faulted SIB INC dword changed its base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted SIB INC dword changed flags");
+}
+
 void testIncrement64BitGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{
         0x49, 0xFF, 0x46, 0x18, 0xC3};
@@ -5227,6 +6285,56 @@ void testIncrement64BitGuestMemory() {
                 sentinel, "failed INC qword changed guest memory");
     expectEqual(state.rflags, std::uint64_t{0xAD7},
                 "failed INC qword changed flags");
+
+    constexpr std::array<std::uint8_t, 8> ripCode{
+        0x48, 0xFF, 0x05, 0x0C, 0x3E, 0xC9, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress ripAddress{0x7FF802A1B185ULL};
+    constexpr rosa::guest::GuestAddress ripTarget{0x7FF8436AEF98ULL};
+    constexpr rosa::guest::GuestAddress ripPage{0x7FF8436AE000ULL};
+    const auto ripDecoded = decoder.decodeBlock(ripCode, ripAddress);
+    expect(ripDecoded[0].opcode == rosa::x86::Opcode::IncMem,
+           "RIP-relative INC qword opcode differs");
+    expectEqual(ripDecoded[0].length, std::uint8_t{7},
+                "RIP-relative INC qword length differs");
+    const auto ripMemory =
+        std::get<rosa::x86::MemoryOperand>(ripDecoded[0].operands[0]);
+    expect(ripMemory.ripRelative && !ripMemory.hasBase &&
+               ripMemory.displacement == 0x40C93E0C &&
+               ripMemory.width == 64,
+           "RIP-relative INC qword operands differ");
+    expect(rosa::debug::dumpX86(ripDecoded).find(
+               "inc qword [rip+0x40c93e0c] ; 0x7ff8436aef98") !=
+               std::string::npos,
+           "RIP-relative INC qword dump differs");
+
+    rosa::guest::AddressSpace ripAddressSpace;
+    ripAddressSpace.mapAnonymous(
+        ripPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    ripAddressSpace.writeU64(ripTarget, 0);
+    const auto ripBlock = translator.translate(ripCode, ripAddress);
+    rosa::x86::X86State ripState;
+    ripState.rflags = 0x3;
+    static_cast<void>(ripBlock.execute(ripState, &ripAddressSpace));
+    expectEqual(ripAddressSpace.readU64(ripTarget), std::uint64_t{1},
+                "RIP-relative INC qword result differs");
+    expectEqual(ripState.rflags, std::uint64_t{0x3},
+                "RIP-relative INC qword flags differ or changed CF");
+
+    rosa::guest::AddressSpace ripFaultAddressSpace;
+    rosa::x86::X86State ripFaultState;
+    ripFaultState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(
+            ripBlock.execute(ripFaultState, &ripFaultAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative INC qword accepted unmapped memory");
+    expectEqual(ripFaultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative INC qword changed flags");
 }
 
 void testDecrement64BitGuestMemory() {
@@ -5300,6 +6408,77 @@ void testDecrement64BitGuestMemory() {
                 "failed DEC qword changed its base register");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "failed DEC qword changed flags");
+}
+
+void testDecrement32BitGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x41, 0xFF, 0x4B, 0x08, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802D0EF1EULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::DecMem,
+           "DEC dword memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "DEC dword memory length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::R11 &&
+               memory.displacement == 8 && memory.width == 32,
+           "DEC dword [r11+8] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "dec dword [r11+0x8]") != std::string::npos,
+           "DEC dword memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8108};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.r11 = 0x8100;
+    state.rflags = 0x3;
+    addressSpace.writeU32(target, UINT32_C(0x80000000));
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), UINT32_C(0x7FFFFFFF),
+                "DEC dword overflow result differs");
+    expectEqual(state.r11, std::uint64_t{0x8100},
+                "DEC dword changed its base");
+    expectEqual(state.rflags, std::uint64_t{0x817},
+                "DEC dword overflow flags differ or CF changed");
+
+    addressSpace.writeU32(target, 0);
+    state.rflags = 0x2;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), UINT32_MAX,
+                "DEC dword wrap result differs");
+    expectEqual(state.rflags, std::uint64_t{0x96},
+                "DEC dword wrap flags differ or CF changed");
+
+    constexpr rosa::guest::GuestAddress crossPageTarget{0x8FFE};
+    addressSpace.writeBytes(
+        crossPageTarget, std::array<std::uint8_t, 2>{0x34, 0x12});
+    rosa::x86::X86State faultState;
+    faultState.r11 = crossPageTarget.value - 8;
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "cross-page DEC dword did not fault");
+    expectEqual(addressSpace.readBytes(crossPageTarget, 2),
+                std::vector<std::uint8_t>{0x34, 0x12},
+                "faulted DEC dword partially changed memory");
+    expectEqual(faultState.r11, crossPageTarget.value - 8,
+                "faulted DEC dword changed its base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted DEC dword changed flags");
 }
 
 void testDecrement8BitScaledGuestMemory() {
@@ -5438,6 +6617,71 @@ void testCompare32BitRegisterWithGuestMemory() {
                 "failed memory CMP changed flags");
 }
 
+void testCompare32BitRegisterWithGsAbsoluteMemory() {
+    constexpr std::array<std::uint8_t, 9> observedCode{
+        0x65, 0x3B, 0x04, 0x25, 0x18, 0x00, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802AEC84DULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegMem,
+           "GS-absolute CMP opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "GS-absolute CMP length differs");
+    const auto lhs =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(lhs.reg == rosa::x86::Register::Rax && lhs.width == 32,
+           "GS-absolute CMP register differs");
+    expect(!memory.hasBase && !memory.index && !memory.ripRelative &&
+               memory.displacement == 0x18 && memory.width == 32 &&
+               memory.segment == rosa::x86::Segment::Gs,
+           "GS-absolute CMP memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "cmp eax, [gs:0x18]") != std::string::npos,
+           "GS-absolute CMP dump differs");
+
+    constexpr rosa::guest::GuestAddress gsBase{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8018};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(gsBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 1);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("read_guest_gs_base.i64") != std::string::npos,
+           "GS-absolute CMP did not lower through guest GS base");
+    rosa::x86::X86State state;
+    state.rax = 1;
+    state.gsBase = gsBase.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{1},
+                "GS-absolute CMP changed EAX");
+    expectEqual(state.gsBase, gsBase.value,
+                "GS-absolute CMP changed GS base");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "GS-absolute CMP equal flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 1;
+    faultState.gsBase = gsBase.value;
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "GS-absolute CMP accepted unmapped memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted GS-absolute CMP changed flags");
+}
+
 void testCompareByteRegisterWithScaledGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{
         0x41, 0x3A, 0x14, 0x0E, 0xC3};
@@ -5562,6 +6806,45 @@ void testCompare64BitRegisterWithGuestMemory() {
     static_cast<void>(block.execute(state, &addressSpace));
     expectEqual(state.rax, std::uint64_t{5}, "CMP r64 changed its register operand");
     expectEqual(state.rflags, std::uint64_t{0x93}, "CMP r64 flags differ");
+
+    constexpr std::array<std::uint8_t, 6> indexedCode{
+        0x4B, 0x3B, 0x54, 0x25, 0x28, 0xC3};
+    const auto indexedDecoded = decoder.decodeBlock(
+        indexedCode, rosa::guest::GuestAddress{0x7FF802B0810FULL});
+    const auto indexedLhs =
+        std::get<rosa::x86::RegisterOperand>(
+            indexedDecoded[0].operands[0]);
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            indexedDecoded[0].operands[1]);
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::CmpRegMem &&
+               indexedDecoded[0].length == 5 &&
+               indexedLhs.reg == rosa::x86::Register::Rdx &&
+               indexedLhs.width == 64 &&
+               indexedMemory.base == rosa::x86::Register::R13 &&
+               indexedMemory.index == rosa::x86::Register::R12 &&
+               indexedMemory.scale == 1 &&
+               indexedMemory.displacement == 0x28,
+           "indexed CMP r64, m64 operands differ");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "cmp rdx, [r13+r12*1+0x28]") != std::string::npos,
+           "indexed CMP r64, m64 dump differs");
+
+    constexpr rosa::guest::GuestAddress indexedTarget{0x8148};
+    addressSpace.writeU64(indexedTarget, 10);
+    const auto indexedBlock = translator.translate(
+        indexedCode, rosa::guest::GuestAddress{0x7FF802B0810FULL});
+    state.rdx = 10;
+    state.r13 = 0x8100;
+    state.r12 = 0x20;
+    state.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "indexed CMP r64, m64 equal flags differ");
+    expectEqual(state.r13, std::uint64_t{0x8100},
+                "indexed CMP changed its base");
+    expectEqual(state.r12, std::uint64_t{0x20},
+                "indexed CMP changed its index");
 }
 
 void testCompare64BitRegisterWithRipRelativeGuestMemory() {
@@ -5710,6 +6993,140 @@ void testCompareGuestByteWithRegister() {
                 "faulted CMP byte memory changed flags");
 }
 
+void testCompareRipRelativeGuestByteWithRegister() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x38, 0x05, 0xA3, 0xD8, 0xA2, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802E6F02BULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF84389C8D4ULL};
+    constexpr rosa::guest::GuestAddress targetPage{0x7FF84389C000ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemReg,
+           "RIP-relative CMP byte opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6},
+                "RIP-relative CMP byte length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 8 &&
+               memory.displacement == 0x40A2D8A3,
+           "RIP-relative CMP byte memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rax && source.width == 8,
+           "RIP-relative CMP byte source differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "cmp byte [rip+0x40a2d8a3], al ; 0x7ff84389c8d4") !=
+               std::string::npos,
+           "RIP-relative CMP byte dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 1>{0});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rax = 0x0123456789ABCD00ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0x0123456789ABCD00ULL},
+                "RIP-relative CMP byte changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "RIP-relative CMP byte equal flags differ");
+    expectEqual(addressSpace.readBytes(target, 1).front(), std::uint8_t{0},
+                "RIP-relative CMP byte changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x0123456789ABCD00ULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState,
+                                        &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected,
+           "RIP-relative CMP byte from unmapped memory did not fault");
+    expectEqual(faultState.rax, std::uint64_t{0x0123456789ABCD00ULL},
+                "faulted RIP-relative CMP byte changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative CMP byte changed flags");
+}
+
+void testCompareGuestWordWithExtendedRegister() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x66, 0x44, 0x39, 0x63, 0x10, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C68D84ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemReg,
+           "CMP word memory/register opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "CMP word memory/register length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbx && memory.hasBase &&
+               !memory.ripRelative && !memory.index &&
+               memory.displacement == 0x10 && memory.width == 16,
+           "CMP word [rbx+0x10] memory operand differs");
+    expect(source.reg == rosa::x86::Register::R12 && source.width == 16,
+           "CMP word memory R12W source differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "cmp word [rbx+0x10], r12w") != std::string::npos,
+           "CMP word memory/register dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8010};
+    constexpr std::array<std::uint8_t, 4> valueAndSentinel{
+        0x03, 0x00, 0xAA, 0xBB};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, valueAndSentinel);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    rosa::x86::X86State state;
+    state.rbx = page.value;
+    state.r12 = 0xAABBCCDDEEFF0003ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP word equal flags differ");
+    expectEqual(state.rbx, page.value,
+                "CMP word changed its memory base");
+    expectEqual(state.r12, std::uint64_t{0xAABBCCDDEEFF0003ULL},
+                "CMP word changed its source register");
+    expect(addressSpace.readBytes(target, valueAndSentinel.size()) ==
+               std::vector<std::uint8_t>(valueAndSentinel.begin(),
+                                         valueAndSentinel.end()),
+           "CMP word changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rbx = page.value;
+    faultState.r12 = 0x1122334455660003ULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "CMP word from unmapped memory did not fault");
+    expectEqual(faultState.r12, std::uint64_t{0x1122334455660003ULL},
+                "faulted CMP word changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted CMP word changed flags");
+}
+
 void testCompareGuestMemoryWith64BitRegister() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x39, 0x43, 0x30, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -5779,11 +7196,167 @@ void testCompareGuestMemoryWith64BitRegister() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "failed CMP [memory], r64 changed flags");
 
+    constexpr std::array<std::uint8_t, 8> ripCode{
+        0x48, 0x39, 0x15, 0x2D, 0x8A, 0xE4, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress ripCmpAddress{
+        0x7FF802A17CFCULL};
+    constexpr rosa::guest::GuestAddress ripTarget{0x7FF843860730ULL};
+    constexpr rosa::guest::GuestAddress ripTargetPage{0x7FF843860000ULL};
+    const auto ripDecoded = decoder.decodeBlock(ripCode, ripCmpAddress);
+    expect(ripDecoded[0].opcode == rosa::x86::Opcode::CmpMemReg &&
+               ripDecoded[0].length == 7,
+           "RIP-relative CMP [memory], r64 opcode or length differs");
+    const auto ripMemory =
+        std::get<rosa::x86::MemoryOperand>(ripDecoded[0].operands[0]);
+    const auto ripSource =
+        std::get<rosa::x86::RegisterOperand>(ripDecoded[0].operands[1]);
+    expect(ripMemory.ripRelative && !ripMemory.hasBase &&
+               !ripMemory.index && ripMemory.displacement == 0x40E48A2D &&
+               ripMemory.width == 64 &&
+               ripSource.reg == rosa::x86::Register::Rdx &&
+               ripSource.width == 64,
+           "RIP-relative CMP [memory], rdx operands differ");
+    expect(rosa::debug::dumpX86(ripDecoded).find(
+               "cmp [rip+0x40e48a2d], rdx ; 0x7ff843860730") !=
+               std::string::npos,
+           "RIP-relative CMP [memory], rdx dump differs");
+
+    constexpr std::uint64_t ripValue = 0x7FF82258A220ULL;
+    addressSpace.mapAnonymous(
+        ripTargetPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(ripTarget, ripValue);
+    const auto ripBlock = translator.translate(ripCode, ripCmpAddress);
+    rosa::x86::X86State ripState;
+    ripState.rdx = ripValue;
+    ripState.rflags = 0x8D7;
+    static_cast<void>(ripBlock.execute(ripState, &addressSpace));
+    expectEqual(ripState.rdx, ripValue,
+                "RIP-relative CMP [memory], rdx changed its source");
+    expectEqual(ripState.rflags, std::uint64_t{0x46},
+                "RIP-relative CMP [memory], rdx equal flags differ");
+    expectEqual(addressSpace.readU64(ripTarget), ripValue,
+                "RIP-relative CMP [memory], rdx changed memory");
+
+    rosa::guest::AddressSpace ripFaultAddressSpace;
+    rosa::x86::X86State ripFaultState;
+    ripFaultState.rdx = ripValue;
+    ripFaultState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(
+            ripBlock.execute(ripFaultState, &ripFaultAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative CMP [unmapped], rdx did not fault");
+    expectEqual(ripFaultState.rdx, ripValue,
+                "faulted RIP-relative CMP changed its source");
+    expectEqual(ripFaultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative CMP changed flags");
+
     constexpr std::array<std::uint8_t, 4> registerCode{0x48, 0x39, 0xD8, 0xC3};
     const auto registerDecoded = decoder.decodeBlock(
         registerCode, rosa::guest::GuestAddress{0x2000});
     expect(registerDecoded[0].opcode == rosa::x86::Opcode::CmpRegReg,
            "register-direct opcode 39 no longer decodes as CMP register");
+
+    constexpr std::array<std::uint8_t, 6> sibCode{
+        0x49, 0x39, 0x44, 0x24, 0x38, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802AA664AULL};
+    const auto sibDecoded = decoder.decodeBlock(sibCode, observedRip);
+    expect(sibDecoded[0].opcode == rosa::x86::Opcode::CmpMemReg,
+           "CMP no-index SIB memory opcode differs");
+    expectEqual(sibDecoded[0].length, std::uint8_t{5},
+                "CMP no-index SIB memory length differs");
+    const auto sibMemory =
+        std::get<rosa::x86::MemoryOperand>(sibDecoded[0].operands[0]);
+    const auto sibSource =
+        std::get<rosa::x86::RegisterOperand>(sibDecoded[0].operands[1]);
+    expect(sibMemory.base == rosa::x86::Register::R12 &&
+               !sibMemory.index && sibMemory.displacement == 0x38 &&
+               sibMemory.width == 64,
+           "CMP [r12+0x38] memory operand differs");
+    expect(sibSource.reg == rosa::x86::Register::Rax &&
+               sibSource.width == 64,
+           "CMP [r12+0x38], rax source differs");
+    expect(rosa::debug::dumpX86(sibDecoded).find(
+               "cmp [r12+0x38], rax") != std::string::npos,
+           "CMP [r12+0x38], rax dump differs");
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8038}, 0x55);
+    const auto sibBlock = translator.translate(sibCode, observedRip);
+    rosa::x86::X86State sibState;
+    sibState.r12 = 0x8000;
+    sibState.rax = 0x55;
+    sibState.rflags = 0x8D7;
+    static_cast<void>(sibBlock.execute(sibState, &addressSpace));
+    expectEqual(sibState.rflags, std::uint64_t{0x46},
+                "CMP [r12+0x38], rax equal flags differ");
+    expectEqual(sibState.r12, std::uint64_t{0x8000},
+                "CMP [r12+0x38], rax changed its base");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8038}),
+                std::uint64_t{0x55},
+                "CMP [r12+0x38], rax changed memory");
+
+    constexpr std::array<std::uint8_t, 10> gsCode{
+        0x65, 0x48, 0x39, 0x0C, 0x25, 0xD0, 0xFF, 0xFF, 0xFF, 0xC3};
+    constexpr rosa::guest::GuestAddress gsRip{0x7FF802E6F83AULL};
+    constexpr rosa::guest::GuestAddress gsBase{0x9000};
+    constexpr rosa::guest::GuestAddress gsTarget{0x8FD0};
+    const auto gsDecoded = decoder.decodeBlock(gsCode, gsRip);
+    expect(gsDecoded[0].opcode == rosa::x86::Opcode::CmpMemReg,
+           "GS-absolute CMP qword opcode differs");
+    expectEqual(gsDecoded[0].length, std::uint8_t{9},
+                "GS-absolute CMP qword length differs");
+    const auto gsMemory =
+        std::get<rosa::x86::MemoryOperand>(gsDecoded[0].operands[0]);
+    const auto gsSource =
+        std::get<rosa::x86::RegisterOperand>(gsDecoded[0].operands[1]);
+    expect(!gsMemory.hasBase && !gsMemory.index &&
+               !gsMemory.ripRelative && gsMemory.displacement == -0x30 &&
+               gsMemory.width == 64 &&
+               gsMemory.segment == rosa::x86::Segment::Gs,
+           "GS-absolute CMP qword memory operand differs");
+    expect(gsSource.reg == rosa::x86::Register::Rcx &&
+               gsSource.width == 64,
+           "GS-absolute CMP qword source differs");
+    expect(rosa::debug::dumpX86(gsDecoded).find(
+               "cmp [gs:0xffffffffffffffd0], rcx") != std::string::npos,
+           "GS-absolute CMP qword dump differs");
+    constexpr std::uint64_t gsValue = 0x7000000FB678ULL;
+    addressSpace.writeU64(gsTarget, gsValue);
+    const auto gsBlock = translator.translate(gsCode, gsRip);
+    expect(rosa::debug::dumpIr(gsBlock.intermediateRepresentation())
+                   .find("read_guest_gs_base.i64") != std::string::npos,
+           "GS-absolute CMP qword did not lower through GS base IR");
+    rosa::x86::X86State gsState;
+    gsState.gsBase = gsBase.value;
+    gsState.rcx = gsValue;
+    gsState.rflags = 0x8D7;
+    static_cast<void>(gsBlock.execute(gsState, &addressSpace));
+    expectEqual(gsState.rflags, std::uint64_t{0x46},
+                "GS-absolute CMP qword equal flags differ");
+    expectEqual(gsState.gsBase, gsBase.value,
+                "GS-absolute CMP qword changed GS base");
+    expectEqual(gsState.rcx, gsValue,
+                "GS-absolute CMP qword changed its source");
+    expectEqual(addressSpace.readU64(gsTarget), gsValue,
+                "GS-absolute CMP qword changed memory");
+
+    rosa::guest::AddressSpace unmappedGsAddressSpace;
+    gsState.rflags = 0xAD7;
+    bool gsFaulted = false;
+    try {
+        static_cast<void>(gsBlock.execute(gsState,
+                                          &unmappedGsAddressSpace));
+    } catch (const std::runtime_error &error) {
+        gsFaulted = std::string_view(error.what()).find("unmapped") !=
+                    std::string_view::npos;
+    }
+    expect(gsFaulted, "GS-absolute CMP qword accepted unmapped memory");
+    expectEqual(gsState.rflags, std::uint64_t{0xAD7},
+                "faulted GS-absolute CMP qword changed flags");
 }
 
 void testLockedCompareExchangeGuestDword() {
@@ -5885,6 +7458,247 @@ void testLockedCompareExchangeGuestDword() {
                 "faulted LOCK CMPXCHG changed its source");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "faulted LOCK CMPXCHG changed flags");
+
+    constexpr std::array<std::uint8_t, 7> sibCode{
+        0xF0, 0x41, 0x0F, 0xB1, 0x0C, 0x24, 0xC3};
+    constexpr rosa::guest::GuestAddress sibRip{0x7FF802C6819EULL};
+    const auto sibDecoded = decoder.decodeBlock(sibCode, sibRip);
+    expect(sibDecoded[0].opcode == rosa::x86::Opcode::CmpxchgMemReg,
+           "LOCK CMPXCHG no-index SIB opcode differs");
+    expectEqual(sibDecoded[0].length, std::uint8_t{6},
+                "LOCK CMPXCHG no-index SIB length differs");
+    const auto sibMemory =
+        std::get<rosa::x86::MemoryOperand>(sibDecoded[0].operands[0]);
+    const auto sibSource =
+        std::get<rosa::x86::RegisterOperand>(sibDecoded[0].operands[1]);
+    expect(sibMemory.base == rosa::x86::Register::R12 &&
+               sibMemory.width == 32 && sibMemory.displacement == 0 &&
+               !sibMemory.index && sibSource.reg == rosa::x86::Register::Rcx &&
+               sibSource.width == 32,
+           "LOCK CMPXCHG dword [r12], ecx operands differ");
+    expect(rosa::debug::dumpX86(sibDecoded).find(
+               "lock cmpxchg dword [r12], ecx") != std::string::npos,
+           "LOCK CMPXCHG no-index SIB dump differs");
+
+    addressSpace.writeBytes(memoryBase, zeroBytes);
+    const auto sibBlock = translator.translate(sibCode, sibRip);
+    rosa::x86::X86State sibState;
+    sibState.r12 = memoryBase.value;
+    sibState.rax = 0;
+    sibState.rcx = 0x8007FFFB;
+    sibState.rflags = 0x8D7;
+    static_cast<void>(sibBlock.execute(sibState, &addressSpace));
+    expectEqual(addressSpace.readU32(memoryBase),
+                std::uint32_t{0x8007FFFB},
+                "LOCK CMPXCHG no-index SIB stored the wrong dword");
+    expectEqual(sibState.r12, memoryBase.value,
+                "LOCK CMPXCHG no-index SIB changed R12");
+    expectEqual(sibState.rcx, std::uint64_t{0x8007FFFB},
+                "LOCK CMPXCHG no-index SIB changed ECX");
+    expectEqual(sibState.rflags, std::uint64_t{0x46},
+                "LOCK CMPXCHG no-index SIB flags differ");
+
+    constexpr std::array<std::uint8_t, 7> indexedCode{
+        0xF0, 0x41, 0x0F, 0xB1, 0x14, 0x0C, 0xC3};
+    constexpr rosa::guest::GuestAddress indexedRip{0x7FF802C70673ULL};
+    const auto indexedDecoded = decoder.decodeBlock(indexedCode, indexedRip);
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::CmpxchgMemReg,
+           "LOCK CMPXCHG indexed SIB opcode differs");
+    expectEqual(indexedDecoded[0].length, std::uint8_t{6},
+                "LOCK CMPXCHG indexed SIB length differs");
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            indexedDecoded[0].operands[0]);
+    const auto indexedSource =
+        std::get<rosa::x86::RegisterOperand>(
+            indexedDecoded[0].operands[1]);
+    expect(indexedMemory.base == rosa::x86::Register::R12 &&
+               indexedMemory.index == rosa::x86::Register::Rcx &&
+               indexedMemory.scale == 1 && indexedMemory.width == 32 &&
+               indexedMemory.displacement == 0 &&
+               indexedSource.reg == rosa::x86::Register::Rdx &&
+               indexedSource.width == 32,
+           "LOCK CMPXCHG dword [r12+rcx], edx operands differ");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "lock cmpxchg dword [r12+rcx*1], edx") !=
+               std::string::npos,
+           "LOCK CMPXCHG indexed SIB dump differs");
+
+    addressSpace.writeBytes(memoryBase, zeroBytes);
+    const auto indexedBlock = translator.translate(indexedCode, indexedRip);
+    rosa::x86::X86State indexedState;
+    indexedState.r12 = memoryBase.value - 0x800;
+    indexedState.rcx = 0x800;
+    indexedState.rax = 0;
+    indexedState.rdx = 0x803;
+    indexedState.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    expectEqual(addressSpace.readU32(memoryBase), std::uint32_t{0x803},
+                "LOCK CMPXCHG indexed SIB stored the wrong dword");
+    expectEqual(indexedState.r12, memoryBase.value - 0x800,
+                "LOCK CMPXCHG indexed SIB changed R12");
+    expectEqual(indexedState.rcx, std::uint64_t{0x800},
+                "LOCK CMPXCHG indexed SIB changed RCX");
+    expectEqual(indexedState.rdx, std::uint64_t{0x803},
+                "LOCK CMPXCHG indexed SIB changed EDX");
+    expectEqual(indexedState.rflags, std::uint64_t{0x46},
+                "LOCK CMPXCHG indexed SIB flags differ");
+
+    rosa::x86::X86State indexedFaultState;
+    indexedFaultState.r12 = memoryBase.value - 0x800;
+    indexedFaultState.rcx = 0x800;
+    indexedFaultState.rax = 1;
+    indexedFaultState.rdx = 2;
+    indexedFaultState.rflags = 0xAD7;
+    bool indexedRejected = false;
+    try {
+        static_cast<void>(indexedBlock.execute(indexedFaultState,
+                                                &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        indexedRejected = std::string_view(error.what()).find(
+                              "permissions") != std::string_view::npos;
+    }
+    expect(indexedRejected,
+           "LOCK CMPXCHG indexed SIB accepted a read-only destination");
+    expectEqual(indexedFaultState.rax, std::uint64_t{1},
+                "faulted LOCK CMPXCHG indexed SIB changed RAX");
+    expectEqual(indexedFaultState.rdx, std::uint64_t{2},
+                "faulted LOCK CMPXCHG indexed SIB changed EDX");
+    expectEqual(indexedFaultState.rflags, std::uint64_t{0xAD7},
+                "faulted LOCK CMPXCHG indexed SIB changed flags");
+}
+
+void testLockedCompareExchangeGuestQword() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0xF0, 0x4C, 0x0F, 0xB1, 0x07, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802E7AF24ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpxchgMemReg,
+           "LOCK CMPXCHG qword opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "LOCK CMPXCHG qword length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rdi && memory.width == 64 &&
+               memory.displacement == 0 &&
+               source.reg == rosa::x86::Register::R8 && source.width == 64,
+           "LOCK CMPXCHG qword operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "lock cmpxchg qword [rdi], r8") != std::string::npos,
+           "LOCK CMPXCHG qword dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802E7AF24ULL});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("compare_exchange_guest_memory.i64") !=
+               std::string::npos,
+           "LOCK CMPXCHG qword IR differs");
+
+    addressSpace.writeU64(memoryBase, 0);
+    rosa::x86::X86State equalState;
+    equalState.rdi = memoryBase.value;
+    equalState.rax = 0;
+    equalState.r8 = 0x1122334455667788ULL;
+    equalState.rflags = 0x8D7;
+    static_cast<void>(block.execute(equalState, &addressSpace));
+    expectEqual(addressSpace.readU64(memoryBase),
+                std::uint64_t{0x1122334455667788ULL},
+                "successful LOCK CMPXCHG qword stored the wrong value");
+    expectEqual(equalState.rax, std::uint64_t{0},
+                "successful LOCK CMPXCHG qword changed RAX");
+    expectEqual(equalState.r8, std::uint64_t{0x1122334455667788ULL},
+                "successful LOCK CMPXCHG qword changed its source");
+    expectEqual(equalState.rflags, std::uint64_t{0x46},
+                "successful LOCK CMPXCHG qword flags differ");
+
+    addressSpace.writeU64(memoryBase, 0x8000000000000000ULL);
+    rosa::x86::X86State mismatchState;
+    mismatchState.rdi = memoryBase.value;
+    mismatchState.rax = 0;
+    mismatchState.r8 = 0x1122334455667788ULL;
+    mismatchState.rflags = 0x8D7;
+    static_cast<void>(block.execute(mismatchState, &addressSpace));
+    expectEqual(addressSpace.readU64(memoryBase),
+                std::uint64_t{0x8000000000000000ULL},
+                "failed LOCK CMPXCHG qword comparison changed memory");
+    expectEqual(mismatchState.rax,
+                std::uint64_t{0x8000000000000000ULL},
+                "failed LOCK CMPXCHG qword did not load RAX");
+    expectEqual(mismatchState.rflags, std::uint64_t{0x86},
+                "failed LOCK CMPXCHG qword flags differ");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                                      rosa::guest::Permission::Read);
+    rosa::x86::X86State faultState;
+    faultState.rdi = memoryBase.value;
+    faultState.rax = 1;
+    faultState.r8 = 2;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected,
+           "LOCK CMPXCHG qword accepted a read-only guest destination");
+    expectEqual(faultState.rax, std::uint64_t{1},
+                "faulted LOCK CMPXCHG qword changed RAX");
+    expectEqual(faultState.r8, std::uint64_t{2},
+                "faulted LOCK CMPXCHG qword changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted LOCK CMPXCHG qword changed flags");
+
+    constexpr std::array<std::uint8_t, 10> ripRelativeCode{
+        0xF0, 0x48, 0x0F, 0xB1, 0x35, 0x38, 0x1E, 0x84, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress ripRelativeAddress{
+        0x7FF802E7D1CFULL};
+    constexpr rosa::guest::GuestAddress ripRelativeTarget{
+        0x7FF8436BF010ULL};
+    const auto ripRelativeDecoded = decoder.decodeBlock(
+        ripRelativeCode, ripRelativeAddress);
+    const auto ripRelativeMemory = std::get<rosa::x86::MemoryOperand>(
+        ripRelativeDecoded[0].operands[0]);
+    expect(ripRelativeDecoded[0].opcode ==
+               rosa::x86::Opcode::CmpxchgMemReg &&
+               ripRelativeMemory.ripRelative &&
+               !ripRelativeMemory.hasBase &&
+               ripRelativeMemory.displacement == 0x40841E38 &&
+               ripRelativeMemory.width == 64,
+           "RIP-relative LOCK CMPXCHG qword operand differs");
+    expect(rosa::debug::dumpX86(ripRelativeDecoded).find(
+               "lock cmpxchg qword [rip+0x40841e38], rsi ; 0x7ff8436bf010") !=
+               std::string::npos,
+           "RIP-relative LOCK CMPXCHG qword dump differs");
+    addressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{ripRelativeTarget.value & ~UINT64_C(0xFFF)},
+        rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(ripRelativeTarget, 0);
+    const auto ripRelativeBlock = translator.translate(
+        ripRelativeCode, ripRelativeAddress);
+    rosa::x86::X86State ripRelativeState;
+    ripRelativeState.rax = 0;
+    ripRelativeState.rsi = 0x8877665544332211ULL;
+    ripRelativeState.rflags = 0x8D7;
+    static_cast<void>(
+        ripRelativeBlock.execute(ripRelativeState, &addressSpace));
+    expectEqual(addressSpace.readU64(ripRelativeTarget),
+                std::uint64_t{0x8877665544332211ULL},
+                "RIP-relative LOCK CMPXCHG qword stored the wrong value");
+    expectEqual(ripRelativeState.rflags, std::uint64_t{0x46},
+                "RIP-relative LOCK CMPXCHG qword flags differ");
 }
 
 void testLockedCompareExchangeGuestPair() {
@@ -6241,6 +8055,67 @@ void testExchangeGuestQwordWithRegister() {
                 "cross-page XCHG qword changed RCX");
     expectEqual(faultState.rflags, std::uint64_t{0xBD7},
                 "cross-page XCHG qword changed flags");
+
+    constexpr rosa::guest::GuestAddress rip{0x7FF802E18172ULL};
+    constexpr rosa::guest::GuestAddress ripTarget{0x7FF8436BCF70ULL};
+    constexpr rosa::guest::GuestAddress ripTargetPage{0x7FF8436BC000ULL};
+    constexpr std::array<std::uint8_t, 8> ripCode{
+        0x48, 0x87, 0x05, 0xF7, 0x4D, 0x8A, 0x40, 0xC3};
+    const auto ripDecoded = decoder.decodeBlock(ripCode, rip);
+    expect(ripDecoded[0].opcode == rosa::x86::Opcode::XchgMemReg,
+           "RIP-relative XCHG qword opcode differs");
+    expectEqual(ripDecoded[0].length, std::uint8_t{7},
+                "RIP-relative XCHG qword length differs");
+    const auto ripMemory =
+        std::get<rosa::x86::MemoryOperand>(ripDecoded[0].operands[0]);
+    const auto ripSource =
+        std::get<rosa::x86::RegisterOperand>(ripDecoded[0].operands[1]);
+    expect(ripMemory.ripRelative && !ripMemory.hasBase &&
+               ripMemory.displacement == 0x408A4DF7 && ripMemory.width == 64,
+           "RIP-relative XCHG qword memory operand differs");
+    expect(ripSource.reg == rosa::x86::Register::Rax &&
+               ripSource.width == 64,
+           "RIP-relative XCHG qword source differs");
+    expect(rosa::debug::dumpX86(ripDecoded).find(
+               "xchg qword [rip+0x408a4df7], rax ; 0x7ff8436bcf70") !=
+               std::string::npos,
+           "RIP-relative XCHG qword dump differs");
+
+    rosa::guest::AddressSpace ripAddressSpace;
+    ripAddressSpace.mapAnonymous(
+        ripTargetPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::uint64_t ripOldValue = 0xFEDCBA9876543210ULL;
+    constexpr std::uint64_t ripNewValue = 0x7FF802A31E99ULL;
+    ripAddressSpace.writeU64(ripTarget, ripOldValue);
+    const auto ripBlock = translator.translate(ripCode, rip);
+    rosa::x86::X86State ripState;
+    ripState.rax = ripNewValue;
+    ripState.rflags = 0x9D7;
+    static_cast<void>(ripBlock.execute(ripState, &ripAddressSpace));
+    expectEqual(ripAddressSpace.readU64(ripTarget), ripNewValue,
+                "RIP-relative XCHG qword stored the wrong value");
+    expectEqual(ripState.rax, ripOldValue,
+                "RIP-relative XCHG qword returned the wrong old value");
+    expectEqual(ripState.rflags, std::uint64_t{0x9D7},
+                "RIP-relative XCHG qword changed flags");
+
+    rosa::guest::AddressSpace unmappedRipAddressSpace;
+    ripState.rax = ripNewValue;
+    ripState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(
+            ripBlock.execute(ripState, &unmappedRipAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative XCHG qword accepted an unmapped target");
+    expectEqual(ripState.rax, ripNewValue,
+                "faulted RIP-relative XCHG qword changed RAX");
+    expectEqual(ripState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative XCHG qword changed flags");
 }
 
 void testLockedAddGuestQwordRegister() {
@@ -6475,6 +8350,76 @@ void testLockedExchangeAddGuestDwordRegister() {
                 "cross-page LOCK XADD changed flags");
 }
 
+void testLockedExchangeAddGuestQwordRegister() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0xF0, 0x49, 0x0F, 0xC1, 0x07, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802E7D202ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockXaddMemReg,
+           "LOCK XADD qword opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "LOCK XADD qword length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R15 && memory.width == 64 &&
+               memory.displacement == 0 &&
+               source.reg == rosa::x86::Register::Rax && source.width == 64,
+           "LOCK XADD qword operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "lock xadd qword [r15], rax") != std::string::npos,
+           "LOCK XADD qword dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802E7D202ULL});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("locked_exchange_add_guest_memory.i64") !=
+               std::string::npos,
+           "LOCK XADD qword IR differs");
+    constexpr rosa::guest::GuestAddress target{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(target, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0x20);
+    rosa::x86::X86State state;
+    state.rax = 0x20;
+    state.r15 = target.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0x40},
+                "LOCK XADD qword stored the wrong sum");
+    expectEqual(state.rax, std::uint64_t{0x20},
+                "LOCK XADD qword returned the wrong old value");
+    expectEqual(state.r15, target.value,
+                "LOCK XADD qword changed its address register");
+    expectEqual(state.rflags, std::uint64_t{0x2},
+                "LOCK XADD qword flags differ");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(target, rosa::guest::guestPageSize,
+                                      rosa::guest::Permission::Read);
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x20;
+    faultState.r15 = target.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "LOCK XADD qword accepted read-only guest memory");
+    expectEqual(faultState.rax, std::uint64_t{0x20},
+                "faulted LOCK XADD qword changed its source register");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted LOCK XADD qword changed flags");
+}
+
 void testLockedOrGuestDwordImmediate() {
     constexpr std::array<std::uint8_t, 7> zeroCode{
         0xF0, 0x83, 0x4C, 0x24, 0xC0, 0x00, 0xC3};
@@ -6543,6 +8488,47 @@ void testLockedOrGuestDwordImmediate() {
     expectEqual(negativeState.rflags & definedLogicFlags, std::uint64_t{0x84},
                 "LOCK OR negative result defined flags differ");
 
+    constexpr std::array<std::uint8_t, 8> fullImmediateCode{
+        0xF0, 0x81, 0x08, 0x00, 0x00, 0x00, 0x10, 0xC3};
+    const auto fullImmediateDecoded = decoder.decodeBlock(
+        fullImmediateCode, rosa::guest::GuestAddress{0x3000});
+    expect(fullImmediateDecoded[0].opcode ==
+               rosa::x86::Opcode::LockOrMemImm,
+           "LOCK OR imm32 opcode differs");
+    expectEqual(fullImmediateDecoded[0].length, std::uint8_t{7},
+                "LOCK OR imm32 length differs");
+    const auto fullImmediateMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            fullImmediateDecoded[0].operands[0]);
+    const auto fullImmediate =
+        std::get<rosa::x86::ImmediateOperand>(
+            fullImmediateDecoded[0].operands[1]);
+    expect(fullImmediateMemory.base == rosa::x86::Register::Rax &&
+               fullImmediateMemory.width == 32 &&
+               fullImmediateMemory.displacement == 0 &&
+               fullImmediate.width == 32 &&
+               fullImmediate.value == 0x10000000,
+           "lock or dword [rax], 0x10000000 operands differ");
+    expect(rosa::debug::dumpX86(fullImmediateDecoded).find(
+               "lock or dword [rax], 0x10000000") != std::string::npos,
+           "LOCK OR imm32 dump differs");
+    const auto fullImmediateBlock = translator.translate(
+        fullImmediateCode, rosa::guest::GuestAddress{0x3000});
+    addressSpace.writeBytes(
+        target, std::array<std::uint8_t, 4>{0x01, 0x00, 0x00, 0x00});
+    rosa::x86::X86State fullImmediateState;
+    fullImmediateState.rax = target.value;
+    fullImmediateState.rflags = 0x8D7;
+    static_cast<void>(
+        fullImmediateBlock.execute(fullImmediateState, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0x10000001},
+                "LOCK OR imm32 result differs");
+    expectEqual(fullImmediateState.rax, target.value,
+                "LOCK OR imm32 changed RAX");
+    expectEqual(fullImmediateState.rflags & definedLogicFlags,
+                std::uint64_t{0},
+                "LOCK OR imm32 defined flags differ");
+
     std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
     readOnlyBytes[0x100] = 0xA5;
     rosa::guest::AddressSpace readOnlyAddressSpace;
@@ -6566,6 +8552,25 @@ void testLockedOrGuestDwordImmediate() {
                 "faulted LOCK OR changed RSP");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "faulted LOCK OR changed flags");
+
+    rosa::x86::X86State fullImmediateFaultState;
+    fullImmediateFaultState.rax = target.value;
+    fullImmediateFaultState.rflags = 0xCD7;
+    rejected = false;
+    try {
+        static_cast<void>(fullImmediateBlock.execute(
+            fullImmediateFaultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "LOCK OR imm32 accepted a read-only guest dword");
+    expectEqual(readOnlyAddressSpace.readU32(target), std::uint32_t{0xA5},
+                "faulted LOCK OR imm32 changed read-only memory");
+    expectEqual(fullImmediateFaultState.rax, target.value,
+                "faulted LOCK OR imm32 changed RAX");
+    expectEqual(fullImmediateFaultState.rflags, std::uint64_t{0xCD7},
+                "faulted LOCK OR imm32 changed flags");
 
     constexpr rosa::guest::GuestAddress crossPageTarget{0x8FFE};
     constexpr std::array crossPageBytes{
@@ -6592,6 +8597,161 @@ void testLockedOrGuestDwordImmediate() {
            "cross-page LOCK OR partially changed guest memory");
     expectEqual(faultState.rflags, std::uint64_t{0xBD7},
                 "cross-page LOCK OR changed flags");
+}
+
+void testLockedOrGuestWordImmediate() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x66, 0xF0, 0x41, 0x83, 0x4C, 0x24, 0x1E, 0x01, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802A1A52AULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockOrMemImm,
+           "word LOCK OR opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "word LOCK OR length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R12 && memory.width == 16 &&
+               memory.displacement == 0x1E && immediate.width == 8 &&
+               immediate.value == 1,
+           "lock or word [r12+0x1e], 1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "lock or word [r12+0x1e], 0x1") != std::string::npos,
+           "word LOCK OR dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x811E};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> initial{0x00, 0x80};
+    addressSpace.writeBytes(target, initial);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "locked_or_guest_memory.i16") != std::string::npos,
+           "word LOCK OR did not lower through atomic guest-memory IR");
+    rosa::x86::X86State state;
+    state.r12 = 0x8100;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expect(addressSpace.readBytes(target, 2) ==
+               std::vector<std::uint8_t>({0x01, 0x80}),
+           "word LOCK OR result differs");
+    expectEqual(state.r12, std::uint64_t{0x8100},
+                "word LOCK OR changed its base");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 7U},
+                "word LOCK OR defined flags differ");
+
+    constexpr std::array<std::uint8_t, 10> imm16Code{
+        0x66, 0xF0, 0x41, 0x81, 0x4C, 0x24, 0x1E, 0x00, 0x20, 0xC3};
+    constexpr rosa::guest::GuestAddress imm16Address{0x7FF802A1A61AULL};
+    const auto imm16Decoded = decoder.decodeBlock(imm16Code, imm16Address);
+    expect(imm16Decoded[0].opcode == rosa::x86::Opcode::LockOrMemImm,
+           "word LOCK OR imm16 opcode differs");
+    expectEqual(imm16Decoded[0].length, std::uint8_t{9},
+                "word LOCK OR imm16 length differs");
+    const auto imm16Memory =
+        std::get<rosa::x86::MemoryOperand>(imm16Decoded[0].operands[0]);
+    const auto imm16 =
+        std::get<rosa::x86::ImmediateOperand>(imm16Decoded[0].operands[1]);
+    expect(imm16Memory.base == rosa::x86::Register::R12 &&
+               imm16Memory.width == 16 &&
+               imm16Memory.displacement == 0x1E &&
+               imm16.width == 16 && imm16.value == 0x2000,
+           "lock or word [r12+0x1e], 0x2000 operands differ");
+    expect(rosa::debug::dumpX86(imm16Decoded).find(
+               "lock or word [r12+0x1e], 0x2000") !=
+               std::string::npos,
+           "word LOCK OR imm16 dump differs");
+    const auto imm16Block = translator.translate(imm16Code, imm16Address);
+    rosa::x86::X86State imm16State;
+    imm16State.r12 = 0x8100;
+    imm16State.rflags = 0x8D7;
+    static_cast<void>(imm16Block.execute(imm16State, &addressSpace));
+    expect(addressSpace.readBytes(target, 2) ==
+               std::vector<std::uint8_t>({0x01, 0xA0}),
+           "word LOCK OR imm16 result differs");
+    expectEqual(imm16State.r12, std::uint64_t{0x8100},
+                "word LOCK OR imm16 changed its base");
+    expectEqual(imm16State.rflags & definedLogicFlags,
+                std::uint64_t{1U << 7U},
+                "word LOCK OR imm16 defined flags differ");
+
+    constexpr std::array<std::uint8_t, 8> legacyImm16Code{
+        0x66, 0xF0, 0x81, 0x4E, 0x1E, 0x00, 0x20, 0xC3};
+    constexpr rosa::guest::GuestAddress legacyImm16Address{
+        0x7FF802A1BC3CULL};
+    const auto legacyImm16Decoded =
+        decoder.decodeBlock(legacyImm16Code, legacyImm16Address);
+    expect(legacyImm16Decoded[0].opcode ==
+               rosa::x86::Opcode::LockOrMemImm,
+           "legacy word LOCK OR imm16 opcode differs");
+    expectEqual(legacyImm16Decoded[0].length, std::uint8_t{7},
+                "legacy word LOCK OR imm16 length differs");
+    const auto legacyImm16Memory =
+        std::get<rosa::x86::MemoryOperand>(
+            legacyImm16Decoded[0].operands[0]);
+    const auto legacyImm16 =
+        std::get<rosa::x86::ImmediateOperand>(
+            legacyImm16Decoded[0].operands[1]);
+    expect(legacyImm16Memory.base == rosa::x86::Register::Rsi &&
+               legacyImm16Memory.width == 16 &&
+               legacyImm16Memory.displacement == 0x1E &&
+               legacyImm16.width == 16 && legacyImm16.value == 0x2000,
+           "lock or word [rsi+0x1e], 0x2000 operands differ");
+    expect(rosa::debug::dumpX86(legacyImm16Decoded).find(
+               "lock or word [rsi+0x1e], 0x2000") !=
+               std::string::npos,
+           "legacy word LOCK OR imm16 dump differs");
+    addressSpace.writeBytes(
+        target, std::array<std::uint8_t, 2>{0x01, 0x00});
+    const auto legacyImm16Block =
+        translator.translate(legacyImm16Code, legacyImm16Address);
+    rosa::x86::X86State legacyImm16State;
+    legacyImm16State.rsi = 0x8100;
+    legacyImm16State.rflags = 0x8D7;
+    static_cast<void>(
+        legacyImm16Block.execute(legacyImm16State, &addressSpace));
+    expect(addressSpace.readBytes(target, 2) ==
+               std::vector<std::uint8_t>({0x01, 0x20}),
+           "legacy word LOCK OR imm16 result differs");
+    expectEqual(legacyImm16State.rsi, std::uint64_t{0x8100},
+                "legacy word LOCK OR imm16 changed its base");
+
+    constexpr rosa::guest::GuestAddress crossPageTarget{0x8FFF};
+    constexpr std::array<std::uint8_t, 1> tail{0xA5};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    crossPageAddressSpace.writeBytes(crossPageTarget, tail);
+    rosa::x86::X86State faultState;
+    faultState.r12 = crossPageTarget.value - 0x1E;
+    faultState.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(
+            block.execute(faultState, &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page word LOCK OR did not fault");
+    expect(crossPageAddressSpace.readBytes(crossPageTarget, 1) ==
+               std::vector<std::uint8_t>(tail.begin(), tail.end()),
+           "faulted word LOCK OR partially changed memory");
+    expectEqual(faultState.r12,
+                crossPageTarget.value - 0x1E,
+                "faulted word LOCK OR changed its base");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "faulted word LOCK OR changed flags");
 }
 
 void testLockedIncrementGuestDword() {
@@ -6704,6 +8864,145 @@ void testLockedIncrementGuestDword() {
            "cross-page LOCK INC partially changed guest memory");
     expectEqual(faultState.rflags, std::uint64_t{0xBD7},
                 "cross-page LOCK INC changed flags");
+}
+
+void testLockedIncrementRipRelativeGuestDword() {
+    constexpr std::array<std::uint8_t, 8> observedCode{
+        0xF0, 0xFF, 0x05, 0x31, 0x37, 0xA4, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C712B8ULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF8436B49F0ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockIncMem,
+           "RIP-relative LOCK INC opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "RIP-relative LOCK INC length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.ripRelative && memory.width == 32 && !memory.index &&
+               memory.displacement == 0x40A43731,
+           "RIP-relative LOCK INC operand differs");
+    expectEqual(observedRip.value + decoded[0].length + memory.displacement,
+                target.value, "RIP-relative LOCK INC target differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "lock inc dword [rip+0x40a43731]") != std::string::npos,
+           "RIP-relative LOCK INC dump differs");
+
+    constexpr rosa::guest::GuestAddress targetPage{
+        target.value & ~(rosa::guest::guestPageSize - 1)};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, UINT32_MAX);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    rosa::x86::X86State state;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0},
+                "RIP-relative LOCK INC result differs");
+    expectEqual(state.rflags, std::uint64_t{0x57},
+                "RIP-relative LOCK INC flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    state.rflags = 0xBD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "RIP-relative LOCK INC accepted unmapped memory");
+    expectEqual(state.rflags, std::uint64_t{0xBD7},
+                "faulted RIP-relative LOCK INC changed flags");
+}
+
+void testLockedDecrementGuestDword() {
+    constexpr std::array<std::uint8_t, 4> observedCode{
+        0xF0, 0xFF, 0x08, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C7201FULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockDecMem,
+           "LOCK DEC opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "LOCK DEC length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rax && memory.width == 32 &&
+               memory.displacement == 0 && !memory.ripRelative,
+           "LOCK DEC memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("lock dec dword [rax]") !=
+               std::string::npos,
+           "LOCK DEC dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("locked_decrement_guest_memory.i32") !=
+               std::string::npos,
+           "LOCK DEC did not lower through locked guest-memory IR");
+
+    addressSpace.writeU64(target, 0xDEADBEEF80000000ULL);
+    rosa::x86::X86State overflowState;
+    overflowState.rax = target.value;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(block.execute(overflowState, &addressSpace));
+    expectEqual(addressSpace.readU64(target),
+                std::uint64_t{0xDEADBEEF7FFFFFFFULL},
+                "LOCK DEC did not perform an exact dword write");
+    expectEqual(overflowState.rax, target.value,
+                "LOCK DEC changed its address base");
+    expectEqual(overflowState.rflags, std::uint64_t{0x817},
+                "LOCK DEC overflow flags differ or changed CF");
+
+    addressSpace.writeU64(target, 0xA5A5A5A500000000ULL);
+    rosa::x86::X86State wrapState;
+    wrapState.rax = target.value;
+    wrapState.rflags = 0x8D6;
+    static_cast<void>(block.execute(wrapState, &addressSpace));
+    expectEqual(addressSpace.readU64(target),
+                std::uint64_t{0xA5A5A5A5FFFFFFFFULL},
+                "LOCK DEC dword wrap result differs");
+    expectEqual(wrapState.rflags, std::uint64_t{0x96},
+                "LOCK DEC wrap flags differ or changed CF");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[0x100] = 0x00;
+    readOnlyBytes[0x101] = 0x00;
+    readOnlyBytes[0x102] = 0x00;
+    readOnlyBytes[0x103] = 0x80;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(page, rosa::guest::guestPageSize,
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes,
+                                    "read-only LOCK DEC memory");
+    rosa::x86::X86State faultState;
+    faultState.rax = target.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "LOCK DEC accepted a read-only guest dword");
+    expectEqual(readOnlyAddressSpace.readU32(target),
+                std::uint32_t{0x80000000U},
+                "faulted LOCK DEC changed read-only memory");
+    expectEqual(faultState.rax, target.value,
+                "faulted LOCK DEC changed its address base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted LOCK DEC changed flags");
 }
 
 void testCompareGuestMemoryWith32BitImmediate() {
@@ -7130,6 +9429,50 @@ void testCompareGuestWordWithShortImmediate() {
     expectEqual(state.rflags, std::uint64_t{0x46},
                 "CMP word equal flags differ");
 
+    constexpr std::array<std::uint8_t, 7> observedCode{
+        0x66, 0x41, 0x83, 0x3C, 0x24, 0x08, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{
+        0x7FF802C71AECULL};
+    constexpr rosa::guest::GuestAddress observedPage{
+        0x7FFFFFE00000ULL};
+    constexpr rosa::guest::GuestAddress observedTarget{
+        0x7FFFFFE0001EULL};
+    const auto observedDecoded = decoder.decodeBlock(observedCode,
+                                                      observedRip);
+    expect(observedDecoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "REX/SIB CMP word opcode differs");
+    expectEqual(observedDecoded[0].length, std::uint8_t{6},
+                "REX/SIB CMP word length differs");
+    const auto observedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            observedDecoded[0].operands[0]);
+    expect(observedMemory.base == rosa::x86::Register::R12 &&
+               !observedMemory.index && observedMemory.scale == 1 &&
+               observedMemory.displacement == 0 &&
+               observedMemory.width == 16,
+           "CMP word [r12], 8 operands differ");
+    expect(rosa::debug::dumpX86(observedDecoded).find(
+               "cmp word [r12], 0x8") != std::string::npos,
+           "REX/SIB CMP word dump differs");
+
+    rosa::guest::AddressSpace observedAddressSpace;
+    observedAddressSpace.mapAnonymous(
+        observedPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> observedR12Value{8, 0};
+    observedAddressSpace.writeBytes(observedTarget, observedR12Value);
+    const auto observedBlock = translator.translate(observedCode,
+                                                     observedRip);
+    rosa::x86::X86State observedState;
+    observedState.r12 = observedTarget.value;
+    observedState.rflags = 0x8D7;
+    static_cast<void>(observedBlock.execute(observedState,
+                                            &observedAddressSpace));
+    expectEqual(observedState.r12, observedTarget.value,
+                "CMP word [r12], 8 changed its base");
+    expectEqual(observedState.rflags, std::uint64_t{0x46},
+                "CMP word [r12], 8 equal flags differ");
+
     constexpr std::array<std::uint8_t, 6> negativeCode{
         0x66, 0x83, 0x7A, 0x14, 0xFF, 0xC3};
     constexpr std::array<std::uint8_t, 2> minusOne{0xFF, 0xFF};
@@ -7146,6 +9489,32 @@ void testCompareGuestWordWithShortImmediate() {
     static_cast<void>(negativeBlock.execute(state, &addressSpace));
     expectEqual(state.rflags, std::uint64_t{0x13},
                 "CMP word negative imm8 flags differ");
+
+    constexpr std::array<std::uint8_t, 10> wideImmediateCode{
+        0x66, 0x81, 0xBD, 0x64, 0xFF, 0xFF, 0xFF, 0x00, 0x90, 0xC3};
+    const auto wideImmediateDecoded = decoder.decodeBlock(
+        wideImmediateCode, rosa::guest::GuestAddress{0x2800});
+    expect(wideImmediateDecoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "CMP word [memory], imm16 opcode differs");
+    const auto wideImmediateMemory = std::get<rosa::x86::MemoryOperand>(
+        wideImmediateDecoded[0].operands[0]);
+    expect(wideImmediateMemory.base == rosa::x86::Register::Rbp &&
+               wideImmediateMemory.displacement == -0x9C &&
+               wideImmediateMemory.width == 16,
+           "CMP word [rbp-0x9c], imm16 memory operand differs");
+    expect(rosa::debug::dumpX86(wideImmediateDecoded).find(
+               "cmp word [rbp-0x9c], 0x9000") != std::string::npos,
+           "CMP word [memory], imm16 dump differs");
+    constexpr std::array<std::uint8_t, 2> observedValue{0x00, 0x90};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8064},
+                            observedValue);
+    const auto wideImmediateBlock = translator.translate(
+        wideImmediateCode, rosa::guest::GuestAddress{0x2800});
+    state.rbp = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(wideImmediateBlock.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "CMP word [memory], imm16 equal flags differ");
 
     constexpr std::array<std::uint8_t, 6> overflowCode{
         0x66, 0x83, 0x7A, 0x14, 0x01, 0xC3};
@@ -7812,6 +10181,42 @@ void testCompare32BitRegisters() {
                 "legacy CMP changed ESI");
     expectEqual(state.rflags, std::uint64_t{0x816},
                 "legacy CMP EDX, ESI flags differ");
+}
+
+void testCompare16BitRegisters() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x44, 0x39, 0xF9, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C6CCDCULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegReg,
+           "CMP r16, r16 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "CMP r16, r16 length differs");
+    const auto lhs =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto rhs =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(lhs.reg == rosa::x86::Register::Rcx && lhs.width == 16 &&
+               rhs.reg == rosa::x86::Register::R15 && rhs.width == 16,
+           "CMP CX, R15W operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmp cx, r15w") !=
+               std::string::npos,
+           "CMP CX, R15W dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    rosa::x86::X86State state;
+    state.rcx = 0x112233445566003DULL;
+    state.r15 = 0x8877665544330001ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x112233445566003DULL},
+                "CMP r16 changed its lhs");
+    expectEqual(state.r15, std::uint64_t{0x8877665544330001ULL},
+                "CMP r16 changed its rhs");
+    expectEqual(state.rflags, std::uint64_t{0x6},
+                "CMP r16 flags differ");
 }
 
 void testMovRegisterToGuestMemory() {
@@ -9037,6 +11442,59 @@ void testMovWordImmediateToGuestMemory() {
                 "faulted REX MOV word immediate changed its base");
     expectEqual(extendedFaultState.rflags, std::uint64_t{0xBD7},
                 "faulted REX MOV word immediate changed flags");
+
+    constexpr std::array<std::uint8_t, 7> indexedCode{
+        0x66, 0xC7, 0x04, 0x88, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress indexedRip{0x7FF802C772B4ULL};
+    const auto indexedDecoded = decoder.decodeBlock(indexedCode, indexedRip);
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "indexed MOV word immediate opcode differs");
+    expectEqual(indexedDecoded[0].length, std::uint8_t{6},
+                "indexed MOV word immediate length differs");
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            indexedDecoded[0].operands[0]);
+    expect(indexedMemory.base == rosa::x86::Register::Rax &&
+               indexedMemory.index == rosa::x86::Register::Rcx &&
+               indexedMemory.scale == 4 && indexedMemory.width == 16 &&
+               indexedMemory.displacement == 0,
+           "indexed MOV word immediate operand differs");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "mov word [rax+rcx*4], 0x0") != std::string::npos,
+           "indexed MOV word immediate dump differs");
+
+    const auto indexedBlock = translator.translate(indexedCode, indexedRip);
+    constexpr rosa::guest::GuestAddress indexedTarget{0x8010};
+    addressSpace.writeU64(indexedTarget, 0x1122334455667788ULL);
+    rosa::x86::X86State indexedState;
+    indexedState.rax = memoryBase.value;
+    indexedState.rcx = 4;
+    indexedState.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    expectEqual(addressSpace.readU64(indexedTarget),
+                std::uint64_t{0x1122334455660000ULL},
+                "indexed MOV word immediate changed the wrong bytes");
+    expectEqual(indexedState.rax, memoryBase.value,
+                "indexed MOV word immediate changed its base");
+    expectEqual(indexedState.rcx, std::uint64_t{4},
+                "indexed MOV word immediate changed its index");
+    expectEqual(indexedState.rflags, std::uint64_t{0x8D7},
+                "indexed MOV word immediate changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    indexedState.rflags = 0xAD7;
+    bool indexedFaulted = false;
+    try {
+        static_cast<void>(
+            indexedBlock.execute(indexedState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        indexedFaulted = std::string_view(error.what()).find("unmapped") !=
+                         std::string_view::npos;
+    }
+    expect(indexedFaulted,
+           "indexed MOV word immediate accepted unmapped memory");
+    expectEqual(indexedState.rflags, std::uint64_t{0xAD7},
+                "faulted indexed MOV word immediate changed flags");
 }
 
 void testMovWordRegisterToGuestMemory() {
@@ -9112,6 +11570,107 @@ void testMovWordRegisterToGuestMemory() {
                 "REX MOV word store changed its source");
     expectEqual(state.rflags, std::uint64_t{0xAD7},
                 "REX MOV word store changed flags");
+
+    constexpr std::array<std::uint8_t, 9> ripRelativeCode{
+        0x66, 0x44, 0x89, 0x35, 0x72, 0x57, 0xC1, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress ripRelativeRip{
+        0x7FF802C76986ULL};
+    constexpr rosa::guest::GuestAddress ripRelativePage{
+        0x7FF84388C000ULL};
+    constexpr rosa::guest::GuestAddress ripRelativeTarget{
+        0x7FF84388C100ULL};
+    const auto ripRelativeDecoded = decoder.decodeBlock(
+        ripRelativeCode, ripRelativeRip);
+    expect(ripRelativeDecoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "RIP-relative MOV word store opcode differs");
+    expectEqual(ripRelativeDecoded[0].length, std::uint8_t{8},
+                "RIP-relative MOV word store length differs");
+    const auto ripRelativeMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            ripRelativeDecoded[0].operands[0]);
+    const auto ripRelativeSource =
+        std::get<rosa::x86::RegisterOperand>(
+            ripRelativeDecoded[0].operands[1]);
+    expect(ripRelativeMemory.ripRelative &&
+               ripRelativeMemory.displacement == 0x40C15772 &&
+               ripRelativeMemory.width == 16 &&
+               ripRelativeSource.reg == rosa::x86::Register::R14 &&
+               ripRelativeSource.width == 16,
+           "MOV word [rip+disp32], r14w operands differ");
+    expect(rosa::debug::dumpX86(ripRelativeDecoded).find(
+               "mov [rip+0x40c15772], r14w") != std::string::npos,
+           "RIP-relative MOV word store dump differs");
+
+    rosa::guest::AddressSpace ripRelativeAddressSpace;
+    ripRelativeAddressSpace.mapAnonymous(
+        ripRelativePage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    ripRelativeAddressSpace.writeU64(ripRelativeTarget,
+                                     0x1122334455667788ULL);
+    const auto ripRelativeBlock = translator.translate(
+        ripRelativeCode, ripRelativeRip);
+    rosa::x86::X86State ripRelativeState;
+    ripRelativeState.r14 = 0xAABBCCDDEEFFBEEFULL;
+    ripRelativeState.rflags = 0xBD7;
+    static_cast<void>(ripRelativeBlock.execute(
+        ripRelativeState, &ripRelativeAddressSpace));
+    expectEqual(ripRelativeAddressSpace.readU64(ripRelativeTarget),
+                std::uint64_t{0x112233445566BEEFULL},
+                "RIP-relative MOV word store changed adjacent bytes");
+    expectEqual(ripRelativeState.r14,
+                std::uint64_t{0xAABBCCDDEEFFBEEFULL},
+                "RIP-relative MOV word store changed its source");
+    expectEqual(ripRelativeState.rflags, std::uint64_t{0xBD7},
+                "RIP-relative MOV word store changed flags");
+
+    constexpr std::array<std::uint8_t, 6> indexedCode{
+        0x66, 0x89, 0x44, 0x51, 0x28, 0xC3};
+    constexpr rosa::guest::GuestAddress indexedRip{0x7FF802C69351ULL};
+    const auto indexedDecoded = decoder.decodeBlock(indexedCode, indexedRip);
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "indexed MOV word store opcode differs");
+    expectEqual(indexedDecoded[0].length, std::uint8_t{5},
+                "indexed MOV word store length differs");
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            indexedDecoded[0].operands[0]);
+    const auto indexedSource =
+        std::get<rosa::x86::RegisterOperand>(
+            indexedDecoded[0].operands[1]);
+    expect(indexedMemory.base == rosa::x86::Register::Rcx &&
+               indexedMemory.index == rosa::x86::Register::Rdx &&
+               indexedMemory.scale == 2 &&
+               indexedMemory.displacement == 0x28 &&
+               indexedMemory.width == 16,
+           "indexed MOV word memory operand differs");
+    expect(indexedSource.reg == rosa::x86::Register::Rax &&
+               indexedSource.width == 16,
+           "indexed MOV word source differs");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "mov [rcx+rdx*2+0x28], ax") != std::string::npos,
+           "indexed MOV word dump differs");
+
+    constexpr rosa::guest::GuestAddress indexedTarget{0x8130};
+    addressSpace.writeU64(indexedTarget, 0x1122334455667788ULL);
+    const auto indexedBlock = translator.translate(indexedCode, indexedRip);
+    rosa::x86::X86State indexedState;
+    indexedState.rcx = 0x8100;
+    indexedState.rdx = 4;
+    indexedState.rax = 0xAABBCCDDEEFFBEEFULL;
+    indexedState.rflags = 0xCD7;
+    static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    expectEqual(addressSpace.readU64(indexedTarget),
+                std::uint64_t{0x112233445566BEEFULL},
+                "indexed MOV word changed adjacent bytes");
+    expectEqual(indexedState.rcx, std::uint64_t{0x8100},
+                "indexed MOV word changed its base");
+    expectEqual(indexedState.rdx, std::uint64_t{4},
+                "indexed MOV word changed its index");
+    expectEqual(indexedState.rax,
+                std::uint64_t{0xAABBCCDDEEFFBEEFULL},
+                "indexed MOV word changed its source");
+    expectEqual(indexedState.rflags, std::uint64_t{0xCD7},
+                "indexed MOV word changed flags");
 }
 
 void testMovGuestMemoryToRegister() {
@@ -9252,6 +11811,151 @@ void testMovGuestGsMemoryTo32BitRegister() {
                 "failed GS MOV changed the guest GS base");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "failed GS MOV changed flags");
+}
+
+void testMovGuestGsMemoryWithNoBaseScaledIndex() {
+    constexpr std::array<std::uint8_t, 10> code{
+        0x65, 0x48, 0x8B, 0x04, 0xC5, 0x00, 0x00, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802D156DBULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegMem,
+           "GS no-base indexed MOV opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9},
+                "GS no-base indexed MOV length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 64,
+           "GS no-base indexed MOV destination differs");
+    expect(memory.segment == rosa::x86::Segment::Gs && !memory.hasBase &&
+               !memory.ripRelative &&
+               memory.index == rosa::x86::Register::Rax &&
+               memory.scale == 8 && memory.displacement == 0 &&
+               memory.width == 64,
+           "GS no-base indexed MOV memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov rax, [gs:rax*8]") != std::string::npos,
+           "GS no-base indexed MOV dump differs");
+
+    constexpr rosa::guest::GuestAddress gsBase{0x8000};
+    constexpr std::uint64_t index = 4;
+    constexpr std::uint64_t value = 0x0123456789ABCDEFULL;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        gsBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{gsBase.value + index * 8}, value);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.gsBase = gsBase.value;
+    state.rax = index;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, value,
+                "GS no-base indexed MOV loaded the wrong qword");
+    expectEqual(state.gsBase, gsBase.value,
+                "GS no-base indexed MOV changed GS base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "GS no-base indexed MOV changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.gsBase = gsBase.value;
+    faultState.rax = index;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "GS no-base indexed MOV accepted unmapped memory");
+    expectEqual(faultState.rax, index,
+                "faulted GS no-base indexed MOV changed RAX");
+    expectEqual(faultState.gsBase, gsBase.value,
+                "faulted GS no-base indexed MOV changed GS base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted GS no-base indexed MOV changed flags");
+}
+
+void testMovImmediateToGuestGsMemory() {
+    constexpr std::array<std::uint8_t, 14> code{
+        0x65, 0x48, 0xC7, 0x04, 0x25, 0x50, 0x01,
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802A4277AULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "MOV qword [GS:0x150], 1 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{13},
+                "MOV qword [GS:0x150], 1 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.segment == rosa::x86::Segment::Gs && !memory.hasBase &&
+               !memory.index && !memory.ripRelative &&
+               memory.displacement == 0x150 && memory.width == 64 &&
+               immediate.value == 1 && immediate.width == 32,
+           "MOV qword [GS:0x150], 1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov qword [gs:0x150], 0x1") != std::string::npos,
+           "MOV qword [GS:0x150], 1 dump differs");
+
+    constexpr rosa::guest::GuestAddress gsBase{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8150};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(gsBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, UINT64_MAX);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("read_guest_gs_base.i64") != std::string::npos,
+           "MOV qword GS immediate did not read the guest GS base");
+    rosa::x86::X86State state;
+    state.gsBase = gsBase.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{1},
+                "MOV qword [GS:0x150], 1 stored the wrong value");
+    expectEqual(state.gsBase, gsBase.value,
+                "MOV qword GS immediate changed GS base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV qword GS immediate changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    constexpr std::uint64_t sentinel = 0x0123456789ABCDEFULL;
+    std::memcpy(readOnlyBytes.data() + 0x150, &sentinel, sizeof(sentinel));
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        gsBase, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        readOnlyBytes, "read-only GS immediate target");
+    rosa::x86::X86State faultState;
+    faultState.gsBase = gsBase.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "MOV qword GS immediate accepted read-only memory");
+    expectEqual(readOnlyAddressSpace.readU64(target), sentinel,
+                "faulted MOV qword GS immediate changed memory");
+    expectEqual(faultState.gsBase, gsBase.value,
+                "faulted MOV qword GS immediate changed GS base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted MOV qword GS immediate changed flags");
 }
 
 void testMov64BitRegisterToGuestGsMemory() {
@@ -9434,6 +12138,73 @@ void testMovGuestMemoryTo32BitRegisterWithScaledIndex() {
                 "failed indexed MOV changed its destination");
     expectEqual(state.rflags, std::uint64_t{0x8D7},
                 "failed indexed MOV changed flags");
+}
+
+void testMovGuestMemoryTo16BitRegisterWithIndex() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x8B, 0x3C, 0x3C, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C784CDULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegMem,
+           "MOV DI, word [RSP+RDI] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "MOV DI, word [RSP+RDI] length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdi &&
+               destination.width == 16 &&
+               memory.base == rosa::x86::Register::Rsp &&
+               memory.index == rosa::x86::Register::Rdi &&
+               memory.scale == 1 && memory.width == 16 &&
+               memory.displacement == 0,
+           "MOV DI, word [RSP+RDI] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "mov di, [rsp+rdi*1]") != std::string::npos,
+           "MOV DI, word [RSP+RDI] dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> word{0xC6, 0x85};
+    addressSpace.writeBytes(memoryBase, word);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("load_guest.i16") != std::string::npos,
+           "MOV DI, word [RSP+RDI] did not use a 16-bit guest load");
+
+    rosa::x86::X86State state;
+    state.rdi = 0x1122334455660018ULL;
+    state.rsp = memoryBase.value - state.rdi;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rdi, std::uint64_t{0x11223344556685C6ULL},
+                "MOV DI, word [RSP+RDI] did not preserve upper RDI bits");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOV DI, word [RSP+RDI] changed flags");
+
+    rosa::x86::X86State faultState;
+    faultState.rdi = 0x1122334455660FFFULL;
+    faultState.rsp = 0x8FFFULL - faultState.rdi;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected,
+           "cross-page MOV DI, word [RSP+RDI] did not fault");
+    expectEqual(faultState.rdi, std::uint64_t{0x1122334455660FFFULL},
+                "faulted MOV DI, word [RSP+RDI] changed RDI");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted MOV DI, word [RSP+RDI] changed flags");
 }
 
 void testMovGuestMemoryTo32BitRegister() {
@@ -9678,15 +12449,37 @@ void testMovzxLowByteRegisterTo32BitRegister() {
     expectEqual(state.rflags, std::uint64_t{0x8D7},
                 "MOVZX r32, r8 changed flags");
 
-    constexpr std::array<std::uint8_t, 3> highByteCode{0x0F, 0xB6, 0xE4};
-    bool rejectedHighByte = false;
-    try {
-        static_cast<void>(decoder.decodeBlock(
-            highByteCode, rosa::guest::GuestAddress{0x2000}));
-    } catch (const rosa::x86::DecodeError &) {
-        rejectedHighByte = true;
-    }
-    expect(rejectedHighByte, "MOVZX from AH was not rejected explicitly");
+    constexpr std::array<std::uint8_t, 4> highByteCode{
+        0x0F, 0xB6, 0xDC, 0xC3};
+    const auto highByteDecoded = decoder.decodeBlock(
+        highByteCode, rosa::guest::GuestAddress{0x7FF802B05FE7ULL});
+    const auto highByteDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            highByteDecoded[0].operands[0]);
+    const auto highByteSource =
+        std::get<rosa::x86::RegisterOperand>(
+            highByteDecoded[0].operands[1]);
+    expect(highByteDestination.reg == rosa::x86::Register::Rbx &&
+               highByteDestination.width == 32 &&
+               highByteSource.reg == rosa::x86::Register::Rax &&
+               highByteSource.width == 8 && highByteSource.byteOffset == 1,
+           "MOVZX EBX, AH operands differ");
+    expect(rosa::debug::dumpX86(highByteDecoded).find("movzx ebx, ah") !=
+               std::string::npos,
+           "MOVZX high-byte dump differs");
+
+    const auto highByteBlock = translator.translate(
+        highByteCode, rosa::guest::GuestAddress{0x7FF802B05FE7ULL});
+    state.rax = 0x112233445566ABCDULL;
+    state.rbx = UINT64_MAX;
+    state.rflags = 0xAD7;
+    static_cast<void>(highByteBlock.execute(state));
+    expectEqual(state.rbx, std::uint64_t{0xAB},
+                "MOVZX EBX, AH selected the wrong byte lane");
+    expectEqual(state.rax, std::uint64_t{0x112233445566ABCDULL},
+                "MOVZX EBX, AH changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "MOVZX EBX, AH changed flags");
 }
 
 void testMovsxLowByteRegisterTo32BitRegister() {
@@ -9739,6 +12532,38 @@ void testMovsxLowByteRegisterTo32BitRegister() {
     expectEqual(negativeState.rflags, std::uint64_t{0xAD7},
                 "negative MOVSX changed flags");
 
+    constexpr std::array<std::uint8_t, 4> aliasedCode{
+        0x0F, 0xBE, 0xC9, 0xC3};
+    constexpr rosa::guest::GuestAddress aliasedRip{0x7FF802CBA133ULL};
+    const auto aliasedDecoded = decoder.decodeBlock(aliasedCode, aliasedRip);
+    expect(aliasedDecoded[0].opcode == rosa::x86::Opcode::MovsxRegReg,
+           "legacy MOVSX r32, r8 opcode differs");
+    expectEqual(aliasedDecoded[0].length, std::uint8_t{3},
+                "legacy MOVSX r32, r8 length differs");
+    const auto aliasedDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            aliasedDecoded[0].operands[0]);
+    const auto aliasedSource =
+        std::get<rosa::x86::RegisterOperand>(
+            aliasedDecoded[0].operands[1]);
+    expect(aliasedDestination.reg == rosa::x86::Register::Rcx &&
+               aliasedDestination.width == 32 &&
+               aliasedSource.reg == rosa::x86::Register::Rcx &&
+               aliasedSource.width == 8,
+           "MOVSX ECX, CL operands differ");
+    expect(rosa::debug::dumpX86(aliasedDecoded).find("movsx ecx, cl") !=
+               std::string::npos,
+           "MOVSX ECX, CL dump differs");
+    const auto aliasedBlock = translator.translate(aliasedCode, aliasedRip);
+    rosa::x86::X86State aliasedState;
+    aliasedState.rcx = 0x1122334455667780ULL;
+    aliasedState.rflags = 0x46;
+    static_cast<void>(aliasedBlock.execute(aliasedState));
+    expectEqual(aliasedState.rcx, std::uint64_t{0xFFFFFF80},
+                "MOVSX ECX, CL result or zero extension differs");
+    expectEqual(aliasedState.rflags, std::uint64_t{0x46},
+                "MOVSX ECX, CL changed flags");
+
     constexpr std::array<std::uint8_t, 5> extendedCode{
         0x45, 0x0F, 0xBE, 0xC8, 0xC3};
     const auto extendedDecoded = decoder.decodeBlock(
@@ -9770,7 +12595,7 @@ void testMovsxLowByteRegisterTo32BitRegister() {
         0x40, 0x0F, 0xBE, 0x0E};
     constexpr std::array<std::uint8_t, 4> rexW{
         0x48, 0x0F, 0xBE, 0xCE};
-    expectRejected(noRex, "non-REX MOVSX r32, r8 was accepted");
+    expectRejected(noRex, "legacy high-byte MOVSX source was accepted");
     expectRejected(memory, "MOVSX byte memory form was accepted");
     expectRejected(rexW, "MOVSX r64, r8 was accepted");
 }
@@ -9837,6 +12662,43 @@ void testMovsxGuestByteTo32BitRegister() {
     expectEqual(negativeState.rflags, std::uint64_t{0xAD7},
                 "negative MOVSX byte memory changed flags");
 
+    constexpr std::array<std::uint8_t, 6> observedCode{
+        0x49, 0x0F, 0xBE, 0x5D, 0x00, 0xC3};
+    const auto observedDecoded = decoder.decodeBlock(
+        observedCode, rosa::guest::GuestAddress{0x7FF802ACEDD0ULL});
+    const auto observedDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            observedDecoded[0].operands[0]);
+    const auto observedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            observedDecoded[0].operands[1]);
+    expect(observedDecoded[0].opcode == rosa::x86::Opcode::MovsxRegMem &&
+               observedDecoded[0].length == 5,
+           "MOVSX r64, byte [memory] decode differs");
+    expect(observedDestination.reg == rosa::x86::Register::Rbx &&
+               observedDestination.width == 64 &&
+               observedMemory.base == rosa::x86::Register::R13 &&
+               observedMemory.width == 8 &&
+               observedMemory.displacement == 0,
+           "MOVSX RBX, byte [R13] operands differ");
+    expect(rosa::debug::dumpX86(observedDecoded).find(
+               "movsx rbx, byte [r13]") != std::string::npos,
+           "MOVSX r64 byte memory dump differs");
+
+    const auto observedBlock = translator.translate(
+        observedCode, rosa::guest::GuestAddress{0x7FF802ACEDD0ULL});
+    rosa::x86::X86State observedState;
+    observedState.r13 = source.value;
+    observedState.rbx = 0x0123456789ABCDEFULL;
+    observedState.rflags = 0xBD7;
+    static_cast<void>(observedBlock.execute(observedState, &addressSpace));
+    expectEqual(observedState.rbx, std::uint64_t{0xFFFFFFFFFFFFFF80ULL},
+                "MOVSX r64 byte memory did not sign-extend to 64 bits");
+    expectEqual(observedState.r13, source.value,
+                "MOVSX r64 byte memory changed its base");
+    expectEqual(observedState.rflags, std::uint64_t{0xBD7},
+                "MOVSX r64 byte memory changed flags");
+
     rosa::guest::AddressSpace unmapped;
     rosa::x86::X86State faultState;
     faultState.rdi = source.value;
@@ -9854,6 +12716,90 @@ void testMovsxGuestByteTo32BitRegister() {
                 "faulted MOVSX byte memory changed its destination");
     expectEqual(faultState.rflags, std::uint64_t{0xBD7},
                 "faulted MOVSX byte memory changed flags");
+}
+
+void testMovsxGuestWordWithScaledIndexTo32BitRegister() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x0F, 0xBF, 0x0C, 0x4A, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802D0F967ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovsxRegMem,
+           "indexed word MOVSX opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "indexed word MOVSX length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 32,
+           "indexed word MOVSX destination differs");
+    expect(memory.base == rosa::x86::Register::Rdx &&
+               memory.index == rosa::x86::Register::Rcx &&
+               memory.scale == 2 && memory.displacement == 0 &&
+               memory.width == 16,
+           "indexed word MOVSX address differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movsx ecx, word [rdx+rcx*2]") != std::string::npos,
+           "indexed word MOVSX dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::uint64_t index = 0x20;
+    constexpr rosa::guest::GuestAddress source{
+        page.value + index * 2};
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+
+    addressSpace.writeBytes(
+        source, std::array<std::uint8_t, 2>{0x23, 0x81});
+    rosa::x86::X86State negativeState;
+    negativeState.rdx = page.value;
+    negativeState.rcx = index;
+    negativeState.rflags = 0x8D7;
+    static_cast<void>(block.execute(negativeState, &addressSpace));
+    expectEqual(negativeState.rcx, std::uint64_t{0xFFFF8123},
+                "negative indexed word MOVSX result differs");
+    expectEqual(negativeState.rdx, page.value,
+                "indexed word MOVSX changed its base");
+    expectEqual(negativeState.rflags, std::uint64_t{0x8D7},
+                "indexed word MOVSX changed flags");
+
+    addressSpace.writeBytes(
+        source, std::array<std::uint8_t, 2>{0x34, 0x12});
+    rosa::x86::X86State positiveState;
+    positiveState.rdx = page.value;
+    positiveState.rcx = index;
+    positiveState.rflags = 0xAD7;
+    static_cast<void>(block.execute(positiveState, &addressSpace));
+    expectEqual(positiveState.rcx, std::uint64_t{0x1234},
+                "positive indexed word MOVSX result differs");
+    expectEqual(positiveState.rflags, std::uint64_t{0xAD7},
+                "positive indexed word MOVSX changed flags");
+
+    rosa::x86::X86State faultState;
+    faultState.rdx = page.value + 1;
+    faultState.rcx = 0x7FF;
+    faultState.rflags = 0xBD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "cross-page indexed word MOVSX did not fault");
+    expectEqual(faultState.rcx, std::uint64_t{0x7FF},
+                "faulted indexed word MOVSX changed its destination");
+    expectEqual(faultState.rdx, page.value + 1,
+                "faulted indexed word MOVSX changed its base");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "faulted indexed word MOVSX changed flags");
 }
 
 void testMovzxGuestByteTo32BitRegister() {
@@ -9926,6 +12872,67 @@ void testMovzxGuestByteTo32BitRegister() {
         truncatedRejected = true;
     }
     expect(truncatedRejected, "truncated MOVZX byte displacement was accepted");
+}
+
+void testMovzxRipRelativeGuestByteTo32BitRegister() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x0F, 0xB6, 0x05, 0x6B, 0x03, 0x85, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802E6EC26ULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF8436BEF98ULL};
+    constexpr rosa::guest::GuestAddress targetPage{0x7FF8436BE000ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovzxRegMem,
+           "RIP-relative MOVZX byte opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "RIP-relative MOVZX byte length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 32 && memory.ripRelative &&
+               !memory.hasBase && memory.width == 8 &&
+               memory.displacement == 0x4085036B,
+           "RIP-relative MOVZX byte operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movzx eax, byte [rip+0x4085036b]") != std::string::npos,
+           "RIP-relative MOVZX byte dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 1>{0xA5});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rax = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0xA5},
+                "RIP-relative MOVZX byte did not zero-extend");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative MOVZX byte changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x0123456789ABCDEFULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState,
+                                        &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected,
+           "RIP-relative MOVZX byte from unmapped memory did not fault");
+    expectEqual(faultState.rax, std::uint64_t{0x0123456789ABCDEFULL},
+                "faulted RIP-relative MOVZX byte changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative MOVZX byte changed flags");
 }
 
 void testMovzxGuestByteWithSibTo64BitRegister() {
@@ -10182,6 +13189,67 @@ void testMovsxdScaledGuestDword() {
                 "MOVSXD sign-extended result differs");
     expectEqual(state.rax, std::uint64_t{0x8000}, "MOVSXD changed base");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVSXD changed flags");
+}
+
+void testMovsxdRipRelativeGuestDword() {
+    constexpr std::array<std::uint8_t, 8> observedCode{
+        0x4C, 0x63, 0x3D, 0x98, 0x38, 0xA4, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C71151ULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF8436B49F0ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovsxdRegMem,
+           "RIP-relative MOVSXD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "RIP-relative MOVSXD length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R15 &&
+               destination.width == 64,
+           "RIP-relative MOVSXD destination differs");
+    expect(memory.ripRelative && memory.width == 32 && !memory.index &&
+               memory.displacement == 0x40A43898,
+           "RIP-relative MOVSXD source differs");
+    expectEqual(observedRip.value + decoded[0].length + memory.displacement,
+                target.value, "RIP-relative MOVSXD target differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movsxd r15, dword [rip+0x40a43898]") != std::string::npos,
+           "RIP-relative MOVSXD dump differs");
+
+    constexpr rosa::guest::GuestAddress targetPage{
+        target.value & ~(rosa::guest::guestPageSize - 1)};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 0xFFFFFFFCU);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    rosa::x86::X86State state;
+    state.r15 = 0x1122334455667788ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r15, std::uint64_t{0xFFFFFFFFFFFFFFFCULL},
+                "RIP-relative MOVSXD sign extension differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative MOVSXD changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    state.r15 = 0x8877665544332211ULL;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(state, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "RIP-relative MOVSXD accepted an unmapped source");
+    expectEqual(state.r15, std::uint64_t{0x8877665544332211ULL},
+                "faulted RIP-relative MOVSXD changed its destination");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "faulted RIP-relative MOVSXD changed flags");
 }
 
 void testMovsxdRegister() {
@@ -10470,6 +13538,141 @@ void testLegacyTestLowByteGeneratedExecution() {
                 "TEST R14B flags differ");
 }
 
+void testTestGuestByteRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> code{0x84, 0x09, 0xC3};
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeBase);
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestMemReg,
+           "TEST byte [rcx], cl opcode differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto reg =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rcx && memory.hasBase &&
+               !memory.ripRelative && memory.displacement == 0 &&
+               memory.width == 8,
+           "TEST byte [rcx], cl memory operand differs");
+    expect(reg.reg == rosa::x86::Register::Rcx && reg.width == 8,
+           "TEST byte [rcx], cl register operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("test byte [rcx], cl") !=
+               std::string::npos,
+           "TEST byte [rcx], cl dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8181};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 1>{0x80});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeBase);
+    rosa::x86::X86State state;
+    state.rcx = target.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rcx, target.value,
+                "TEST byte [rcx], cl changed RCX");
+    expectEqual(addressSpace.readBytes(target, 1).front(), std::uint8_t{0x80},
+                "TEST byte [rcx], cl changed memory");
+    expectEqual(state.rflags, std::uint64_t{0x82},
+                "TEST byte [rcx], cl flags differ");
+
+    rosa::x86::X86State faultState;
+    faultState.rcx = 0xA181;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                       std::string_view::npos ||
+                   std::string_view(error.what()).find(
+                       "outside guest mapping") != std::string_view::npos;
+    }
+    expect(rejected, "TEST byte [rcx], cl accepted unmapped memory");
+    expectEqual(faultState.rcx, std::uint64_t{0xA181},
+                "faulted TEST byte [rcx], cl changed RCX");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted TEST byte [rcx], cl changed flags");
+}
+
+void testTestGuestDwordRegisterWithScaledIndex() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x41, 0x85, 0x74, 0x95, 0x2C, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C6C8ABULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestMemReg,
+           "TEST dword [R13+RDX*4+0x2c], ESI opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "TEST dword [R13+RDX*4+0x2c], ESI length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto reg =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R13 &&
+               memory.index == rosa::x86::Register::Rdx &&
+               memory.scale == 4 && memory.displacement == 0x2C &&
+               memory.width == 32 && reg.reg == rosa::x86::Register::Rsi &&
+               reg.width == 32,
+           "TEST dword [R13+RDX*4+0x2c], ESI operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "test dword [r13+rdx*4+0x2c], esi") !=
+               std::string::npos,
+           "TEST dword [R13+RDX*4+0x2c], ESI dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryBase{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x804C};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 4> value{0x00, 0x00, 0x20, 0x00};
+    addressSpace.writeBytes(target, value);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.r13 = memoryBase.value;
+    state.rdx = 8;
+    state.rsi = 0x200000;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r13, memoryBase.value,
+                "TEST indexed dword changed R13");
+    expectEqual(state.rdx, std::uint64_t{8},
+                "TEST indexed dword changed RDX");
+    expectEqual(state.rsi, std::uint64_t{0x200000},
+                "TEST indexed dword changed RSI");
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0x200000},
+                "TEST indexed dword changed memory");
+    expectEqual(state.rflags, std::uint64_t{0x6},
+                "TEST indexed dword flags differ");
+
+    rosa::x86::X86State faultState;
+    faultState.r13 = memoryBase.value + 3;
+    faultState.rdx = 0x3F4;
+    faultState.rsi = 0x200000;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page TEST indexed dword did not fault");
+    expectEqual(faultState.r13, memoryBase.value + 3,
+                "faulted TEST indexed dword changed R13");
+    expectEqual(faultState.rdx, std::uint64_t{0x3F4},
+                "faulted TEST indexed dword changed RDX");
+    expectEqual(faultState.rsi, std::uint64_t{0x200000},
+                "faulted TEST indexed dword changed RSI");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted TEST indexed dword changed flags");
+}
+
 void testTestAccumulatorImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 3> code{0xA8, 0x03, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -10490,6 +13693,46 @@ void testTestAccumulatorImmediateGeneratedExecution() {
     expectEqual(state.rax, std::uint64_t{0xABCDEF1234567806ULL},
                 "TEST AL, imm8 changed RAX");
     expectEqual(state.rflags, std::uint64_t{0x2}, "TEST AL, imm8 flags differ");
+
+    constexpr std::array<std::uint8_t, 6> observedCode{
+        0xA9, 0x00, 0x00, 0x00, 0x22, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802E6F7D3ULL};
+    const auto observed = decoder.decodeBlock(observedCode, observedRip);
+    expect(observed[0].opcode == rosa::x86::Opcode::TestRegImm,
+           "TEST EAX, imm32 opcode differs");
+    expectEqual(observed[0].length, std::uint8_t{5},
+                "TEST EAX, imm32 length differs");
+    const auto observedRegister =
+        std::get<rosa::x86::RegisterOperand>(observed[0].operands[0]);
+    const auto observedImmediate =
+        std::get<rosa::x86::ImmediateOperand>(observed[0].operands[1]);
+    expect(observedRegister.reg == rosa::x86::Register::Rax &&
+               observedRegister.width == 32 &&
+               observedImmediate.value == 0x22000000 &&
+               observedImmediate.width == 32,
+           "TEST EAX, 0x22000000 operands differ");
+    expect(rosa::debug::dumpX86(observed).find(
+               "test eax, 0x22000000") != std::string::npos,
+           "TEST EAX, imm32 dump differs");
+
+    const auto observedBlock = translator.translate(observedCode, observedRip);
+    rosa::x86::X86State nonzeroState;
+    nonzeroState.rax = 0xDEADBEEF22000000ULL;
+    nonzeroState.rflags = 0x8D7;
+    static_cast<void>(observedBlock.execute(nonzeroState));
+    expectEqual(nonzeroState.rax, std::uint64_t{0xDEADBEEF22000000ULL},
+                "TEST EAX, imm32 changed RAX");
+    expectEqual(nonzeroState.rflags, std::uint64_t{0x6},
+                "TEST EAX, imm32 nonzero flags differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0xFFFFFFFF00000000ULL;
+    zeroState.rflags = 0x8D7;
+    static_cast<void>(observedBlock.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0xFFFFFFFF00000000ULL},
+                "TEST EAX, imm32 changed upper RAX bits");
+    expectEqual(zeroState.rflags, std::uint64_t{0x46},
+                "TEST EAX, imm32 zero flags differ");
 }
 
 void testTestRegisterImmediateGeneratedExecution() {
@@ -10755,10 +13998,140 @@ void testLfenceGeneratedExecution() {
            "LFENCE did not emit an ARM64 instruction barrier");
 }
 
+void testSidtGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x0F, 0x01, 0x4C, 0x24, 0xF0, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C82EA7ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SidtMem,
+           "SIDT opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "SIDT length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rsp && memory.hasBase &&
+               !memory.ripRelative && !memory.index &&
+               memory.displacement == -0x10 && memory.width == 80,
+           "SIDT stack operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("sidt [rsp-0x10]") !=
+               std::string::npos,
+           "SIDT disassembly differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "store_guest_idtr") != std::string::npos,
+           "SIDT IR lacks the guest-IDTR store");
+
+    constexpr rosa::guest::GuestAddress stackPage{0x7000000FC000ULL};
+    constexpr rosa::guest::GuestAddress target{stackPage.value + 0x1E8};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        stackPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "SIDT stack");
+    constexpr std::array<std::uint8_t, 10> initial{
+        0xA0, 0xA1, 0xA2, 0xA3, 0xA4,
+        0xA5, 0xA6, 0xA7, 0xA8, 0xA9};
+    addressSpace.writeBytes(target, initial);
+    rosa::x86::X86State state;
+    state.rsp = target.value + 0x10;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    constexpr std::array<std::uint8_t, 10> expected{
+        0xFF, 0x0F, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00};
+    expect(addressSpace.readBytes(target, expected.size()) ==
+               std::vector<std::uint8_t>(expected.begin(), expected.end()),
+           "SIDT synthetic guest descriptor differs");
+    expectEqual(state.rsp, target.value + 0x10,
+                "SIDT changed RSP");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "SIDT changed flags");
+
+    constexpr std::array<std::uint8_t, 5> frameCode{
+        0x0F, 0x01, 0x4D, 0xA0, 0xC3};
+    constexpr rosa::guest::GuestAddress frameCodeAddress{
+        0x7FF802C8DB4FULL};
+    const auto frameDecoded = decoder.decodeBlock(frameCode, frameCodeAddress);
+    expect(frameDecoded[0].opcode == rosa::x86::Opcode::SidtMem,
+           "SIDT frame-pointer opcode differs");
+    expectEqual(frameDecoded[0].length, std::uint8_t{4},
+                "SIDT frame-pointer length differs");
+    const auto frameMemory =
+        std::get<rosa::x86::MemoryOperand>(frameDecoded[0].operands[0]);
+    expect(frameMemory.base == rosa::x86::Register::Rbp &&
+               frameMemory.hasBase && !frameMemory.ripRelative &&
+               !frameMemory.index && frameMemory.displacement == -0x60 &&
+               frameMemory.width == 80,
+           "SIDT [rbp-0x60] operand differs");
+    expect(rosa::debug::dumpX86(frameDecoded).find("sidt [rbp-0x60]") !=
+               std::string::npos,
+           "SIDT frame-pointer disassembly differs");
+
+    addressSpace.writeBytes(target, initial);
+    const auto frameBlock = translator.translate(frameCode, frameCodeAddress);
+    state.rbp = target.value + 0x60;
+    state.rsp = 0x7000000FB4D0ULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(frameBlock.execute(state, &addressSpace));
+    expect(addressSpace.readBytes(target, expected.size()) ==
+               std::vector<std::uint8_t>(expected.begin(), expected.end()),
+           "SIDT frame-pointer synthetic descriptor differs");
+    expectEqual(state.rbp, target.value + 0x60,
+                "SIDT frame-pointer form changed RBP");
+    expectEqual(state.rsp, std::uint64_t{0x7000000FB4D0ULL},
+                "SIDT frame-pointer form changed RSP");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "SIDT frame-pointer form changed flags");
+
+    constexpr rosa::guest::GuestAddress faultPage{0x9000};
+    constexpr rosa::guest::GuestAddress faultTarget{
+        faultPage.value + rosa::guest::guestPageSize - 8};
+    constexpr std::array<std::uint8_t, 8> sentinel{
+        0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87};
+    rosa::guest::AddressSpace faultAddressSpace;
+    faultAddressSpace.mapAnonymous(
+        faultPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "cross-page SIDT stack");
+    faultAddressSpace.writeBytes(faultTarget, sentinel);
+    rosa::x86::X86State faultState;
+    faultState.rsp = faultTarget.value + 0x10;
+    faultState.rflags = 0xBD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &faultAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page SIDT did not fault");
+    expect(faultAddressSpace.readBytes(faultTarget, sentinel.size()) ==
+               std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+           "cross-page SIDT partially changed guest memory");
+    expectEqual(faultState.rsp, faultTarget.value + 0x10,
+                "faulted SIDT changed RSP");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "faulted SIDT changed flags");
+}
+
 void testMultiByteNopGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 2> singleByteCode{0x90, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto singleByteDecoded = decoder.decodeBlock(
+        singleByteCode, rosa::guest::GuestAddress{0x7FF802C692A5ULL});
+    expect(singleByteDecoded[0].opcode == rosa::x86::Opcode::Nop,
+           "single-byte NOP opcode differs");
+    expectEqual(singleByteDecoded[0].length, std::uint8_t{1},
+                "single-byte NOP length differs");
+    expect(rosa::debug::dumpX86(singleByteDecoded).find("nop") !=
+               std::string::npos,
+           "single-byte NOP dump differs");
+
     constexpr std::array<std::uint8_t, 8> code{
         0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00, 0xC3};
-    const rosa::x86::Decoder decoder;
     const auto decoded = decoder.decodeBlock(
         code, rosa::guest::GuestAddress{0x7FF700002C09ULL});
     expect(decoded[0].opcode == rosa::x86::Opcode::Nop,
@@ -10784,6 +14157,15 @@ void testMultiByteNopGeneratedExecution() {
                sibDecoded[0].length == 5,
            "SIB disp8 multi-byte NOP length differs");
 
+    constexpr std::array<std::uint8_t, 11> prefixedCode{
+        0x66, 0x2E, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xC3};
+    const auto prefixedDecoded = decoder.decodeBlock(
+        prefixedCode, rosa::guest::GuestAddress{0x7FF802A8CAC3ULL});
+    expect(prefixedDecoded[0].opcode == rosa::x86::Opcode::Nop &&
+               prefixedDecoded[0].length == 10,
+           "operand-size/CS-prefixed multi-byte NOP differs");
+
     constexpr std::array<std::uint8_t, 3> invalidExtension{
         0x0F, 0x1F, 0xC8};
     bool rejected = false;
@@ -10807,13 +14189,19 @@ void testMultiByteNopGeneratedExecution() {
     expect(rejected, "truncated multi-byte NOP was accepted");
 
     const rosa::dbt::Translator translator;
+    const auto singleByteBlock = translator.translate(
+        singleByteCode, rosa::guest::GuestAddress{0x7FF802C692A5ULL});
     const auto block = translator.translate(
         code, rosa::guest::GuestAddress{0x7FF700002C09ULL});
+    const auto prefixedBlock = translator.translate(
+        prefixedCode, rosa::guest::GuestAddress{0x7FF802A8CAC3ULL});
     rosa::x86::X86State state;
     state.rax = UINT64_MAX;
     state.rbx = 0x0123456789ABCDEFULL;
     state.rflags = 0xAD7;
+    static_cast<void>(singleByteBlock.execute(state));
     static_cast<void>(block.execute(state));
+    static_cast<void>(prefixedBlock.execute(state));
     expectEqual(state.rax, UINT64_MAX,
                 "multi-byte NOP evaluated its unmapped address");
     expectEqual(state.rbx, std::uint64_t{0x0123456789ABCDEFULL},
@@ -10887,6 +14275,34 @@ void testShiftLeftImmediateGeneratedExecution() {
                 "SHL with a masked zero count changed the value");
     expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
                 "SHL with a masked zero count changed flags");
+
+    constexpr std::array<std::uint8_t, 4> observedByteCode{
+        0xC0, 0xE2, 0x05, 0xC3};
+    constexpr rosa::guest::GuestAddress observedByteRip{0x7FF802AE164AULL};
+    const auto observedByte = decoder.decodeBlock(
+        observedByteCode, observedByteRip);
+    expect(observedByte[0].opcode == rosa::x86::Opcode::ShlRegImm,
+           "SHL r8, imm8 opcode differs");
+    expectEqual(observedByte[0].length, std::uint8_t{3},
+                "SHL r8, imm8 length differs");
+    const auto byteDestination =
+        std::get<rosa::x86::RegisterOperand>(observedByte[0].operands[0]);
+    expect(byteDestination.reg == rosa::x86::Register::Rdx &&
+               byteDestination.width == 8,
+           "SHL dl, 5 destination differs");
+    expect(rosa::debug::dumpX86(observedByte).find("shl dl, 0x5") !=
+               std::string::npos,
+           "SHL dl, 5 dump differs");
+    const auto observedByteBlock = translator.translate(
+        observedByteCode, observedByteRip);
+    rosa::x86::X86State byteState;
+    byteState.rdx = 0x1122334455667787ULL;
+    byteState.rflags = 0x812;
+    static_cast<void>(observedByteBlock.execute(byteState));
+    expectEqual(byteState.rdx, std::uint64_t{0x11223344556677E0ULL},
+                "SHL dl, 5 result or upper-byte preservation differs");
+    expectEqual(byteState.rflags, std::uint64_t{0x892},
+                "SHL dl, 5 flags differ");
 
     constexpr std::array<std::uint8_t, 4> code32{0xC1, 0xE2, 0x04, 0xC3};
     const auto decoded32 = decoder.decodeBlock(
@@ -11579,6 +14995,252 @@ void testRotateLeft16ImmediateGeneratedExecution() {
                 "ROL si, 16 changed flags");
 }
 
+void testRotateLeft32ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> observedCode{
+        0xC1, 0xC0, 0x1E, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802CEA0D5ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::RolRegImm,
+           "ROL r32, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "ROL r32, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 32 && immediate.value == 30,
+           "ROL eax, 30 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("rol eax, 0x1e") !=
+               std::string::npos,
+           "ROL eax, 30 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("update_rotate_left_flags.i32") !=
+               std::string::npos,
+           "ROL eax, 30 did not lower through 32-bit rotate flag IR");
+    rosa::x86::X86State observedState;
+    observedState.rax = 0xFFFFFFFFFFFFFFFBULL;
+    observedState.rflags = 0x82;
+    static_cast<void>(block.execute(observedState));
+    expectEqual(observedState.rax, std::uint64_t{0xFFFFFFFEULL},
+                "ROL eax, 30 result or zero-extension differs");
+    expectEqual(observedState.rflags, std::uint64_t{0x82},
+                "ROL eax, 30 flags differ");
+
+    constexpr std::array<std::uint8_t, 4> countOne{
+        0xC1, 0xC0, 0x01, 0xC3};
+    const auto oneBlock = translator.translate(
+        countOne, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State oneState;
+    oneState.rax = 0xFFFFFFFF80000000ULL;
+    oneState.rflags = 0xD6;
+    static_cast<void>(oneBlock.execute(oneState));
+    expectEqual(oneState.rax, std::uint64_t{1},
+                "ROL eax, 1 result or zero-extension differs");
+    expectEqual(oneState.rflags, std::uint64_t{0x8D7},
+                "ROL eax, 1 CF/OF or unaffected flags differ");
+
+    constexpr std::array<std::uint8_t, 4> maskedZero{
+        0xC1, 0xC0, 0x20, 0xC3};
+    const auto zeroBlock = translator.translate(
+        maskedZero, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0xFFFFFFFF89ABCDEFULL;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(zeroBlock.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0xFFFFFFFF89ABCDEFULL},
+                "ROL masked-zero changed RAX");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "ROL masked-zero changed flags");
+}
+
+void testRotateLeft64ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> observedCode{
+        0x49, 0xC1, 0xC2, 0x04, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C6D466ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::RolRegImm,
+           "ROL r64, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "ROL r64, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R10 &&
+               destination.width == 64 && immediate.value == 4,
+           "ROL R10, 4 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("rol r10, 0x4") !=
+               std::string::npos,
+           "ROL R10, 4 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("update_rotate_left_flags.i64") !=
+               std::string::npos,
+           "ROL R10, 4 did not lower through 64-bit rotate flag IR");
+    rosa::x86::X86State state;
+    state.r10 = 0x0123456789ABCDEFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r10, std::uint64_t{0x123456789ABCDEF0ULL},
+                "ROL R10, 4 result differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "ROL R10, 4 flags differ");
+
+    constexpr std::array<std::uint8_t, 5> countOne{
+        0x49, 0xC1, 0xC2, 0x01, 0xC3};
+    const auto oneBlock = translator.translate(
+        countOne, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State oneState;
+    oneState.r10 = 0x8000000000000000ULL;
+    oneState.rflags = 0xD6;
+    static_cast<void>(oneBlock.execute(oneState));
+    expectEqual(oneState.r10, std::uint64_t{1},
+                "ROL R10, 1 result differs");
+    expectEqual(oneState.rflags, std::uint64_t{0x8D7},
+                "ROL R10, 1 CF/OF or unaffected flags differ");
+
+    constexpr std::array<std::uint8_t, 5> maskedZero{
+        0x49, 0xC1, 0xC2, 0x40, 0xC3};
+    const auto zeroBlock = translator.translate(
+        maskedZero, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State zeroState;
+    zeroState.r10 = 0x0123456789ABCDEFULL;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(zeroBlock.execute(zeroState));
+    expectEqual(zeroState.r10, std::uint64_t{0x0123456789ABCDEFULL},
+                "ROL R10, masked-zero changed its destination");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "ROL R10, masked-zero changed flags");
+}
+
+void testRotateLeft32ClGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x41, 0xD3, 0xC6, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C6D115ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::RolRegCl,
+           "ROL R14D, CL opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "ROL R14D, CL length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::R14 &&
+               destination.width == 32,
+           "ROL R14D, CL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("rol r14d, cl") !=
+               std::string::npos,
+           "ROL R14D, CL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("update_rotate_left_flags.i32") !=
+               std::string::npos,
+           "ROL R14D, CL did not lower through rotate flags IR");
+
+    rosa::x86::X86State observedState;
+    observedState.r14 = 0xFFFFFFFFFFFFFFFEULL;
+    observedState.rcx = 0x35;
+    observedState.rflags = 0x2;
+    static_cast<void>(block.execute(observedState));
+    expectEqual(observedState.r14, std::uint64_t{0xFFDFFFFF},
+                "ROL R14D, CL observed-count result differs");
+    expectEqual(observedState.rflags, std::uint64_t{0x3},
+                "ROL R14D, CL observed-count flags differ");
+
+    rosa::x86::X86State oneState;
+    oneState.r14 = 0xAAAAAAAA80000000ULL;
+    oneState.rcx = 1;
+    oneState.rflags = 0xD6;
+    static_cast<void>(block.execute(oneState));
+    expectEqual(oneState.r14, std::uint64_t{1},
+                "ROL R14D, 1 result differs");
+    expectEqual(oneState.rflags, std::uint64_t{0x8D7},
+                "ROL R14D, 1 carry/overflow flags differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.r14 = 0xAAAAAAAA80000001ULL;
+    zeroState.rcx = 0x20;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.r14, std::uint64_t{0x80000001},
+                "ROL R14D, masked-zero count did not zero-extend R14D");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "ROL R14D, masked-zero count changed flags");
+}
+
+void testRotateRight64ImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> observedCode{
+        0x48, 0xC1, 0xC8, 0x03, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802A729DCULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::RorRegImm,
+           "ROR r64, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "ROR r64, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 64 && immediate.value == 3,
+           "ROR rax, 3 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("ror rax, 0x3") !=
+               std::string::npos,
+           "ROR rax, 3 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("update_rotate_right_flags.i64") !=
+               std::string::npos,
+           "ROR rax, 3 did not lower through rotate-right flag IR");
+    rosa::x86::X86State observedState;
+    observedState.rax = 8;
+    observedState.rflags = 0x847;
+    static_cast<void>(block.execute(observedState));
+    expectEqual(observedState.rax, std::uint64_t{1},
+                "ROR rax, 3 result differs");
+    expectEqual(observedState.rflags, std::uint64_t{0x846},
+                "ROR rax, 3 flags differ");
+
+    constexpr std::array<std::uint8_t, 5> countOne{
+        0x48, 0xC1, 0xC8, 0x01, 0xC3};
+    const auto oneBlock = translator.translate(
+        countOne, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State oneState;
+    oneState.rax = 3;
+    oneState.rflags = 0xD6;
+    static_cast<void>(oneBlock.execute(oneState));
+    expectEqual(oneState.rax, std::uint64_t{0x8000000000000001ULL},
+                "ROR rax, 1 result differs");
+    expectEqual(oneState.rflags, std::uint64_t{0x8D7},
+                "ROR rax, 1 CF/OF or unaffected flags differ");
+
+    constexpr std::array<std::uint8_t, 5> maskedZero{
+        0x48, 0xC1, 0xC8, 0x40, 0xC3};
+    const auto zeroBlock = translator.translate(
+        maskedZero, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0x0123456789ABCDEFULL;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(zeroBlock.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0x0123456789ABCDEFULL},
+                "ROR masked-zero changed RAX");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "ROR masked-zero changed flags");
+}
+
 void testShiftRightClGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{
         0x49, 0xD3, 0xEC, 0xC3};
@@ -11678,6 +15340,57 @@ void testNot32GeneratedExecution() {
                 "NOT eax zero edge differs");
     expectEqual(state.rflags, std::uint64_t{0xAD7},
                 "NOT eax zero edge changed flags");
+
+    constexpr std::array<std::uint8_t, 4> byteCode{
+        0x40, 0xF6, 0xD6, 0xC3};
+    const auto byteDecoded = decoder.decodeBlock(
+        byteCode, rosa::guest::GuestAddress{0x7FF802B09393ULL});
+    const auto byteOperand =
+        std::get<rosa::x86::RegisterOperand>(
+            byteDecoded[0].operands[0]);
+    expect(byteDecoded[0].opcode == rosa::x86::Opcode::NotReg &&
+               byteDecoded[0].length == 3 &&
+               byteOperand.reg == rosa::x86::Register::Rsi &&
+               byteOperand.width == 8,
+           "NOT SIL decode differs");
+    expect(rosa::debug::dumpX86(byteDecoded).find("not sil") !=
+               std::string::npos,
+           "NOT SIL dump differs");
+
+    const auto byteBlock = translator.translate(
+        byteCode, rosa::guest::GuestAddress{0x7FF802B09393ULL});
+    state.rsi = 0x1122334455667700ULL;
+    state.rflags = 0x846;
+    static_cast<void>(byteBlock.execute(state));
+    expectEqual(state.rsi, std::uint64_t{0x11223344556677FFULL},
+                "NOT SIL changed bytes outside its destination");
+    expectEqual(state.rflags, std::uint64_t{0x846},
+                "NOT SIL changed flags");
+
+    constexpr std::array<std::uint8_t, 3> legacyByteCode{
+        0xF6, 0xD0, 0xC3};
+    const auto legacyByteDecoded = decoder.decodeBlock(
+        legacyByteCode, rosa::guest::GuestAddress{0x7FF802AB295FULL});
+    const auto legacyByteOperand =
+        std::get<rosa::x86::RegisterOperand>(
+            legacyByteDecoded[0].operands[0]);
+    expect(legacyByteDecoded[0].opcode == rosa::x86::Opcode::NotReg &&
+               legacyByteDecoded[0].length == 2 &&
+               legacyByteOperand.reg == rosa::x86::Register::Rax &&
+               legacyByteOperand.width == 8,
+           "legacy NOT AL decode differs");
+    expect(rosa::debug::dumpX86(legacyByteDecoded).find("not al") !=
+               std::string::npos,
+           "legacy NOT AL dump differs");
+    const auto legacyByteBlock = translator.translate(
+        legacyByteCode, rosa::guest::GuestAddress{0x7FF802AB295FULL});
+    state.rax = 0xAABBCCDDEEFF0000ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(legacyByteBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xAABBCCDDEEFF00FFULL},
+                "legacy NOT AL changed bytes outside its destination");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "legacy NOT AL changed flags");
 }
 
 void testNeg64GeneratedExecution() {
@@ -11755,6 +15468,48 @@ void testNeg64GeneratedExecution() {
                 "NEG r32 minimum result or zero extension differs");
     expectEqual(overflow32.rflags, std::uint64_t{0x887},
                 "NEG r32 minimum flags differ");
+
+    constexpr std::array<std::uint8_t, 3> byteCode{
+        0xF6, 0xD9, 0xC3};
+    constexpr rosa::guest::GuestAddress byteRip{0x7FF802A2DD72ULL};
+    const auto byteDecoded = decoder.decodeBlock(byteCode, byteRip);
+    expect(byteDecoded[0].opcode == rosa::x86::Opcode::NegReg &&
+               byteDecoded[0].length == 2,
+           "NEG r8 opcode or length differs");
+    const auto byteOperand =
+        std::get<rosa::x86::RegisterOperand>(byteDecoded[0].operands[0]);
+    expect(byteOperand.reg == rosa::x86::Register::Rcx &&
+               byteOperand.width == 8,
+           "NEG CL operand differs");
+    expect(rosa::debug::dumpX86(byteDecoded).find("neg cl") !=
+               std::string::npos,
+           "NEG CL dump differs");
+    const auto byteBlock = translator.translate(byteCode, byteRip);
+
+    rosa::x86::X86State byteZero;
+    byteZero.rcx = 0x1122334455667700ULL;
+    byteZero.rflags = 0x8D7;
+    static_cast<void>(byteBlock.execute(byteZero));
+    expectEqual(byteZero.rcx, std::uint64_t{0x1122334455667700ULL},
+                "NEG zero CL changed its register");
+    expectEqual(byteZero.rflags, std::uint64_t{0x46},
+                "NEG zero CL flags differ");
+
+    rosa::x86::X86State byteOne;
+    byteOne.rcx = 0xFFEEDDCCBBAA9901ULL;
+    static_cast<void>(byteBlock.execute(byteOne));
+    expectEqual(byteOne.rcx, std::uint64_t{0xFFEEDDCCBBAA99FFULL},
+                "NEG one CL result or merge differs");
+    expectEqual(byteOne.rflags, std::uint64_t{0x97},
+                "NEG one CL flags differ");
+
+    rosa::x86::X86State byteOverflow;
+    byteOverflow.rcx = 0x8877665544332280ULL;
+    static_cast<void>(byteBlock.execute(byteOverflow));
+    expectEqual(byteOverflow.rcx, std::uint64_t{0x8877665544332280ULL},
+                "NEG minimum CL result or merge differs");
+    expectEqual(byteOverflow.rflags, std::uint64_t{0x883},
+                "NEG minimum CL flags differ");
 }
 
 void testRepMovsbGeneratedExecution() {
@@ -11928,6 +15683,437 @@ void testUnsignedMultiplyGeneratedExecution() {
     expectEqual(wideState.rdx, std::uint64_t{1}, "MUL wide high result differs");
     expectEqual(wideState.rflags, std::uint64_t{0x803},
                 "MUL nonzero-high defined flags differ");
+
+    constexpr std::array<std::uint8_t, 4> dwordCode{
+        0x41, 0xF7, 0xE4, 0xC3};
+    constexpr rosa::guest::GuestAddress dwordAddress{0x7FF802A1AAEAULL};
+    const auto dwordDecoded = decoder.decodeBlock(dwordCode, dwordAddress);
+    expect(dwordDecoded[0].opcode == rosa::x86::Opcode::MulReg,
+           "MUL r32 opcode differs");
+    expectEqual(dwordDecoded[0].length, std::uint8_t{3},
+                "MUL r32 length differs");
+    const auto dwordSource = std::get<rosa::x86::RegisterOperand>(
+        dwordDecoded[0].operands[0]);
+    expect(dwordSource.reg == rosa::x86::Register::R12 &&
+               dwordSource.width == 32,
+           "mul r12d source differs");
+    expect(rosa::debug::dumpX86(dwordDecoded).find("mul r12d") !=
+               std::string::npos,
+           "mul r12d dump differs");
+
+    const auto dwordBlock = translator.translate(dwordCode, dwordAddress);
+    rosa::x86::X86State dwordSmallState;
+    dwordSmallState.rax = 0xAABBCCDD0000005DULL;
+    dwordSmallState.rdx = UINT64_MAX;
+    dwordSmallState.r12 = 8;
+    dwordSmallState.rflags = 0x8D7;
+    static_cast<void>(dwordBlock.execute(dwordSmallState));
+    expectEqual(dwordSmallState.rax, std::uint64_t{0x2E8},
+                "MUL r32 low result differs");
+    expectEqual(dwordSmallState.rdx, std::uint64_t{0},
+                "MUL r32 high result differs");
+    expectEqual(dwordSmallState.r12, std::uint64_t{8},
+                "MUL r32 changed its source");
+    expectEqual(dwordSmallState.rflags, std::uint64_t{0xD6},
+                "MUL r32 zero-high defined flags differ");
+
+    rosa::x86::X86State dwordWideState;
+    dwordWideState.rax = 0xAABBCCDDFFFFFFFFULL;
+    dwordWideState.rdx = UINT64_MAX;
+    dwordWideState.r12 = 2;
+    dwordWideState.rflags = 0x2;
+    static_cast<void>(dwordBlock.execute(dwordWideState));
+    expectEqual(dwordWideState.rax, std::uint64_t{0xFFFFFFFEULL},
+                "wide MUL r32 low result differs");
+    expectEqual(dwordWideState.rdx, std::uint64_t{1},
+                "wide MUL r32 high result differs");
+    expectEqual(dwordWideState.rflags, std::uint64_t{0x803},
+                "MUL r32 nonzero-high defined flags differ");
+}
+
+void testUnsignedDivideByteGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 3> observedCode{
+        0xF6, 0xF2, 0xC3}; // div dl
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C75758ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::DivReg,
+           "DIV r8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2},
+                "DIV r8 length differs");
+    const auto divisor = std::get<rosa::x86::RegisterOperand>(
+        decoded[0].operands[0]);
+    expect(divisor.reg == rosa::x86::Register::Rdx && divisor.width == 8,
+           "DIV DL operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("div dl") !=
+               std::string::npos,
+           "DIV DL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "divide_unsigned_byte") != std::string::npos,
+           "DIV DL IR differs");
+
+    rosa::x86::X86State state;
+    state.rip = observedRip.value;
+    state.rax = 0x1122334455660100ULL;
+    state.rdx = 0x8877665544332203ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455660155ULL},
+                "DIV DL quotient/remainder or upper RAX bytes differ");
+    expectEqual(state.rdx, std::uint64_t{0x8877665544332203ULL},
+                "DIV DL changed its divisor register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "DIV DL changed undefined flags");
+
+    state.rip = observedRip.value;
+    state.rax = 0xFFEEDDCCBBAA0001ULL;
+    state.rdx = 1;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xFFEEDDCCBBAA0001ULL},
+                "observed one-by-one DIV result differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "observed one-by-one DIV changed flags");
+
+    rosa::x86::X86State zeroDivisor;
+    zeroDivisor.rip = observedRip.value;
+    zeroDivisor.rax = 0x1122334455661234ULL;
+    zeroDivisor.rdx = 0x8877665544332200ULL;
+    zeroDivisor.rflags = 0xCD7;
+    bool divideError = false;
+    try {
+        static_cast<void>(block.execute(zeroDivisor));
+    } catch (const std::runtime_error &error) {
+        divideError = std::string_view(error.what()).find("divide error") !=
+                      std::string_view::npos;
+    }
+    expect(divideError, "zero-divisor DIV did not raise a divide error");
+    expectEqual(zeroDivisor.rax, std::uint64_t{0x1122334455661234ULL},
+                "zero-divisor DIV changed RAX");
+    expectEqual(zeroDivisor.rdx, std::uint64_t{0x8877665544332200ULL},
+                "zero-divisor DIV changed RDX");
+    expectEqual(zeroDivisor.rflags, std::uint64_t{0xCD7},
+                "zero-divisor DIV changed flags");
+
+    rosa::x86::X86State overflow;
+    overflow.rip = observedRip.value;
+    overflow.rax = 0x1122334455660100ULL;
+    overflow.rdx = 1;
+    overflow.rflags = 0xED7;
+    divideError = false;
+    try {
+        static_cast<void>(block.execute(overflow));
+    } catch (const std::runtime_error &error) {
+        divideError = std::string_view(error.what()).find("overflows AL") !=
+                      std::string_view::npos;
+    }
+    expect(divideError, "overflowing byte DIV did not raise a divide error");
+    expectEqual(overflow.rax, std::uint64_t{0x1122334455660100ULL},
+                "overflowing byte DIV changed RAX");
+    expectEqual(overflow.rdx, std::uint64_t{1},
+                "overflowing byte DIV changed RDX");
+    expectEqual(overflow.rflags, std::uint64_t{0xED7},
+                "overflowing byte DIV changed flags");
+}
+
+void testUnsignedDivideQwordRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x48, 0xF7, 0xF6, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802A2DACAULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::DivReg,
+           "DIV r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "DIV r64 length differs");
+    const auto divisor =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(divisor.reg == rosa::x86::Register::Rsi && divisor.width == 64,
+           "DIV RSI operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("div rsi") !=
+               std::string::npos,
+           "DIV RSI dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "divide_unsigned_qword") != std::string::npos,
+           "DIV RSI qword IR differs");
+
+    rosa::x86::X86State state;
+    state.rax = 0;
+    state.rdx = 1;
+    state.rsi = 3;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x5555555555555555ULL},
+                "DIV r64 128-bit dividend quotient differs");
+    expectEqual(state.rdx, std::uint64_t{1},
+                "DIV r64 128-bit dividend remainder differs");
+    expectEqual(state.rsi, std::uint64_t{3},
+                "DIV r64 changed its divisor register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "DIV r64 changed undefined flags");
+
+    state.rax = 100;
+    state.rdx = 0;
+    state.rsi = 24;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{4},
+                "DIV r64 quotient differs");
+    expectEqual(state.rdx, std::uint64_t{4},
+                "DIV r64 remainder differs");
+
+    rosa::x86::X86State zeroDivisor;
+    zeroDivisor.rax = 0x1122334455667788ULL;
+    zeroDivisor.rdx = 0x8877665544332211ULL;
+    zeroDivisor.rsi = 0;
+    zeroDivisor.rflags = 0xBD7;
+    bool divideError = false;
+    try {
+        static_cast<void>(block.execute(zeroDivisor));
+    } catch (const std::runtime_error &error) {
+        divideError = std::string_view(error.what()).find("divide error") !=
+                      std::string_view::npos;
+    }
+    expect(divideError, "zero-divisor qword DIV did not fault");
+    expectEqual(zeroDivisor.rax, std::uint64_t{0x1122334455667788ULL},
+                "zero-divisor qword DIV changed RAX");
+    expectEqual(zeroDivisor.rdx, std::uint64_t{0x8877665544332211ULL},
+                "zero-divisor qword DIV changed RDX");
+    expectEqual(zeroDivisor.rflags, std::uint64_t{0xBD7},
+                "zero-divisor qword DIV changed flags");
+
+    rosa::x86::X86State overflow;
+    overflow.rax = 0;
+    overflow.rdx = 3;
+    overflow.rsi = 3;
+    overflow.rflags = 0xCD7;
+    divideError = false;
+    try {
+        static_cast<void>(block.execute(overflow));
+    } catch (const std::runtime_error &error) {
+        divideError = std::string_view(error.what()).find("overflows RAX") !=
+                      std::string_view::npos;
+    }
+    expect(divideError, "overflowing qword DIV did not fault");
+    expectEqual(overflow.rax, std::uint64_t{0},
+                "overflowing qword DIV changed RAX");
+    expectEqual(overflow.rdx, std::uint64_t{3},
+                "overflowing qword DIV changed RDX");
+    expectEqual(overflow.rsi, std::uint64_t{3},
+                "overflowing qword DIV changed RSI");
+    expectEqual(overflow.rflags, std::uint64_t{0xCD7},
+                "overflowing qword DIV changed flags");
+}
+
+void testUnsignedDivideDwordMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x41, 0xF7, 0xB5, 0x60, 0x02, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C68D3AULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::DivMem,
+           "DIV dword memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "DIV dword memory length differs");
+    const auto divisor =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(divisor.base == rosa::x86::Register::R13 && divisor.hasBase &&
+               !divisor.ripRelative && !divisor.index &&
+               divisor.displacement == 0x260 && divisor.width == 32,
+           "DIV dword [r13+0x260] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "div dword [r13+0x260]") != std::string::npos,
+           "DIV dword memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress divisorAddress{0x8260};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(divisorAddress, 5);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "divide_unsigned_dword") != std::string::npos,
+           "DIV dword memory IR differs");
+
+    rosa::x86::X86State state;
+    state.r13 = page.value;
+    state.rax = 0xAAAAAAAA00000011ULL;
+    state.rdx = 0xBBBBBBBB00000000ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{3},
+                "DIV dword quotient differs");
+    expectEqual(state.rdx, std::uint64_t{2},
+                "DIV dword remainder differs");
+    expectEqual(state.r13, page.value,
+                "DIV dword changed its memory base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "DIV dword changed undefined flags");
+
+    addressSpace.writeU32(divisorAddress, 0);
+    rosa::x86::X86State zeroDivisor;
+    zeroDivisor.r13 = page.value;
+    zeroDivisor.rax = 0x1122334455667788ULL;
+    zeroDivisor.rdx = 0x8877665544332211ULL;
+    zeroDivisor.rflags = 0xAD7;
+    bool divideError = false;
+    try {
+        static_cast<void>(block.execute(zeroDivisor, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        divideError = std::string_view(error.what()).find("divide error") !=
+                      std::string_view::npos;
+    }
+    expect(divideError, "zero-divisor dword DIV did not fault");
+    expectEqual(zeroDivisor.rax, std::uint64_t{0x1122334455667788ULL},
+                "zero-divisor dword DIV changed RAX");
+    expectEqual(zeroDivisor.rdx, std::uint64_t{0x8877665544332211ULL},
+                "zero-divisor dword DIV changed RDX");
+    expectEqual(zeroDivisor.rflags, std::uint64_t{0xAD7},
+                "zero-divisor dword DIV changed flags");
+
+    addressSpace.writeU32(divisorAddress, 5);
+    rosa::x86::X86State overflow;
+    overflow.r13 = page.value;
+    overflow.rax = 0;
+    overflow.rdx = 5;
+    overflow.rflags = 0xBD7;
+    divideError = false;
+    try {
+        static_cast<void>(block.execute(overflow, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        divideError = std::string_view(error.what()).find("overflows EAX") !=
+                      std::string_view::npos;
+    }
+    expect(divideError, "overflowing dword DIV did not fault");
+    expectEqual(overflow.rax, std::uint64_t{0},
+                "overflowing dword DIV changed RAX");
+    expectEqual(overflow.rdx, std::uint64_t{5},
+                "overflowing dword DIV changed RDX");
+    expectEqual(overflow.rflags, std::uint64_t{0xBD7},
+                "overflowing dword DIV changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State unmapped;
+    unmapped.r13 = page.value;
+    unmapped.rax = 0x12345678;
+    unmapped.rdx = 0x9ABCDEF0;
+    unmapped.rflags = 0xCD7;
+    bool memoryFault = false;
+    try {
+        static_cast<void>(block.execute(unmapped, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        memoryFault = std::string_view(error.what()).find("unmapped") !=
+                      std::string_view::npos;
+    }
+    expect(memoryFault, "unmapped dword DIV did not fault");
+    expectEqual(unmapped.rax, std::uint64_t{0x12345678},
+                "unmapped dword DIV changed RAX");
+    expectEqual(unmapped.rdx, std::uint64_t{0x9ABCDEF0},
+                "unmapped dword DIV changed RDX");
+    expectEqual(unmapped.rflags, std::uint64_t{0xCD7},
+                "unmapped dword DIV changed flags");
+}
+
+void testSignedDivideDwordRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x41, 0xF7, 0xFD, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802C8E053ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::IdivReg,
+           "IDIV r32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "IDIV r32 length differs");
+    const auto divisor =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(divisor.reg == rosa::x86::Register::R13 && divisor.width == 32,
+           "IDIV R13D operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("idiv r13d") !=
+               std::string::npos,
+           "IDIV R13D dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "divide_signed_dword") != std::string::npos,
+           "IDIV R13D IR differs");
+
+    rosa::x86::X86State liveShape;
+    liveShape.rax = 0x80;
+    liveShape.rdx = 0;
+    liveShape.r13 = 0x20;
+    liveShape.rflags = 0x46;
+    static_cast<void>(block.execute(liveShape));
+    expectEqual(liveShape.rax, std::uint64_t{4},
+                "positive IDIV quotient differs");
+    expectEqual(liveShape.rdx, std::uint64_t{0},
+                "positive IDIV remainder differs");
+    expectEqual(liveShape.r13, std::uint64_t{0x20},
+                "IDIV changed its divisor register");
+    expectEqual(liveShape.rflags, std::uint64_t{0x46},
+                "IDIV changed undefined flags");
+
+    rosa::x86::X86State negative;
+    negative.rax = 0xFFFFFFF6U;
+    negative.rdx = 0xFFFFFFFFU;
+    negative.r13 = 3;
+    negative.rflags = 0xAD7;
+    static_cast<void>(block.execute(negative));
+    expectEqual(negative.rax, std::uint64_t{0xFFFFFFFD},
+                "negative IDIV quotient differs");
+    expectEqual(negative.rdx, std::uint64_t{0xFFFFFFFF},
+                "negative IDIV remainder differs");
+    expectEqual(negative.rflags, std::uint64_t{0xAD7},
+                "negative IDIV changed flags");
+
+    const auto expectDivideFault = [&](rosa::x86::X86State state,
+                                       std::string_view message) {
+        const auto original = state;
+        bool divideError = false;
+        try {
+            static_cast<void>(block.execute(state));
+        } catch (const std::runtime_error &error) {
+            divideError = std::string_view(error.what()).find(
+                              "divide error") != std::string_view::npos;
+        }
+        expect(divideError, message);
+        expectEqual(state.rax, original.rax,
+                    "faulted IDIV changed RAX");
+        expectEqual(state.rdx, original.rdx,
+                    "faulted IDIV changed RDX");
+        expectEqual(state.r13, original.r13,
+                    "faulted IDIV changed its divisor");
+        expectEqual(state.rflags, original.rflags,
+                    "faulted IDIV changed flags");
+    };
+    expectDivideFault(
+        rosa::x86::X86State{.rax = 0x11223344,
+                            .rdx = 0x55667788,
+                            .r13 = 0,
+                            .rflags = 0x8D7},
+        "zero-divisor IDIV did not fault");
+    expectDivideFault(
+        rosa::x86::X86State{.rax = 0x80000000,
+                            .rdx = 0,
+                            .r13 = 1,
+                            .rflags = 0xBD7},
+        "overflowing positive IDIV did not fault");
+    expectDivideFault(
+        rosa::x86::X86State{.rax = 0,
+                            .rdx = 0x80000000,
+                            .r13 = 0xFFFFFFFF,
+                            .rflags = 0xCD7},
+        "INT64_MIN / -1 IDIV did not fault safely");
 }
 
 void testSignedMultiply64GeneratedExecution() {
@@ -11980,6 +16166,97 @@ void testSignedMultiply64GeneratedExecution() {
                 "minimum-times-negative-one IMUL low result differs");
     expectEqual(state.rflags, std::uint64_t{0x803},
                 "minimum-times-negative-one IMUL flags differ");
+
+    constexpr std::array<std::uint8_t, 4> legacyCode{
+        0x0F, 0xAF, 0xC1, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802ACCF32ULL};
+    const auto legacyDecoded = decoder.decodeBlock(legacyCode, observedRip);
+    expect(legacyDecoded[0].opcode == rosa::x86::Opcode::ImulRegReg,
+           "legacy IMUL r32 opcode differs");
+    expectEqual(legacyDecoded[0].length, std::uint8_t{3},
+                "legacy IMUL r32 length differs");
+    const auto legacyDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            legacyDecoded[0].operands[0]);
+    const auto legacySource =
+        std::get<rosa::x86::RegisterOperand>(
+            legacyDecoded[0].operands[1]);
+    expect(legacyDestination.reg == rosa::x86::Register::Rax &&
+               legacyDestination.width == 32 &&
+               legacySource.reg == rosa::x86::Register::Rcx &&
+               legacySource.width == 32,
+           "legacy IMUL eax, ecx operands differ");
+    expect(rosa::debug::dumpX86(legacyDecoded).find("imul eax, ecx") !=
+               std::string::npos,
+           "legacy IMUL eax, ecx dump differs");
+    const auto legacyBlock = translator.translate(legacyCode, observedRip);
+    rosa::x86::X86State legacyState;
+    legacyState.rax = 0xAABBCCDD00000010ULL;
+    legacyState.rcx = 5;
+    legacyState.rflags = 0x8D7;
+    static_cast<void>(legacyBlock.execute(legacyState));
+    expectEqual(legacyState.rax, std::uint64_t{80},
+                "legacy IMUL eax, ecx result or zero-extension differs");
+    expectEqual(legacyState.rcx, std::uint64_t{5},
+                "legacy IMUL eax, ecx changed its source");
+    expectEqual(legacyState.rflags, std::uint64_t{0xD6},
+                "non-overflowing legacy IMUL flags differ");
+
+    legacyState.rax = static_cast<std::uint32_t>(INT32_MAX);
+    legacyState.rcx = 2;
+    legacyState.rflags = 0xD6;
+    static_cast<void>(legacyBlock.execute(legacyState));
+    expectEqual(legacyState.rax, std::uint64_t{0xFFFFFFFE},
+                "overflowing legacy IMUL low result differs");
+    expectEqual(legacyState.rflags, std::uint64_t{0x8D7},
+                "overflowing legacy IMUL did not set CF and OF");
+
+    constexpr std::array<std::uint8_t, 5> extendedCode{
+        0x45, 0x0F, 0xAF, 0xF1, 0xC3};
+    constexpr rosa::guest::GuestAddress extendedRip{0x7FF802C685B8ULL};
+    const auto extendedDecoded = decoder.decodeBlock(extendedCode,
+                                                       extendedRip);
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::ImulRegReg,
+           "REX IMUL r32, r32 opcode differs");
+    expectEqual(extendedDecoded[0].length, std::uint8_t{4},
+                "REX IMUL r32, r32 length differs");
+    const auto extendedDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            extendedDecoded[0].operands[0]);
+    const auto extendedSource =
+        std::get<rosa::x86::RegisterOperand>(
+            extendedDecoded[0].operands[1]);
+    expect(extendedDestination.reg == rosa::x86::Register::R14 &&
+               extendedDestination.width == 32 &&
+               extendedSource.reg == rosa::x86::Register::R9 &&
+               extendedSource.width == 32,
+           "IMUL r14d, r9d operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find("imul r14d, r9d") !=
+               std::string::npos,
+           "REX IMUL r32, r32 dump differs");
+
+    const auto extendedBlock = translator.translate(extendedCode,
+                                                      extendedRip);
+    rosa::x86::X86State extendedState;
+    extendedState.r14 = 0xAAAAAAAAFFFFFFFDULL;
+    extendedState.r9 = 7;
+    extendedState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.r14, std::uint64_t{0xFFFFFFEB},
+                "REX IMUL r32 result or zero-extension differs");
+    expectEqual(extendedState.r9, std::uint64_t{7},
+                "REX IMUL r32 changed its source");
+    expectEqual(extendedState.rflags, std::uint64_t{0xD6},
+                "non-overflowing REX IMUL r32 flags differ");
+
+    extendedState.r14 = 0x40000000;
+    extendedState.r9 = 4;
+    extendedState.rflags = 0xD6;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.r14, std::uint64_t{0},
+                "overflowing REX IMUL r32 low result differs");
+    expectEqual(extendedState.rflags, std::uint64_t{0x8D7},
+                "overflowing REX IMUL r32 did not set CF and OF");
 }
 
 void testSignedMultiply64RipMemoryGeneratedExecution() {
@@ -12124,6 +16401,129 @@ void testSignedMultiply64ImmediateGeneratedExecution() {
     static_cast<void>(aliasBlock.execute(state));
     expectEqual(state.rcx, std::uint64_t{0xA8},
                 "aliased immediate IMUL did not use the original source");
+
+    constexpr std::array<std::uint8_t, 8> legacyCode{
+        0x41, 0x69, 0xC4, 0x78, 0x08, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802AC2E3BULL};
+    const auto legacyDecoded = decoder.decodeBlock(legacyCode, observedRip);
+    expect(legacyDecoded[0].opcode == rosa::x86::Opcode::ImulRegRegImm,
+           "IMUL r32, r32, imm32 opcode differs");
+    expectEqual(legacyDecoded[0].length, std::uint8_t{7},
+                "IMUL r32, r32, imm32 length differs");
+    const auto legacyDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            legacyDecoded[0].operands[0]);
+    const auto legacySource =
+        std::get<rosa::x86::RegisterOperand>(
+            legacyDecoded[0].operands[1]);
+    const auto legacyImmediate =
+        std::get<rosa::x86::ImmediateOperand>(
+            legacyDecoded[0].operands[2]);
+    expect(legacyDestination.reg == rosa::x86::Register::Rax &&
+               legacyDestination.width == 32 &&
+               legacySource.reg == rosa::x86::Register::R12 &&
+               legacySource.width == 32 &&
+               legacyImmediate.width == 32 &&
+               legacyImmediate.value == 0x878,
+           "IMUL eax, r12d, 0x878 operands differ");
+    expect(rosa::debug::dumpX86(legacyDecoded).find(
+               "imul eax, r12d, 0x878") != std::string::npos,
+           "IMUL eax, r12d, 0x878 dump differs");
+    const auto legacyBlock = translator.translate(legacyCode, observedRip);
+    rosa::x86::X86State legacyState;
+    legacyState.rax = UINT64_MAX;
+    legacyState.r12 = 1;
+    legacyState.rflags = 0x8D7;
+    static_cast<void>(legacyBlock.execute(legacyState));
+    expectEqual(legacyState.rax, std::uint64_t{0x878},
+                "IMUL eax, r12d, 0x878 result or zero-extension differs");
+    expectEqual(legacyState.r12, std::uint64_t{1},
+                "IMUL eax, r12d, 0x878 changed its source");
+    expectEqual(legacyState.rflags & std::uint64_t{0x801},
+                std::uint64_t{0},
+                "non-overflowing IMUL r32, imm32 flags differ");
+
+    legacyState.r12 = static_cast<std::uint32_t>(INT32_MAX);
+    legacyState.rflags = 0;
+    static_cast<void>(legacyBlock.execute(legacyState));
+    expectEqual(legacyState.rflags & std::uint64_t{0x801},
+                std::uint64_t{0x801},
+                "overflowing IMUL r32, imm32 did not set CF and OF");
+}
+
+void testSignedMultiply64MemoryImmediateGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x48, 0x69, 0x45, 0xF0, 0x18, 0xFC, 0xFF, 0xFF, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802D04E86ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::ImulRegMemImm,
+           "IMUL r64, memory, imm32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "IMUL r64, memory, imm32 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 64 &&
+               memory.base == rosa::x86::Register::Rbp && memory.hasBase &&
+               !memory.ripRelative && memory.displacement == -0x10 &&
+               memory.width == 64 &&
+               immediate.value == UINT64_C(0xFFFFFFFFFFFFFC18),
+           "IMUL rax, qword [rbp-0x10], -1000 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "imul rax, qword [rbp-0x10], 0xfffffffffffffc18") !=
+               std::string::npos,
+           "memory immediate IMUL dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress source{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(source, 6);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State state;
+    state.rax = UINT64_MAX;
+    state.rbp = source.value + 0x10;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, UINT64_C(0xFFFFFFFFFFFFE890),
+                "memory immediate IMUL result differs");
+    expectEqual(state.rbp, source.value + 0x10,
+                "memory immediate IMUL changed its address base");
+    expectEqual(state.rflags & std::uint64_t{0x801}, std::uint64_t{0},
+                "non-overflowing memory immediate IMUL flags differ");
+
+    addressSpace.writeU64(source, static_cast<std::uint64_t>(INT64_MAX));
+    state.rflags = 0;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rflags & std::uint64_t{0x801},
+                std::uint64_t{0x801},
+                "overflowing memory immediate IMUL did not set CF and OF");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x0123456789ABCDEFULL;
+    faultState.rbp = source.value + 0x10;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "memory immediate IMUL accepted unmapped guest memory");
+    expectEqual(faultState.rax, UINT64_C(0x0123456789ABCDEF),
+                "faulted memory immediate IMUL changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted memory immediate IMUL changed flags");
 }
 
 void testShiftRightDoubleGeneratedExecution() {
@@ -12165,6 +16565,74 @@ void testShiftRightDoubleGeneratedExecution() {
                 "SHRD masked-zero count changed its destination");
     expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
                 "SHRD masked-zero count changed flags");
+}
+
+void testShiftLeftDoubleGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x4C, 0x0F, 0xA4, 0xDE, 0x3C, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C6D339ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShldRegRegImm,
+           "SHLD RSI, R11, 0x3c opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "SHLD RSI, R11, 0x3c length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::Register::Rsi &&
+               destination.width == 64 &&
+               source.reg == rosa::x86::Register::R11 &&
+               source.width == 64 && immediate.value == 0x3C,
+           "SHLD RSI, R11, 0x3c operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "shld rsi, r11, 0x3c") != std::string::npos,
+           "SHLD RSI, R11, 0x3c dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rsi = 0x0123456789ABCDEFULL;
+    state.r11 = 0xFEDCBA9876543210ULL;
+    state.rflags = 0x812;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rsi, std::uint64_t{0xFFEDCBA987654321ULL},
+                "SHLD RSI, R11, 0x3c result differs");
+    expectEqual(state.r11, std::uint64_t{0xFEDCBA9876543210ULL},
+                "SHLD changed R11");
+    expectEqual(state.rflags, std::uint64_t{0x896},
+                "SHLD RSI, R11, 0x3c flags differ");
+
+    constexpr std::array<std::uint8_t, 6> oneCode{
+        0x48, 0x0F, 0xA4, 0xD0, 0x01, 0xC3};
+    const auto oneBlock = translator.translate(
+        oneCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State oneState;
+    oneState.rax = 0x8000000000000000ULL;
+    oneState.rdx = 1;
+    oneState.rflags = 0x2;
+    static_cast<void>(oneBlock.execute(oneState));
+    expectEqual(oneState.rax, std::uint64_t{0},
+                "SHLD RAX, RDX, 1 result differs");
+    expectEqual(oneState.rflags, std::uint64_t{0x847},
+                "SHLD RAX, RDX, 1 flags differ");
+
+    constexpr std::array<std::uint8_t, 6> zeroCode{
+        0x48, 0x0F, 0xA4, 0xD0, 0x40, 0xC3};
+    const auto zeroBlock = translator.translate(
+        zeroCode, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0x0123456789ABCDEFULL;
+    zeroState.rdx = UINT64_MAX;
+    zeroState.rflags = 0xAD7;
+    static_cast<void>(zeroBlock.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0x0123456789ABCDEFULL},
+                "SHLD masked-zero count changed RAX");
+    expectEqual(zeroState.rflags, std::uint64_t{0xAD7},
+                "SHLD masked-zero count changed flags");
 }
 
 void testOrRegisterGeneratedExecution() {
@@ -12338,6 +16806,100 @@ void testOr8BitRegisterIntoIndexedGuestMemory() {
                 "read-only OR byte memory changed flags");
 }
 
+void testOr32BitRegisterIntoIndexedGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x09, 0x7C, 0x82, 0x28, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C6AD29ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrMemReg,
+           "dword memory-destination OR opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "dword memory-destination OR length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rdx &&
+               memory.index == rosa::x86::Register::Rax &&
+               memory.scale == 4 && memory.displacement == 0x28 &&
+               memory.width == 32 && source.reg == rosa::x86::Register::Rdi &&
+               source.width == 32,
+           "or dword [rdx+rax*4+0x28], edi operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "or dword [rdx+rax*4+0x28], edi") !=
+               std::string::npos,
+           "dword memory-destination OR dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8050};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 0x80000000U);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "or_guest_memory.i32") != std::string::npos,
+           "dword memory-destination OR did not lower through guest-memory IR");
+    rosa::x86::X86State state;
+    state.rdx = page.value;
+    state.rax = 10;
+    state.rdi = 0xAABBCCDD00000101ULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0x80000101U},
+                "dword memory-destination OR result differs");
+    expectEqual(state.rdx, page.value,
+                "dword memory-destination OR changed its base");
+    expectEqual(state.rax, std::uint64_t{10},
+                "dword memory-destination OR changed its index");
+    expectEqual(state.rdi, std::uint64_t{0xAABBCCDD00000101ULL},
+                "dword memory-destination OR changed its source");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 7U},
+                "dword memory-destination OR defined flags differ");
+
+    constexpr rosa::guest::GuestAddress crossPage{0x1000};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        crossPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> tailBytes{0xA5, 0x5A};
+    crossPageAddressSpace.writeBytes(
+        rosa::guest::GuestAddress{0x1FFE}, tailBytes);
+    rosa::x86::X86State faultState;
+    faultState.rdx = 0x1FAE;
+    faultState.rax = 10;
+    faultState.rdi = 0xAABBCCDD00000101ULL;
+    faultState.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(
+            block.execute(faultState, &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page dword memory OR did not fault");
+    expect(crossPageAddressSpace.readBytes(
+               rosa::guest::GuestAddress{0x1FFE}, tailBytes.size()) ==
+               std::vector<std::uint8_t>(tailBytes.begin(), tailBytes.end()),
+           "faulted dword memory OR partially changed memory");
+    expectEqual(faultState.rdx, std::uint64_t{0x1FAE},
+                "faulted dword memory OR changed its base");
+    expectEqual(faultState.rax, std::uint64_t{10},
+                "faulted dword memory OR changed its index");
+    expectEqual(faultState.rdi,
+                std::uint64_t{0xAABBCCDD00000101ULL},
+                "faulted dword memory OR changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "faulted dword memory OR changed flags");
+}
+
 void testOr8BitRegisterFromGuestMemory() {
     constexpr std::array<std::uint8_t, 4> code{0x41, 0x0A, 0x06, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -12427,6 +16989,80 @@ void testOr8BitRegisterFromGuestMemory() {
                 "permission-faulted OR byte load changed its destination");
     expectEqual(faultState.rflags, std::uint64_t{0xBD7},
                 "permission-faulted OR byte load changed flags");
+
+    constexpr std::array<std::uint8_t, 8> ripRelativeCode{
+        0x44, 0x0A, 0x3D, 0x21, 0x39, 0xC7, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress ripRelativeRip{
+        0x7FF802A39288ULL};
+    constexpr rosa::guest::GuestAddress ripRelativeTarget{
+        0x7FF8436ACBB0ULL};
+    constexpr rosa::guest::GuestAddress ripRelativePage{
+        0x7FF8436AC000ULL};
+    const auto ripRelativeDecoded = decoder.decodeBlock(
+        ripRelativeCode, ripRelativeRip);
+    expect(ripRelativeDecoded[0].opcode == rosa::x86::Opcode::OrRegMem,
+           "RIP-relative byte OR opcode differs");
+    expectEqual(ripRelativeDecoded[0].length, std::uint8_t{7},
+                "RIP-relative byte OR length differs");
+    const auto ripRelativeDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            ripRelativeDecoded[0].operands[0]);
+    const auto ripRelativeMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            ripRelativeDecoded[0].operands[1]);
+    expect(ripRelativeDestination.reg == rosa::x86::Register::R15 &&
+               ripRelativeDestination.width == 8 &&
+               ripRelativeMemory.ripRelative &&
+               !ripRelativeMemory.hasBase && !ripRelativeMemory.index &&
+               ripRelativeMemory.width == 8 &&
+               ripRelativeMemory.displacement == 0x40C73921,
+           "RIP-relative byte OR operands differ");
+    expect(rosa::debug::dumpX86(ripRelativeDecoded).find(
+               "or r15b, byte [rip+0x40c73921]") !=
+               std::string::npos,
+           "RIP-relative byte OR dump differs");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize>
+        ripRelativeBytes{};
+    ripRelativeBytes[ripRelativeTarget.value - ripRelativePage.value] =
+        0x0F;
+    rosa::guest::AddressSpace ripRelativeAddressSpace;
+    ripRelativeAddressSpace.mapSegment(
+        ripRelativePage, ripRelativeBytes.size(),
+        rosa::guest::Permission::Read, ripRelativeBytes,
+        "read-only RIP-relative byte OR source");
+    const auto ripRelativeBlock = translator.translate(
+        ripRelativeCode, ripRelativeRip);
+    rosa::x86::X86State ripRelativeState;
+    ripRelativeState.r15 = UINT64_C(0x11223344556677F0);
+    ripRelativeState.rflags = 0x8D7;
+    static_cast<void>(ripRelativeBlock.execute(
+        ripRelativeState, &ripRelativeAddressSpace));
+    expectEqual(ripRelativeState.r15,
+                UINT64_C(0x11223344556677FF),
+                "RIP-relative byte OR changed upper destination bytes");
+    expectEqual(ripRelativeState.rflags & definedLogicFlags,
+                std::uint64_t{0x84},
+                "RIP-relative byte OR defined flags differ");
+
+    rosa::guest::AddressSpace unmappedRipRelativeAddressSpace;
+    rosa::x86::X86State ripRelativeFaultState;
+    ripRelativeFaultState.r15 = UINT64_C(0x11223344556677F0);
+    ripRelativeFaultState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(ripRelativeBlock.execute(
+            ripRelativeFaultState, &unmappedRipRelativeAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative byte OR accepted unmapped memory");
+    expectEqual(ripRelativeFaultState.r15,
+                UINT64_C(0x11223344556677F0),
+                "faulted RIP-relative byte OR changed its destination");
+    expectEqual(ripRelativeFaultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative byte OR changed flags");
 }
 
 void testOr32BitRegisterFromGuestMemory() {
@@ -12452,6 +17088,36 @@ void testOr32BitRegisterFromGuestMemory() {
     expect(rosa::debug::dumpX86(decoded).find(
                "or r14d, dword [rbp-0x2c]") != std::string::npos,
            "OR r14d, dword [rbp-0x2c] dump differs");
+
+    constexpr std::array<std::uint8_t, 7> ripRelativeCode{
+        0x0B, 0x05, 0x19, 0xDA, 0xC1, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress ripRelativeRip{
+        0x7FF802C758C9ULL};
+    constexpr rosa::guest::GuestAddress ripRelativePage{
+        0x7FF843893000ULL};
+    constexpr rosa::guest::GuestAddress ripRelativeTarget{
+        0x7FF8438932E8ULL};
+    const auto ripRelativeDecoded = decoder.decodeBlock(
+        ripRelativeCode, ripRelativeRip);
+    expect(ripRelativeDecoded[0].opcode == rosa::x86::Opcode::OrRegMem,
+           "RIP-relative dword OR opcode differs");
+    expectEqual(ripRelativeDecoded[0].length, std::uint8_t{6},
+                "RIP-relative dword OR length differs");
+    const auto ripRelativeDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            ripRelativeDecoded[0].operands[0]);
+    const auto ripRelativeMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            ripRelativeDecoded[0].operands[1]);
+    expect(ripRelativeDestination.reg == rosa::x86::Register::Rax &&
+               ripRelativeDestination.width == 32 &&
+               ripRelativeMemory.ripRelative &&
+               ripRelativeMemory.displacement == 0x40C1DA19 &&
+               ripRelativeMemory.width == 32,
+           "OR eax, dword [rip+disp32] operands differ");
+    expect(rosa::debug::dumpX86(ripRelativeDecoded).find(
+               "or eax, dword [rip+0x40c1da19]") != std::string::npos,
+           "RIP-relative dword OR dump differs");
 
     constexpr rosa::guest::GuestAddress page{0x8000};
     constexpr rosa::guest::GuestAddress base{0x8100};
@@ -12488,6 +17154,31 @@ void testOr32BitRegisterFromGuestMemory() {
         (1U << 11U);
     expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0x80},
                 "OR r32 memory defined flags differ");
+
+    rosa::guest::AddressSpace ripRelativeAddressSpace;
+    ripRelativeAddressSpace.mapAnonymous(
+        ripRelativePage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    ripRelativeAddressSpace.writeU32(ripRelativeTarget, 0x4);
+    expectEqual(ripRelativeAddressSpace.protect(
+                    ripRelativePage, rosa::guest::guestPageSize,
+                    rosa::guest::Permission::Read),
+                rosa::guest::ProtectResult::Success,
+                "could not make RIP-relative dword OR source read-only");
+    const auto ripRelativeBlock = translator.translate(
+        ripRelativeCode, ripRelativeRip);
+    rosa::x86::X86State ripRelativeState;
+    ripRelativeState.rax = 0xFFFFFFFF00000020ULL;
+    ripRelativeState.rflags = 0x8D7;
+    static_cast<void>(ripRelativeBlock.execute(
+        ripRelativeState, &ripRelativeAddressSpace));
+    expectEqual(ripRelativeState.rax, std::uint64_t{0x24},
+                "RIP-relative dword OR result did not zero-extend");
+    expectEqual(ripRelativeState.rflags, std::uint64_t{0x6},
+                "RIP-relative dword OR flags differ");
+    expectEqual(ripRelativeAddressSpace.readU32(ripRelativeTarget),
+                std::uint32_t{0x4},
+                "RIP-relative dword OR changed its source memory");
 
     rosa::guest::AddressSpace unmappedAddressSpace;
     rosa::x86::X86State faultState;
@@ -12538,6 +17229,53 @@ void testOrImmediateIntoGuestByteMemory() {
                 std::int64_t{-8},
                 "OR byte immediate disp8 was not sign-extended");
 
+    constexpr std::array<std::uint8_t, 8> ripRelativeCode{
+        0x80, 0x0D, 0xEE, 0xEE, 0xA3, 0x40, 0x34, 0xC3};
+    constexpr rosa::guest::GuestAddress ripRelativeRip{
+        0x7FF802C75873ULL};
+    constexpr rosa::guest::GuestAddress ripRelativePage{
+        0x7FF8436B4000ULL};
+    constexpr rosa::guest::GuestAddress ripRelativeTarget{
+        0x7FF8436B4768ULL};
+    const auto ripRelativeDecoded = decoder.decodeBlock(
+        ripRelativeCode, ripRelativeRip);
+    expect(ripRelativeDecoded[0].opcode == rosa::x86::Opcode::OrMemImm,
+           "RIP-relative byte OR opcode differs");
+    expectEqual(ripRelativeDecoded[0].length, std::uint8_t{7},
+                "RIP-relative byte OR length differs");
+    const auto ripRelativeMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            ripRelativeDecoded[0].operands[0]);
+    expect(ripRelativeMemory.ripRelative &&
+               ripRelativeMemory.displacement == 0x40A3EEEE &&
+               ripRelativeMemory.width == 8,
+           "RIP-relative byte OR memory operand differs");
+    expect(rosa::debug::dumpX86(ripRelativeDecoded).find(
+               "or byte [rip+0x40a3eeee], 0x34") != std::string::npos,
+           "RIP-relative byte OR dump differs");
+
+    rosa::guest::AddressSpace ripRelativeAddressSpace;
+    ripRelativeAddressSpace.mapAnonymous(
+        ripRelativePage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array ripRelativeInitial{std::uint8_t{0x01}};
+    ripRelativeAddressSpace.writeBytes(ripRelativeTarget,
+                                       ripRelativeInitial);
+    const rosa::dbt::Translator translator;
+    const auto ripRelativeBlock = translator.translate(
+        ripRelativeCode, ripRelativeRip);
+    rosa::x86::X86State ripRelativeState;
+    ripRelativeState.rflags = 0x8D7;
+    static_cast<void>(ripRelativeBlock.execute(
+        ripRelativeState, &ripRelativeAddressSpace));
+    expectEqual(ripRelativeAddressSpace
+                    .readBytes(ripRelativeTarget, 1)
+                    .front(),
+                std::uint8_t{0x35},
+                "RIP-relative byte OR result differs");
+    expectEqual(ripRelativeState.rflags, std::uint64_t{0x6},
+                "RIP-relative byte OR flags differ");
+
     constexpr rosa::guest::GuestAddress page{0x8000};
     constexpr rosa::guest::GuestAddress target{0x80D8};
     rosa::guest::AddressSpace addressSpace;
@@ -12546,7 +17284,6 @@ void testOrImmediateIntoGuestByteMemory() {
                                   rosa::guest::Permission::Write);
     constexpr std::array initialByte{std::uint8_t{0x40}};
     addressSpace.writeBytes(target, initialByte);
-    const rosa::dbt::Translator translator;
     const auto block = translator.translate(
         code, rosa::guest::GuestAddress{0x7FF70004E0F9ULL});
     rosa::x86::X86State state;
@@ -12624,6 +17361,116 @@ void testOrShortImmediateGeneratedExecution() {
                 "OR r32, imm8 result did not zero-extend");
     expectEqual(state.rflags, std::uint64_t{0x6},
                 "OR r32, imm8 flags differ");
+
+    constexpr std::array<std::uint8_t, 7> wideImmediateCode{
+        0x81, 0xC9, 0x00, 0x00, 0x04, 0x00, 0xC3};
+    const auto wideImmediateDecoded = decoder.decodeBlock(
+        wideImmediateCode, rosa::guest::GuestAddress{0x2800});
+    expect(wideImmediateDecoded[0].opcode == rosa::x86::Opcode::OrRegImm,
+           "OR r32, imm32 opcode differs");
+    expect(rosa::debug::dumpX86(wideImmediateDecoded).find(
+               "or ecx, 0x40000") != std::string::npos,
+           "OR r32, imm32 dump differs");
+    const auto wideImmediateBlock = translator.translate(
+        wideImmediateCode, rosa::guest::GuestAddress{0x2800});
+    state.rcx = 0xAAAAAAAA00000002ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(wideImmediateBlock.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x40002},
+                "OR r32, imm32 result did not zero-extend");
+    expectEqual(state.rflags, std::uint64_t{0x2},
+                "OR r32, imm32 flags differ");
+
+    constexpr std::array<std::uint8_t, 6> accumulatorCode{
+        0x0D, 0x00, 0x00, 0x0F, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress accumulatorRip{0x7FF802CEA1DAULL};
+    const auto accumulatorDecoded = decoder.decodeBlock(
+        accumulatorCode, accumulatorRip);
+    expect(accumulatorDecoded[0].opcode == rosa::x86::Opcode::OrRegImm,
+           "OR EAX, imm32 opcode differs");
+    expectEqual(accumulatorDecoded[0].length, std::uint8_t{5},
+                "OR EAX, imm32 length differs");
+    const auto accumulatorDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            accumulatorDecoded[0].operands[0]);
+    const auto accumulatorImmediate =
+        std::get<rosa::x86::ImmediateOperand>(
+            accumulatorDecoded[0].operands[1]);
+    expect(accumulatorDestination.reg == rosa::x86::Register::Rax &&
+               accumulatorDestination.width == 32 &&
+               accumulatorImmediate.value == 0xF0000 &&
+               accumulatorImmediate.width == 32,
+           "OR EAX, 0xf0000 operands differ");
+    expect(rosa::debug::dumpX86(accumulatorDecoded).find(
+               "or eax, 0xf0000") != std::string::npos,
+           "OR EAX, 0xf0000 dump differs");
+    const auto accumulatorBlock = translator.translate(
+        accumulatorCode, accumulatorRip);
+    rosa::x86::X86State accumulatorState;
+    accumulatorState.rax = 0xFFFFFFFF00000000ULL;
+    accumulatorState.rflags = 0x8D7;
+    static_cast<void>(accumulatorBlock.execute(accumulatorState));
+    expectEqual(accumulatorState.rax, std::uint64_t{0xF0000},
+                "OR EAX, imm32 result did not zero-extend");
+    expectEqual(accumulatorState.rflags, std::uint64_t{0x6},
+                "OR EAX, imm32 flags differ");
+
+    constexpr std::array<std::uint8_t, 7> qwordAccumulatorCode{
+        0x48, 0x0D, 0x80, 0x40, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress qwordAccumulatorRip{
+        0x7FF802C7848BULL};
+    const auto qwordAccumulatorDecoded = decoder.decodeBlock(
+        qwordAccumulatorCode, qwordAccumulatorRip);
+    expect(qwordAccumulatorDecoded[0].opcode ==
+               rosa::x86::Opcode::OrRegImm,
+           "OR RAX, imm32 opcode differs");
+    expectEqual(qwordAccumulatorDecoded[0].length, std::uint8_t{6},
+                "OR RAX, imm32 length differs");
+    const auto qwordAccumulatorDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            qwordAccumulatorDecoded[0].operands[0]);
+    const auto qwordAccumulatorImmediate =
+        std::get<rosa::x86::ImmediateOperand>(
+            qwordAccumulatorDecoded[0].operands[1]);
+    expect(qwordAccumulatorDestination.reg == rosa::x86::Register::Rax &&
+               qwordAccumulatorDestination.width == 64 &&
+               qwordAccumulatorImmediate.value == 0x4080 &&
+               qwordAccumulatorImmediate.width == 32,
+           "OR RAX, 0x4080 operands differ");
+    expect(rosa::debug::dumpX86(qwordAccumulatorDecoded).find(
+               "or rax, 0x4080") != std::string::npos,
+           "OR RAX, 0x4080 dump differs");
+    const auto qwordAccumulatorBlock = translator.translate(
+        qwordAccumulatorCode, qwordAccumulatorRip);
+    rosa::x86::X86State qwordAccumulatorState;
+    qwordAccumulatorState.rax = 0x100100000ULL;
+    qwordAccumulatorState.rflags = 0x8D7;
+    static_cast<void>(qwordAccumulatorBlock.execute(qwordAccumulatorState));
+    expectEqual(qwordAccumulatorState.rax, std::uint64_t{0x100104080ULL},
+                "OR RAX, 0x4080 result differs");
+    expectEqual(qwordAccumulatorState.rflags, std::uint64_t{0x2},
+                "OR RAX, 0x4080 flags differ");
+
+    constexpr std::array<std::uint8_t, 7> negativeAccumulatorCode{
+        0x48, 0x0D, 0x00, 0x00, 0x00, 0x80, 0xC3};
+    const auto negativeAccumulatorDecoded = decoder.decodeBlock(
+        negativeAccumulatorCode, qwordAccumulatorRip);
+    expectEqual(
+        std::get<rosa::x86::ImmediateOperand>(
+            negativeAccumulatorDecoded[0].operands[1]).value,
+        std::uint64_t{0xFFFFFFFF80000000ULL},
+        "OR RAX, imm32 did not sign-extend its immediate");
+    const auto negativeAccumulatorBlock = translator.translate(
+        negativeAccumulatorCode, qwordAccumulatorRip);
+    rosa::x86::X86State negativeAccumulatorState;
+    negativeAccumulatorState.rflags = 0x8D7;
+    static_cast<void>(negativeAccumulatorBlock.execute(
+        negativeAccumulatorState));
+    expectEqual(negativeAccumulatorState.rax,
+                std::uint64_t{0xFFFFFFFF80000000ULL},
+                "OR RAX, negative imm32 result differs");
+    expectEqual(negativeAccumulatorState.rflags, std::uint64_t{0x86},
+                "OR RAX, negative imm32 flags differ");
 
     constexpr std::array<std::uint8_t, 5> extendedCode{
         0x41, 0x80, 0xC8, 0x0F, 0xC3};
@@ -12724,6 +17571,110 @@ void testXor32BitRegisterGeneratedExecution() {
     static_cast<void>(zeroR8.execute(state));
     expectEqual(state.r8, std::uint64_t{0}, "XOR r8d, r8d did not clear R8");
     expectEqual(state.rflags, std::uint64_t{0x46}, "XOR r8d, r8d flags differ");
+
+    constexpr std::array<std::uint8_t, 3> reverseEncodingCode{
+        0x33, 0xC0, 0xC3};
+    const auto reverseDecoded = decoder.decodeBlock(
+        reverseEncodingCode,
+        rosa::guest::GuestAddress{0x7FF802A18075ULL});
+    expect(reverseDecoded[0].opcode == rosa::x86::Opcode::XorRegReg &&
+               reverseDecoded[0].length == 2,
+           "opcode 33 XOR r32, r32 opcode or length differs");
+    const auto reverseDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            reverseDecoded[0].operands[0]);
+    const auto reverseSource =
+        std::get<rosa::x86::RegisterOperand>(
+            reverseDecoded[0].operands[1]);
+    expect(reverseDestination.reg == rosa::x86::Register::Rax &&
+               reverseDestination.width == 32 &&
+               reverseSource.reg == rosa::x86::Register::Rax &&
+               reverseSource.width == 32,
+           "opcode 33 XOR eax, eax operands differ");
+    expect(rosa::debug::dumpX86(reverseDecoded).find("xor eax, eax") !=
+               std::string::npos,
+           "opcode 33 XOR eax, eax dump differs");
+
+    const auto reverseBlock = translator.translate(
+        reverseEncodingCode,
+        rosa::guest::GuestAddress{0x7FF802A18075ULL});
+    rosa::x86::X86State reverseState;
+    reverseState.rax = UINT64_MAX;
+    reverseState.rflags = 0x8D7;
+    static_cast<void>(reverseBlock.execute(reverseState));
+    expectEqual(reverseState.rax, std::uint64_t{0},
+                "opcode 33 XOR eax, eax did not zero-extend its result");
+    expectEqual(reverseState.rflags, std::uint64_t{0x46},
+                "opcode 33 XOR eax, eax flags differ");
+}
+
+void testXor8BitRegistersGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> observedCode{
+        0x30, 0xC1,       // xor cl, al
+        0x34, 0x01,       // xor al, 1
+        0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C751A6ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expectEqual(decoded.size(), std::size_t{3},
+                "observed byte XOR sequence instruction count differs");
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegReg,
+           "XOR CL, AL opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2},
+                "XOR CL, AL length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(
+        decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(
+        decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 8 &&
+               source.reg == rosa::x86::Register::Rax && source.width == 8,
+           "XOR CL, AL operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("xor cl, al") !=
+               std::string::npos,
+           "XOR CL, AL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto first = translator.translate(observedCode, observedRip, 1);
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667701ULL;
+    state.rcx = 0x8877665544332200ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(first.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667701ULL},
+                "XOR CL, AL changed its source");
+    expectEqual(state.rcx, std::uint64_t{0x8877665544332201ULL},
+                "XOR CL, AL changed bytes above CL");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0},
+                "XOR CL, AL defined flags differ");
+
+    const auto sequence = translator.translate(observedCode, observedRip);
+    state.rax = 0x1122334455667701ULL;
+    state.rcx = 0x8877665544332200ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(sequence.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667700ULL},
+                "observed XOR sequence changed bytes above AL");
+    expectEqual(state.rcx, std::uint64_t{0x8877665544332201ULL},
+                "observed XOR sequence produced the wrong CL");
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "observed XOR sequence final flags differ");
+
+    constexpr std::array<std::uint8_t, 4> extendedCode{
+        0x45, 0x30, 0xC8, 0xC3}; // xor r8b, r9b
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    expect(std::get<rosa::x86::RegisterOperand>(
+               extendedDecoded[0].operands[0]).reg ==
+               rosa::x86::Register::R8 &&
+               std::get<rosa::x86::RegisterOperand>(
+                   extendedDecoded[0].operands[1]).reg ==
+                   rosa::x86::Register::R9,
+           "REX XOR r8b, r9b operands differ");
 }
 
 void testXor32BitRegisterFromGuestMemory() {
@@ -13194,6 +18145,54 @@ void testXor8BitAccumulatorImmediate() {
                 "XOR AL, imm8 sign defined flags differ");
 }
 
+void testXor8BitRegisterImmediate() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x80, 0xF1, 0x01, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802AB6BFDULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegImm,
+           "XOR CL, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "XOR CL, imm8 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 8,
+           "XOR CL, imm8 destination differs");
+    expect(immediate.width == 8 && immediate.value == 1,
+           "XOR CL, imm8 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("xor cl, 0x1") !=
+               std::string::npos,
+           "XOR CL, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rcx = 0x1122334455667700ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x1122334455667701ULL},
+                "XOR CL, imm8 changed upper RCX bytes");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0},
+                "XOR CL, imm8 defined flags differ");
+
+    constexpr std::array<std::uint8_t, 4> extendedCode{
+        0x41, 0x80, 0xF4, 0xFF};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x2000}, 1);
+    const auto extendedDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            extendedDecoded[0].operands[0]);
+    expect(extendedDestination.reg == rosa::x86::Register::R12 &&
+               extendedDestination.width == 8,
+           "XOR R12B, imm8 destination differs");
+}
+
 void testXorpsRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x57, 0xC1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -13333,6 +18332,73 @@ void testPxorGuestMemoryGeneratedExecution() {
                 "faulted PXOR changed its high lane");
     expectEqual(state.rflags, std::uint64_t{0xBD7},
                 "faulted PXOR changed flags");
+
+    constexpr std::array<std::uint8_t, 9> ripCode{
+        0x66, 0x0F, 0xEF, 0x05, 0xB9, 0xEB, 0x05, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress ripAddress{0x7FF802AB443FULL};
+    constexpr rosa::guest::GuestAddress ripTarget{0x7FF802B13000ULL};
+    const auto ripDecoded = decoder.decodeBlock(ripCode, ripAddress);
+    expect(ripDecoded[0].opcode == rosa::x86::Opcode::PxorRegMem &&
+               ripDecoded[0].length == 8,
+           "RIP-relative PXOR opcode or length differs");
+    const auto ripMemory =
+        std::get<rosa::x86::MemoryOperand>(ripDecoded[0].operands[1]);
+    expect(ripMemory.ripRelative && !ripMemory.hasBase &&
+               !ripMemory.index && ripMemory.displacement == 0x5EBB9 &&
+               ripMemory.width == 128,
+           "RIP-relative PXOR memory operand differs");
+    expect(rosa::debug::dumpX86(ripDecoded).find(
+               "pxor xmm0, [rip+0x5ebb9] ; 0x7ff802b13000") !=
+               std::string::npos,
+           "RIP-relative PXOR dump differs");
+
+    constexpr std::uint64_t ripSourceLow = 0xFFFF0000FFFF0000ULL;
+    constexpr std::uint64_t ripSourceHigh = 0x00FF00FF00FF00FFULL;
+    addressSpace.mapAnonymous(
+        ripTarget, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(ripTarget, ripSourceLow);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{ripTarget.value + 8}, ripSourceHigh);
+    const auto ripBlock = translator.translate(ripCode, ripAddress);
+    rosa::x86::X86State ripState;
+    ripState.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    ripState.rflags = 0x82;
+    static_cast<void>(ripBlock.execute(ripState, &addressSpace));
+    expectEqual(ripState.xmm[0].low,
+                std::uint64_t{0x0123456789ABCDEFULL ^ ripSourceLow},
+                "RIP-relative PXOR low lane differs");
+    expectEqual(ripState.xmm[0].high,
+                std::uint64_t{0xFEDCBA9876543210ULL ^ ripSourceHigh},
+                "RIP-relative PXOR high lane differs");
+    expectEqual(ripState.rflags, std::uint64_t{0x82},
+                "RIP-relative PXOR changed flags");
+
+    rosa::guest::AddressSpace ripFaultAddressSpace;
+    rosa::x86::X86State ripFaultState;
+    ripFaultState.xmm[0] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL};
+    ripFaultState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(
+            ripBlock.execute(ripFaultState, &ripFaultAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "unmapped RIP-relative PXOR did not fault");
+    expectEqual(ripFaultState.xmm[0].low,
+                std::uint64_t{0x1122334455667788ULL},
+                "faulted RIP-relative PXOR changed its low lane");
+    expectEqual(ripFaultState.xmm[0].high,
+                std::uint64_t{0x8877665544332211ULL},
+                "faulted RIP-relative PXOR changed its high lane");
+    expectEqual(ripFaultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative PXOR changed flags");
 }
 
 void testPandRipGuestMemoryGeneratedExecution() {
@@ -13411,6 +18477,70 @@ void testPandRipGuestMemoryGeneratedExecution() {
                 "faulted PAND changed its high lane");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "faulted PAND changed flags");
+}
+
+void testPandRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x0F, 0xDB, 0xC8, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802C6ACDFULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PandRegReg,
+           "register PAND opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "register PAND length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(
+               decoded[0].operands[0]).reg ==
+               rosa::x86::XmmRegister::Xmm1 &&
+               std::get<rosa::x86::XmmRegisterOperand>(
+                   decoded[0].operands[1]).reg ==
+                   rosa::x86::XmmRegister::Xmm0,
+           "pand xmm1, xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("pand xmm1, xmm0") !=
+               std::string::npos,
+           "pand xmm1, xmm0 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State state;
+    state.xmm[0] = {
+        .low = 0xFF00FF00FF00FF00ULL,
+        .high = 0x0F0F0F0F0F0F0F0FULL};
+    state.xmm[1] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[1].low,
+                std::uint64_t{0x010045008900CD00ULL},
+                "register PAND low lane differs");
+    expectEqual(state.xmm[1].high,
+                std::uint64_t{0x0E0C0A0806040200ULL},
+                "register PAND high lane differs");
+    expectEqual(state.xmm[0].low,
+                std::uint64_t{0xFF00FF00FF00FF00ULL},
+                "register PAND changed source low lane");
+    expectEqual(state.xmm[0].high,
+                std::uint64_t{0x0F0F0F0F0F0F0F0FULL},
+                "register PAND changed source high lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "register PAND changed flags");
+
+    constexpr std::array<std::uint8_t, 5> aliasedCode{
+        0x66, 0x0F, 0xDB, 0xC0, 0xC3};
+    const auto aliasedBlock = translator.translate(
+        aliasedCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State aliasedState;
+    aliasedState.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    static_cast<void>(aliasedBlock.execute(aliasedState));
+    expectEqual(aliasedState.xmm[0].low,
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "aliased PAND low lane differs");
+    expectEqual(aliasedState.xmm[0].high,
+                std::uint64_t{0xFEDCBA9876543210ULL},
+                "aliased PAND high lane differs");
 }
 
 void testPtestRegisterGeneratedExecution() {
@@ -13629,6 +18759,269 @@ void testPcmpeqdRegisterGeneratedExecution() {
                 "distinct PCMPEQD changed flags");
 }
 
+void testPackedDwordShiftAndAddGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> shiftCode{
+        0x66, 0x0F, 0x72, 0xF1, 0x06, 0xC3};
+    constexpr rosa::guest::GuestAddress shiftRip{0x7FF802C76FB0ULL};
+    const rosa::x86::Decoder decoder;
+    const auto shiftDecoded = decoder.decodeBlock(shiftCode, shiftRip);
+    expect(shiftDecoded[0].opcode == rosa::x86::Opcode::PslldRegImm,
+           "PSLLD opcode differs");
+    expectEqual(shiftDecoded[0].length, std::uint8_t{5},
+                "PSLLD length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(
+               shiftDecoded[0].operands[0])
+                   .reg == rosa::x86::XmmRegister::Xmm1,
+           "PSLLD destination differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(
+                    shiftDecoded[0].operands[1])
+                    .value,
+                std::uint64_t{6}, "PSLLD count differs");
+    expect(rosa::debug::dumpX86(shiftDecoded).find("pslld xmm1, 6") !=
+               std::string::npos,
+           "PSLLD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto shiftBlock = translator.translate(shiftCode, shiftRip);
+    expect(rosa::debug::dumpIr(shiftBlock.intermediateRepresentation())
+                   .find("shift_left_xmm_dwords.i32 xmm1, 6") !=
+               std::string::npos,
+           "PSLLD did not lower through packed-dword IR");
+    rosa::x86::X86State shiftState;
+    shiftState.xmm[1] = {
+        .low = 0x0000000200000001ULL,
+        .high = 0x0400000080000000ULL};
+    shiftState.ymmUpper[1] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL};
+    shiftState.rflags = 0x8D7;
+    static_cast<void>(shiftBlock.execute(shiftState));
+    expectEqual(shiftState.xmm[1].low,
+                std::uint64_t{0x0000008000000040ULL},
+                "PSLLD low lane differs");
+    expectEqual(shiftState.xmm[1].high, std::uint64_t{0},
+                "PSLLD did not truncate overflowing dwords");
+    expectEqual(shiftState.ymmUpper[1].low,
+                std::uint64_t{0x1122334455667788ULL},
+                "legacy PSLLD changed the upper YMM state");
+    expectEqual(shiftState.rflags, std::uint64_t{0x8D7},
+                "PSLLD changed flags");
+
+    constexpr std::array<std::uint8_t, 6> largeShiftCode{
+        0x66, 0x0F, 0x72, 0xF1, 0x20, 0xC3};
+    const auto largeShiftBlock = translator.translate(
+        largeShiftCode, rosa::guest::GuestAddress{0x1000});
+    shiftState.xmm[1] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    static_cast<void>(largeShiftBlock.execute(shiftState));
+    expectEqual(shiftState.xmm[1].low, std::uint64_t{0},
+                "PSLLD count 32 did not zero low dwords");
+    expectEqual(shiftState.xmm[1].high, std::uint64_t{0},
+                "PSLLD count 32 did not zero high dwords");
+
+    constexpr std::array<std::uint8_t, 5> addCode{
+        0x66, 0x0F, 0xFE, 0xC1, 0xC3};
+    constexpr rosa::guest::GuestAddress addRip{0x7FF802C76FB5ULL};
+    const auto addDecoded = decoder.decodeBlock(addCode, addRip);
+    expect(addDecoded[0].opcode == rosa::x86::Opcode::PadddRegReg,
+           "PADDD opcode differs");
+    expectEqual(addDecoded[0].length, std::uint8_t{4},
+                "PADDD length differs");
+    expect(rosa::debug::dumpX86(addDecoded).find("paddd xmm0, xmm1") !=
+               std::string::npos,
+           "PADDD dump differs");
+
+    const auto addBlock = translator.translate(addCode, addRip);
+    expect(rosa::debug::dumpIr(addBlock.intermediateRepresentation())
+                   .find("add_xmm_dwords.i32 xmm0, xmm1") !=
+               std::string::npos,
+           "PADDD did not lower through packed-dword IR");
+    rosa::x86::X86State addState;
+    addState.xmm[0] = {
+        .low = 0x00000002FFFFFFFFULL,
+        .high = 0xFFFFFFFF80000000ULL};
+    addState.xmm[1] = {
+        .low = 0xFFFFFFFF00000002ULL,
+        .high = 0xFFFFFFFF80000000ULL};
+    addState.ymmUpper[0] = {
+        .low = 0xA5A5A5A5A5A5A5A5ULL,
+        .high = 0x5A5A5A5A5A5A5A5AULL};
+    addState.rflags = 0xAD7;
+    static_cast<void>(addBlock.execute(addState));
+    expectEqual(addState.xmm[0].low,
+                std::uint64_t{0x0000000100000001ULL},
+                "PADDD low lane differs");
+    expectEqual(addState.xmm[0].high,
+                std::uint64_t{0xFFFFFFFE00000000ULL},
+                "PADDD high lane differs");
+    expectEqual(addState.xmm[1].low,
+                std::uint64_t{0xFFFFFFFF00000002ULL},
+                "PADDD changed its source");
+    expectEqual(addState.ymmUpper[0].low,
+                std::uint64_t{0xA5A5A5A5A5A5A5A5ULL},
+                "legacy PADDD changed the upper YMM state");
+    expectEqual(addState.rflags, std::uint64_t{0xAD7},
+                "PADDD changed flags");
+}
+
+void testPackedQwordLogicalRightShiftImmediate() {
+    constexpr std::array<std::uint8_t, 6> observed{
+        0x66, 0x0F, 0x73, 0xD2, 0x20, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF80681D31DULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observed, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PsrlqRegImm,
+           "PSRLQ opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "PSRLQ length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0])
+                   .reg == rosa::x86::XmmRegister::Xmm2,
+           "PSRLQ destination differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1])
+                    .value,
+                std::uint64_t{32}, "PSRLQ count differs");
+    expect(rosa::debug::dumpX86(decoded).find("psrlq xmm2, 32") !=
+               std::string::npos,
+           "PSRLQ dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observed, rip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("shift_right_logical.i64") != std::string::npos,
+           "PSRLQ did not lower through logical-right-shift IR");
+    rosa::x86::X86State state;
+    state.xmm[2] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    state.ymmUpper[2] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[2].low, std::uint64_t{0x01234567},
+                "PSRLQ count 32 low qword differs");
+    expectEqual(state.xmm[2].high, std::uint64_t{0xFEDCBA98},
+                "PSRLQ count 32 high qword differs");
+    expectEqual(state.ymmUpper[2].low,
+                std::uint64_t{0x1122334455667788ULL},
+                "legacy PSRLQ changed upper YMM state");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PSRLQ changed flags");
+
+    constexpr std::array<std::uint8_t, 6> count33{
+        0x66, 0x0F, 0x73, 0xD3, 0x21, 0xC3};
+    const auto count33Block = translator.translate(
+        count33, rosa::guest::GuestAddress{rip.value + 12});
+    state.xmm[3] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    static_cast<void>(count33Block.execute(state));
+    expectEqual(state.xmm[3].low, std::uint64_t{0x0091A2B3},
+                "PSRLQ count 33 low qword differs");
+    expectEqual(state.xmm[3].high, std::uint64_t{0x7F6E5D4C},
+                "PSRLQ count 33 high qword differs");
+
+    constexpr std::array<std::uint8_t, 6> count64{
+        0x66, 0x0F, 0x73, 0xD2, 0x40, 0xC3};
+    const auto count64Block = translator.translate(
+        count64, rosa::guest::GuestAddress{0x1000});
+    state.xmm[2] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    static_cast<void>(count64Block.execute(state));
+    expectEqual(state.xmm[2].low, std::uint64_t{0},
+                "PSRLQ count 64 did not zero low qword");
+    expectEqual(state.xmm[2].high, std::uint64_t{0},
+                "PSRLQ count 64 did not zero high qword");
+
+    constexpr std::array<std::uint8_t, 7> extended{
+        0x66, 0x41, 0x0F, 0x73, 0xD2, 0x01, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extended, rosa::guest::GuestAddress{0x2000});
+    expect(std::get<rosa::x86::XmmRegisterOperand>(
+               extendedDecoded[0].operands[0])
+                   .reg == rosa::x86::XmmRegister::Xmm10,
+           "REX.B PSRLQ destination differs");
+}
+
+void testPackedHorizontalAddAndMovdExtract() {
+    constexpr std::array<std::uint8_t, 6> horizontalCode{
+        0x66, 0x0F, 0x38, 0x02, 0xC0, 0xC3};
+    constexpr rosa::guest::GuestAddress horizontalRip{0x7FF802C76FC3ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(horizontalCode, horizontalRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PhadddRegReg,
+           "PHADDD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "PHADDD length differs");
+    expect(rosa::debug::dumpX86(decoded).find("phaddd xmm0, xmm0") !=
+               std::string::npos,
+           "PHADDD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto horizontalBlock =
+        translator.translate(horizontalCode, horizontalRip);
+    expect(rosa::debug::dumpIr(
+               horizontalBlock.intermediateRepresentation())
+                   .find("horizontal_add_xmm_dwords.i32 xmm0, xmm0") !=
+               std::string::npos,
+           "PHADDD did not lower through horizontal-add IR");
+    rosa::x86::X86State state;
+    state.xmm[0] = {
+        .low = 0x0000000200000001ULL,
+        .high = 0x00000002FFFFFFFFULL};
+    state.ymmUpper[0] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(horizontalBlock.execute(state));
+    expectEqual(state.xmm[0].low,
+                std::uint64_t{0x0000000100000003ULL},
+                "first aliased PHADDD low lane differs");
+    expectEqual(state.xmm[0].high,
+                std::uint64_t{0x0000000100000003ULL},
+                "first aliased PHADDD high lane differs");
+    static_cast<void>(horizontalBlock.execute(state));
+    expectEqual(state.xmm[0].low,
+                std::uint64_t{0x0000000400000004ULL},
+                "second aliased PHADDD low lane differs");
+    expectEqual(state.xmm[0].high,
+                std::uint64_t{0x0000000400000004ULL},
+                "second aliased PHADDD high lane differs");
+    expectEqual(state.ymmUpper[0].low,
+                std::uint64_t{0x1122334455667788ULL},
+                "legacy PHADDD changed upper YMM state");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PHADDD changed flags");
+
+    constexpr std::array<std::uint8_t, 5> extractCode{
+        0x66, 0x0F, 0x7E, 0xC1, 0xC3};
+    constexpr rosa::guest::GuestAddress extractRip{0x7FF802C76FCDULL};
+    const auto extractDecoded = decoder.decodeBlock(extractCode, extractRip);
+    expect(extractDecoded[0].opcode == rosa::x86::Opcode::MovdRegXmm,
+           "MOVD XMM-to-register opcode differs");
+    expectEqual(extractDecoded[0].length, std::uint8_t{4},
+                "MOVD XMM-to-register length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(
+            extractDecoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 32,
+           "MOVD ECX destination differs");
+    expect(rosa::debug::dumpX86(extractDecoded).find("movd ecx, xmm0") !=
+               std::string::npos,
+           "MOVD XMM-to-register dump differs");
+
+    const auto extractBlock = translator.translate(extractCode, extractRip);
+    state.rcx = UINT64_MAX;
+    state.rflags = 0xAD7;
+    static_cast<void>(extractBlock.execute(state));
+    expectEqual(state.rcx, std::uint64_t{4},
+                "MOVD XMM-to-register did not zero-extend ECX");
+    expectEqual(state.xmm[0].low,
+                std::uint64_t{0x0000000400000004ULL},
+                "MOVD XMM-to-register changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "MOVD XMM-to-register changed flags");
+}
+
 void testPandnRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{
         0x66, 0x0F, 0xDF, 0xC8, 0xC3};
@@ -13698,6 +19091,240 @@ void testPmovmskbGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "PMOVMSKB changed flags");
 }
 
+void testPmovsxbdRipMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 10> code{
+        0x66, 0x0F, 0x38, 0x21, 0x0D, 0x57, 0xE2, 0x03, 0x00,
+        0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C6AA48ULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF802CA8CA8ULL};
+    constexpr rosa::guest::GuestAddress targetPage{0x7FF802CA8000ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PmovsxbdRegMem,
+           "PMOVSXBD RIP-relative opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9},
+                "PMOVSXBD RIP-relative length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1,
+           "PMOVSXBD destination differs");
+    expect(memory.ripRelative && !memory.hasBase && !memory.index &&
+               memory.width == 32 && memory.displacement == 0x3E257,
+           "PMOVSXBD RIP-relative memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "pmovsxbd xmm1, dword [rip+0x3e257] ; 0x7ff802ca8ca8") !=
+               std::string::npos,
+           "PMOVSXBD disassembly differs");
+
+    constexpr std::array<std::uint8_t, 4> source{0x80, 0xFF, 0x00, 0x7F};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        targetPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "PMOVSXBD source");
+    addressSpace.writeBytes(target, source);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "load_guest_sign_extended_bytes_xmm") !=
+               std::string::npos,
+           "PMOVSXBD IR differs");
+    rosa::x86::X86State state;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL,
+    };
+    state.xmm[1] = {
+        .low = 0xAAAAAAAAAAAAAAAAULL,
+        .high = 0xBBBBBBBBBBBBBBBBULL,
+    };
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[1].low, std::uint64_t{0xFFFFFFFFFFFFFF80ULL},
+                "PMOVSXBD low sign extensions differ");
+    expectEqual(state.xmm[1].high, std::uint64_t{0x0000007F00000000ULL},
+                "PMOVSXBD high sign extensions differ");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "PMOVSXBD changed an unrelated XMM lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PMOVSXBD changed flags");
+
+    constexpr std::array<std::uint8_t, 10> crossingCode{
+        0x66, 0x0F, 0x38, 0x21, 0x0D, 0xF5, 0x3F, 0x00, 0x00,
+        0xC3};
+    const auto crossingBlock = translator.translate(
+        crossingCode, rosa::guest::GuestAddress{0x1000});
+    rosa::guest::AddressSpace crossingAddressSpace;
+    crossingAddressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{0x4000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "partial PMOVSXBD source");
+    crossingAddressSpace.writeBytes(
+        rosa::guest::GuestAddress{0x4FFE},
+        std::array<std::uint8_t, 2>{0x80, 0xFF});
+    rosa::x86::X86State faultState;
+    faultState.xmm[1] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL,
+    };
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(
+            crossingBlock.execute(faultState, &crossingAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page PMOVSXBD did not fault");
+    expectEqual(faultState.xmm[1].low,
+                std::uint64_t{0x1122334455667788ULL},
+                "faulted PMOVSXBD changed its low lane");
+    expectEqual(faultState.xmm[1].high,
+                std::uint64_t{0x8877665544332211ULL},
+                "faulted PMOVSXBD changed its high lane");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted PMOVSXBD changed flags");
+}
+
+void testPmovsxdqRipMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 10> code{
+        0x66, 0x0F, 0x38, 0x25, 0x0D, 0x09, 0xF1, 0x03, 0x00,
+        0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C6932EULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF802CA8440ULL};
+    constexpr rosa::guest::GuestAddress targetPage{0x7FF802CA8000ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PmovsxdqRegMem,
+           "PMOVSXDQ RIP-relative opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9},
+                "PMOVSXDQ RIP-relative length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1,
+           "PMOVSXDQ destination differs");
+    expect(memory.ripRelative && !memory.hasBase && !memory.index &&
+               memory.width == 64 && memory.displacement == 0x3F109,
+           "PMOVSXDQ RIP-relative memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "pmovsxdq xmm1, qword [rip+0x3f109] ; 0x7ff802ca8440") !=
+               std::string::npos,
+           "PMOVSXDQ disassembly differs");
+
+    constexpr std::array<std::uint8_t, 8> source{
+        0xFE, 0xFF, 0xFF, 0xFF,
+        0x00, 0x00, 0x00, 0x80};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        targetPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "PMOVSXDQ source");
+    addressSpace.writeBytes(target, source);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "load_guest_sign_extended_dwords_xmm") !=
+               std::string::npos,
+           "PMOVSXDQ IR differs");
+    rosa::x86::X86State state;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL,
+    };
+    state.xmm[1] = {
+        .low = 0xAAAAAAAAAAAAAAAAULL,
+        .high = 0xBBBBBBBBBBBBBBBBULL,
+    };
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[1].low, std::uint64_t{0xFFFFFFFFFFFFFFFEULL},
+                "PMOVSXDQ low sign extension differs");
+    expectEqual(state.xmm[1].high, std::uint64_t{0xFFFFFFFF80000000ULL},
+                "PMOVSXDQ high sign extension differs");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "PMOVSXDQ changed an unrelated XMM lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PMOVSXDQ changed flags");
+    expect(addressSpace.readBytes(target, source.size()) ==
+               std::vector<std::uint8_t>(source.begin(), source.end()),
+           "PMOVSXDQ changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.xmm[1] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL,
+    };
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "unmapped PMOVSXDQ did not fault");
+    expectEqual(faultState.xmm[1].low,
+                std::uint64_t{0x1122334455667788ULL},
+                "faulted PMOVSXDQ changed its low lane");
+    expectEqual(faultState.xmm[1].high,
+                std::uint64_t{0x8877665544332211ULL},
+                "faulted PMOVSXDQ changed its high lane");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted PMOVSXDQ changed flags");
+}
+
+void testPaddqRegisterExecution() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x0F, 0xD4, 0xC8, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C6933EULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PaddqRegReg,
+           "PADDQ opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "PADDQ length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0,
+           "PADDQ xmm1, xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("paddq xmm1, xmm0") !=
+               std::string::npos,
+           "PADDQ dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    rosa::x86::X86State state;
+    state.xmm[0] = {
+        .low = 2,
+        .high = UINT64_MAX,
+    };
+    state.xmm[1] = {
+        .low = UINT64_MAX,
+        .high = 1,
+    };
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[1].low, std::uint64_t{1},
+                "PADDQ low wrapping sum differs");
+    expectEqual(state.xmm[1].high, std::uint64_t{0},
+                "PADDQ high wrapping sum differs");
+    expectEqual(state.xmm[0].low, std::uint64_t{2},
+                "PADDQ changed its source low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{UINT64_MAX},
+                "PADDQ changed its source high lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PADDQ changed flags");
+}
+
 void testPshufdRegisterExecution() {
     constexpr std::array<std::uint8_t, 6> code{
         0x66, 0x0F, 0x70, 0xC0, 0xE8, 0xC3};
@@ -13722,6 +19349,56 @@ void testPshufdRegisterExecution() {
     expectEqual(state.xmm[0].high, std::uint64_t{0x4444444433333333ULL},
                 "in-place PSHUFD high lane differs");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "PSHUFD changed flags");
+}
+
+void testShufpdRegisterExecution() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x66, 0x0F, 0xC6, 0xC1, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802A8C43CULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShufpdRegRegImm,
+           "SHUFPD opcode differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "shufpd xmm0, xmm1, 0x1") != std::string::npos,
+           "SHUFPD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802A8C43CULL});
+    rosa::x86::X86State state;
+    state.xmm[0] = {
+        .low = 0x1111111111111111ULL,
+        .high = 0x2222222222222222ULL,
+    };
+    state.xmm[1] = {
+        .low = 0x3333333333333333ULL,
+        .high = 0x4444444444444444ULL,
+    };
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x2222222222222222ULL},
+                "SHUFPD selected the wrong destination lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x3333333333333333ULL},
+                "SHUFPD selected the wrong source lane");
+    expectEqual(state.xmm[1].low, std::uint64_t{0x3333333333333333ULL},
+                "SHUFPD changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "SHUFPD changed flags");
+
+    constexpr std::array<std::uint8_t, 6> inPlaceCode{
+        0x66, 0x0F, 0xC6, 0xC0, 0x01, 0xC3};
+    const auto inPlaceBlock = translator.translate(
+        inPlaceCode, rosa::guest::GuestAddress{0x2000});
+    state.xmm[0] = {
+        .low = 0x1111111111111111ULL,
+        .high = 0x2222222222222222ULL,
+    };
+    static_cast<void>(inPlaceBlock.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x2222222222222222ULL},
+                "in-place SHUFPD low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x1111111111111111ULL},
+                "in-place SHUFPD did not preserve its old low lane");
 }
 
 void testPalignrRegisterExecution() {
@@ -13803,6 +19480,40 @@ void testMovapsRegisterToGuestMemory() {
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x80E8}),
                 state.xmm[0].high, "MOVAPS stored the wrong high lane");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVAPS changed flags");
+
+    constexpr std::array<std::uint8_t, 6> movapdCode{
+        0x66, 0x0F, 0x29, 0x04, 0x0F, 0xC3};
+    const auto movapdDecoded = decoder.decodeBlock(
+        movapdCode, rosa::guest::GuestAddress{0x7FF802A8C457ULL});
+    expect(movapdDecoded[0].opcode == rosa::x86::Opcode::MovapdMemReg,
+           "MOVAPD [indexed memory], xmm opcode differs");
+    const auto movapdMemory = std::get<rosa::x86::MemoryOperand>(
+        movapdDecoded[0].operands[0]);
+    expect(movapdMemory.base == rosa::x86::Register::Rdi &&
+               movapdMemory.index == rosa::x86::Register::Rcx &&
+               movapdMemory.scale == 1 && movapdMemory.displacement == 0,
+           "MOVAPD [rdi+rcx], xmm0 operands differ");
+    expect(rosa::debug::dumpX86(movapdDecoded).find(
+               "movapd [rdi+rcx*1], xmm0") != std::string::npos,
+           "MOVAPD indexed store dump differs");
+    const auto movapdBlock = translator.translate(
+        movapdCode, rosa::guest::GuestAddress{0x7FF802A8C457ULL});
+    state.rdi = 0x8100;
+    state.rcx = 0x10;
+    state.xmm[0] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL,
+    };
+    state.rflags = 0xAD7;
+    static_cast<void>(movapdBlock.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8110}),
+                state.xmm[0].low,
+                "MOVAPD indexed store low lane differs");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8118}),
+                state.xmm[0].high,
+                "MOVAPD indexed store high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "MOVAPD indexed store changed flags");
 
     constexpr std::array<std::uint8_t, 5> extendedBaseCode{
         0x41, 0x0F, 0x29, 0x07, 0xC3};
@@ -13989,8 +19700,72 @@ void testMovapsGuestMemoryToRegister() {
     expectEqual(state.rflags, std::uint64_t{0x8D7},
                 "MOVAPS load changed flags");
 
+    constexpr std::array<std::uint8_t, 7> movapdCode{
+        0x66, 0x0F, 0x28, 0x44, 0x0E, 0xF8, 0xC3};
+    const auto movapdDecoded = decoder.decodeBlock(
+        movapdCode, rosa::guest::GuestAddress{0x7FF802A8C425ULL});
+    expect(movapdDecoded[0].opcode == rosa::x86::Opcode::MovapdRegMem,
+           "MOVAPD xmm, [indexed memory] opcode differs");
+    const auto movapdMemory = std::get<rosa::x86::MemoryOperand>(
+        movapdDecoded[0].operands[1]);
+    expect(movapdMemory.base == rosa::x86::Register::Rsi &&
+               movapdMemory.index == rosa::x86::Register::Rcx &&
+               movapdMemory.scale == 1 &&
+               movapdMemory.displacement == -8 &&
+               movapdMemory.width == 128,
+           "MOVAPD xmm0, [rsi+rcx-8] operands differ");
+    expect(rosa::debug::dumpX86(movapdDecoded).find(
+               "movapd xmm0, [rsi+rcx*1-0x8]") != std::string::npos,
+           "MOVAPD indexed load dump differs");
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8110},
+                          0x8877665544332211ULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8118},
+                          0x1020304050607080ULL);
+    const auto movapdBlock = translator.translate(
+        movapdCode, rosa::guest::GuestAddress{0x7FF802A8C425ULL});
+    state.rsi = 0x8108;
+    state.rcx = 0x10;
+    state.xmm[0] = {};
+    state.rflags = 0xAD7;
+    static_cast<void>(movapdBlock.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x8877665544332211ULL},
+                "MOVAPD indexed load low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x1020304050607080ULL},
+                "MOVAPD indexed load high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "MOVAPD indexed load changed flags");
+
+    constexpr std::array<std::uint8_t, 5> movapdRegisterCode{
+        0x66, 0x0F, 0x28, 0xC4, 0xC3};
+    const auto movapdRegisterDecoded = decoder.decodeBlock(
+        movapdRegisterCode,
+        rosa::guest::GuestAddress{0x7FF802A8C46DULL});
+    expect(movapdRegisterDecoded[0].opcode ==
+               rosa::x86::Opcode::MovapdRegReg,
+           "MOVAPD xmm, xmm opcode differs");
+    expect(rosa::debug::dumpX86(movapdRegisterDecoded).find(
+               "movapd xmm0, xmm4") != std::string::npos,
+           "MOVAPD xmm, xmm dump differs");
+    const auto movapdRegisterBlock = translator.translate(
+        movapdRegisterCode,
+        rosa::guest::GuestAddress{0x7FF802A8C46DULL});
+    state.xmm[0] = {};
+    state.xmm[4] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL,
+    };
+    state.rflags = 0xBD7;
+    static_cast<void>(movapdRegisterBlock.execute(state));
+    expectEqual(state.xmm[0].low, state.xmm[4].low,
+                "MOVAPD register move low lane differs");
+    expectEqual(state.xmm[0].high, state.xmm[4].high,
+                "MOVAPD register move high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xBD7},
+                "MOVAPD register move changed flags");
+
     state.rbp = 0x8108;
     state.xmm[0] = {.low = 3, .high = 4};
+    state.rflags = 0x8D7;
     bool rejected = false;
     try {
         static_cast<void>(block.execute(state, &addressSpace));
@@ -14417,6 +20192,495 @@ void testMovupsGuestMemoryToRegister() {
                 "failed indexed MOVUPS changed flags");
 }
 
+void testVexXmmShortCopyInstructions() {
+    constexpr rosa::guest::GuestAddress codeAddress{0x1000};
+    constexpr rosa::guest::GuestAddress memoryPage{0x8000};
+    const rosa::x86::Decoder decoder;
+    const rosa::dbt::Translator translator;
+
+    constexpr std::array<std::uint8_t, 7> loadCode{
+        0xC5, 0xF8, 0x10, 0x4C, 0x16, 0xF0, 0xC3};
+    const auto loadDecoded = decoder.decodeBlock(loadCode, codeAddress);
+    expect(loadDecoded[0].opcode == rosa::x86::Opcode::VmovupsRegMem,
+           "VMOVUPS load opcode differs");
+    expectEqual(loadDecoded[0].length, std::uint8_t{6},
+                "VMOVUPS load length differs");
+    const auto loadDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(loadDecoded[0].operands[0]);
+    const auto loadMemory =
+        std::get<rosa::x86::MemoryOperand>(loadDecoded[0].operands[1]);
+    expect(loadDestination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               loadMemory.base == rosa::x86::Register::Rsi &&
+               loadMemory.index == rosa::x86::Register::Rdx &&
+               loadMemory.scale == 1 && loadMemory.displacement == -0x10 &&
+               loadMemory.width == 128,
+           "VMOVUPS load operands differ");
+    expect(rosa::debug::dumpX86(loadDecoded).find(
+               "vmovups xmm1, [rsi+rdx*1-0x10]") != std::string::npos,
+           "VMOVUPS load dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8030},
+                          0x0123456789ABCDEFULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8038},
+                          0xFEDCBA9876543210ULL);
+    rosa::x86::X86State state;
+    state.rsi = memoryPage.value;
+    state.rdx = 0x40;
+    state.xmm[1] = {.low = 1, .high = 2};
+    state.ymmUpper[1] = {.low = 3, .high = 4};
+    state.rflags = 0x8D7;
+    const auto loadBlock = translator.translate(loadCode, codeAddress);
+    static_cast<void>(loadBlock.execute(state, &addressSpace));
+    expectEqual(state.xmm[1].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "VMOVUPS loaded the wrong low lane");
+    expectEqual(state.xmm[1].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "VMOVUPS loaded the wrong high lane");
+    expectEqual(state.ymmUpper[1].low, std::uint64_t{0},
+                "128-bit VMOVUPS did not clear the low upper-YMM lane");
+    expectEqual(state.ymmUpper[1].high, std::uint64_t{0},
+                "128-bit VMOVUPS did not clear the high upper-YMM lane");
+    expectEqual(state.rsi, memoryPage.value, "VMOVUPS load changed its base");
+    expectEqual(state.rdx, std::uint64_t{0x40},
+                "VMOVUPS load changed its index");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "VMOVUPS load changed flags");
+
+    constexpr std::array<std::uint8_t, 6> storeCode{
+        0xC5, 0xF8, 0x11, 0x0C, 0x17, 0xC3};
+    const auto storeDecoded = decoder.decodeBlock(storeCode, codeAddress);
+    expect(storeDecoded[0].opcode == rosa::x86::Opcode::VmovupsMemReg,
+           "VMOVUPS store opcode differs");
+    expectEqual(storeDecoded[0].length, std::uint8_t{5},
+                "VMOVUPS store length differs");
+    const auto storeMemory =
+        std::get<rosa::x86::MemoryOperand>(storeDecoded[0].operands[0]);
+    const auto storeSource =
+        std::get<rosa::x86::XmmRegisterOperand>(storeDecoded[0].operands[1]);
+    expect(storeMemory.base == rosa::x86::Register::Rdi &&
+               storeMemory.index == rosa::x86::Register::Rdx &&
+               storeMemory.scale == 1 && storeMemory.displacement == 0 &&
+               storeSource.reg == rosa::x86::XmmRegister::Xmm1,
+           "VMOVUPS store operands differ");
+    expect(rosa::debug::dumpX86(storeDecoded).find(
+               "vmovups [rdi+rdx*1], xmm1") != std::string::npos,
+           "VMOVUPS store dump differs");
+    state.rdi = memoryPage.value;
+    state.rdx = 0x50;
+    state.xmm[1] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL};
+    state.rflags = 0xAD7;
+    const auto storeBlock = translator.translate(storeCode, codeAddress);
+    static_cast<void>(storeBlock.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8050}),
+                std::uint64_t{0x8877665544332211ULL},
+                "VMOVUPS stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8058}),
+                std::uint64_t{0x1020304050607080ULL},
+                "VMOVUPS stored the wrong high lane");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "VMOVUPS store changed flags");
+
+    constexpr std::array<std::uint8_t, 5> xorCode{
+        0xC5, 0xF0, 0x57, 0xC9, 0xC3};
+    const auto xorDecoded = decoder.decodeBlock(xorCode, codeAddress);
+    expect(xorDecoded[0].opcode == rosa::x86::Opcode::VxorpsRegRegReg,
+           "VXORPS opcode differs");
+    expect(rosa::debug::dumpX86(xorDecoded).find(
+               "vxorps xmm1, xmm1, xmm1") != std::string::npos,
+           "VXORPS dump differs");
+    state.xmm[1] = {.low = UINT64_MAX, .high = 0x123456789ABCDEF0ULL};
+    state.ymmUpper[1] = {.low = UINT64_MAX,
+                         .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0xBD7;
+    const auto xorBlock = translator.translate(xorCode, codeAddress);
+    static_cast<void>(xorBlock.execute(state, &addressSpace));
+    expectEqual(state.xmm[1].low, std::uint64_t{0},
+                "VXORPS did not clear its low lane");
+    expectEqual(state.xmm[1].high, std::uint64_t{0},
+                "VXORPS did not clear its high lane");
+    expectEqual(state.ymmUpper[1].low, std::uint64_t{0},
+                "128-bit VXORPS did not clear the low upper-YMM lane");
+    expectEqual(state.ymmUpper[1].high, std::uint64_t{0},
+                "128-bit VXORPS did not clear the high upper-YMM lane");
+    expectEqual(state.rflags, std::uint64_t{0xBD7},
+                "VXORPS changed flags");
+
+    constexpr std::array<std::uint8_t, 4> zeroUpperCode{
+        0xC5, 0xF8, 0x77, 0xC3};
+    const auto zeroUpperDecoded =
+        decoder.decodeBlock(zeroUpperCode, codeAddress);
+    expect(zeroUpperDecoded[0].opcode == rosa::x86::Opcode::Vzeroupper,
+           "VZEROUPPER opcode differs");
+    expect(rosa::debug::dumpX86(zeroUpperDecoded).find("vzeroupper") !=
+               std::string::npos,
+           "VZEROUPPER dump differs");
+    state.xmm[1] = {.low = 0x55, .high = 0xAA};
+    state.ymmUpper[1] = {.low = UINT64_MAX,
+                         .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0xCD7;
+    const auto zeroUpperBlock =
+        translator.translate(zeroUpperCode, codeAddress);
+    static_cast<void>(zeroUpperBlock.execute(state, &addressSpace));
+    expectEqual(state.xmm[1].low, std::uint64_t{0x55},
+                "VZEROUPPER changed modeled low XMM state");
+    expectEqual(state.xmm[1].high, std::uint64_t{0xAA},
+                "VZEROUPPER changed modeled high XMM state");
+    expectEqual(state.ymmUpper[1].low, std::uint64_t{0},
+                "VZEROUPPER did not clear the low upper-YMM lane");
+    expectEqual(state.ymmUpper[1].high, std::uint64_t{0},
+                "VZEROUPPER did not clear the high upper-YMM lane");
+    expectEqual(state.rflags, std::uint64_t{0xCD7},
+                "VZEROUPPER changed flags");
+}
+
+void testVexYmmBroadcastAndStore() {
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802E7AE50ULL};
+    constexpr rosa::guest::GuestAddress memoryPage{0x8000};
+    constexpr std::array<std::uint8_t, 11> code{
+        0xC4, 0xE2, 0x7D, 0x18, 0xC0,
+        0xC5, 0xFC, 0x11, 0x07,
+        0xEB, 0x00};
+
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expectEqual(decoded.size(), std::size_t{3},
+                "YMM broadcast/store test block instruction count differs");
+    expect(decoded[0].opcode == rosa::x86::Opcode::VbroadcastssYmmReg &&
+               decoded[0].length == 5,
+           "VBROADCASTSS YMM opcode or length differs");
+    const auto broadcastDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto broadcastSource =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(broadcastDestination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               broadcastSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "VBROADCASTSS ymm0, xmm0 operands differ");
+    expect(decoded[1].opcode == rosa::x86::Opcode::VmovupsYmmMemReg &&
+               decoded[1].length == 4,
+           "256-bit VMOVUPS opcode or length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[1].operands[0]);
+    const auto storeSource =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[1].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rdi && !memory.index &&
+               memory.displacement == 0 && memory.width == 256 &&
+               storeSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "VMOVUPS [rdi], ymm0 operands differ");
+    const auto dump = rosa::debug::dumpX86(decoded);
+    expect(dump.find("vbroadcastss ymm0, xmm0") != std::string::npos &&
+               dump.find("vmovups [rdi], ymm0") != std::string::npos,
+           "YMM broadcast/store dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("store_guest_ymm.i256") != std::string::npos,
+           "256-bit VMOVUPS did not lower through YMM store IR");
+    rosa::x86::X86State state;
+    state.rip = instructionAddress.value;
+    state.rdi = 0x8043;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    state.ymmUpper[0] = {.low = 1, .high = 2};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    constexpr std::uint64_t packed = 0x89ABCDEF89ABCDEFULL;
+    expectEqual(state.xmm[0].low, packed,
+                "VBROADCASTSS produced the wrong first qword");
+    expectEqual(state.xmm[0].high, packed,
+                "VBROADCASTSS produced the wrong second qword");
+    expectEqual(state.ymmUpper[0].low, packed,
+                "VBROADCASTSS produced the wrong third qword");
+    expectEqual(state.ymmUpper[0].high, packed,
+                "VBROADCASTSS produced the wrong fourth qword");
+    for (std::uint64_t offset = 0; offset < 32; offset += 8) {
+        expectEqual(addressSpace.readU64(
+                        rosa::guest::GuestAddress{state.rdi + offset}),
+                    packed, "256-bit VMOVUPS stored the wrong qword");
+    }
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "YMM broadcast/store changed flags");
+
+    constexpr std::array<std::uint8_t, 11> alignedStoreCode{
+        0xC5, 0xFC, 0x29, 0x07,
+        0xC5, 0xFC, 0x29, 0x47, 0x20,
+        0xEB, 0x00};
+    const auto alignedDecoded =
+        decoder.decodeBlock(alignedStoreCode, instructionAddress);
+    expect(alignedDecoded[0].opcode ==
+               rosa::x86::Opcode::VmovapsYmmMemReg &&
+               alignedDecoded[1].opcode ==
+                   rosa::x86::Opcode::VmovapsYmmMemReg,
+           "256-bit VMOVAPS store opcodes differ");
+    const auto secondAlignedMemory = std::get<rosa::x86::MemoryOperand>(
+        alignedDecoded[1].operands[0]);
+    expect(secondAlignedMemory.base == rosa::x86::Register::Rdi &&
+               secondAlignedMemory.displacement == 0x20 &&
+               secondAlignedMemory.width == 256,
+           "second 256-bit VMOVAPS store operand differs");
+    expect(rosa::debug::dumpX86(alignedDecoded).find(
+               "vmovaps [rdi+0x20], ymm0") != std::string::npos,
+           "256-bit VMOVAPS dump differs");
+    const auto alignedStore =
+        translator.translate(alignedStoreCode, instructionAddress);
+    state.rdi = 0x8080;
+    state.xmm[0] = {.low = 1, .high = 2};
+    state.ymmUpper[0] = {.low = 3, .high = 4};
+    state.rflags = 0xAD7;
+    static_cast<void>(alignedStore.execute(state, &addressSpace));
+    for (const auto base : {std::uint64_t{0x8080},
+                            std::uint64_t{0x80A0}}) {
+        expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{base}),
+                    std::uint64_t{1},
+                    "256-bit VMOVAPS stored the wrong first qword");
+        expectEqual(addressSpace.readU64(
+                        rosa::guest::GuestAddress{base + 8}),
+                    std::uint64_t{2},
+                    "256-bit VMOVAPS stored the wrong second qword");
+        expectEqual(addressSpace.readU64(
+                        rosa::guest::GuestAddress{base + 16}),
+                    std::uint64_t{3},
+                    "256-bit VMOVAPS stored the wrong third qword");
+        expectEqual(addressSpace.readU64(
+                        rosa::guest::GuestAddress{base + 24}),
+                    std::uint64_t{4},
+                    "256-bit VMOVAPS stored the wrong fourth qword");
+    }
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "256-bit VMOVAPS changed flags");
+
+    rosa::guest::AddressSpace misalignedAddressSpace;
+    misalignedAddressSpace.mapAnonymous(
+        memoryPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const std::vector<std::uint8_t> alignmentSentinel(64, 0xA5);
+    misalignedAddressSpace.writeBytes(
+        rosa::guest::GuestAddress{0x8081}, alignmentSentinel);
+    rosa::x86::X86State misalignedState = state;
+    misalignedState.rdi = 0x8081;
+    bool misaligned = false;
+    try {
+        static_cast<void>(alignedStore.execute(misalignedState,
+                                               &misalignedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        misaligned = std::string_view(error.what()).find(
+                         "32-byte aligned") != std::string_view::npos;
+    }
+    expect(misaligned, "256-bit VMOVAPS accepted a misaligned target");
+    expectEqual(misalignedAddressSpace.readBytes(
+                    rosa::guest::GuestAddress{0x8081}, 64),
+                alignmentSentinel,
+                "misaligned 256-bit VMOVAPS changed guest memory");
+
+    constexpr std::array<std::uint8_t, 6> storeOnlyCode{
+        0xC5, 0xFC, 0x11, 0x07, 0xEB, 0x00};
+    const auto storeOnly = translator.translate(storeOnlyCode,
+                                                instructionAddress);
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        memoryPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr rosa::guest::GuestAddress crossPageTarget{0x8FF0};
+    const std::vector<std::uint8_t> sentinel(16, 0xA5);
+    crossPageAddressSpace.writeBytes(crossPageTarget, sentinel);
+    rosa::x86::X86State faultState;
+    faultState.rip = instructionAddress.value;
+    faultState.rdi = crossPageTarget.value;
+    faultState.xmm[0] = {.low = 1, .high = 2};
+    faultState.ymmUpper[0] = {.low = 3, .high = 4};
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(storeOnly.execute(faultState,
+                                            &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "cross-page 256-bit VMOVUPS did not fault");
+    expectEqual(crossPageAddressSpace.readBytes(crossPageTarget, 16), sentinel,
+                "faulted 256-bit VMOVUPS partially changed guest memory");
+    expectEqual(faultState.xmm[0].low, std::uint64_t{1},
+                "faulted 256-bit VMOVUPS changed lower YMM state");
+    expectEqual(faultState.ymmUpper[0].high, std::uint64_t{4},
+                "faulted 256-bit VMOVUPS changed upper YMM state");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted 256-bit VMOVUPS changed flags");
+}
+
+void testVexYmmMemoryLoad() {
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802E7AA70ULL};
+    constexpr std::array<std::uint8_t, 5> code{
+        0xC5, 0xFC, 0x10, 0x06, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::VmovupsYmmRegMem,
+           "256-bit VMOVUPS load opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "256-bit VMOVUPS load length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               memory.base == rosa::x86::Register::Rsi &&
+               memory.hasBase && !memory.ripRelative && !memory.index &&
+               memory.displacement == 0 && memory.width == 256,
+           "VMOVUPS ymm0, [rsi] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("vmovups ymm0, [rsi]") !=
+               std::string::npos,
+           "256-bit VMOVUPS load dump differs");
+
+    constexpr rosa::guest::GuestAddress memoryPage{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8080};
+    constexpr std::array<std::uint64_t, 4> lanes{
+        0x0123456789ABCDEFULL,
+        0xFEDCBA9876543210ULL,
+        0x8877665544332211ULL,
+        0x1020304050607080ULL,
+    };
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(memoryPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    for (std::size_t lane = 0; lane < lanes.size(); ++lane) {
+        addressSpace.writeU64(
+            rosa::guest::GuestAddress{
+                target.value + lane * sizeof(std::uint64_t)},
+            lanes[lane]);
+    }
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("load_guest_ymm.i256") != std::string::npos,
+           "256-bit VMOVUPS did not lower through YMM load IR");
+    rosa::x86::X86State state;
+    state.rsi = target.value;
+    state.xmm[0] = {.low = 1, .high = 2};
+    state.ymmUpper[0] = {.low = 3, .high = 4};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, lanes[0],
+                "256-bit VMOVUPS loaded the wrong first qword");
+    expectEqual(state.xmm[0].high, lanes[1],
+                "256-bit VMOVUPS loaded the wrong second qword");
+    expectEqual(state.ymmUpper[0].low, lanes[2],
+                "256-bit VMOVUPS loaded the wrong third qword");
+    expectEqual(state.ymmUpper[0].high, lanes[3],
+                "256-bit VMOVUPS loaded the wrong fourth qword");
+    expectEqual(state.rsi, target.value,
+                "256-bit VMOVUPS changed its address base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "256-bit VMOVUPS changed flags");
+
+    constexpr rosa::guest::GuestAddress crossPageTarget{0x9FF0};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        rosa::guest::GuestAddress{0x9000}, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    state.rsi = crossPageTarget.value;
+    state.xmm[0] = {.low = 0x11, .high = 0x22};
+    state.ymmUpper[0] = {.low = 0x33, .high = 0x44};
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page 256-bit VMOVUPS load did not fault");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x11},
+                "faulted 256-bit VMOVUPS changed its first qword");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x22},
+                "faulted 256-bit VMOVUPS changed its second qword");
+    expectEqual(state.ymmUpper[0].low, std::uint64_t{0x33},
+                "faulted 256-bit VMOVUPS changed its third qword");
+    expectEqual(state.ymmUpper[0].high, std::uint64_t{0x44},
+                "faulted 256-bit VMOVUPS changed its fourth qword");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "faulted 256-bit VMOVUPS changed flags");
+
+    constexpr std::array<std::uint8_t, 5> zeroCode{
+        0xC5, 0xFC, 0x57, 0xC0, 0xC3};
+    const auto zeroDecoded = decoder.decodeBlock(zeroCode, instructionAddress);
+    expect(zeroDecoded[0].opcode ==
+               rosa::x86::Opcode::VxorpsYmmRegRegReg &&
+               zeroDecoded[0].length == 4,
+           "256-bit VXORPS zero-idiom opcode or length differs");
+    expect(rosa::debug::dumpX86(zeroDecoded).find(
+               "vxorps ymm0, ymm0, ymm0") != std::string::npos,
+           "256-bit VXORPS zero-idiom dump differs");
+    const auto zeroBlock = translator.translate(zeroCode, instructionAddress);
+    state.xmm[0] = {.low = UINT64_MAX, .high = 0x0123456789ABCDEFULL};
+    state.ymmUpper[0] = {
+        .low = 0xFEDCBA9876543210ULL, .high = UINT64_MAX};
+    state.rflags = 0xBD7;
+    static_cast<void>(zeroBlock.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0},
+                "256-bit VXORPS did not clear its first qword");
+    expectEqual(state.xmm[0].high, std::uint64_t{0},
+                "256-bit VXORPS did not clear its second qword");
+    expectEqual(state.ymmUpper[0].low, std::uint64_t{0},
+                "256-bit VXORPS did not clear its third qword");
+    expectEqual(state.ymmUpper[0].high, std::uint64_t{0},
+                "256-bit VXORPS did not clear its fourth qword");
+    expectEqual(state.rflags, std::uint64_t{0xBD7},
+                "256-bit VXORPS zero idiom changed flags");
+
+    constexpr std::array<std::uint8_t, 5> xorCode{
+        0xC5, 0xF4, 0x57, 0xC2, 0xC3};
+    const auto xorDecoded = decoder.decodeBlock(xorCode, instructionAddress);
+    expect(rosa::debug::dumpX86(xorDecoded).find(
+               "vxorps ymm0, ymm1, ymm2") != std::string::npos,
+           "256-bit three-register VXORPS dump differs");
+    const auto xorBlock = translator.translate(xorCode, instructionAddress);
+    expect(rosa::debug::dumpIr(xorBlock.intermediateRepresentation())
+                   .find("read_guest_ymm_upper_lane.i64") !=
+               std::string::npos,
+           "256-bit VXORPS did not lower upper-lane reads");
+    state.xmm[1] = {
+        .low = 0xFFFF0000FFFF0000ULL,
+        .high = 0xAAAAAAAAAAAAAAAAULL};
+    state.ymmUpper[1] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    state.xmm[2] = {
+        .low = 0x00FF00FF00FF00FFULL,
+        .high = 0x5555555555555555ULL};
+    state.ymmUpper[2] = {
+        .low = 0x1111111111111111ULL,
+        .high = 0x2222222222222222ULL};
+    state.rflags = 0xCD7;
+    static_cast<void>(xorBlock.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low,
+                state.xmm[1].low ^ state.xmm[2].low,
+                "256-bit VXORPS produced the wrong first qword");
+    expectEqual(state.xmm[0].high,
+                state.xmm[1].high ^ state.xmm[2].high,
+                "256-bit VXORPS produced the wrong second qword");
+    expectEqual(state.ymmUpper[0].low,
+                state.ymmUpper[1].low ^ state.ymmUpper[2].low,
+                "256-bit VXORPS produced the wrong third qword");
+    expectEqual(state.ymmUpper[0].high,
+                state.ymmUpper[1].high ^ state.ymmUpper[2].high,
+                "256-bit VXORPS produced the wrong fourth qword");
+    expectEqual(state.rflags, std::uint64_t{0xCD7},
+                "256-bit VXORPS changed flags");
+}
+
 void testMovdqaRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 6> code{
         0x66, 0x0F, 0x7F, 0x0C, 0x0F, 0xC3};
@@ -14756,6 +21020,47 @@ void testMovdquRegisterToGuestMemory() {
                 state.xmm[0].high, "MOVDQU stored the wrong high lane");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVDQU changed flags");
 
+    constexpr std::array<std::uint8_t, 6> indexedCode{
+        0xF3, 0x0F, 0x7F, 0x04, 0xC8, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802AA9366ULL};
+    const auto indexedDecoded = decoder.decodeBlock(indexedCode, observedRip);
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::MovdquMemReg,
+           "indexed MOVDQU store opcode differs");
+    expectEqual(indexedDecoded[0].length, std::uint8_t{5},
+                "indexed MOVDQU store length differs");
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            indexedDecoded[0].operands[0]);
+    expect(indexedMemory.base == rosa::x86::Register::Rax &&
+               indexedMemory.index == rosa::x86::Register::Rcx &&
+               indexedMemory.scale == 8 &&
+               indexedMemory.displacement == 0,
+           "MOVDQU [rax+rcx*8] memory operand differs");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "movdqu [rax+rcx*8], xmm0") != std::string::npos,
+           "MOVDQU [rax+rcx*8], xmm0 dump differs");
+    const auto indexedBlock = translator.translate(indexedCode, observedRip);
+    rosa::x86::X86State indexedState;
+    indexedState.rax = 0x8101;
+    indexedState.rcx = 2;
+    indexedState.xmm[0] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x99AABBCCDDEEFF00ULL};
+    indexedState.rflags = 0xAD7;
+    static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8111}),
+                std::uint64_t{0x1122334455667788ULL},
+                "indexed MOVDQU stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8119}),
+                std::uint64_t{0x99AABBCCDDEEFF00ULL},
+                "indexed MOVDQU stored the wrong high lane");
+    expectEqual(indexedState.rax, std::uint64_t{0x8101},
+                "indexed MOVDQU changed its base");
+    expectEqual(indexedState.rcx, std::uint64_t{2},
+                "indexed MOVDQU changed its index");
+    expectEqual(indexedState.rflags, std::uint64_t{0xAD7},
+                "indexed MOVDQU changed flags");
+
     constexpr std::array<std::uint8_t, 7> extendedCode{
         0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x08, 0xC3};
     const auto extendedDecoded = decoder.decodeBlock(
@@ -14799,6 +21104,52 @@ void testMovdquRegisterToGuestMemory() {
     expectEqual(extendedState.rflags, std::uint64_t{0xAD7},
                 "REX MOVDQU changed flags");
 
+    constexpr std::array<std::uint8_t, 7> extendedSibCode{
+        0xF3, 0x41, 0x0F, 0x7F, 0x04, 0x24, 0xC3};
+    constexpr rosa::guest::GuestAddress extendedSibRip{
+        0x7FF802C6CC03ULL};
+    const auto extendedSibDecoded =
+        decoder.decodeBlock(extendedSibCode, extendedSibRip);
+    expect(extendedSibDecoded[0].opcode ==
+               rosa::x86::Opcode::MovdquMemReg,
+           "REX SIB MOVDQU store opcode differs");
+    expectEqual(extendedSibDecoded[0].length, std::uint8_t{6},
+                "REX SIB MOVDQU store length differs");
+    const auto extendedSibMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            extendedSibDecoded[0].operands[0]);
+    const auto extendedSibSource =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            extendedSibDecoded[0].operands[1]);
+    expect(extendedSibMemory.base == rosa::x86::Register::R12 &&
+               !extendedSibMemory.index &&
+               extendedSibMemory.displacement == 0 &&
+               extendedSibSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "MOVDQU [r12], xmm0 operands differ");
+    expect(rosa::debug::dumpX86(extendedSibDecoded).find(
+               "movdqu [r12], xmm0") != std::string::npos,
+           "REX SIB MOVDQU store dump differs");
+    const auto extendedSibBlock =
+        translator.translate(extendedSibCode, extendedSibRip);
+    rosa::x86::X86State extendedSibState;
+    extendedSibState.r12 = 0x8120;
+    extendedSibState.xmm[0] = {
+        .low = 0xA1A2A3A4A5A6A7A8ULL,
+        .high = 0xB1B2B3B4B5B6B7B8ULL};
+    extendedSibState.rflags = 0x46;
+    static_cast<void>(
+        extendedSibBlock.execute(extendedSibState, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8120}),
+                extendedSibState.xmm[0].low,
+                "REX SIB MOVDQU stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8128}),
+                extendedSibState.xmm[0].high,
+                "REX SIB MOVDQU stored the wrong high lane");
+    expectEqual(extendedSibState.r12, std::uint64_t{0x8120},
+                "REX SIB MOVDQU changed R12");
+    expectEqual(extendedSibState.rflags, std::uint64_t{0x46},
+                "REX SIB MOVDQU changed flags");
+
     rosa::guest::AddressSpace readOnlyAddressSpace;
     std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
     std::fill_n(readOnlyBytes.begin() + 0x10B, 16, 0xA5);
@@ -14824,6 +21175,105 @@ void testMovdquRegisterToGuestMemory() {
            "faulted REX MOVDQU partially changed guest memory");
     expectEqual(faultState.rflags, std::uint64_t{0xBD7},
                 "faulted REX MOVDQU changed flags");
+
+    auto extendedSibFaultState = extendedSibState;
+    extendedSibFaultState.r12 = 0x810B;
+    extendedSibFaultState.rflags = 0xCD7;
+    rejected = false;
+    try {
+        static_cast<void>(extendedSibBlock.execute(
+            extendedSibFaultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "REX SIB MOVDQU accepted read-only guest memory");
+    expect(std::ranges::all_of(
+               readOnlyAddressSpace.readBytes(
+                   rosa::guest::GuestAddress{0x810B}, 16),
+               [](std::uint8_t byte) { return byte == 0xA5; }),
+           "faulted REX SIB MOVDQU partially changed guest memory");
+    expectEqual(extendedSibFaultState.r12, std::uint64_t{0x810B},
+                "faulted REX SIB MOVDQU changed R12");
+    expectEqual(extendedSibFaultState.rflags, std::uint64_t{0xCD7},
+                "faulted REX SIB MOVDQU changed flags");
+
+    constexpr std::array<std::uint8_t, 9> ripCode{
+        0xF3, 0x0F, 0x7F, 0x05, 0x2B, 0x47, 0xC9, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress ripStoreAddress{
+        0x7FF802A18245ULL};
+    constexpr rosa::guest::GuestAddress ripTarget{0x7FF8436AC978ULL};
+    constexpr rosa::guest::GuestAddress ripTargetPage{0x7FF8436AC000ULL};
+    const auto ripDecoded = decoder.decodeBlock(ripCode, ripStoreAddress);
+    expect(ripDecoded[0].opcode == rosa::x86::Opcode::MovdquMemReg &&
+               ripDecoded[0].length == 8,
+           "RIP-relative MOVDQU store opcode or length differs");
+    const auto ripMemory =
+        std::get<rosa::x86::MemoryOperand>(ripDecoded[0].operands[0]);
+    const auto ripSource =
+        std::get<rosa::x86::XmmRegisterOperand>(ripDecoded[0].operands[1]);
+    expect(ripMemory.ripRelative && !ripMemory.hasBase &&
+               !ripMemory.index && ripMemory.displacement == 0x40C9472B &&
+               ripMemory.width == 128 &&
+               ripSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "RIP-relative MOVDQU store operands differ");
+    expect(rosa::debug::dumpX86(ripDecoded).find(
+               "movdqu [rip+0x40c9472b], xmm0 ; 0x7ff8436ac978") !=
+               std::string::npos,
+           "RIP-relative MOVDQU store dump differs");
+
+    addressSpace.mapAnonymous(
+        ripTargetPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const auto ripBlock = translator.translate(ripCode, ripStoreAddress);
+    rosa::x86::X86State ripState;
+    ripState.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    ripState.rflags = 0x46;
+    static_cast<void>(ripBlock.execute(ripState, &addressSpace));
+    expectEqual(addressSpace.readU64(ripTarget), ripState.xmm[0].low,
+                "RIP-relative MOVDQU stored the wrong low lane");
+    expectEqual(addressSpace.readU64(
+                    rosa::guest::GuestAddress{ripTarget.value + 8}),
+                ripState.xmm[0].high,
+                "RIP-relative MOVDQU stored the wrong high lane");
+    expectEqual(ripState.rflags, std::uint64_t{0x46},
+                "RIP-relative MOVDQU changed flags");
+
+    constexpr std::array<std::uint8_t, 9> crossPageCode{
+        0xF3, 0x0F, 0x7F, 0x05, 0xF0, 0x0F, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress crossPageAddress{0x1000};
+    constexpr rosa::guest::GuestAddress crossPageTarget{0x1FF8};
+    constexpr std::array<std::uint8_t, 8> crossPageBytes{
+        0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        crossPageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    crossPageAddressSpace.writeBytes(crossPageTarget, crossPageBytes);
+    const auto crossPageBlock = translator.translate(
+        crossPageCode, crossPageAddress);
+    rosa::x86::X86State crossPageState;
+    crossPageState.xmm[0] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x99AABBCCDDEEFF00ULL};
+    crossPageState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(crossPageBlock.execute(
+            crossPageState, &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page RIP-relative MOVDQU did not fault");
+    expect(crossPageAddressSpace.readBytes(crossPageTarget, 8) ==
+               std::vector<std::uint8_t>(crossPageBytes.begin(),
+                                         crossPageBytes.end()),
+           "faulted cross-page RIP-relative MOVDQU partially changed memory");
+    expectEqual(crossPageState.rflags, std::uint64_t{0xAD7},
+                "faulted cross-page RIP-relative MOVDQU changed flags");
 }
 
 void testMovdquGuestMemoryToRegister() {
@@ -14919,6 +21369,82 @@ void testMovdquGuestMemoryToRegister() {
                 "indexed MOVDQU changed its index register");
     expectEqual(indexedState.rflags, std::uint64_t{0x8D7},
                 "indexed MOVDQU changed flags");
+
+    constexpr std::array<std::uint8_t, 9> ripCode{
+        0xF3, 0x0F, 0x6F, 0x05, 0xA1, 0xDB, 0x63, 0x3D, 0xC3};
+    constexpr rosa::guest::GuestAddress ripAddress{0x7FF802A186FFULL};
+    constexpr rosa::guest::GuestAddress ripSource{0x7FF8400562A8ULL};
+    constexpr rosa::guest::GuestAddress ripSourcePage{0x7FF840056000ULL};
+    const auto ripDecoded = decoder.decodeBlock(ripCode, ripAddress);
+    expect(ripDecoded[0].opcode == rosa::x86::Opcode::MovdquRegMem &&
+               ripDecoded[0].length == 8,
+           "RIP-relative MOVDQU load opcode or length differs");
+    const auto ripMemory =
+        std::get<rosa::x86::MemoryOperand>(ripDecoded[0].operands[1]);
+    expect(ripMemory.ripRelative && !ripMemory.hasBase &&
+               !ripMemory.index && ripMemory.width == 128 &&
+               ripMemory.displacement == 0x3D63DBA1,
+           "RIP-relative MOVDQU load operand differs");
+    expect(rosa::debug::dumpX86(ripDecoded).find(
+               "movdqu xmm0, [rip+0x3d63dba1] ; 0x7ff8400562a8") !=
+               std::string::npos,
+           "RIP-relative MOVDQU load dump differs");
+    rosa::guest::AddressSpace ripAddressSpace;
+    ripAddressSpace.mapAnonymous(
+        ripSourcePage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    ripAddressSpace.writeU64(ripSource, 0x1122334455667788ULL);
+    ripAddressSpace.writeU64(
+        rosa::guest::GuestAddress{ripSource.value + 8},
+        0x99AABBCCDDEEFF00ULL);
+    const auto ripBlock = translator.translate(ripCode, ripAddress);
+    rosa::x86::X86State ripState;
+    ripState.xmm[0] = {.low = 5, .high = 6};
+    ripState.rflags = 0xAD7;
+    static_cast<void>(ripBlock.execute(ripState, &ripAddressSpace));
+    expectEqual(ripState.xmm[0].low,
+                std::uint64_t{0x1122334455667788ULL},
+                "RIP-relative MOVDQU loaded the wrong low lane");
+    expectEqual(ripState.xmm[0].high,
+                std::uint64_t{0x99AABBCCDDEEFF00ULL},
+                "RIP-relative MOVDQU loaded the wrong high lane");
+    expectEqual(ripState.rflags, std::uint64_t{0xAD7},
+                "RIP-relative MOVDQU load changed flags");
+
+    constexpr std::array<std::uint8_t, 9> crossPageCode{
+        0xF3, 0x0F, 0x6F, 0x05, 0xF0, 0x0F, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress crossPageRip{0x1000};
+    constexpr rosa::guest::GuestAddress crossPageSource{0x1FF8};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        crossPageRip, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    crossPageAddressSpace.writeU64(crossPageSource,
+                                   0x0123456789ABCDEFULL);
+    const auto crossPageBlock =
+        translator.translate(crossPageCode, crossPageRip);
+    rosa::x86::X86State crossPageState;
+    crossPageState.xmm[0] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL};
+    crossPageState.rflags = 0x8D7;
+    rejected = false;
+    try {
+        static_cast<void>(crossPageBlock.execute(
+            crossPageState, &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page RIP-relative MOVDQU load did not fault");
+    expectEqual(crossPageState.xmm[0].low,
+                std::uint64_t{0x8877665544332211ULL},
+                "faulted MOVDQU load changed the low lane");
+    expectEqual(crossPageState.xmm[0].high,
+                std::uint64_t{0x1020304050607080ULL},
+                "faulted MOVDQU load changed the high lane");
+    expectEqual(crossPageState.rflags, std::uint64_t{0x8D7},
+                "faulted MOVDQU load changed flags");
 }
 
 void testMovqXmmToGuestMemory() {
@@ -14962,6 +21488,147 @@ void testMovqXmmToGuestMemory() {
     expect(rejected, "MOVQ to unmapped guest memory did not fault");
     expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
                 "failed MOVQ changed its XMM source");
+
+    constexpr std::array<std::uint8_t, 7> indexedCode{
+        0x66, 0x0F, 0xD6, 0x44, 0xC2, 0x20, 0xC3};
+    const auto indexedDecoded = decoder.decodeBlock(
+        indexedCode, rosa::guest::GuestAddress{0x7FF802A18008ULL});
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::MovqMemXmm &&
+               indexedDecoded[0].length == 6,
+           "indexed MOVQ [memory], xmm opcode or length differs");
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(indexedDecoded[0].operands[0]);
+    const auto indexedSource =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            indexedDecoded[0].operands[1]);
+    expect(indexedMemory.base == rosa::x86::Register::Rdx &&
+               indexedMemory.index == rosa::x86::Register::Rax &&
+               indexedMemory.scale == 8 &&
+               indexedMemory.displacement == 0x20 &&
+               indexedMemory.width == 64 &&
+               indexedSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "indexed MOVQ [rdx+rax*8+0x20], xmm0 operands differ");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "movq [rdx+rax*8+0x20], xmm0") != std::string::npos,
+           "indexed MOVQ [memory], xmm dump differs");
+
+    const auto indexedBlock = translator.translate(
+        indexedCode, rosa::guest::GuestAddress{0x7FF802A18008ULL});
+    rosa::x86::X86State indexedState;
+    indexedState.rdx = memoryBase.value;
+    indexedState.rax = 4;
+    indexedState.xmm[0] = {
+        .low = 0x8877665544332211ULL,
+        .high = 0x1020304050607080ULL,
+    };
+    indexedState.rflags = 0xAD7;
+    static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8040}),
+                std::uint64_t{0x8877665544332211ULL},
+                "indexed MOVQ stored the wrong XMM lane");
+    expectEqual(indexedState.rdx, memoryBase.value,
+                "indexed MOVQ changed its base");
+    expectEqual(indexedState.rax, std::uint64_t{4},
+                "indexed MOVQ changed its index");
+    expectEqual(indexedState.xmm[0].high,
+                std::uint64_t{0x1020304050607080ULL},
+                "indexed MOVQ changed its XMM source");
+    expectEqual(indexedState.rflags, std::uint64_t{0xAD7},
+                "indexed MOVQ changed flags");
+
+    rosa::x86::X86State indexedFaultState = indexedState;
+    indexedFaultState.rflags = 0x8D7;
+    rejected = false;
+    try {
+        static_cast<void>(
+            indexedBlock.execute(indexedFaultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "indexed MOVQ to unmapped guest memory did not fault");
+    expectEqual(indexedFaultState.xmm[0].low,
+                std::uint64_t{0x8877665544332211ULL},
+                "faulted indexed MOVQ changed its XMM source");
+    expectEqual(indexedFaultState.rflags, std::uint64_t{0x8D7},
+                "faulted indexed MOVQ changed flags");
+
+    constexpr std::array<std::uint8_t, 8> extendedIndexedCode{
+        0x66, 0x42, 0x0F, 0xD6, 0x4C, 0x92, 0x2C, 0xC3};
+    constexpr rosa::guest::GuestAddress extendedIndexedRip{
+        0x7FF802C6ACE3ULL};
+    const auto extendedIndexedDecoded =
+        decoder.decodeBlock(extendedIndexedCode, extendedIndexedRip);
+    expect(extendedIndexedDecoded[0].opcode ==
+               rosa::x86::Opcode::MovqMemXmm,
+           "extended-index MOVQ [memory], xmm opcode differs");
+    expectEqual(extendedIndexedDecoded[0].length, std::uint8_t{7},
+                "extended-index MOVQ [memory], xmm length differs");
+    const auto extendedIndexedMemory = std::get<rosa::x86::MemoryOperand>(
+        extendedIndexedDecoded[0].operands[0]);
+    const auto extendedIndexedSource =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            extendedIndexedDecoded[0].operands[1]);
+    expect(extendedIndexedMemory.base == rosa::x86::Register::Rdx &&
+               extendedIndexedMemory.index == rosa::x86::Register::R10 &&
+               extendedIndexedMemory.scale == 4 &&
+               extendedIndexedMemory.displacement == 0x2C &&
+               extendedIndexedSource.reg == rosa::x86::XmmRegister::Xmm1,
+           "movq [rdx+r10*4+0x2c], xmm1 operands differ");
+    expect(rosa::debug::dumpX86(extendedIndexedDecoded).find(
+               "movq [rdx+r10*4+0x2c], xmm1") != std::string::npos,
+           "movq [rdx+r10*4+0x2c], xmm1 dump differs");
+
+    const auto extendedIndexedBlock =
+        translator.translate(extendedIndexedCode, extendedIndexedRip);
+    rosa::x86::X86State extendedIndexedState;
+    extendedIndexedState.rdx = memoryBase.value;
+    extendedIndexedState.r10 = 7;
+    extendedIndexedState.xmm[1] = {
+        .low = 0xD0C0B0A090807060ULL,
+        .high = 0x1020304050607080ULL};
+    extendedIndexedState.rflags = 0xAD7;
+    static_cast<void>(extendedIndexedBlock.execute(extendedIndexedState,
+                                                   &addressSpace));
+    expectEqual(addressSpace.readU64(
+                    rosa::guest::GuestAddress{memoryBase.value + 0x48}),
+                std::uint64_t{0xD0C0B0A090807060ULL},
+                "extended-index MOVQ stored the wrong XMM lane");
+    expectEqual(extendedIndexedState.rdx, memoryBase.value,
+                "extended-index MOVQ changed its base");
+    expectEqual(extendedIndexedState.r10, std::uint64_t{7},
+                "extended-index MOVQ changed its index");
+    expectEqual(extendedIndexedState.xmm[1].high,
+                std::uint64_t{0x1020304050607080ULL},
+                "extended-index MOVQ changed its XMM source");
+    expectEqual(extendedIndexedState.rflags, std::uint64_t{0xAD7},
+                "extended-index MOVQ changed flags");
+
+    constexpr rosa::guest::GuestAddress crossPage{0x1000};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        crossPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    crossPageAddressSpace.writeU32(
+        rosa::guest::GuestAddress{0x1FFC}, 0xA5A5A5A5U);
+    rosa::x86::X86State crossPageState = extendedIndexedState;
+    crossPageState.rdx = 0x1FB4;
+    rejected = false;
+    try {
+        static_cast<void>(extendedIndexedBlock.execute(
+            crossPageState, &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page extended-index MOVQ did not fault");
+    expectEqual(crossPageAddressSpace.readU32(
+                    rosa::guest::GuestAddress{0x1FFC}),
+                std::uint32_t{0xA5A5A5A5U},
+                "faulted extended-index MOVQ partially changed memory");
+    expectEqual(crossPageState.xmm[1].low,
+                std::uint64_t{0xD0C0B0A090807060ULL},
+                "faulted extended-index MOVQ changed its XMM source");
 }
 
 void testMovqGuestMemoryToXmm() {
@@ -15036,6 +21703,146 @@ void testMovqGuestMemoryToXmm() {
                 "faulted MOVQ load changed its high lane");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "faulted MOVQ load changed flags");
+
+    constexpr std::array<std::uint8_t, 7> indexedCode{
+        0xF3, 0x0F, 0x7E, 0x44, 0x3A, 0x28, 0xC3};
+    constexpr rosa::guest::GuestAddress indexedRip{0x7FF802C6AC09ULL};
+    const auto indexedDecoded = decoder.decodeBlock(indexedCode, indexedRip);
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::MovqXmmMem,
+           "indexed MOVQ xmm, [mem] opcode differs");
+    expectEqual(indexedDecoded[0].length, std::uint8_t{6},
+                "indexed MOVQ xmm, [mem] length differs");
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(indexedDecoded[0].operands[1]);
+    expect(indexedMemory.base == rosa::x86::Register::Rdx &&
+               indexedMemory.index == rosa::x86::Register::Rdi &&
+               indexedMemory.scale == 1 && indexedMemory.displacement == 0x28 &&
+               indexedMemory.width == 64,
+           "MOVQ xmm0, [rdx+rdi+0x28] operands differ");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "movq xmm0, qword [rdx+rdi+0x28]") != std::string::npos,
+           "MOVQ xmm0, [rdx+rdi+0x28] dump differs");
+
+    constexpr auto indexedValue = std::uint64_t{0xD0C0B0A090807060ULL};
+    std::array<std::uint8_t, rosa::guest::guestPageSize> indexedBytes{};
+    std::memcpy(indexedBytes.data() + 0x48, &indexedValue,
+                sizeof(indexedValue));
+    rosa::guest::AddressSpace indexedAddressSpace;
+    indexedAddressSpace.mapSegment(
+        page, indexedBytes.size(), rosa::guest::Permission::Read,
+        indexedBytes, "read-only indexed MOVQ source");
+    const auto indexedBlock = translator.translate(indexedCode, indexedRip);
+    rosa::x86::X86State indexedState;
+    indexedState.rdx = page.value;
+    indexedState.rdi = 0x20;
+    indexedState.xmm[0] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL};
+    indexedState.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(indexedState, &indexedAddressSpace));
+    expectEqual(indexedState.xmm[0].low, indexedValue,
+                "indexed MOVQ loaded the wrong low lane");
+    expectEqual(indexedState.xmm[0].high, std::uint64_t{0},
+                "indexed MOVQ did not zero the high lane");
+    expectEqual(indexedState.rdx, page.value,
+                "indexed MOVQ changed its base register");
+    expectEqual(indexedState.rdi, std::uint64_t{0x20},
+                "indexed MOVQ changed its index register");
+    expectEqual(indexedState.rflags, std::uint64_t{0x8D7},
+                "indexed MOVQ changed flags");
+
+    rosa::x86::X86State indexedFaultState;
+    indexedFaultState.rdx = page.value;
+    indexedFaultState.rdi = 0x20;
+    indexedFaultState.xmm[0] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL};
+    indexedFaultState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(indexedBlock.execute(indexedFaultState,
+                                               &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "indexed MOVQ load accepted unmapped guest memory");
+    expectEqual(indexedFaultState.xmm[0].low,
+                std::uint64_t{0x1122334455667788ULL},
+                "faulted indexed MOVQ changed its low lane");
+    expectEqual(indexedFaultState.xmm[0].high,
+                std::uint64_t{0x8877665544332211ULL},
+                "faulted indexed MOVQ changed its high lane");
+    expectEqual(indexedFaultState.rflags, std::uint64_t{0xAD7},
+                "faulted indexed MOVQ changed flags");
+
+    constexpr std::array<std::uint8_t, 8> extendedIndexedCode{
+        0xF3, 0x42, 0x0F, 0x7E, 0x44, 0x92, 0x2C, 0xC3};
+    constexpr rosa::guest::GuestAddress extendedIndexedRip{
+        0x7FF802C6ACCCULL};
+    const auto extendedIndexedDecoded =
+        decoder.decodeBlock(extendedIndexedCode, extendedIndexedRip);
+    expect(extendedIndexedDecoded[0].opcode ==
+               rosa::x86::Opcode::MovqXmmMem,
+           "extended-index MOVQ xmm, [mem] opcode differs");
+    expectEqual(extendedIndexedDecoded[0].length, std::uint8_t{7},
+                "extended-index MOVQ xmm, [mem] length differs");
+    const auto extendedIndexedMemory = std::get<rosa::x86::MemoryOperand>(
+        extendedIndexedDecoded[0].operands[1]);
+    expect(extendedIndexedMemory.base == rosa::x86::Register::Rdx &&
+               extendedIndexedMemory.index == rosa::x86::Register::R10 &&
+               extendedIndexedMemory.scale == 4 &&
+               extendedIndexedMemory.displacement == 0x2C,
+           "MOVQ xmm0, [rdx+r10*4+0x2c] operands differ");
+    expect(rosa::debug::dumpX86(extendedIndexedDecoded).find(
+               "movq xmm0, qword [rdx+r10*4+0x2c]") != std::string::npos,
+           "MOVQ xmm0, [rdx+r10*4+0x2c] dump differs");
+
+    const auto extendedIndexedBlock =
+        translator.translate(extendedIndexedCode, extendedIndexedRip);
+    rosa::x86::X86State extendedIndexedState;
+    extendedIndexedState.rdx = page.value;
+    extendedIndexedState.r10 = 7;
+    extendedIndexedState.xmm[0] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL};
+    extendedIndexedState.rflags = 0x8D7;
+    static_cast<void>(extendedIndexedBlock.execute(extendedIndexedState,
+                                                   &indexedAddressSpace));
+    expectEqual(extendedIndexedState.xmm[0].low, indexedValue,
+                "extended-index MOVQ loaded the wrong low lane");
+    expectEqual(extendedIndexedState.xmm[0].high, std::uint64_t{0},
+                "extended-index MOVQ did not zero the high lane");
+    expectEqual(extendedIndexedState.rdx, page.value,
+                "extended-index MOVQ changed its base register");
+    expectEqual(extendedIndexedState.r10, std::uint64_t{7},
+                "extended-index MOVQ changed its index register");
+    expectEqual(extendedIndexedState.rflags, std::uint64_t{0x8D7},
+                "extended-index MOVQ changed flags");
+
+    rosa::x86::X86State extendedIndexedFaultState = extendedIndexedState;
+    extendedIndexedFaultState.xmm[0] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL};
+    extendedIndexedFaultState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(extendedIndexedBlock.execute(
+            extendedIndexedFaultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected,
+           "extended-index MOVQ load accepted unmapped guest memory");
+    expectEqual(extendedIndexedFaultState.xmm[0].low,
+                std::uint64_t{0x1122334455667788ULL},
+                "faulted extended-index MOVQ changed its low lane");
+    expectEqual(extendedIndexedFaultState.xmm[0].high,
+                std::uint64_t{0x8877665544332211ULL},
+                "faulted extended-index MOVQ changed its high lane");
+    expectEqual(extendedIndexedFaultState.rflags, std::uint64_t{0xAD7},
+                "faulted extended-index MOVQ changed flags");
 }
 
 void testMovlhpsRegister() {
@@ -15133,6 +21940,162 @@ void testPshufbRegisters() {
                 "PSHUFB changed its control source");
     expectEqual(state.rflags, std::uint64_t{0x8D7},
                 "PSHUFB changed flags");
+}
+
+void testPshufbRipRelativeGuestMemory() {
+    constexpr std::array<std::uint8_t, 10> code{
+        0x66, 0x0F, 0x38, 0x00, 0x05, 0xB3, 0xCF, 0x03, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802B2E6F4ULL};
+    constexpr rosa::guest::GuestAddress controlAddress{0x7FF802B6B6B0ULL};
+    constexpr rosa::guest::GuestAddress controlPage{0x7FF802B6B000ULL};
+    constexpr std::array<std::uint8_t, 16> control{
+        0x0F, 0x0E, 0x80, 0x00, 0x01, 0x82, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0xFF};
+
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PshufbRegMem,
+           "RIP-relative PSHUFB opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9},
+                "RIP-relative PSHUFB length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(
+               decoded[0].operands[0]).reg ==
+               rosa::x86::XmmRegister::Xmm0,
+           "RIP-relative PSHUFB destination differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && !memory.index &&
+               memory.width == 128 && memory.displacement == 0x3CFB3,
+           "RIP-relative PSHUFB memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "pshufb xmm0, [rip+0x3cfb3]") != std::string::npos,
+           "RIP-relative PSHUFB dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        controlPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "PSHUFB control table");
+    addressSpace.writeBytes(controlAddress, control);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x0706050403020100ULL,
+                    .high = 0x0F0E0D0C0B0A0908ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0807000100000E0FULL},
+                "memory PSHUFB produced the wrong low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x000F0E0D0C0B0A09ULL},
+                "memory PSHUFB produced the wrong high lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "memory PSHUFB changed flags");
+    expectEqual(addressSpace.readBytes(controlAddress, control.size()),
+                std::vector<std::uint8_t>(control.begin(), control.end()),
+                "memory PSHUFB changed its control table");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.xmm[0] = {.low = 0x1111222233334444ULL,
+                         .high = 0x5555666677778888ULL};
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "unmapped RIP-relative PSHUFB did not fault");
+    expectEqual(faultState.xmm[0].low,
+                std::uint64_t{0x1111222233334444ULL},
+                "faulted PSHUFB changed its low lane");
+    expectEqual(faultState.xmm[0].high,
+                std::uint64_t{0x5555666677778888ULL},
+                "faulted PSHUFB changed its high lane");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted PSHUFB changed flags");
+}
+
+void testPunpcklwdRegisters() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x66, 0x0F, 0x61, 0xD9, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF80681D353ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PunpcklwdRegReg,
+           "PUNPCKLWD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "PUNPCKLWD length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0])
+                       .reg == rosa::x86::XmmRegister::Xmm3 &&
+               std::get<rosa::x86::XmmRegisterOperand>(
+                   decoded[0].operands[1])
+                       .reg == rosa::x86::XmmRegister::Xmm1,
+           "PUNPCKLWD operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("punpcklwd xmm3, xmm1") !=
+               std::string::npos,
+           "PUNPCKLWD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "unpack_low_xmm_words.i16 xmm3, xmm1") !=
+               std::string::npos,
+           "PUNPCKLWD IR differs");
+    rosa::x86::X86State state;
+    state.xmm[3] = {
+        .low = UINT64_C(0x4444333322221111),
+        .high = UINT64_C(0x8888777766665555)};
+    state.xmm[1] = {
+        .low = UINT64_C(0xDDDDCCCCBBBBAAAA),
+        .high = UINT64_C(0x9999888877776666)};
+    state.ymmUpper[3] = {
+        .low = UINT64_C(0x1122334455667788),
+        .high = UINT64_C(0x8877665544332211)};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[3].low,
+                UINT64_C(0xBBBB2222AAAA1111),
+                "PUNPCKLWD low lane differs");
+    expectEqual(state.xmm[3].high,
+                UINT64_C(0xDDDD4444CCCC3333),
+                "PUNPCKLWD high lane differs");
+    expectEqual(state.xmm[1].low,
+                UINT64_C(0xDDDDCCCCBBBBAAAA),
+                "PUNPCKLWD changed its source");
+    expectEqual(state.ymmUpper[3].low,
+                UINT64_C(0x1122334455667788),
+                "legacy PUNPCKLWD changed upper YMM state");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PUNPCKLWD changed flags");
+
+    constexpr std::array<std::uint8_t, 5> aliasCode{
+        0x66, 0x0F, 0x61, 0xC0, 0xC3};
+    const auto aliasBlock = translator.translate(
+        aliasCode, rosa::guest::GuestAddress{0x1000});
+    state.xmm[0] = {
+        .low = UINT64_C(0x0004000300020001),
+        .high = UINT64_MAX};
+    static_cast<void>(aliasBlock.execute(state));
+    expectEqual(state.xmm[0].low,
+                UINT64_C(0x0002000200010001),
+                "aliased PUNPCKLWD low lane differs");
+    expectEqual(state.xmm[0].high,
+                UINT64_C(0x0004000400030003),
+                "aliased PUNPCKLWD high lane differs");
+
+    constexpr std::array<std::uint8_t, 6> extendedCode{
+        0x66, 0x45, 0x0F, 0x61, 0xE8, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    expect(std::get<rosa::x86::XmmRegisterOperand>(
+               extendedDecoded[0].operands[0])
+                       .reg == rosa::x86::XmmRegister::Xmm13 &&
+               std::get<rosa::x86::XmmRegisterOperand>(
+                   extendedDecoded[0].operands[1])
+                       .reg == rosa::x86::XmmRegister::Xmm8,
+           "REX PUNPCKLWD operands differ");
 }
 
 void testPorRegisters() {
@@ -15280,6 +22243,220 @@ void testMovdRegisterToXmm() {
                 "MOVQ changed flags");
 }
 
+void testMovdGuestMemoryToXmm() {
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802A90439ULL};
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr std::array<std::uint8_t, 7> code{
+        0x66, 0x0F, 0x6E, 0x40, 0x58, 0xEB, 0x00};
+    constexpr std::uint32_t sourceValue = 0x89ABCDEFU;
+
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expectEqual(decoded.size(), std::size_t{2},
+                "MOVD memory load test block instruction count differs");
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovdXmmMem,
+           "MOVD xmm, [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "MOVD xmm, [memory] length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               memory.base == rosa::x86::Register::Rax &&
+               memory.displacement == 0x58 && memory.width == 32,
+           "MOVD xmm0, dword [rax+0x58] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movd xmm0, dword [rax+0x58]") != std::string::npos,
+           "MOVD xmm, [memory] dump differs");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> bytes{};
+    std::memcpy(bytes.data() + 0x58, &sourceValue, sizeof(sourceValue));
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(page, bytes.size(), rosa::guest::Permission::Read,
+                            bytes, "read-only MOVD source");
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.rip = instructionAddress.value;
+    state.rax = page.value;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{sourceValue},
+                "MOVD memory load did not zero-extend its dword");
+    expectEqual(state.xmm[0].high, std::uint64_t{0},
+                "MOVD memory load did not clear the high XMM lane");
+    expectEqual(state.rax, page.value,
+                "MOVD memory load changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "MOVD memory load changed flags");
+
+    rosa::x86::X86State faultState;
+    faultState.rip = instructionAddress.value;
+    faultState.rax = 0x9000;
+    faultState.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "MOVD memory load accepted an unmapped source");
+    expectEqual(faultState.rip, instructionAddress.value,
+                "faulted MOVD memory load changed RIP");
+    expectEqual(faultState.xmm[0].low,
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "faulted MOVD memory load changed the low XMM lane");
+    expectEqual(faultState.xmm[0].high,
+                std::uint64_t{0xFEDCBA9876543210ULL},
+                "faulted MOVD memory load changed the high XMM lane");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted MOVD memory load changed flags");
+
+    // Exact paired corecrypto load using the REX.X-extended SIB index.
+    constexpr std::array<std::uint8_t, 7> indexedCode{
+        0x66, 0x42, 0x0F, 0x6E, 0x04, 0x1E, 0xC3};
+    constexpr rosa::guest::GuestAddress indexedRip{0x7FF802C09C42ULL};
+    const auto indexedDecoded = decoder.decodeBlock(indexedCode, indexedRip);
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::MovdXmmMem,
+           "indexed MOVD xmm, [memory] opcode differs");
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(indexedDecoded[0].operands[1]);
+    expect(indexedMemory.base == rosa::x86::Register::Rsi &&
+               indexedMemory.index == rosa::x86::Register::R11 &&
+               indexedMemory.scale == 1 &&
+               indexedMemory.displacement == 0,
+           "MOVD xmm0, dword [rsi+r11] operands differ");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "movd xmm0, dword [rsi+r11]") != std::string::npos,
+           "indexed MOVD load dump differs");
+    const auto indexedBlock = translator.translate(indexedCode, indexedRip);
+    rosa::x86::X86State indexedState;
+    indexedState.r11 = 0x20;
+    indexedState.rsi = page.value + 0x58 - indexedState.r11;
+    indexedState.xmm[0] = {
+        .low = UINT64_C(0x0123456789ABCDEF),
+        .high = UINT64_C(0xFEDCBA9876543210)};
+    indexedState.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    expectEqual(indexedState.xmm[0].low, std::uint64_t{sourceValue},
+                "indexed MOVD load read the wrong dword");
+    expectEqual(indexedState.xmm[0].high, std::uint64_t{0},
+                "indexed MOVD load did not clear its high XMM lane");
+    expectEqual(indexedState.rflags, std::uint64_t{0x8D7},
+                "indexed MOVD load changed flags");
+
+    indexedState.rsi = page.value + rosa::guest::guestPageSize - 2 -
+                       indexedState.r11;
+    indexedState.xmm[0] = {
+        .low = UINT64_C(0x0123456789ABCDEF),
+        .high = UINT64_C(0xFEDCBA9876543210)};
+    indexedState.rflags = 0xAD7;
+    faulted = false;
+    try {
+        static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "cross-page indexed MOVD accepted an unmapped tail");
+    expectEqual(indexedState.xmm[0].low,
+                UINT64_C(0x0123456789ABCDEF),
+                "faulted indexed MOVD changed its low XMM lane");
+    expectEqual(indexedState.xmm[0].high,
+                UINT64_C(0xFEDCBA9876543210),
+                "faulted indexed MOVD changed its high XMM lane");
+    expectEqual(indexedState.rflags, std::uint64_t{0xAD7},
+                "faulted indexed MOVD changed flags");
+
+    constexpr std::array<std::uint8_t, 9> ripRelativeCode{
+        0x66, 0x0F, 0x6E, 0x05, 0x57, 0x59, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress ripRelativeRip{
+        0x7FF80681D341ULL};
+    constexpr rosa::guest::GuestAddress ripRelativeTarget{
+        0x7FF806822CA0ULL};
+    constexpr rosa::guest::GuestAddress ripRelativePage{
+        0x7FF806822000ULL};
+    constexpr std::uint32_t ripRelativeValue = 0xF3A55A3CU;
+    const auto ripRelativeDecoded = decoder.decodeBlock(
+        ripRelativeCode, ripRelativeRip);
+    expect(ripRelativeDecoded[0].opcode ==
+               rosa::x86::Opcode::MovdXmmMem,
+           "RIP-relative MOVD opcode differs");
+    expectEqual(ripRelativeDecoded[0].length, std::uint8_t{8},
+                "RIP-relative MOVD length differs");
+    const auto ripRelativeMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            ripRelativeDecoded[0].operands[1]);
+    expect(ripRelativeMemory.ripRelative &&
+               !ripRelativeMemory.hasBase && !ripRelativeMemory.index &&
+               ripRelativeMemory.width == 32 &&
+               ripRelativeMemory.displacement == 0x5957,
+           "RIP-relative MOVD memory operand differs");
+    expect(rosa::debug::dumpX86(ripRelativeDecoded).find(
+               "movd xmm0, dword [rip+0x5957]") != std::string::npos,
+           "RIP-relative MOVD dump differs");
+
+    rosa::guest::AddressSpace ripRelativeAddressSpace;
+    ripRelativeAddressSpace.mapAnonymous(
+        ripRelativePage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "RIP-relative MOVD source");
+    ripRelativeAddressSpace.writeBytes(
+        ripRelativeTarget,
+        std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t *>(&ripRelativeValue),
+            sizeof(ripRelativeValue)});
+    const auto ripRelativeBlock = translator.translate(
+        ripRelativeCode, ripRelativeRip);
+    rosa::x86::X86State ripRelativeState;
+    ripRelativeState.xmm[0] = {
+        .low = UINT64_C(0x0123456789ABCDEF),
+        .high = UINT64_C(0xFEDCBA9876543210)};
+    ripRelativeState.rflags = 0x8D7;
+    static_cast<void>(ripRelativeBlock.execute(
+        ripRelativeState, &ripRelativeAddressSpace));
+    expectEqual(ripRelativeState.xmm[0].low,
+                std::uint64_t{ripRelativeValue},
+                "RIP-relative MOVD loaded the wrong dword");
+    expectEqual(ripRelativeState.xmm[0].high, std::uint64_t{0},
+                "RIP-relative MOVD did not clear its high XMM lane");
+    expectEqual(ripRelativeState.rflags, std::uint64_t{0x8D7},
+                "RIP-relative MOVD changed flags");
+
+    rosa::guest::AddressSpace unmappedRipRelativeAddressSpace;
+    rosa::x86::X86State ripRelativeFaultState;
+    ripRelativeFaultState.xmm[0] = {
+        .low = UINT64_C(0x0123456789ABCDEF),
+        .high = UINT64_C(0xFEDCBA9876543210)};
+    ripRelativeFaultState.rflags = 0xAD7;
+    faulted = false;
+    try {
+        static_cast<void>(ripRelativeBlock.execute(
+            ripRelativeFaultState, &unmappedRipRelativeAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "unmapped RIP-relative MOVD did not fault");
+    expectEqual(ripRelativeFaultState.xmm[0].low,
+                UINT64_C(0x0123456789ABCDEF),
+                "faulted RIP-relative MOVD changed its low XMM lane");
+    expectEqual(ripRelativeFaultState.xmm[0].high,
+                UINT64_C(0xFEDCBA9876543210),
+                "faulted RIP-relative MOVD changed its high XMM lane");
+    expectEqual(ripRelativeFaultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative MOVD changed flags");
+}
+
 void testMovdXmmToGuestMemory() {
     constexpr std::array<std::uint8_t, 7> code{
         0x66, 0x41, 0x0F, 0x7E, 0x46, 0x11, 0xC3};
@@ -15364,6 +22541,337 @@ void testMovdXmmToGuestMemory() {
                 "faulted MOVD store changed flags");
     expectEqual(readOnlyAddressSpace.readU32(target), readOnlyBefore,
                 "faulted MOVD store changed guest memory");
+
+    // Exact live corecrypto form with a REX.X-extended SIB index.
+    constexpr std::array<std::uint8_t, 8> indexedCode{
+        0x66, 0x42, 0x0F, 0x7E, 0x44, 0x1E, 0x10, 0xC3};
+    constexpr rosa::guest::GuestAddress indexedRip{0x7FF802C09B86ULL};
+    const auto indexedDecoded = decoder.decodeBlock(indexedCode, indexedRip);
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::MovdMemXmm,
+           "indexed MOVD [memory], xmm opcode differs");
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(indexedDecoded[0].operands[0]);
+    expect(indexedMemory.base == rosa::x86::Register::Rsi &&
+               indexedMemory.index == rosa::x86::Register::R11 &&
+               indexedMemory.scale == 1 &&
+               indexedMemory.displacement == 0x10,
+           "MOVD dword [rsi+r11+0x10], xmm0 operands differ");
+    expect(rosa::debug::dumpX86(indexedDecoded).find(
+               "movd dword [rsi+r11+0x10], xmm0") != std::string::npos,
+           "indexed MOVD store dump differs");
+    const auto indexedBlock = translator.translate(indexedCode, indexedRip);
+    constexpr rosa::guest::GuestAddress indexedTarget{0x8200};
+    state.r11 = 0x20;
+    state.rsi = indexedTarget.value - state.r11 - 0x10;
+    state.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(indexedTarget),
+                std::uint32_t{0x89ABCDEF},
+                "indexed MOVD stored the wrong low XMM dword");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "indexed MOVD store changed flags");
+
+    constexpr rosa::guest::GuestAddress crossPage{0xA000};
+    constexpr rosa::guest::GuestAddress crossTarget{
+        crossPage.value + rosa::guest::guestPageSize - 2};
+    rosa::guest::AddressSpace crossAddressSpace;
+    crossAddressSpace.mapAnonymous(
+        crossPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> firstHalf{0x11, 0x22};
+    crossAddressSpace.writeBytes(crossTarget, firstHalf);
+    std::array<std::uint8_t, rosa::guest::guestPageSize> secondPage{};
+    secondPage[0] = 0x33;
+    secondPage[1] = 0x44;
+    crossAddressSpace.mapSegment(
+        rosa::guest::GuestAddress{crossPage.value +
+                                  rosa::guest::guestPageSize},
+        secondPage.size(), rosa::guest::Permission::Read, secondPage,
+        "read-only second half of MOVD destination");
+    rosa::x86::X86State crossState = state;
+    crossState.r11 = 0x20;
+    crossState.rsi = crossTarget.value - crossState.r11 - 0x10;
+    crossState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(
+            indexedBlock.execute(crossState, &crossAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page MOVD store accepted a read-only second page");
+    expectEqual(crossAddressSpace.readBytes(crossTarget, 2),
+                std::vector<std::uint8_t>(firstHalf.begin(), firstHalf.end()),
+                "faulted cross-page MOVD partially changed its first page");
+    expectEqual(crossAddressSpace.readBytes(
+                    rosa::guest::GuestAddress{crossPage.value +
+                                              rosa::guest::guestPageSize},
+                    2),
+                std::vector<std::uint8_t>{0x33, 0x44},
+                "faulted cross-page MOVD changed its second page");
+    expectEqual(crossState.rflags, std::uint64_t{0xAD7},
+                "faulted indexed MOVD changed flags");
+
+    constexpr std::array<std::uint8_t, 9> ripRelativeCode{
+        0x66, 0x0F, 0x7E, 0x1D, 0x95, 0x62, 0xEC, 0x3C, 0xC3};
+    constexpr rosa::guest::GuestAddress ripRelativeRip{
+        0x7FF80681D35FULL};
+    constexpr rosa::guest::GuestAddress ripRelativeTarget{
+        0x7FF8436E35FCULL};
+    constexpr rosa::guest::GuestAddress ripRelativePage{
+        0x7FF8436E3000ULL};
+    const auto ripRelativeDecoded = decoder.decodeBlock(
+        ripRelativeCode, ripRelativeRip);
+    expect(ripRelativeDecoded[0].opcode ==
+               rosa::x86::Opcode::MovdMemXmm,
+           "RIP-relative MOVD store opcode differs");
+    expectEqual(ripRelativeDecoded[0].length, std::uint8_t{8},
+                "RIP-relative MOVD store length differs");
+    const auto ripRelativeMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            ripRelativeDecoded[0].operands[0]);
+    expect(ripRelativeMemory.ripRelative &&
+               !ripRelativeMemory.hasBase && !ripRelativeMemory.index &&
+               ripRelativeMemory.width == 32 &&
+               ripRelativeMemory.displacement == 0x3CEC6295,
+           "RIP-relative MOVD store memory operand differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(
+               ripRelativeDecoded[0].operands[1])
+                   .reg == rosa::x86::XmmRegister::Xmm3,
+           "RIP-relative MOVD store source differs");
+    expect(rosa::debug::dumpX86(ripRelativeDecoded).find(
+               "movd dword [rip+0x3cec6295], xmm3") !=
+               std::string::npos,
+           "RIP-relative MOVD store dump differs");
+
+    rosa::guest::AddressSpace ripRelativeAddressSpace;
+    ripRelativeAddressSpace.mapAnonymous(
+        ripRelativePage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "RIP-relative MOVD destination");
+    ripRelativeAddressSpace.writeU64(
+        rosa::guest::GuestAddress{ripRelativeTarget.value - 2},
+        UINT64_C(0x8877665544332211));
+    const auto ripRelativeBlock = translator.translate(
+        ripRelativeCode, ripRelativeRip);
+    rosa::x86::X86State ripRelativeState;
+    ripRelativeState.xmm[3] = {
+        .low = UINT64_C(0x0123456789ABCDEF),
+        .high = UINT64_C(0xFEDCBA9876543210)};
+    ripRelativeState.rflags = 0x8D7;
+    static_cast<void>(ripRelativeBlock.execute(
+        ripRelativeState, &ripRelativeAddressSpace));
+    expectEqual(ripRelativeAddressSpace.readU64(
+                    rosa::guest::GuestAddress{ripRelativeTarget.value - 2}),
+                UINT64_C(0x887789ABCDEF2211),
+                "RIP-relative MOVD did not store exactly one dword");
+    expectEqual(ripRelativeState.xmm[3].low,
+                UINT64_C(0x0123456789ABCDEF),
+                "RIP-relative MOVD store changed its source");
+    expectEqual(ripRelativeState.rflags, std::uint64_t{0x8D7},
+                "RIP-relative MOVD store changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize>
+        ripRelativePageBytes{};
+    std::memcpy(
+        ripRelativePageBytes.data() +
+            (ripRelativeTarget.value - ripRelativePage.value),
+        sentinel.data(), sizeof(std::uint32_t));
+    rosa::guest::AddressSpace readOnlyRipRelativeAddressSpace;
+    readOnlyRipRelativeAddressSpace.mapSegment(
+        ripRelativePage, ripRelativePageBytes.size(),
+        rosa::guest::Permission::Read, ripRelativePageBytes,
+        "read-only RIP-relative MOVD destination");
+    const auto ripRelativeBefore =
+        readOnlyRipRelativeAddressSpace.readU32(ripRelativeTarget);
+    auto ripRelativeFaultState = ripRelativeState;
+    ripRelativeFaultState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(ripRelativeBlock.execute(
+            ripRelativeFaultState, &readOnlyRipRelativeAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative MOVD store accepted read-only memory");
+    expectEqual(readOnlyRipRelativeAddressSpace.readU32(ripRelativeTarget),
+                ripRelativeBefore,
+                "faulted RIP-relative MOVD store changed memory");
+    expectEqual(ripRelativeFaultState.xmm[3].low,
+                UINT64_C(0x0123456789ABCDEF),
+                "faulted RIP-relative MOVD store changed its source");
+    expectEqual(ripRelativeFaultState.rflags, std::uint64_t{0xAD7},
+                "faulted RIP-relative MOVD store changed flags");
+}
+
+void testMovssXmmToGuestMemory() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0xF3, 0x0F, 0x11, 0x45, 0xD0, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802C67F31ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovssMemXmm,
+           "MOVSS [memory], xmm opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "MOVSS [memory], xmm length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbp &&
+               memory.displacement == -0x30 && memory.width == 32 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0,
+           "MOVSS dword [rbp-0x30], xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "movss dword [rbp-0x30], xmm0") != std::string::npos,
+           "MOVSS [memory], xmm dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 8> sentinel{
+        0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80};
+    addressSpace.writeBytes(
+        rosa::guest::GuestAddress{target.value - 2}, sentinel);
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.rbp = target.value + 0x30;
+    state.xmm[0] = {
+        .low = 0x0123456789ABCDEFULL,
+        .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    constexpr std::array<std::uint8_t, 8> expected{
+        0x10, 0x20, 0xEF, 0xCD, 0xAB, 0x89, 0x70, 0x80};
+    expect(addressSpace.readBytes(
+               rosa::guest::GuestAddress{target.value - 2}, expected.size()) ==
+               std::vector<std::uint8_t>(expected.begin(), expected.end()),
+           "MOVSS did not store exactly the low XMM dword");
+    expectEqual(state.rbp, target.value + 0x30,
+                "MOVSS store changed its base register");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVSS store changed its low XMM source lane");
+    expectEqual(state.xmm[0].high,
+                std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVSS store changed its high XMM source lane");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "MOVSS store changed flags");
+
+    constexpr rosa::guest::GuestAddress faultTarget{
+        page.value + rosa::guest::guestPageSize - 2};
+    constexpr std::array<std::uint8_t, 2> faultSentinel{0xA5, 0x5A};
+    addressSpace.writeBytes(faultTarget, faultSentinel);
+    rosa::x86::X86State faultState = state;
+    faultState.rbp = faultTarget.value + 0x30;
+    faultState.rflags = 0xBD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page MOVSS store did not fault");
+    expect(addressSpace.readBytes(faultTarget, faultSentinel.size()) ==
+               std::vector<std::uint8_t>(faultSentinel.begin(),
+                                          faultSentinel.end()),
+           "faulted MOVSS store partially changed guest memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "faulted MOVSS store changed flags");
+}
+
+void testExtractpsXmmToGuestMemory() {
+    constexpr std::array<std::uint8_t, 8> laneThreeCode{
+        0x66, 0x0F, 0x3A, 0x17, 0x45, 0xCC, 0x03, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802C67F36ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(laneThreeCode,
+                                              instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::ExtractpsMemXmmImm,
+           "EXTRACTPS [memory], xmm, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "EXTRACTPS [memory], xmm, imm8 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(memory.base == rosa::x86::Register::Rbp &&
+               memory.displacement == -0x34 && memory.width == 32 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0 &&
+               immediate.value == 3 && immediate.width == 8,
+           "EXTRACTPS dword [rbp-0x34], xmm0, 3 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "extractps dword [rbp-0x34], xmm0, 0x3") !=
+               std::string::npos,
+           "EXTRACTPS lane-three dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto laneThreeBlock = translator.translate(laneThreeCode,
+                                                       instructionAddress);
+    rosa::x86::X86State state;
+    state.rbp = target.value + 0x34;
+    state.xmm[0] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x99AABBCCDDEEFF00ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(laneThreeBlock.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0x99AABBCC},
+                "EXTRACTPS lane three stored the wrong dword");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x1122334455667788ULL},
+                "EXTRACTPS changed its low XMM source lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x99AABBCCDDEEFF00ULL},
+                "EXTRACTPS changed its high XMM source lane");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "EXTRACTPS changed flags");
+
+    constexpr std::array<std::uint8_t, 8> laneOneCode{
+        0x66, 0x0F, 0x3A, 0x17, 0x45, 0x98, 0x01, 0xC3};
+    const auto laneOneBlock = translator.translate(
+        laneOneCode, rosa::guest::GuestAddress{0x7FF802C67F3DULL});
+    constexpr rosa::guest::GuestAddress laneOneTarget{0x8200};
+    state.rbp = laneOneTarget.value + 0x68;
+    static_cast<void>(laneOneBlock.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(laneOneTarget),
+                std::uint32_t{0x11223344},
+                "EXTRACTPS lane one stored the wrong dword");
+
+    constexpr rosa::guest::GuestAddress faultTarget{
+        page.value + rosa::guest::guestPageSize - 2};
+    constexpr std::array<std::uint8_t, 2> sentinel{0xA5, 0x5A};
+    addressSpace.writeBytes(faultTarget, sentinel);
+    rosa::x86::X86State faultState = state;
+    faultState.rbp = faultTarget.value + 0x34;
+    faultState.rflags = 0xBD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(laneThreeBlock.execute(faultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page EXTRACTPS did not fault");
+    expect(addressSpace.readBytes(faultTarget, sentinel.size()) ==
+               std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+           "faulted EXTRACTPS partially changed guest memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xBD7},
+                "faulted EXTRACTPS changed flags");
 }
 
 void testPinsrdGuestMemoryToXmm() {
@@ -15449,6 +22957,164 @@ void testPinsrdGuestMemoryToXmm() {
                 "faulted PINSRD changed its high XMM lane");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "faulted PINSRD changed flags");
+}
+
+void testPinsrdRegisterToXmm() {
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802A9044AULL};
+    constexpr std::array<std::uint8_t, 14> code{
+        0x66, 0x0F, 0x3A, 0x22, 0xC0, 0x02,
+        0x66, 0x0F, 0x3A, 0x22, 0xC0, 0x03,
+        0xEB, 0x00};
+
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expectEqual(decoded.size(), std::size_t{3},
+                "register PINSRD test block instruction count differs");
+    for (std::size_t index = 0; index < 2; ++index) {
+        expect(decoded[index].opcode == rosa::x86::Opcode::PinsrdXmmReg,
+               "register PINSRD opcode differs");
+        expectEqual(decoded[index].length, std::uint8_t{6},
+                    "register PINSRD length differs");
+        const auto destination =
+            std::get<rosa::x86::XmmRegisterOperand>(
+                decoded[index].operands[0]);
+        const auto source = std::get<rosa::x86::RegisterOperand>(
+            decoded[index].operands[1]);
+        const auto immediate = std::get<rosa::x86::ImmediateOperand>(
+            decoded[index].operands[2]);
+        expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+                   source.reg == rosa::x86::Register::Rax &&
+                   source.width == 32 && immediate.value == index + 2 &&
+                   immediate.width == 8,
+               "register PINSRD operands differ");
+    }
+    const auto dump = rosa::debug::dumpX86(decoded);
+    expect(dump.find("pinsrd xmm0, eax, 0x2") != std::string::npos &&
+               dump.find("pinsrd xmm0, eax, 0x3") != std::string::npos,
+           "register PINSRD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    const auto ir = rosa::debug::dumpIr(block.intermediateRepresentation());
+    expect(ir.find("write_guest_xmm_dword.i32 xmm0.2") !=
+                   std::string::npos &&
+               ir.find("write_guest_xmm_dword.i32 xmm0.3") !=
+                   std::string::npos,
+           "register PINSRD did not lower through partial-XMM-write IR");
+    rosa::x86::X86State state;
+    state.rip = instructionAddress.value;
+    state.rax = 0xAABBCCDD00010000ULL;
+    state.xmm[0] = {
+        .low = 0x2222222211111111ULL,
+        .high = 0x4444444433333333ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low,
+                std::uint64_t{0x2222222211111111ULL},
+                "register PINSRD changed unselected low dwords");
+    expectEqual(state.xmm[0].high,
+                std::uint64_t{0x0001000000010000ULL},
+                "register PINSRD inserted the wrong high dwords");
+    expectEqual(state.rax, std::uint64_t{0xAABBCCDD00010000ULL},
+                "register PINSRD changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "register PINSRD changed flags");
+
+    constexpr std::array<std::uint8_t, 8> extendedCode{
+        0x66, 0x41, 0x0F, 0x3A, 0x22, 0xC8, 0x01, 0xC3};
+    constexpr rosa::guest::GuestAddress extendedAddress{
+        0x7FF802C6ACD8ULL};
+    const auto extendedDecoded =
+        decoder.decodeBlock(extendedCode, extendedAddress);
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::PinsrdXmmReg,
+           "extended-source PINSRD opcode differs");
+    expectEqual(extendedDecoded[0].length, std::uint8_t{7},
+                "extended-source PINSRD length differs");
+    const auto extendedDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(
+            extendedDecoded[0].operands[0]);
+    const auto extendedSource = std::get<rosa::x86::RegisterOperand>(
+        extendedDecoded[0].operands[1]);
+    const auto extendedLane = std::get<rosa::x86::ImmediateOperand>(
+        extendedDecoded[0].operands[2]);
+    expect(extendedDestination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               extendedSource.reg == rosa::x86::Register::R8 &&
+               extendedSource.width == 32 && extendedLane.value == 1,
+           "pinsrd xmm1, r8d, 1 operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find(
+               "pinsrd xmm1, r8d, 0x1") != std::string::npos,
+           "pinsrd xmm1, r8d, 1 dump differs");
+
+    const auto extendedBlock =
+        translator.translate(extendedCode, extendedAddress);
+    rosa::x86::X86State extendedState;
+    extendedState.r8 = 0xAABBCCDDEEFF0011ULL;
+    extendedState.xmm[1] = {
+        .low = 0x1122334455667788ULL,
+        .high = 0x8877665544332211ULL};
+    extendedState.rflags = 0xAD7;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.xmm[1].low,
+                std::uint64_t{0xEEFF001155667788ULL},
+                "extended-source PINSRD inserted the wrong dword");
+    expectEqual(extendedState.xmm[1].high,
+                std::uint64_t{0x8877665544332211ULL},
+                "extended-source PINSRD changed unselected dwords");
+    expectEqual(extendedState.r8,
+                std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                "extended-source PINSRD changed its source");
+    expectEqual(extendedState.rflags, std::uint64_t{0xAD7},
+                "extended-source PINSRD changed flags");
+}
+
+void testPinsrqRegisterToXmm() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x66, 0x48, 0x0F, 0x3A, 0x22, 0xC8, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C69337ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PinsrdXmmReg,
+           "PINSRQ register opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "PINSRQ register length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    const auto lane =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               source.reg == rosa::x86::Register::Rax &&
+               source.width == 64 && lane.value == 0,
+           "PINSRQ xmm1, rax, 0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "pinsrq xmm1, rax, 0x0") != std::string::npos,
+           "PINSRQ register dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "write_guest_xmm_lane.i64 xmm1.low") !=
+               std::string::npos,
+           "PINSRQ did not lower through a qword XMM lane write");
+    rosa::x86::X86State state;
+    state.rax = 0x0123456789ABCDEFULL;
+    state.xmm[1] = {
+        .low = 0xAAAAAAAAAAAAAAAAULL,
+        .high = 0xFEDCBA9876543210ULL,
+    };
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[1].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "PINSRQ inserted the wrong low qword");
+    expectEqual(state.xmm[1].high,
+                std::uint64_t{0xFEDCBA9876543210ULL},
+                "PINSRQ changed the unselected high qword");
+    expectEqual(state.rax, std::uint64_t{0x0123456789ABCDEFULL},
+                "PINSRQ changed its source register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "PINSRQ changed flags");
 }
 
 void testPinsrbRegisterToXmm() {
@@ -15788,6 +23454,94 @@ void testDecoderRipRelativeLeaAndSyscall() {
                 "syscall fallthrough differs");
 }
 
+void testDarwinBsdthreadRegister() {
+    constexpr auto syscallNumber = UINT64_C(0x0200016E);
+    constexpr rosa::guest::GuestAddress codePage{0x7000};
+    constexpr rosa::guest::GuestAddress threadStart{0x7020};
+    constexpr rosa::guest::GuestAddress workqueueStart{0x7040};
+    constexpr rosa::guest::GuestAddress dataPage{0x8000};
+    constexpr rosa::guest::GuestAddress dataAddress{0x8100};
+    constexpr std::size_t dataSize = 56;
+
+    std::array<std::uint8_t, dataSize> data{};
+    const auto put64 = [&](std::size_t offset, std::uint64_t value) {
+        std::memcpy(data.data() + offset, &value, sizeof(value));
+    };
+    const auto put32 = [&](std::size_t offset, std::uint32_t value) {
+        std::memcpy(data.data() + offset, &value, sizeof(value));
+    };
+    put64(0, dataSize);
+    put64(8, 0xA0);
+    put32(24, 0xE0);
+    put32(28, 0x28);
+    put32(32, 0x18);
+    put32(48, 0x188);
+    put32(52, 0x3C0);
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(
+        codePage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Execute,
+        std::array<std::uint8_t, 1>{0xC3});
+    addressSpace.mapAnonymous(dataPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(dataAddress, data);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = syscallNumber;
+    state.rdi = threadStart.value;
+    state.rsi = workqueueStart.value;
+    state.rdx = 0x2000;
+    state.r10 = dataAddress.value;
+    state.r8 = dataSize;
+    state.r9 = 0xA0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E345DCULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "bsdthread_register did not return legacy feature success");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "bsdthread_register did not clear BSD carry");
+    expectEqual(addressSpace.readBytes(dataAddress, data.size()),
+                std::vector<std::uint8_t>(data.begin(), data.end()),
+                "bsdthread_register changed unsupported outgoing fields");
+    const auto &registration = dispatcher.pthreadRegistration();
+    expect(registration.has_value(),
+           "bsdthread_register did not record the guest handshake");
+    expectEqual(registration->threadStart, threadStart,
+                "bsdthread_register recorded the wrong thread entry");
+    expectEqual(registration->workqueueThreadStart, workqueueStart,
+                "bsdthread_register recorded the wrong workqueue entry");
+    expectEqual(registration->pthreadSize, std::uint32_t{0x2000},
+                "bsdthread_register recorded the wrong pthread size");
+    expectEqual(registration->tsdOffset, std::uint32_t{0xE0},
+                "bsdthread_register recorded the wrong TSD offset");
+    expectEqual(registration->machThreadSelfOffset, std::uint32_t{0x18},
+                "bsdthread_register recorded the wrong thread-port offset");
+
+    state.rax = syscallNumber;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "repeated bsdthread_register returned the wrong errno");
+    expect((state.rflags & 1U) != 0,
+           "repeated bsdthread_register did not set BSD carry");
+
+    rosa::darwin::SyscallDispatcher faultDispatcher;
+    state.rax = syscallNumber;
+    state.r10 = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(faultDispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid bsdthread_register record returned the wrong errno");
+    expect(!faultDispatcher.pthreadRegistration(),
+           "faulted bsdthread_register recorded a partial handshake");
+}
+
 void testDarwinThreadSelfid() {
     constexpr auto threadSelfidNumber = UINT64_C(0x02000174);
     rosa::guest::AddressSpace addressSpace;
@@ -15838,6 +23592,179 @@ void testDarwinGetpid() {
                 "getpid changed an ignored argument register");
     expectEqual(state.r9, std::uint64_t{0xFEDCBA9876543210ULL},
                 "getpid changed an ignored argument register");
+}
+
+void testDarwinGettimeofday() {
+    constexpr auto gettimeofdayNumber = UINT64_C(0x02000074);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress timevalAddress{0x8100};
+    constexpr rosa::guest::GuestAddress timezoneAddress{0x8120};
+    constexpr rosa::guest::GuestAddress absoluteTimeAddress{0x8130};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = gettimeofdayNumber;
+    state.rdi = timevalAddress.value;
+    state.rsi = timezoneAddress.value;
+    state.rdx = absoluteTimeAddress.value;
+    state.rflags = 0x8D7;
+
+    timeval hostBefore{};
+    expect(::gettimeofday(&hostBefore, nullptr) == 0,
+           "could not sample host time before guest gettimeofday");
+    const auto absoluteBefore =
+        rosa::darwin::sampleX86TimestampCounter() / 2U;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state,
+        rosa::guest::GuestAddress{0x7FF802E32BACULL});
+    const auto absoluteAfter =
+        rosa::darwin::sampleX86TimestampCounter() / 2U;
+    timeval hostAfter{};
+    expect(::gettimeofday(&hostAfter, nullptr) == 0,
+           "could not sample host time after guest gettimeofday");
+
+    expect(!outcome.exited, "gettimeofday terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "gettimeofday did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "gettimeofday did not apply successful BSD carry semantics");
+    const auto guestSeconds = addressSpace.readU64(timevalAddress);
+    const auto guestMicroseconds = addressSpace.readU32(
+        rosa::guest::GuestAddress{timevalAddress.value + 8});
+    expect(guestSeconds >= static_cast<std::uint32_t>(hostBefore.tv_sec) &&
+               guestSeconds <= static_cast<std::uint32_t>(hostAfter.tv_sec),
+           "gettimeofday returned seconds outside its host sample interval");
+    expect(guestMicroseconds < 1'000'000,
+           "gettimeofday returned an invalid microsecond field");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{timevalAddress.value + 12}),
+                std::uint32_t{0},
+                "gettimeofday did not clear timeval padding");
+    expectEqual(addressSpace.readU64(timezoneAddress), std::uint64_t{0},
+                "gettimeofday did not return the UTC timezone default");
+    const auto guestAbsoluteTime = addressSpace.readU64(absoluteTimeAddress);
+    expect(guestAbsoluteTime >= absoluteBefore &&
+               guestAbsoluteTime <= absoluteAfter,
+           "gettimeofday returned an unsynchronized Mach absolute time");
+
+    const auto originalTimeval =
+        addressSpace.readBytes(timevalAddress, 16);
+    const auto originalTimezone =
+        addressSpace.readBytes(timezoneAddress, 8);
+    state = {};
+    state.rax = gettimeofdayNumber;
+    state.rdi = timevalAddress.value;
+    state.rsi = timezoneAddress.value;
+    state.rdx = page.value + rosa::guest::guestPageSize;
+    state.rflags = 0x46;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "gettimeofday invalid output returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x47},
+                "gettimeofday invalid output did not set carry");
+    expectEqual(addressSpace.readBytes(timevalAddress, 16), originalTimeval,
+                "failed gettimeofday partially changed the timeval");
+    expectEqual(addressSpace.readBytes(timezoneAddress, 8), originalTimezone,
+                "failed gettimeofday partially changed the timezone");
+}
+
+void testDarwinIssetugid() {
+    constexpr auto issetugidNumber = UINT64_C(0x02000147);
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = issetugidNumber;
+    state.rdi = 0x7FF8436BD774ULL;
+    state.rsi = 0x1FFE1000000800ULL;
+    state.rdx = 0x1FFE1000000000ULL;
+    state.r10 = UINT32_MAX;
+    state.r8 = 1;
+    state.r9 = 0x3E0;
+    state.rflags = 0x47;
+
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state,
+        rosa::guest::GuestAddress{0x7FF802E2F89CULL});
+    expect(!outcome.exited, "issetugid terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "issetugid reported a credential transition");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "issetugid did not apply successful BSD carry semantics");
+    expectEqual(state.rdi, std::uint64_t{0x7FF8436BD774ULL},
+                "issetugid changed an ignored argument register");
+    expectEqual(state.rsi, std::uint64_t{0x1FFE1000000800ULL},
+                "issetugid changed an ignored argument register");
+    expectEqual(state.rdx, std::uint64_t{0x1FFE1000000000ULL},
+                "issetugid changed an ignored argument register");
+    expectEqual(state.r10, std::uint64_t{UINT32_MAX},
+                "issetugid changed an ignored argument register");
+}
+
+void testDarwinIoctlStandardDescriptorType() {
+    constexpr auto ioctlNumber = UINT64_C(0x02000036);
+    constexpr auto fileDescriptorTypeRequest = UINT64_C(0x4004667A);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress typeAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU32(typeAddress, UINT32_MAX);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = ioctlNumber;
+    state.rdi = STDERR_FILENO;
+    state.rsi = fileDescriptorTypeRequest;
+    state.rdx = typeAddress.value;
+    state.r10 = 0x18;
+    state.rflags = 0x7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state,
+        rosa::guest::GuestAddress{0x7FF802E33228ULL});
+    expect(!outcome.exited, "ioctl(FIODTYPE) terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "ioctl(FIODTYPE) did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x6},
+                "ioctl(FIODTYPE) did not clear BSD carry");
+    expectEqual(addressSpace.readU32(typeAddress), std::uint32_t{3},
+                "stderr was not reported as a Darwin tty");
+    expectEqual(state.r10, std::uint64_t{0x18},
+                "ioctl(FIODTYPE) changed an ignored argument register");
+
+    addressSpace.writeU32(typeAddress, UINT32_MAX);
+    state.rax = ioctlNumber;
+    state.rdi = STDERR_FILENO;
+    state.rsi = fileDescriptorTypeRequest;
+    state.rdx = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "ioctl(FIODTYPE) invalid output returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "faulted ioctl(FIODTYPE) did not set BSD carry");
+    expectEqual(addressSpace.readU32(typeAddress), UINT32_MAX,
+                "faulted ioctl(FIODTYPE) changed a valid output buffer");
+
+    state.rax = ioctlNumber;
+    state.rdi = STDERR_FILENO;
+    state.rsi = 0;
+    state.rdx = typeAddress.value;
+    bool unsupportedRequest = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        unsupportedRequest = std::string_view(error.what()).find(
+                                 "FIODTYPE") != std::string_view::npos;
+    }
+    expect(unsupportedRequest,
+           "unobserved guest ioctl request did not fail loudly");
 }
 
 void testDarwinSandboxSyscallCheck() {
@@ -16166,6 +24093,83 @@ void testDarwinLockdownModeSysctl() {
                 "invalid sysctl MIB returned the wrong errno");
 }
 
+void testDarwinUserStack64Sysctl() {
+    constexpr auto sysctlNumber = UINT64_C(0x020000CA);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress mibAddress{0x8000};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8100};
+    constexpr rosa::guest::GuestAddress lengthAddress{0x8180};
+    constexpr std::array<std::uint32_t, 2> userStackOid{1, 59};
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    std::array<std::uint8_t, sizeof(userStackOid)> mibBytes{};
+    std::memcpy(mibBytes.data(), userStackOid.data(), mibBytes.size());
+    addressSpace.writeBytes(mibAddress, mibBytes);
+    addressSpace.writeU64(lengthAddress, sizeof(std::uint64_t));
+    addressSpace.writeU64(outputAddress, UINT64_MAX);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = userStackOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = 0;
+    state.r9 = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30EECULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "kern.usrstack64 read did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "kern.usrstack64 read did not clear BSD carry");
+    expectEqual(addressSpace.readU64(outputAddress),
+                std::uint64_t{0x700000100000ULL},
+                "kern.usrstack64 returned the wrong guest stack ceiling");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{8},
+                "kern.usrstack64 returned the wrong size");
+
+    addressSpace.writeU64(lengthAddress, 0);
+    state.rax = sysctlNumber;
+    state.rdx = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "kern.usrstack64 size query did not succeed");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{8},
+                "kern.usrstack64 size query returned the wrong size");
+
+    addressSpace.writeU64(lengthAddress, 4);
+    addressSpace.writeU64(outputAddress, UINT64_MAX);
+    state.rax = sysctlNumber;
+    state.rdx = outputAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "short kern.usrstack64 buffer returned the wrong errno");
+    expectEqual(addressSpace.readU64(outputAddress), UINT64_MAX,
+                "short kern.usrstack64 buffer was partially changed");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{4},
+                "short kern.usrstack64 buffer changed its length");
+
+    addressSpace.writeU64(lengthAddress, 8);
+    state.rax = sysctlNumber;
+    state.rdx = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid kern.usrstack64 output returned the wrong errno");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{8},
+                "faulted kern.usrstack64 read changed its length");
+}
+
 void testDarwinBootArgsSysctl() {
     constexpr auto sysctlNumber = UINT64_C(0x020000CA);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -16399,6 +24403,358 @@ void testDarwinKernelVersionSysctl() {
                 "faulted kern.version read changed its length");
 }
 
+void testDarwinProductVersionSysctl() {
+    constexpr auto sysctlNumber = UINT64_C(0x020000CA);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress mibAddress{0x8000};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8100};
+    constexpr rosa::guest::GuestAddress lengthAddress{0x8180};
+    constexpr rosa::guest::GuestAddress nameAddress{0x8200};
+    constexpr std::string_view name = "kern.osproductversion";
+    constexpr std::array<std::uint32_t, 2> nameToOid{0, 3};
+    constexpr std::array<std::uint32_t, 2> productVersionOid{1, 138};
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    std::array<std::uint8_t, sizeof(nameToOid)> mibBytes{};
+    std::memcpy(mibBytes.data(), nameToOid.data(), mibBytes.size());
+    addressSpace.writeBytes(mibAddress, mibBytes);
+    addressSpace.writeBytes(
+        nameAddress,
+        std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t *>(name.data()),
+            name.size()});
+    addressSpace.writeU64(lengthAddress, 16);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = nameToOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = nameAddress.value;
+    state.r9 = name.size();
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30EECULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "kern.osproductversion name-to-OID did not succeed");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{8},
+                "kern.osproductversion name-to-OID returned the wrong size");
+    const auto oidBytes =
+        addressSpace.readBytes(outputAddress, sizeof(productVersionOid));
+    std::array<std::uint32_t, 2> actualOid{};
+    std::memcpy(actualOid.data(), oidBytes.data(), sizeof(actualOid));
+    expectEqual(actualOid, productVersionOid,
+                "kern.osproductversion returned the wrong guest MIB");
+
+    addressSpace.writeBytes(mibAddress, oidBytes);
+    addressSpace.writeU64(lengthAddress, 64);
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = productVersionOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = 0;
+    state.r9 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "guest kern.osproductversion read did not succeed");
+    const auto versionSize = addressSpace.readU64(lengthAddress);
+    expect(versionSize >= 4 && versionSize < 64,
+           "guest kern.osproductversion length is implausible");
+    const auto version = addressSpace.readBytes(
+        outputAddress, static_cast<std::size_t>(versionSize));
+    expect(version.back() == 0 &&
+               std::count(version.begin(), version.end() - 1, '.') >= 1 &&
+               std::all_of(version.begin(), version.end() - 1,
+                           [](std::uint8_t character) {
+                               return (character >= '0' && character <= '9') ||
+                                      character == '.';
+                           }),
+           "guest kern.osproductversion is not a dotted version string");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "guest kern.osproductversion did not clear BSD carry");
+
+    addressSpace.writeU64(lengthAddress, 0);
+    state.rax = sysctlNumber;
+    state.rdx = 0;
+    state.rflags = 0xBD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "guest kern.osproductversion size query failed");
+    expectEqual(addressSpace.readU64(lengthAddress), versionSize,
+                "guest kern.osproductversion size query changed size");
+
+    addressSpace.writeU64(lengthAddress, 1);
+    addressSpace.writeBytes(
+        outputAddress, std::array<std::uint8_t, 1>{0xA5});
+    state.rax = sysctlNumber;
+    state.rdx = outputAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "short kern.osproductversion buffer returned wrong errno");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{0},
+                "short kern.osproductversion did not report zero bytes");
+    expectEqual(addressSpace.readBytes(outputAddress, 1),
+                std::vector<std::uint8_t>{0xA5},
+                "short kern.osproductversion partially changed output");
+
+    addressSpace.writeU64(lengthAddress, 64);
+    state.rax = sysctlNumber;
+    state.rdx = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid kern.osproductversion output returned wrong errno");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{64},
+                "faulted kern.osproductversion changed its length");
+}
+
+void testDarwinIosSupportVersionSysctl() {
+    constexpr auto sysctlNumber = UINT64_C(0x020000CA);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress mibAddress{0x8000};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8100};
+    constexpr rosa::guest::GuestAddress lengthAddress{0x8180};
+    constexpr rosa::guest::GuestAddress nameAddress{0x8200};
+    constexpr std::string_view name = "kern.iossupportversion";
+    constexpr std::array<std::uint32_t, 2> nameToOid{0, 3};
+    constexpr std::array<std::uint32_t, 2> supportVersionOid{1, 140};
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    std::array<std::uint8_t, sizeof(nameToOid)> mibBytes{};
+    std::memcpy(mibBytes.data(), nameToOid.data(), mibBytes.size());
+    addressSpace.writeBytes(mibAddress, mibBytes);
+    addressSpace.writeBytes(
+        nameAddress,
+        std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t *>(name.data()),
+            name.size()});
+    addressSpace.writeU64(lengthAddress, 16);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = nameToOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = nameAddress.value;
+    state.r9 = name.size();
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30EECULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "kern.iossupportversion name-to-OID did not succeed");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{8},
+                "kern.iossupportversion name-to-OID returned wrong size");
+    const auto oidBytes =
+        addressSpace.readBytes(outputAddress, sizeof(supportVersionOid));
+    std::array<std::uint32_t, 2> actualOid{};
+    std::memcpy(actualOid.data(), oidBytes.data(), sizeof(actualOid));
+    expectEqual(actualOid, supportVersionOid,
+                "kern.iossupportversion returned the wrong guest MIB");
+
+    addressSpace.writeBytes(mibAddress, oidBytes);
+    addressSpace.writeU64(lengthAddress, 64);
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = supportVersionOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = 0;
+    state.r9 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "guest kern.iossupportversion read did not succeed");
+    const auto versionSize = addressSpace.readU64(lengthAddress);
+    expect(versionSize >= 4 && versionSize < 64,
+           "guest kern.iossupportversion length is implausible");
+    const auto version = addressSpace.readBytes(
+        outputAddress, static_cast<std::size_t>(versionSize));
+    expect(version.back() == 0 &&
+               std::count(version.begin(), version.end() - 1, '.') >= 1 &&
+               std::all_of(version.begin(), version.end() - 1,
+                           [](std::uint8_t character) {
+                               return (character >= '0' && character <= '9') ||
+                                      character == '.';
+                           }),
+           "guest kern.iossupportversion is not a dotted version string");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "guest kern.iossupportversion did not clear BSD carry");
+
+    addressSpace.writeU64(lengthAddress, 0);
+    state.rax = sysctlNumber;
+    state.rdx = 0;
+    state.rflags = 0xBD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "guest kern.iossupportversion size query failed");
+    expectEqual(addressSpace.readU64(lengthAddress), versionSize,
+                "guest kern.iossupportversion size query changed size");
+
+    addressSpace.writeU64(lengthAddress, 1);
+    addressSpace.writeBytes(
+        outputAddress, std::array<std::uint8_t, 1>{0xA5});
+    state.rax = sysctlNumber;
+    state.rdx = outputAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "short kern.iossupportversion buffer returned wrong errno");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{0},
+                "short kern.iossupportversion did not report zero bytes");
+    expectEqual(addressSpace.readBytes(outputAddress, 1),
+                std::vector<std::uint8_t>{0xA5},
+                "short kern.iossupportversion partially changed output");
+
+    addressSpace.writeU64(lengthAddress, 64);
+    state.rax = sysctlNumber;
+    state.rdx = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid kern.iossupportversion output returned wrong errno");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{64},
+                "faulted kern.iossupportversion changed its length");
+}
+
+void testDarwinOsVariantStatusSysctl() {
+    constexpr auto sysctlNumber = UINT64_C(0x020000CA);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress mibAddress{0x8000};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8100};
+    constexpr rosa::guest::GuestAddress lengthAddress{0x8180};
+    constexpr rosa::guest::GuestAddress nameAddress{0x8200};
+    constexpr std::string_view name = "kern.osvariant_status";
+    constexpr std::array<std::uint32_t, 2> nameToOid{0, 3};
+    constexpr std::array<std::uint32_t, 2> statusOid{1, 141};
+
+    std::uint64_t expectedStatus = 0;
+    std::size_t expectedSize = sizeof(expectedStatus);
+    expect(::sysctlbyname(name.data(), &expectedStatus, &expectedSize,
+                          nullptr, 0) == 0 &&
+               expectedSize == sizeof(expectedStatus),
+           "host kern.osvariant_status query failed");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    std::array<std::uint8_t, sizeof(nameToOid)> mibBytes{};
+    std::memcpy(mibBytes.data(), nameToOid.data(), mibBytes.size());
+    addressSpace.writeBytes(mibAddress, mibBytes);
+    addressSpace.writeBytes(
+        nameAddress,
+        std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t *>(name.data()),
+            name.size()});
+    addressSpace.writeU64(lengthAddress, 16);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = nameToOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = nameAddress.value;
+    state.r9 = name.size();
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30EECULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "kern.osvariant_status name-to-OID did not succeed");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{8},
+                "kern.osvariant_status name-to-OID returned wrong size");
+    const auto oidBytes =
+        addressSpace.readBytes(outputAddress, sizeof(statusOid));
+    std::array<std::uint32_t, 2> actualOid{};
+    std::memcpy(actualOid.data(), oidBytes.data(), sizeof(actualOid));
+    expectEqual(actualOid, statusOid,
+                "kern.osvariant_status returned the wrong guest MIB");
+
+    addressSpace.writeBytes(mibAddress, oidBytes);
+    addressSpace.writeU64(lengthAddress, sizeof(expectedStatus));
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = statusOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = 0;
+    state.r9 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "guest kern.osvariant_status read did not succeed");
+    expectEqual(addressSpace.readU64(lengthAddress),
+                std::uint64_t{sizeof(expectedStatus)},
+                "guest kern.osvariant_status returned wrong size");
+    expectEqual(addressSpace.readU64(outputAddress), expectedStatus,
+                "guest kern.osvariant_status did not mirror the host");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "guest kern.osvariant_status did not clear BSD carry");
+
+    addressSpace.writeU64(lengthAddress, 0);
+    state.rax = sysctlNumber;
+    state.rdx = 0;
+    state.rflags = 0xBD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "guest kern.osvariant_status size query failed");
+    expectEqual(addressSpace.readU64(lengthAddress),
+                std::uint64_t{sizeof(expectedStatus)},
+                "guest kern.osvariant_status size query returned wrong size");
+
+    addressSpace.writeU64(lengthAddress, 1);
+    addressSpace.writeBytes(outputAddress,
+                            std::array<std::uint8_t, 1>{0xA5});
+    state.rax = sysctlNumber;
+    state.rdx = outputAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "short kern.osvariant_status buffer returned wrong errno");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{0},
+                "short kern.osvariant_status did not report zero bytes");
+    expectEqual(addressSpace.readBytes(outputAddress, 1),
+                std::vector<std::uint8_t>{0xA5},
+                "short kern.osvariant_status changed output");
+
+    addressSpace.writeU64(lengthAddress, sizeof(expectedStatus));
+    state.rax = sysctlNumber;
+    state.rdx = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "invalid kern.osvariant_status output returned wrong errno");
+    expectEqual(addressSpace.readU64(lengthAddress),
+                std::uint64_t{sizeof(expectedStatus)},
+                "faulted kern.osvariant_status changed its length");
+}
+
 void testDarwinOpenCurrentDirectory() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr std::uint32_t openDirectory = 0x00100000;
@@ -16477,6 +24833,313 @@ void testDarwinOpenCurrentDirectory() {
     expect(unsupportedFlags, "unobserved guest open flags did not fail loudly");
     expectEqual(dispatcher.fileSpace().size(), std::size_t{2},
                 "unsupported guest open allocated a descriptor");
+}
+
+void testDarwinFeatureFlagsShmOpenProbe() {
+    constexpr auto shmOpenNumber = UINT64_C(0x0200010A);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress nameAddress{0x8100};
+    constexpr std::array<std::uint8_t, 27> featureFlagsName{
+        'c', 'o', 'm', '.', 'a', 'p', 'p', 'l', 'e', '.', 'f', 'e', 'a',
+        't', 'u', 'r', 'e', 'f', 'l', 'a', 'g', 's', '.', 's', 'h', 'm', 0};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(nameAddress, featureFlagsName);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = shmOpenNumber;
+    state.rdi = nameAddress.value;
+    state.rsi = 0;
+    state.rdx = 0x7FF802D02113ULL;
+    state.rflags = 0x8D6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30FA4ULL}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                "FeatureFlags shm_open probe returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "FeatureFlags shm_open probe did not set BSD carry");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+                "FeatureFlags shm_open probe allocated a guest descriptor");
+
+    state.rax = shmOpenNumber;
+    state.rdi = 0x9000;
+    state.rsi = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "shm_open invalid guest name returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "shm_open invalid guest name did not set BSD carry");
+
+    state.rax = shmOpenNumber;
+    state.rdi = nameAddress.value;
+    state.rsi = O_CREAT | O_RDWR;
+    bool unsupportedFlags = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        unsupportedFlags = std::string_view(error.what()).find(
+                               "FeatureFlags shared-memory probe") !=
+                           std::string_view::npos;
+    }
+    expect(unsupportedFlags,
+           "unobserved guest shm_open flags did not fail loudly");
+}
+
+void testDarwinCsopsUnsignedStatus() {
+    constexpr auto csopsNumber = UINT64_C(0x020000A9);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress statusAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU32(statusAddress, UINT32_MAX);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = csopsNumber;
+    state.rdi = static_cast<std::uint32_t>(::getpid());
+    state.rsi = 0;
+    state.rdx = statusAddress.value;
+    state.r10 = sizeof(std::uint32_t);
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E311C8ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "csops status did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "csops status did not clear BSD carry");
+    expectEqual(addressSpace.readU32(statusAddress), std::uint32_t{0},
+                "unsigned guest csops status is not zero");
+
+    addressSpace.writeU32(statusAddress, UINT32_MAX);
+    state.rax = csopsNumber;
+    state.rdi = static_cast<std::uint32_t>(::getpid());
+    state.rsi = 0;
+    state.rdx = 0x9000;
+    state.r10 = sizeof(std::uint32_t);
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "csops invalid output returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "csops invalid output did not set BSD carry");
+    expectEqual(addressSpace.readU32(statusAddress), UINT32_MAX,
+                "faulted csops changed a valid guest output buffer");
+
+    state.rax = csopsNumber;
+    state.rdi = static_cast<std::uint32_t>(::getpid());
+    state.rsi = 1;
+    state.rdx = statusAddress.value;
+    state.r10 = sizeof(std::uint32_t);
+    bool unsupportedOperation = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        unsupportedOperation = std::string_view(error.what()).find(
+                                   "CS_OPS_STATUS") !=
+                               std::string_view::npos;
+    }
+    expect(unsupportedOperation,
+           "unobserved guest csops operation did not fail loudly");
+}
+
+void testDarwinCsopsAuditTokenUnsignedDerEntitlements() {
+    constexpr auto csopsAuditTokenNumber = UINT64_C(0x020000AA);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8100};
+    constexpr rosa::guest::GuestAddress tokenAddress{0x8500};
+    constexpr std::array<std::uint8_t, 16> sentinel{
+        0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5,
+        0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};
+
+    audit_token_t token{};
+    mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
+    expectEqual(task_info(mach_task_self(), TASK_AUDIT_TOKEN,
+                          reinterpret_cast<task_info_t>(&token), &count),
+                KERN_SUCCESS,
+                "csops_audittoken test could not query the host token");
+    expectEqual(count, mach_msg_type_number_t{8},
+                "csops_audittoken test host-token count differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(outputAddress, sentinel);
+    std::array<std::uint8_t, sizeof(token)> tokenBytes{};
+    std::memcpy(tokenBytes.data(), &token, sizeof(token));
+    addressSpace.writeBytes(tokenAddress, tokenBytes);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = csopsAuditTokenNumber;
+    state.rdi = static_cast<std::uint32_t>(::getpid());
+    state.rsi = 16; // CS_OPS_DER_ENTITLEMENTS_BLOB
+    state.rdx = outputAddress.value;
+    state.r10 = 0x408;
+    state.r8 = tokenAddress.value;
+    state.rflags = 0x8D6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E302A8ULL}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "unsigned DER-entitlements query returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "unsigned DER-entitlements query did not set BSD carry");
+    expectEqual(addressSpace.readBytes(outputAddress, sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "unsigned DER-entitlements query changed its output buffer");
+
+    state.rax = csopsAuditTokenNumber;
+    state.r8 = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "DER-entitlements invalid audit token returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "DER-entitlements invalid audit token did not set carry");
+
+    auto staleToken = token;
+    ++staleToken.val[7];
+    std::memcpy(tokenBytes.data(), &staleToken, sizeof(staleToken));
+    addressSpace.writeBytes(tokenAddress, tokenBytes);
+    state.rax = csopsAuditTokenNumber;
+    state.r8 = tokenAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ESRCH),
+                "DER-entitlements stale audit token returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "DER-entitlements stale audit token did not set carry");
+
+    std::memcpy(tokenBytes.data(), &token, sizeof(token));
+    addressSpace.writeBytes(tokenAddress, tokenBytes);
+    state.rax = csopsAuditTokenNumber;
+    state.rsi = 17;
+    bool unsupportedOperation = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        unsupportedOperation = std::string_view(error.what()).find(
+                                   "CS_OPS_DER_ENTITLEMENTS_BLOB") !=
+                               std::string_view::npos;
+    }
+    expect(unsupportedOperation,
+           "unobserved csops_audittoken operation did not fail loudly");
+}
+
+void testDarwinOpenAndReadUrandomNoCancel() {
+    constexpr auto openNoCancelNumber = UINT64_C(0x0200018E);
+    constexpr auto readNoCancelNumber = UINT64_C(0x0200018C);
+    constexpr auto closeNoCancelNumber = UINT64_C(0x0200018F);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress bufferAddress{0x8200};
+    constexpr std::array<std::uint8_t, 13> randomPath{
+        '/', 'd', 'e', 'v', '/', 'u', 'r', 'a', 'n', 'd', 'o', 'm', 0};
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, randomPath);
+    constexpr std::array<std::uint8_t, 16> sentinel{
+        0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5,
+        0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};
+    addressSpace.writeBytes(bufferAddress, sentinel);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = openNoCancelNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = 0;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E305E8ULL}));
+    expectEqual(state.rax, std::uint64_t{3},
+                "open_nocancel /dev/urandom returned the wrong descriptor");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "open_nocancel /dev/urandom did not clear BSD carry");
+    const auto *randomFile = dispatcher.fileSpace().lookup(
+        rosa::darwin::GuestFileDescriptor{3});
+    expect(randomFile != nullptr &&
+               randomFile->kind == rosa::darwin::GuestFileKind::RandomDevice &&
+               randomFile->guestPath == std::filesystem::path{"/dev/urandom"} &&
+               randomFile->flags == 0,
+           "open_nocancel stored the wrong random-device metadata");
+
+    state.rax = readNoCancelNumber;
+    state.rdi = 3;
+    state.rsi = bufferAddress.value;
+    state.rdx = 8;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E305C8ULL}));
+    expectEqual(state.rax, std::uint64_t{8},
+                "read_nocancel /dev/urandom returned the wrong byte count");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "read_nocancel /dev/urandom did not clear BSD carry");
+    expect(addressSpace.readBytes(bufferAddress, 8) !=
+               std::vector<std::uint8_t>(8, 0xA5),
+           "read_nocancel /dev/urandom left its buffer unchanged");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{bufferAddress.value + 8}, 8),
+                std::vector<std::uint8_t>(8, 0xA5),
+                "read_nocancel /dev/urandom wrote past its buffer");
+
+    state.rax = readNoCancelNumber;
+    state.rdi = 3;
+    state.rsi = 0x9000;
+    state.rdx = 8;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "read_nocancel invalid buffer returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "read_nocancel invalid buffer did not set BSD carry");
+
+    state.rax = readNoCancelNumber;
+    state.rdi = 99;
+    state.rsi = bufferAddress.value;
+    state.rdx = 8;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "read_nocancel invalid descriptor returned the wrong errno");
+
+    state.rax = closeNoCancelNumber;
+    state.rdi = 3;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30FBCULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "close_nocancel random device did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "close_nocancel random device did not clear BSD carry");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+                "close_nocancel did not release the guest descriptor");
+
+    state.rax = closeNoCancelNumber;
+    state.rdi = 3;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "repeated close_nocancel returned the wrong errno");
 }
 
 void testDarwinOpenGuestRootDirectory() {
@@ -16661,48 +25324,587 @@ void testDarwinDuplicateGuestDescriptor() {
                 "failed dup allocated a guest descriptor");
 }
 
-void testUnsupportedDarwinFstatat64Diagnostic() {
-    constexpr auto fstatat64Number = UINT64_C(0x020001D6);
+void testDarwinStat64MappedFile() {
+    constexpr auto stat64Number = UINT64_C(0x02000152);
     constexpr rosa::guest::GuestAddress page{0x8000};
     constexpr rosa::guest::GuestAddress pathAddress{0x8100};
-    constexpr std::string_view path = "System/Library/dyld/";
+    constexpr rosa::guest::GuestAddress statAddress{0x8300};
+    const auto fixturePath = std::filesystem::canonical(
+        std::filesystem::path{ROSA_TEST_HELLO_MACHO_PATH});
+    const auto fixtureString = fixturePath.string();
+    std::vector<std::uint8_t> fixtureBytes(fixtureString.begin(),
+                                           fixtureString.end());
+    fixtureBytes.push_back(0);
+
+    struct stat hostMetadata {};
+    expect(::stat(fixturePath.c_str(), &hostMetadata) == 0,
+           "could not stat the mapped-file fixture");
+
     rosa::guest::AddressSpace addressSpace;
     addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
                               rosa::guest::Permission::Read |
                                   rosa::guest::Permission::Write);
-    addressSpace.writeBytes(
-        pathAddress,
-        std::span<const std::uint8_t>{
-            reinterpret_cast<const std::uint8_t *>(path.data()),
-            path.size()});
-    addressSpace.writeBytes(
-        rosa::guest::GuestAddress{pathAddress.value + path.size()},
-        std::array<std::uint8_t, 1>{0});
+    addressSpace.writeBytes(pathAddress, fixtureBytes);
+    constexpr std::array<std::uint8_t, 144> sentinel = [] {
+        std::array<std::uint8_t, 144> bytes{};
+        bytes.fill(0xA5);
+        return bytes;
+    }();
+    addressSpace.writeBytes(statAddress, sentinel);
+
     rosa::darwin::SyscallDispatcher dispatcher;
     rosa::x86::X86State state;
+    state.rax = stat64Number;
+    state.rdi = pathAddress.value;
+    state.rsi = statAddress.value;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802A8CED4ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "stat64 mapped file did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "stat64 mapped file did not clear BSD carry");
+
+    const auto metadata = addressSpace.readBytes(statAddress, sentinel.size());
+    const auto loadU16 = [&metadata](std::size_t offset) {
+        std::uint16_t value = 0;
+        std::memcpy(&value, metadata.data() + offset, sizeof(value));
+        return value;
+    };
+    const auto loadU32 = [&metadata](std::size_t offset) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, metadata.data() + offset, sizeof(value));
+        return value;
+    };
+    const auto loadU64 = [&metadata](std::size_t offset) {
+        std::uint64_t value = 0;
+        std::memcpy(&value, metadata.data() + offset, sizeof(value));
+        return value;
+    };
+    expectEqual(loadU16(4), static_cast<std::uint16_t>(hostMetadata.st_mode),
+                "stat64 mapped file returned the wrong mode");
+    expectEqual(loadU16(6), static_cast<std::uint16_t>(hostMetadata.st_nlink),
+                "stat64 mapped file returned the wrong link count");
+    expectEqual(loadU64(8), static_cast<std::uint64_t>(hostMetadata.st_ino),
+                "stat64 mapped file returned the wrong inode");
+    expectEqual(loadU64(96), static_cast<std::uint64_t>(hostMetadata.st_size),
+                "stat64 mapped file returned the wrong size");
+    expectEqual(loadU32(112),
+                static_cast<std::uint32_t>(hostMetadata.st_blksize),
+                "stat64 mapped file returned the wrong block size");
+    expect(std::all_of(metadata.begin() + 124, metadata.end(),
+                       [](std::uint8_t byte) { return byte == 0; }),
+           "stat64 mapped file did not zero reserved guest fields");
+
+    state.rax = stat64Number;
+    state.rsi = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "stat64 invalid output pointer returned the wrong errno");
+    expect((state.rflags & std::uint64_t{1}) != 0,
+           "stat64 invalid output pointer did not set BSD carry");
+}
+
+void testDarwinGetfsstat64SyntheticRoot() {
+    constexpr auto getfsstat64Number = UINT64_C(0x0200015B);
+    constexpr std::uint64_t recordSize = 2168;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress output{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = getfsstat64Number;
+    state.rdi = 0;
+    state.rsi = 0;
+    state.rdx = 2;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEEC68ULL}));
+    expectEqual(state.rax, std::uint64_t{1},
+                "getfsstat64 count query returned the wrong mount count");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "getfsstat64 count query did not clear BSD carry");
+
+    state.rax = getfsstat64Number;
+    state.rdi = output.value;
+    state.rsi = recordSize;
+    state.rdx = 2;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{1},
+                "getfsstat64 buffer query returned the wrong mount count");
+    expectEqual(addressSpace.readU32(output),
+                static_cast<std::uint32_t>(rosa::guest::guestPageSize),
+                "getfsstat64 root block size differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 64}),
+                std::uint32_t{0x5001},
+                "getfsstat64 root mount flags differ");
+    const auto filesystemType = addressSpace.readBytes(
+        rosa::guest::GuestAddress{output.value + 72}, 5);
+    expect(filesystemType ==
+               std::vector<std::uint8_t>({'a', 'p', 'f', 's', 0}),
+           "getfsstat64 filesystem type differs");
+    const auto mountedOn = addressSpace.readBytes(
+        rosa::guest::GuestAddress{output.value + 88}, 2);
+    expect(mountedOn == std::vector<std::uint8_t>({'/', 0}),
+           "getfsstat64 mount point differs");
+
+    constexpr std::array<std::uint8_t, 4> sentinel{
+        0xA5, 0xA5, 0xA5, 0xA5};
+    addressSpace.writeBytes(output, sentinel);
+    state.rax = getfsstat64Number;
+    state.rdi = output.value;
+    state.rsi = recordSize - 1;
+    state.rdx = 2;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "undersized getfsstat64 buffer returned a record");
+    expectEqual(addressSpace.readBytes(output, sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "undersized getfsstat64 changed its buffer");
+
+    state.rax = getfsstat64Number;
+    state.rdi = 0xA000;
+    state.rsi = recordSize;
+    state.rdx = 2;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "getfsstat64 invalid buffer returned the wrong errno");
+    expect((state.rflags & 1U) != 0,
+           "getfsstat64 invalid buffer did not set BSD carry");
+}
+
+void testDarwinAccessChrootMarker() {
+    constexpr auto accessNumber = UINT64_C(0x02000021);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr std::string_view marker = "/AppleInternal/XBS/.isChrooted";
+    std::vector<std::uint8_t> path(marker.begin(), marker.end());
+    path.push_back(0);
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, path);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = accessNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = F_OK;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30318ULL}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                "chroot-marker access probe returned the wrong errno");
+    expect((state.rflags & std::uint64_t{1}) != 0,
+           "chroot-marker access probe did not set BSD carry");
+
+    state.rax = accessNumber;
+    state.rdi = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "access invalid path returned the wrong errno");
+    expect((state.rflags & std::uint64_t{1}) != 0,
+           "access invalid path did not set BSD carry");
+}
+
+void testDarwinAccessMappedDirectory() {
+    constexpr auto accessNumber = UINT64_C(0x02000021);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    rosa::darwin::SyscallDispatcher dispatcher;
+    auto directory = dispatcher.fileSpace().currentDirectory() /
+                     "test-fixtures";
+    if (!std::filesystem::is_directory(directory)) {
+        directory = dispatcher.fileSpace().currentDirectory() /
+                    "build/debug/test-fixtures";
+    }
+    expect(std::filesystem::is_directory(directory),
+           "mapped access test directory is missing");
+    const auto directoryString = directory.string();
+    std::vector<std::uint8_t> path(directoryString.begin(),
+                                   directoryString.end());
+    path.push_back(0);
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, path);
+    rosa::x86::X86State state;
+    state.rax = accessNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = R_OK;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30318ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "mapped-directory access did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "mapped-directory access did not clear BSD carry");
+
+    const auto missingString = (directory / "missing-rosa-entry").string();
+    std::vector<std::uint8_t> missing(missingString.begin(),
+                                      missingString.end());
+    missing.push_back(0);
+    addressSpace.writeBytes(pathAddress, missing);
+    state.rax = accessNumber;
+    state.rsi = F_OK;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                "missing mapped-path access returned the wrong errno");
+    expect((state.rflags & 1U) != 0,
+           "missing mapped-path access did not set BSD carry");
+}
+
+void testDarwinGetattrlistRootVolume() {
+    constexpr auto getattrlistNumber = UINT64_C(0x020000DC);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress path{0x8010};
+    constexpr rosa::guest::GuestAddress attributeList{0x8100};
+    constexpr rosa::guest::GuestAddress output{0x8200};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(path, std::array<std::uint8_t, 2>{'/', 0});
+    constexpr std::array<std::uint8_t, 24> requestedAttributes{
+        0x05, 0x00, 0x00, 0x00,
+        0x06, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x06, 0x80,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00};
+    addressSpace.writeBytes(attributeList, requestedAttributes);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = getattrlistNumber;
+    state.rdi = path.value;
+    state.rsi = attributeList.value;
+    state.rdx = output.value;
+    state.r10 = 64;
+    state.r8 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802A8D124ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "root getattrlist did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "root getattrlist did not clear BSD carry");
+    expectEqual(addressSpace.readU32(output), std::uint32_t{64},
+                "root getattrlist returned length differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 4}),
+                std::uint32_t{1},
+                "root getattrlist device differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 8}),
+                std::uint32_t{1},
+                "root getattrlist fsid differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 16}),
+                std::uint32_t{0x03000000},
+                "root getattrlist format capabilities differ");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 20}),
+                std::uint32_t{2},
+                "root getattrlist interface capabilities differ");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{output.value + 48}, 16),
+                std::vector<std::uint8_t>({
+                    'R', 'O', 'S', 'A', '-', 'R', 'O', 'O',
+                    'T', '-', 'V', 'O', 'L', 'U', 'M', 'E'}),
+                "root getattrlist UUID differs");
+
+    state.rax = getattrlistNumber;
+    state.rdx = 0xA000;
+    state.r10 = 64;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "root getattrlist invalid output returned the wrong errno");
+    expect((state.rflags & 1U) != 0,
+           "root getattrlist invalid output did not set BSD carry");
+}
+
+void testDarwinGetattrlistMappedFileFullPath() {
+    constexpr auto getattrlistNumber = UINT64_C(0x020000DC);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8010};
+    constexpr rosa::guest::GuestAddress attributeList{0x8100};
+    constexpr rosa::guest::GuestAddress output{0x8200};
+    constexpr rosa::guest::GuestAddress readOnlyPage{0x9000};
+    constexpr rosa::guest::GuestAddress readOnlyOutput{0x9100};
+    rosa::darwin::SyscallDispatcher dispatcher;
+    auto fixturePath = dispatcher.fileSpace().currentDirectory() /
+                       "test-fixtures/hello-darwin-x86_64";
+    if (!std::filesystem::is_regular_file(fixturePath)) {
+        fixturePath = dispatcher.fileSpace().currentDirectory() /
+                      "build/debug/test-fixtures/hello-darwin-x86_64";
+    }
+    const auto path = fixturePath.string();
+    expect(std::filesystem::is_regular_file(path),
+           "FULLPATH getattrlist fixture is missing");
+    std::vector<std::uint8_t> pathBytes(path.begin(), path.end());
+    pathBytes.push_back(0);
+    const auto expectedSize = static_cast<std::uint32_t>(
+        (12U + pathBytes.size() + 3U) & ~std::size_t{3U});
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(readOnlyPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, pathBytes);
+    constexpr std::array<std::uint8_t, 24> requestedAttributes{
+        0x05, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x08,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00};
+    addressSpace.writeBytes(attributeList, requestedAttributes);
+    constexpr std::array<std::uint8_t, 8> sentinel{
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x17, 0x28};
+    addressSpace.writeBytes(
+        rosa::guest::GuestAddress{output.value + expectedSize}, sentinel);
+
+    rosa::x86::X86State state;
+    state.rax = getattrlistNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = attributeList.value;
+    state.rdx = output.value;
+    state.r10 = 0x40C;
+    state.r8 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30300ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "FULLPATH getattrlist did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "FULLPATH getattrlist did not clear BSD carry");
+    expectEqual(addressSpace.readU32(output), expectedSize,
+                "FULLPATH getattrlist record length differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 4}),
+                std::uint32_t{8},
+                "FULLPATH getattrlist attrreference offset differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 8}),
+                static_cast<std::uint32_t>(pathBytes.size()),
+                "FULLPATH getattrlist attrreference length differs");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{output.value + 12},
+                    pathBytes.size()),
+                pathBytes,
+                "FULLPATH getattrlist path bytes differ");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{output.value + expectedSize},
+                    sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "FULLPATH getattrlist wrote past its record");
+
+    addressSpace.writeBytes(output, sentinel);
+    state.rax = getattrlistNumber;
+    state.rdx = output.value;
+    state.r10 = 4;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "truncated FULLPATH getattrlist did not succeed");
+    expectEqual(addressSpace.readU32(output), expectedSize,
+                "truncated FULLPATH getattrlist did not report full size");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{output.value + 4}, 4),
+                std::vector<std::uint8_t>(sentinel.begin() + 4,
+                                          sentinel.end()),
+                "truncated FULLPATH getattrlist wrote past its buffer");
+
+    addressSpace.writeBytes(readOnlyOutput, sentinel);
+    expectEqual(addressSpace.protect(
+                    readOnlyPage, rosa::guest::guestPageSize,
+                    rosa::guest::Permission::Read),
+                rosa::guest::ProtectResult::Success,
+                "could not make FULLPATH output read-only");
+    state.rax = getattrlistNumber;
+    state.rdx = readOnlyOutput.value;
+    state.r10 = 0x40C;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "FULLPATH getattrlist invalid output returned wrong errno");
+    expect((state.rflags & 1U) != 0,
+           "FULLPATH getattrlist invalid output did not set BSD carry");
+    expectEqual(addressSpace.readBytes(readOnlyOutput, sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "faulted FULLPATH getattrlist changed its output");
+}
+
+void testDarwinFstatat64SyntheticDirectory() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto openatNumber = UINT64_C(0x020001CF);
+    constexpr auto fstatat64Number = UINT64_C(0x020001D6);
+    constexpr std::uint32_t rootFlags = 0x20100000;
+    constexpr std::uint32_t directoryFlags = 0x00100000;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress rootPathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress cryptexPathAddress{0x8120};
+    constexpr rosa::guest::GuestAddress dyldPathAddress{0x8160};
+    constexpr rosa::guest::GuestAddress missingPathAddress{0x8190};
+    constexpr rosa::guest::GuestAddress statAddress{0x8300};
+    constexpr std::array<std::uint8_t, 2> rootPath{'/', 0};
+    constexpr std::string_view cryptexPath = "System/Cryptexes/OS";
+    constexpr std::string_view dyldPath = "System/Library/dyld/";
+    constexpr std::array<std::uint8_t, 8> missingPath{
+        'm', 'i', 's', 's', 'i', 'n', 'g', 0};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(rootPathAddress, rootPath);
+    addressSpace.writeBytes(
+        cryptexPathAddress,
+        std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t *>(cryptexPath.data()),
+            cryptexPath.size()});
+    addressSpace.writeBytes(
+        rosa::guest::GuestAddress{cryptexPathAddress.value +
+                                  cryptexPath.size()},
+        std::array<std::uint8_t, 1>{0});
+    addressSpace.writeBytes(
+        dyldPathAddress,
+        std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t *>(dyldPath.data()),
+            dyldPath.size()});
+    addressSpace.writeBytes(
+        rosa::guest::GuestAddress{dyldPathAddress.value + dyldPath.size()},
+        std::array<std::uint8_t, 1>{0});
+    addressSpace.writeBytes(missingPathAddress, missingPath);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+
+    state.rax = openNumber;
+    state.rdi = rootPathAddress.value;
+    state.rsi = rootFlags;
+    state.rdx = 0;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{3},
+                "fstatat64 setup did not open the guest root");
+
+    state.rax = openatNumber;
+    state.rdi = 3;
+    state.rsi = cryptexPathAddress.value;
+    state.rdx = directoryFlags;
+    state.r10 = 0;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{4},
+                "fstatat64 setup did not open the cryptex directory");
+
+    constexpr std::array<std::uint8_t, 144> sentinel = [] {
+        std::array<std::uint8_t, 144> bytes{};
+        bytes.fill(0xA5);
+        return bytes;
+    }();
+    addressSpace.writeBytes(statAddress, sentinel);
     state.rax = fstatat64Number;
-    state.rdi = 6;
-    state.rsi = pathAddress.value;
-    state.rdx = 0x8200;
+    state.rdi = 4;
+    state.rsi = dyldPathAddress.value;
+    state.rdx = statAddress.value;
     state.r10 = 0;
     state.rflags = 0x8D7;
-    bool diagnosed = false;
-    try {
-        static_cast<void>(dispatcher.dispatch(
-            addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEEBD8ULL}));
-    } catch (const std::runtime_error &error) {
-        const auto message = std::string_view(error.what());
-        diagnosed = message.find("unsupported fstatat64: dirfd=6") !=
-                        std::string_view::npos &&
-                    message.find("path=\"System/Library/dyld/\"") !=
-                        std::string_view::npos &&
-                    message.find("stat*=0x8200 flags=0x0") !=
-                        std::string_view::npos;
-    }
-    expect(diagnosed,
-           "unsupported fstatat64 did not report its decoded guest ABI");
-    expectEqual(state.rflags, std::uint64_t{0x8D7},
-                "unsupported fstatat64 changed guest flags");
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEEBD8ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "fstatat64 did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "fstatat64 did not clear BSD carry");
+
+    const auto metadata = addressSpace.readBytes(statAddress, sentinel.size());
+    const auto loadU16 = [&metadata](std::size_t offset) {
+        std::uint16_t value = 0;
+        std::memcpy(&value, metadata.data() + offset, sizeof(value));
+        return value;
+    };
+    const auto loadU32 = [&metadata](std::size_t offset) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, metadata.data() + offset, sizeof(value));
+        return value;
+    };
+    const auto loadU64 = [&metadata](std::size_t offset) {
+        std::uint64_t value = 0;
+        std::memcpy(&value, metadata.data() + offset, sizeof(value));
+        return value;
+    };
+    expectEqual(loadU16(4), std::uint16_t{0040555},
+                "fstatat64 returned the wrong directory mode");
+    expectEqual(loadU16(6), std::uint16_t{2},
+                "fstatat64 returned the wrong directory link count");
+    expectEqual(loadU64(8), std::uint64_t{2},
+                "fstatat64 returned the wrong synthetic inode");
+    expectEqual(loadU32(112),
+                static_cast<std::uint32_t>(rosa::guest::guestPageSize),
+                "fstatat64 returned the wrong block size");
+    expect(std::all_of(metadata.begin() + 116, metadata.end(),
+                       [](std::uint8_t byte) { return byte == 0; }),
+           "fstatat64 did not zero reserved guest stat64 fields");
+
+    addressSpace.writeBytes(statAddress, sentinel);
+    state.rax = fstatat64Number;
+    state.rdi = 99;
+    state.rsi = dyldPathAddress.value;
+    state.rdx = statAddress.value;
+    state.r10 = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "fstatat64 invalid dirfd returned the wrong errno");
+    expectEqual(addressSpace.readBytes(statAddress, sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "failed fstatat64 changed guest stat memory");
+
+    state.rax = fstatat64Number;
+    state.rdi = 4;
+    state.rsi = missingPathAddress.value;
+    state.rdx = statAddress.value;
+    state.r10 = 0;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                "fstatat64 missing path returned the wrong errno");
+
+    state.rax = fstatat64Number;
+    state.rdi = 4;
+    state.rsi = dyldPathAddress.value;
+    state.rdx = 0x9000;
+    state.r10 = 0;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "fstatat64 invalid stat pointer returned the wrong errno");
 }
 
 void testDarwinOpenReadOnlyUserFile() {
@@ -16759,6 +25961,93 @@ void testDarwinOpenReadOnlyUserFile() {
                 "missing read-only guest file did not set BSD carry");
     expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
                 "failed read-only guest open allocated a descriptor");
+}
+
+void testDarwinMmapReadOnlyUserFile() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto mmapNumber = UINT64_C(0x020000C5);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    const auto fixturePath = std::filesystem::canonical(
+        std::filesystem::path{ROSA_TEST_HELLO_MACHO_PATH});
+    const auto fixtureString = fixturePath.string();
+    std::vector<std::uint8_t> fixtureBytes(fixtureString.begin(),
+                                           fixtureString.end());
+    fixtureBytes.push_back(0);
+    struct stat fixtureMetadata {};
+    expect(::stat(fixturePath.c_str(), &fixtureMetadata) == 0 &&
+               fixtureMetadata.st_size > 0,
+           "could not inspect mmap fixture");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, fixtureBytes);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = O_RDONLY;
+    state.rdx = 0;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    const auto descriptor = state.rax;
+
+    state.rax = mmapNumber;
+    state.rdi = 0;
+    state.rsi = static_cast<std::uint64_t>(fixtureMetadata.st_size);
+    state.rdx = 1;
+    state.r10 = 0x00040002;
+    state.r8 = descriptor;
+    state.r9 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802A8F678ULL}));
+    constexpr auto expectedBase = UINT64_C(0x0000000100000000);
+    expectEqual(state.rax, expectedBase,
+                "mmap mapped-file base differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "mmap mapped-file did not clear BSD carry");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{state.rax}),
+                std::uint32_t{0xFEEDFACF},
+                "mmap mapped-file Mach-O header differs");
+    const auto roundedSize =
+        (static_cast<std::uint64_t>(fixtureMetadata.st_size) +
+         rosa::guest::guestPageSize - 1U) &
+        ~(static_cast<std::uint64_t>(rosa::guest::guestPageSize) - 1U);
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{expectedBase + roundedSize - 1U},
+                    1).front(),
+                std::uint8_t{0},
+                "mmap did not zero the source file's final partial page");
+    const auto mappings = addressSpace.mappingInfos();
+    const auto mapped = std::ranges::find_if(
+        mappings, [](const rosa::guest::MappingInfo &mapping) {
+            return mapping.label == "mmap private file";
+        });
+    expect(mapped != mappings.end() && mapped->base.value == expectedBase &&
+               mapped->size == roundedSize &&
+               mapped->permissions == rosa::guest::Permission::Read,
+           "mmap stored the wrong guest mapping metadata");
+    bool writeRejected = false;
+    try {
+        addressSpace.writeU64(rosa::guest::GuestAddress{expectedBase}, 0);
+    } catch (const std::runtime_error &) {
+        writeRejected = true;
+    }
+    expect(writeRejected, "read-only guest mmap accepted a write");
+
+    const auto mappingCount = addressSpace.mappingCount();
+    state.rax = mmapNumber;
+    state.r8 = 99;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "mmap invalid descriptor returned the wrong errno");
+    expectEqual(addressSpace.mappingCount(), mappingCount,
+                "failed mmap installed a guest mapping");
 }
 
 void testDarwinFcntlGetPath() {
@@ -16853,6 +26142,93 @@ void testDarwinFcntlGetPath() {
                              std::string_view::npos;
     }
     expect(unsupportedCommand, "unobserved guest fcntl command did not fail loudly");
+}
+
+void testDarwinSimpleAslSocketFlow() {
+    constexpr auto socketNumber = UINT64_C(0x02000061);
+    constexpr auto connectNumber = UINT64_C(0x02000062);
+    constexpr auto fcntlNumber = UINT64_C(0x0200005C);
+    constexpr auto closeNumber = UINT64_C(0x02000006);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress socketAddress{0x8100};
+    constexpr std::string_view systemLogPath = "/var/run/syslog";
+    std::array<std::uint8_t, 106> sockaddr{};
+    sockaddr[0] = static_cast<std::uint8_t>(sockaddr.size());
+    sockaddr[1] = 1; // AF_UNIX
+    std::copy(systemLogPath.begin(), systemLogPath.end(),
+              sockaddr.begin() + 2);
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(socketAddress, sockaddr);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = socketNumber;
+    state.rdi = 1; // AF_UNIX
+    state.rsi = 2; // SOCK_DGRAM
+    state.rdx = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E32E7CULL}));
+    expectEqual(state.rax, std::uint64_t{3},
+                "simple-ASL socket descriptor differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "socket did not clear BSD carry");
+    const auto descriptor = static_cast<std::uint32_t>(state.rax);
+    const auto *socket = dispatcher.fileSpace().lookup(
+        rosa::darwin::GuestFileDescriptor{
+            static_cast<std::int32_t>(descriptor)});
+    expect(socket != nullptr &&
+               socket->kind == rosa::darwin::GuestFileKind::UnixDatagramSocket,
+           "socket did not create a guest-only Unix datagram descriptor");
+
+    state.rax = fcntlNumber;
+    state.rdi = descriptor;
+    state.rsi = 2; // F_SETFD
+    state.rdx = 1; // FD_CLOEXEC
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "simple-ASL F_SETFD did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "simple-ASL F_SETFD did not clear BSD carry");
+
+    state.rax = connectNumber;
+    state.rdi = descriptor;
+    state.rsi = socketAddress.value;
+    state.rdx = sockaddr.size();
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                "guest ASL connect returned the wrong errno");
+    expect((state.rflags & 1U) != 0,
+           "guest ASL connect did not set BSD carry");
+    expect(dispatcher.fileSpace().lookup(
+               rosa::darwin::GuestFileDescriptor{
+                   static_cast<std::int32_t>(descriptor)}) != nullptr,
+           "failed guest ASL connect closed its descriptor");
+
+    state.rax = connectNumber;
+    state.rsi = 0xA000;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "guest connect bad address returned the wrong errno");
+
+    state.rax = closeNumber;
+    state.rdi = descriptor;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "simple-ASL socket close did not succeed");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+                "simple-ASL socket close retained its descriptor");
 }
 
 void testDarwinCloseGuestDescriptor() {
@@ -16999,6 +26375,267 @@ void testDarwinProcInfoRejectsInvalidDyldImages() {
                 "overflowing dyld metadata range returned the wrong errno");
     expect(!dispatcher.dyldInfo().has_value(),
            "invalid dyld metadata range was registered");
+}
+
+void testDarwinProcInfoUniqueIdentifier() {
+    constexpr auto procInfoNumber = UINT64_C(0x02000150);
+    constexpr rosa::guest::GuestAddress outputPage{0x8000};
+    constexpr rosa::guest::GuestAddress output{0x8100};
+    constexpr rosa::guest::GuestAddress readOnlyPage{0x9000};
+    constexpr rosa::guest::GuestAddress readOnlyOutput{0x9100};
+    constexpr std::array<std::uint8_t, 16> executableUuid{
+        0xCB, 0x37, 0x17, 0xC7, 0x1C, 0x8A, 0x32, 0x5F,
+        0x91, 0xDD, 0x67, 0xCC, 0x9F, 0xB8, 0x0E, 0x67};
+    constexpr std::array<std::uint8_t, 8> sentinel{
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x17, 0x28};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        outputPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(
+        readOnlyPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(readOnlyOutput, sentinel);
+    expectEqual(addressSpace.protect(
+                    readOnlyPage, rosa::guest::guestPageSize,
+                    rosa::guest::Permission::Read),
+                rosa::guest::ProtectResult::Success,
+                "could not make unique-identifier output read-only");
+    rosa::darwin::SyscallDispatcher dispatcher(nullptr, executableUuid);
+    rosa::x86::X86State state;
+    state.rax = procInfoNumber;
+    state.rdi = 2;    // PROC_INFO_CALL_PIDINFO
+    state.rsi = static_cast<std::uint64_t>(::getpid());
+    state.rdx = 0x11; // PROC_PIDUNIQIDENTIFIERINFO
+    state.r10 = 0;
+    state.r8 = output.value;
+    state.r9 = 56;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30C08ULL}));
+    expectEqual(state.rax, std::uint64_t{56},
+                "unique-identifier proc_info size differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "unique-identifier proc_info did not clear BSD carry");
+    expectEqual(addressSpace.readBytes(output, executableUuid.size()),
+                std::vector<std::uint8_t>(executableUuid.begin(),
+                                          executableUuid.end()),
+                "unique-identifier proc_info used the wrong executable UUID");
+    expect(addressSpace.readU64(
+               rosa::guest::GuestAddress{output.value + 16}) != 0,
+           "unique-identifier proc_info returned a zero process ID");
+    expect(addressSpace.readU64(
+               rosa::guest::GuestAddress{output.value + 24}) != 0,
+           "unique-identifier proc_info returned a zero parent ID");
+
+    addressSpace.writeBytes(output, sentinel);
+    state.rax = procInfoNumber;
+    state.r8 = output.value;
+    state.r9 = 55;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "short unique-identifier proc_info returned wrong errno");
+    expect((state.rflags & 1U) != 0,
+           "short unique-identifier proc_info did not set BSD carry");
+    expectEqual(addressSpace.readBytes(output, sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "short unique-identifier proc_info changed its output");
+
+    state.rax = procInfoNumber;
+    state.r8 = readOnlyOutput.value;
+    state.r9 = 56;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "faulted unique-identifier proc_info returned wrong errno");
+    expectEqual(addressSpace.readBytes(readOnlyOutput, sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "faulted unique-identifier proc_info changed its output");
+}
+
+void testDarwinProcInfoShortBsdInfo() {
+    constexpr auto procInfoNumber = UINT64_C(0x02000150);
+    constexpr rosa::guest::GuestAddress outputPage{0x8000};
+    constexpr rosa::guest::GuestAddress output{0x8100};
+    constexpr rosa::guest::GuestAddress readOnlyPage{0x9000};
+    constexpr rosa::guest::GuestAddress readOnlyOutput{0x9100};
+    constexpr std::array<std::uint8_t, 8> sentinel{
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x17, 0x28};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        outputPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.mapAnonymous(
+        readOnlyPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(readOnlyOutput, sentinel);
+    expectEqual(addressSpace.protect(
+                    readOnlyPage, rosa::guest::guestPageSize,
+                    rosa::guest::Permission::Read),
+                rosa::guest::ProtectResult::Success,
+                "could not make short-BSD-info output read-only");
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = procInfoNumber;
+    state.rdi = 2;    // PROC_INFO_CALL_PIDINFO
+    state.rsi = static_cast<std::uint64_t>(::getpid());
+    state.rdx = 0x0D; // PROC_PIDT_SHORTBSDINFO
+    state.r10 = 1;    // Include a zombie lookup if the live lookup misses.
+    state.r8 = output.value;
+    state.r9 = 64;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state,
+        rosa::guest::GuestAddress{0x7FF802E30C08ULL}));
+    expectEqual(state.rax, std::uint64_t{64},
+                "short BSD proc_info size differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "short BSD proc_info did not clear BSD carry");
+    expectEqual(addressSpace.readU32(output),
+                static_cast<std::uint32_t>(::getpid()),
+                "short BSD proc_info PID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 4}),
+                static_cast<std::uint32_t>(::getppid()),
+                "short BSD proc_info parent PID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 8}),
+                static_cast<std::uint32_t>(::getpgrp()),
+                "short BSD proc_info process group differs");
+    expect(addressSpace.readU32(
+               rosa::guest::GuestAddress{output.value + 12}) != 0,
+           "short BSD proc_info returned a zero process status");
+    expect(addressSpace.readBytes(
+               rosa::guest::GuestAddress{output.value + 16}, 16)
+                   .front() != 0,
+           "short BSD proc_info returned an empty command name");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 36}),
+                static_cast<std::uint32_t>(::getuid()),
+                "short BSD proc_info UID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{output.value + 40}),
+                static_cast<std::uint32_t>(::getgid()),
+                "short BSD proc_info GID differs");
+    expectEqual(state.r10, std::uint64_t{1},
+                "short BSD proc_info changed its lookup argument");
+
+    addressSpace.writeBytes(output, sentinel);
+    state.rax = procInfoNumber;
+    state.r8 = output.value;
+    state.r9 = 63;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "short short-BSD-info buffer returned wrong errno");
+    expectEqual(addressSpace.readBytes(output, sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "short short-BSD-info buffer changed its output");
+
+    state.rax = procInfoNumber;
+    state.r8 = readOnlyOutput.value;
+    state.r9 = 64;
+    state.rflags = 0xAD6;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "faulted short BSD proc_info returned wrong errno");
+    expectEqual(addressSpace.readBytes(readOnlyOutput, sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "faulted short BSD proc_info changed its output");
+}
+
+void testDarwinMprotect() {
+    constexpr auto mprotectNumber = UINT64_C(0x0200004A);
+    constexpr auto pageSize = rosa::guest::guestPageSize;
+    constexpr rosa::guest::GuestAddress mappingBase{0x100008000ULL};
+    constexpr rosa::guest::GuestAddress guardPage{0x100009000ULL};
+    constexpr auto readWrite =
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write;
+    constexpr auto maximum = readWrite | rosa::guest::Permission::Execute;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(mappingBase, pageSize * 3, readWrite, maximum,
+                              "BSD mprotect test");
+    addressSpace.writeU64(guardPage, 0x0123456789ABCDEFULL);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = mprotectNumber;
+    state.rdi = guardPage.value;
+    state.rsi = pageSize;
+    state.rdx = 0;
+    state.r10 = 0x40000000;
+    state.rflags = 0x47;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state,
+        rosa::guest::GuestAddress{0x7FF802E32B78ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "mprotect(PROT_NONE) did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x46},
+                "mprotect(PROT_NONE) did not clear BSD carry");
+    expectEqual(state.r10, std::uint64_t{0x40000000},
+                "mprotect changed an ignored argument register");
+    expectEqual(addressSpace.mappingCount(), std::size_t{3},
+                "mprotect did not split the guest mapping");
+    bool guardRejected = false;
+    try {
+        static_cast<void>(addressSpace.readU64(guardPage));
+    } catch (const std::runtime_error &error) {
+        guardRejected = std::string_view(error.what()).find("permissions") !=
+                        std::string_view::npos;
+    }
+    expect(guardRejected,
+           "mprotect(PROT_NONE) left the guest guard page readable");
+
+    state.rax = mprotectNumber;
+    state.rdi = guardPage.value;
+    state.rsi = pageSize;
+    state.rdx = 3;
+    state.rflags = 0x3;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "mprotect(PROT_READ|PROT_WRITE) did not succeed");
+    expectEqual(addressSpace.readU64(guardPage),
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "mprotect did not preserve guarded guest bytes");
+
+    state.rax = mprotectNumber;
+    state.rdi = guardPage.value + 1;
+    state.rsi = pageSize;
+    state.rdx = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "unaligned mprotect returned the wrong errno");
+    expectEqual(addressSpace.readU64(guardPage),
+                std::uint64_t{0x0123456789ABCDEFULL},
+                "invalid mprotect changed guest protection");
+
+    state.rax = mprotectNumber;
+    state.rdi = 0x200000000ULL;
+    state.rsi = pageSize;
+    state.rdx = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "unmapped mprotect returned the wrong errno");
+
+    state.rax = mprotectNumber;
+    state.rdi = guardPage.value;
+    state.rsi = pageSize;
+    state.rdx = 8;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "mprotect with unknown protection bits returned the wrong errno");
 }
 
 void testDarwinMunmap() {
@@ -17641,6 +27278,51 @@ void testGeneratedDarwinThreadFastSetCthreadSelf() {
                 "generated machdep call changed guest flags");
 }
 
+void testMachThreadSelfTrap() {
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::threadSelfTrapNumber;
+    state.rdi = 0x1111111111111111ULL;
+    state.rsi = 0x2222222222222222ULL;
+    state.rdx = 0x3333333333333333ULL;
+    state.r10 = 0x4444444444444444ULL;
+    state.r8 = 0x5555555555555555ULL;
+    state.r9 = 0x6666666666666666ULL;
+    state.rflags = 0x8D7;
+
+    auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2FA68ULL});
+    expect(!outcome.exited, "thread_self_trap terminated the guest");
+    const rosa::darwin::GuestMachPortName name{
+        static_cast<std::uint32_t>(state.rax)};
+    expect(name.value != 0 && name.value != 0x103,
+           "thread_self_trap returned an invalid or task-self name");
+    const auto *port = dispatcher.machDispatcher().portSpace().lookup(name);
+    expect(port != nullptr &&
+               port->type == rosa::darwin::GuestPortType::Thread,
+           "thread_self_trap did not create a guest thread object");
+    expect(!port->hasReceiveRight && port->sendUrefs == 1 &&
+               port->sendOnceUrefs == 0,
+           "thread_self_trap created the wrong guest rights");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "thread_self_trap applied BSD carry semantics");
+    expectEqual(state.rdi, std::uint64_t{0x1111111111111111ULL},
+                "thread_self_trap changed an ignored argument register");
+    expectEqual(state.rdx, std::uint64_t{0x3333333333333333ULL},
+                "thread_self_trap changed an ignored argument register");
+
+    state.rax = rosa::darwin::MachDispatcher::threadSelfTrapNumber;
+    outcome = dispatcher.dispatch(addressSpace, state,
+                                  rosa::guest::GuestAddress{0x1000});
+    expect(!outcome.exited, "repeated thread_self_trap terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(name.value),
+                "repeated thread_self_trap returned a different guest name");
+    port = dispatcher.machDispatcher().portSpace().lookup(name);
+    expect(port != nullptr && port->sendUrefs == 2,
+           "repeated thread_self_trap did not add another send uref");
+}
+
 void testMachTaskSelfTrap() {
     rosa::guest::AddressSpace addressSpace;
     rosa::darwin::SyscallDispatcher dispatcher;
@@ -18027,6 +27709,45 @@ void testMachPortConstructTrap() {
         addressSpace.readU32(outputAddress)};
     expect(second != first, "mach_port_construct reused a live guest name");
 
+    constexpr std::uint32_t guardedSendOptions = 0x31;
+    constexpr std::uint64_t traceGuard = 0x71B75ACE;
+    writeOptions(addressSpace, optionsAddress, guardedSendOptions, 0);
+    rosa::darwin::MachDispatcher guardedDispatcher;
+    const auto guardedState = invoke(
+        guardedDispatcher, addressSpace, optionsAddress, outputAddress,
+        traceGuard);
+    expectEqual(guardedState.rax, std::uint64_t{0},
+                "guarded send-right mach_port_construct failed");
+    expectEqual(guardedState.rflags, std::uint64_t{0x8D7},
+                "guarded mach_port_construct applied BSD carry semantics");
+    const rosa::darwin::GuestMachPortName guardedName{
+        addressSpace.readU32(outputAddress)};
+    const auto *guardedPort =
+        guardedDispatcher.portSpace().lookup(guardedName);
+    expect(guardedPort != nullptr && guardedPort->hasReceiveRight,
+           "guarded mach_port_construct omitted its receive right");
+    expectEqual(guardedPort->type, rosa::darwin::GuestPortType::Ordinary,
+                "guarded mach_port_construct created the wrong port type");
+    expectEqual(guardedPort->sendUrefs, std::uint32_t{1},
+                "MPO_INSERT_SEND_RIGHT did not create one send uref");
+    expectEqual(guardedPort->sendOnceUrefs, std::uint32_t{0},
+                "guarded mach_port_construct fabricated a send-once right");
+    expect(guardedPort->guarded && guardedPort->strictGuard,
+           "guarded mach_port_construct lost strict guard policy");
+    expectEqual(guardedPort->guard, traceGuard,
+                "guarded mach_port_construct stored the wrong guard");
+    expectEqual(guardedPort->context, traceGuard,
+                "guarded mach_port_construct stored the wrong context");
+    expectEqual(guardedPort->queueLimit, std::uint32_t{5},
+                "guarded mach_port_construct used the wrong default qlimit");
+    expectEqual(guardedPort->optionFlags, guardedSendOptions,
+                "guarded mach_port_construct lost its option flags");
+    expect(guardedDispatcher.lastPortConstruct() &&
+               guardedDispatcher.lastPortConstruct()->flags ==
+                   guardedSendOptions &&
+               guardedDispatcher.lastPortConstruct()->context == traceGuard,
+           "guarded mach_port_construct observation differs");
+
     rosa::darwin::MachDispatcher invalidOptionsDispatcher;
     writeOptions(addressSpace, optionsAddress, 0x1001, 0);
     bool invalidOptionsRejected = false;
@@ -18089,6 +27810,86 @@ void testMachPortConstructTrap() {
                              rosa::guest::GuestAddress{0x1000});
     expectEqual(invalidTaskState.rax, std::uint64_t{0x10000003},
                 "invalid construct task returned the wrong Mach result");
+}
+
+void testMachVmAllocateTrap() {
+    constexpr rosa::guest::GuestAddress addressPointer{0x8000};
+    constexpr rosa::guest::GuestAddress readOnlyPointer{0x9000};
+    constexpr rosa::guest::GuestAddress occupied{0x100000000ULL};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        addressPointer, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "mach_vm_allocate address pointer");
+    addressSpace.mapAnonymous(
+        readOnlyPointer, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "mach_vm_allocate read-only pointer");
+    addressSpace.mapAnonymous(
+        occupied, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read, "occupied allocation base");
+    addressSpace.writeU64(addressPointer, 0);
+    expectEqual(addressSpace.protect(
+                    readOnlyPointer, rosa::guest::guestPageSize,
+                    rosa::guest::Permission::Read),
+                rosa::guest::ProtectResult::Success,
+                "could not make mach_vm_allocate pointer read-only");
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::vmAllocateTrapNumber;
+    state.rdi = 0x103;
+    state.rsi = addressPointer.value;
+    state.rdx = 0x1001;
+    state.r10 = 0x01000001; // VM_MEMORY_* | VM_FLAGS_ANYWHERE
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802E2F9A8ULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "mach_vm_allocate did not return KERN_SUCCESS");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_vm_allocate applied BSD carry semantics");
+    const auto mapped = rosa::guest::GuestAddress{
+        addressSpace.readU64(addressPointer)};
+    expectEqual(mapped.value, occupied.value + rosa::guest::guestPageSize,
+                "mach_vm_allocate anywhere placement differs");
+    expectEqual(addressSpace.readU64(mapped), std::uint64_t{0},
+                "mach_vm_allocate memory was not zero-filled");
+    const auto mappings = addressSpace.mappingInfos();
+    const auto allocation = std::ranges::find_if(
+        mappings, [mapped](const rosa::guest::MappingInfo &mapping) {
+            return mapping.base == mapped;
+        });
+    constexpr auto readWrite = rosa::guest::Permission::Read |
+                               rosa::guest::Permission::Write;
+    constexpr auto allPermissions =
+        readWrite | rosa::guest::Permission::Execute;
+    expect(allocation != mappings.end() && allocation->size == 0x2000 &&
+               allocation->permissions == readWrite &&
+               allocation->maximumPermissions == allPermissions,
+           "mach_vm_allocate mapping attributes differ");
+
+    const auto countBeforeFault = addressSpace.mappingCount();
+    state.rax = rosa::darwin::MachDispatcher::vmAllocateTrapNumber;
+    state.rsi = readOnlyPointer.value;
+    state.rdx = 0x1000;
+    state.r10 = 1;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{1},
+                "mach_vm_allocate read-only pointer result differs");
+    expectEqual(addressSpace.mappingCount(), countBeforeFault,
+                "faulted mach_vm_allocate leaked a mapping");
+
+    state.rax = rosa::darwin::MachDispatcher::vmAllocateTrapNumber;
+    state.rdi = 0xDEAD;
+    state.rsi = addressPointer.value;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{0x10000003},
+                "mach_vm_allocate invalid task result differs");
+    expectEqual(addressSpace.mappingCount(), countBeforeFault,
+                "invalid-task mach_vm_allocate changed mappings");
 }
 
 void testMachVmDeallocateTrap() {
@@ -18470,19 +28271,122 @@ void testMachVmMapTrap() {
     expectEqual(addressSpace.mappingCount(), countBeforeFailure,
                 "bad-pointer mach_vm_map changed the mapping count");
 
+    constexpr std::uint64_t fixedHint = 0x200000123ULL;
+    constexpr std::uint64_t fixedBase = 0x200000000ULL;
+    addressSpace.writeU64(addressPointer, fixedHint);
     state.rax = rosa::darwin::MachDispatcher::vmMapTrapNumber;
+    state.rdi = 0x103;
     state.rsi = addressPointer.value;
-    state.r8 = 0x3C000000; // fixed mappings are not implemented yet
-    bool rejected = false;
-    try {
-        static_cast<void>(dispatcher.dispatch(
-            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
-    } catch (const std::runtime_error &error) {
-        rejected = std::string_view(error.what()).find("Mach trap") !=
-                   std::string_view::npos;
-    }
-    expect(rejected,
-           "unsupported fixed mach_vm_map did not fail diagnostically");
+    state.rdx = 0x2345;
+    state.r10 = 0;
+    state.r8 = 0x0B000000; // VM_MEMORY_MALLOC | VM_FLAGS_FIXED
+    state.r9 = 3;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2F9E4ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "fixed mach_vm_map did not return KERN_SUCCESS");
+    expectEqual(addressSpace.readU64(addressPointer), fixedBase,
+                "fixed mach_vm_map did not page-truncate its address");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "fixed mach_vm_map changed flags");
+    const auto fixedMappings = addressSpace.mappingInfos();
+    const auto fixedInfo = std::ranges::find_if(
+        fixedMappings, [](const rosa::guest::MappingInfo &mapping) {
+            return mapping.base.value == fixedBase;
+        });
+    expect(fixedInfo != fixedMappings.end() &&
+               fixedInfo->size == 0x3000 &&
+               fixedInfo->permissions ==
+                   (rosa::guest::Permission::Read |
+                    rosa::guest::Permission::Write),
+           "fixed mach_vm_map mapping differs");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{fixedBase}),
+                std::uint64_t{0},
+                "fixed mach_vm_map was not zero-filled");
+
+    const auto countAfterFixed = addressSpace.mappingCount();
+    addressSpace.writeU64(addressPointer, fixedBase);
+    state.rax = rosa::darwin::MachDispatcher::vmMapTrapNumber;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{3},
+                "overlapping fixed mach_vm_map did not return KERN_NO_SPACE");
+    expectEqual(addressSpace.mappingCount(), countAfterFixed,
+                "overlapping fixed mach_vm_map changed the mappings");
+
+    addressSpace.writeU64(addressPointer, 0);
+    state.rax = rosa::darwin::MachDispatcher::vmMapTrapNumber;
+    state.rdi = 0x103;
+    state.rsi = addressPointer.value;
+    state.rdx = 0x2000;
+    state.r10 = 0;
+    state.r8 = 0x49000001; // VM_MEMORY_* alias | VM_FLAGS_ANYWHERE
+    state.r9 = 3;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2F9E4ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "zero-mask mach_vm_map did not return KERN_SUCCESS");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "zero-mask mach_vm_map changed flags");
+    const auto zeroMaskMapped = addressSpace.readU64(addressPointer);
+    expect((zeroMaskMapped & (rosa::guest::guestPageSize - 1U)) == 0,
+           "zero-mask mach_vm_map result was not page aligned");
+    const auto zeroMaskMappings = addressSpace.mappingInfos();
+    const auto zeroMaskInfo = std::ranges::find_if(
+        zeroMaskMappings,
+        [zeroMaskMapped](const rosa::guest::MappingInfo &mapping) {
+            return mapping.base.value == zeroMaskMapped;
+        });
+    expect(zeroMaskInfo != zeroMaskMappings.end() &&
+               zeroMaskInfo->size == 0x2000 &&
+               zeroMaskInfo->permissions ==
+                   (rosa::guest::Permission::Read |
+                    rosa::guest::Permission::Write),
+           "zero-mask mach_vm_map mapping differs");
+
+    addressSpace.writeU64(addressPointer, 0);
+    state.rax = rosa::darwin::MachDispatcher::vmMapTrapNumber;
+    state.rdi = 0x103;
+    state.rsi = addressPointer.value;
+    state.rdx = 0x800000;
+    state.r10 = 0x7FFFFF;
+    state.r8 = 0x02000001; // VM_MEMORY_MALLOC_SMALL | VM_FLAGS_ANYWHERE
+    state.r9 = 3;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2F9E4ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "large-alignment mach_vm_map did not return KERN_SUCCESS");
+    const auto alignedMapped = addressSpace.readU64(addressPointer);
+    expect((alignedMapped & 0x7FFFFFU) == 0,
+           "mach_vm_map did not honor its 8 MiB alignment mask");
+    const auto alignedMappings = addressSpace.mappingInfos();
+    const auto alignedInfo = std::ranges::find_if(
+        alignedMappings,
+        [alignedMapped](const rosa::guest::MappingInfo &mapping) {
+            return mapping.base.value == alignedMapped;
+        });
+    expect(alignedInfo != alignedMappings.end() &&
+               alignedInfo->size == 0x800000 &&
+               alignedInfo->permissions ==
+                   (rosa::guest::Permission::Read |
+                    rosa::guest::Permission::Write),
+           "large-alignment mach_vm_map mapping differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "large-alignment mach_vm_map changed flags");
+
+    addressSpace.writeU64(addressPointer, 0);
+    const auto countBeforeInvalidMask = addressSpace.mappingCount();
+    state.rax = rosa::darwin::MachDispatcher::vmMapTrapNumber;
+    state.r10 = 0x6FFF;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{4},
+                "noncontiguous mach_vm_map mask did not return KERN_INVALID_ARGUMENT");
+    expectEqual(addressSpace.mappingCount(), countBeforeInvalidMask,
+                "invalid-mask mach_vm_map changed guest mappings");
 }
 
 void testGeneratedMachVmMapTrap() {
@@ -18826,6 +28730,945 @@ void testMachMessage2HostBasicInfoRequest() {
                 "faulted host_info changed the trap result register");
 }
 
+void testMachMessage2HostPriorityInfoRequest() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr std::uint32_t requestSize = 40;
+    constexpr std::uint32_t receiveSize = 320;
+    constexpr std::uint32_t replySize = 72;
+    constexpr std::uint32_t messageBits = 0x1513;
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::hostSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto hostName = static_cast<std::uint32_t>(state.rax);
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto replyName = static_cast<std::uint32_t>(state.rax);
+
+    std::array<std::uint8_t, requestSize> request{};
+    const auto encode32 = [&request](std::size_t offset,
+                                     std::uint32_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, messageBits);
+    encode32(4, requestSize);
+    encode32(8, hostName);
+    encode32(12, replyName);
+    encode32(20, 200);
+    request[28] = 1;
+    encode32(32, 5); // HOST_PRIORITY_INFO
+    encode32(36, 8); // HOST_PRIORITY_INFO_COUNT
+
+    addressSpace.mapAnonymous(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "host priority message");
+    addressSpace.writeBytes(messageAddress, request);
+    addressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "host priority stack arguments");
+    addressSpace.writeU64(stackAddress, 0xDEADBEEF);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(requestSize) << 32U) |
+                messageBits;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) |
+                hostName;
+    state.r8 = std::uint64_t{200} << 32U;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "host priority mach_msg2 did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "host priority mach_msg2 changed flags");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 4}),
+                replySize, "host priority reply size differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 32}),
+                std::uint32_t{0}, "host priority MIG result differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 36}),
+                std::uint32_t{8}, "host priority output count differs");
+    const auto readPriority = [&addressSpace, messageAddress](
+                                  std::uint64_t offset) {
+        return std::bit_cast<std::int32_t>(addressSpace.readU32(
+            rosa::guest::GuestAddress{messageAddress.value + offset}));
+    };
+    const auto kernelPriority = readPriority(40);
+    const auto userPriority = readPriority(52);
+    const auto minimumPriority = readPriority(64);
+    const auto maximumPriority = readPriority(68);
+    expect(minimumPriority <= userPriority &&
+               userPriority <= maximumPriority &&
+               kernelPriority > maximumPriority,
+           "host priority reply returned an incoherent range");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 72}),
+                std::uint32_t{0}, "host priority trailer type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 76}),
+                std::uint32_t{8}, "host priority trailer size differs");
+}
+
+void testMachMessage2HostClockServiceRequest() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr std::uint32_t requestSize = 36;
+    constexpr std::uint32_t receiveSize = 48;
+    constexpr std::uint32_t replySize = 40;
+    constexpr std::uint32_t messageBits = 0x1513;
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::hostSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto hostName = static_cast<std::uint32_t>(state.rax);
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto replyName = static_cast<std::uint32_t>(state.rax);
+
+    std::array<std::uint8_t, requestSize> request{};
+    const auto encode32 = [&request](std::size_t offset,
+                                     std::uint32_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, messageBits);
+    encode32(4, requestSize);
+    encode32(8, hostName);
+    encode32(12, replyName);
+    encode32(20, 206); // host_get_clock_service
+    request[28] = 1;   // native little-endian NDR integer representation
+    encode32(32, 0);   // SYSTEM_CLOCK
+
+    addressSpace.mapAnonymous(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "host clock-service message");
+    addressSpace.writeBytes(messageAddress, request);
+    addressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "host clock-service stack arguments");
+    addressSpace.writeU64(stackAddress, 0xDEADBEEF);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(requestSize) << 32U) |
+                messageBits;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) |
+                hostName;
+    state.r8 = std::uint64_t{206} << 32U;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "host clock-service mach_msg2 did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "host clock-service mach_msg2 changed flags");
+    expectEqual(addressSpace.readU32(messageAddress),
+                std::uint32_t{0x80001200},
+                "host clock-service reply bits differ");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 4}),
+                replySize, "host clock-service reply size differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 8}),
+                std::uint32_t{0},
+                "host clock-service reply remote port differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 12}),
+                replyName, "host clock-service reply local port differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 20}),
+                std::uint32_t{306},
+                "host clock-service reply ID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 24}),
+                std::uint32_t{1},
+                "host clock-service descriptor count differs");
+    const auto clockName = addressSpace.readU32(
+        rosa::guest::GuestAddress{messageAddress.value + 28});
+    expect(clockName != 0 && clockName != hostName && clockName != replyName,
+           "host clock-service returned an invalid clock port name");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{messageAddress.value + 38}, 1)
+                    .front(),
+                std::uint8_t{17},
+                "host clock-service descriptor disposition differs");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{messageAddress.value + 39}, 1)
+                    .front(),
+                std::uint8_t{0},
+                "host clock-service descriptor type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 40}),
+                std::uint32_t{0},
+                "host clock-service trailer type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 44}),
+                std::uint32_t{8},
+                "host clock-service trailer size differs");
+    const auto *clockPort = dispatcher.portSpace().lookup(
+        rosa::darwin::GuestMachPortName{clockName});
+    expect(clockPort != nullptr &&
+               clockPort->type == rosa::darwin::GuestPortType::Clock &&
+               !clockPort->hasReceiveRight && clockPort->sendUrefs == 1 &&
+               clockPort->sendOnceUrefs == 0 && clockPort->context == 0,
+           "host clock-service returned an invalid guest clock right");
+}
+
+void testMachMessage2TaskGetBootstrapPortRequest() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr std::uint32_t requestSize = 36;
+    constexpr std::uint32_t receiveSize = 48;
+    constexpr std::uint32_t replySize = 40;
+    constexpr std::uint32_t messageBits = 0x1513;
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto taskName = static_cast<std::uint32_t>(state.rax);
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto replyName = static_cast<std::uint32_t>(state.rax);
+
+    std::array<std::uint8_t, requestSize> request{};
+    const auto encode32 = [&request](std::size_t offset,
+                                     std::uint32_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, messageBits);
+    encode32(4, requestSize);
+    encode32(8, taskName);
+    encode32(12, replyName);
+    encode32(20, 3409); // task_get_special_port
+    request[28] = 1;    // native little-endian NDR integer representation
+    encode32(32, 4);    // TASK_BOOTSTRAP_PORT
+
+    addressSpace.mapAnonymous(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task_get_special_port message");
+    addressSpace.writeBytes(messageAddress, request);
+    addressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task_get_special_port stack arguments");
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(requestSize) << 32U) |
+                messageBits;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) |
+                taskName;
+    state.r8 = std::uint64_t{3409} << 32U;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "task_get_special_port mach_msg2 did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "task_get_special_port mach_msg2 changed flags");
+    expectEqual(addressSpace.readU32(messageAddress),
+                std::uint32_t{0x80001200},
+                "task_get_special_port reply bits differ");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 4}),
+                replySize, "task_get_special_port reply size differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 12}),
+                replyName, "task_get_special_port reply port differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 20}),
+                std::uint32_t{3509},
+                "task_get_special_port reply ID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 24}),
+                std::uint32_t{1},
+                "task_get_special_port descriptor count differs");
+    const auto bootstrapName = addressSpace.readU32(
+        rosa::guest::GuestAddress{messageAddress.value + 28});
+    expect(bootstrapName != 0 && bootstrapName != taskName &&
+               bootstrapName != replyName,
+           "task_get_special_port returned an invalid bootstrap name");
+    const auto descriptorTail = addressSpace.readBytes(
+        rosa::guest::GuestAddress{messageAddress.value + 38}, 2);
+    expectEqual(descriptorTail[0], std::uint8_t{17},
+                "task_get_special_port descriptor disposition differs");
+    expectEqual(descriptorTail[1], std::uint8_t{0},
+                "task_get_special_port descriptor type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 40}),
+                std::uint32_t{0},
+                "task_get_special_port trailer type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 44}),
+                std::uint32_t{8},
+                "task_get_special_port trailer size differs");
+    const auto *bootstrapPort = dispatcher.portSpace().lookup(
+        rosa::darwin::GuestMachPortName{bootstrapName});
+    expect(bootstrapPort != nullptr &&
+               bootstrapPort->type ==
+                   rosa::darwin::GuestPortType::Bootstrap &&
+               !bootstrapPort->hasReceiveRight &&
+               bootstrapPort->sendUrefs == 1 &&
+               bootstrapPort->sendOnceUrefs == 0,
+           "task_get_special_port returned an invalid bootstrap right");
+
+    rosa::darwin::MachDispatcher faultDispatcher;
+    rosa::x86::X86State setupState;
+    setupState.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    faultDispatcher.dispatch(addressSpace, setupState,
+                             rosa::guest::GuestAddress{0x1000});
+    setupState.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    faultDispatcher.dispatch(addressSpace, setupState,
+                             rosa::guest::GuestAddress{0x1000});
+    rosa::guest::AddressSpace faultAddressSpace;
+    faultAddressSpace.mapSegment(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read, request,
+        "read-only task_get_special_port message");
+    faultAddressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task_get_special_port fault stack");
+    faultAddressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    faultAddressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+    auto faultState = state;
+    faultState.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        faultDispatcher.dispatch(
+            faultAddressSpace, faultState,
+            rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("mach_msg2") !=
+                  std::string_view::npos;
+    }
+    expect(faulted,
+           "task_get_special_port accepted a read-only reply buffer");
+    expectEqual(faultDispatcher.portSpace().size(), std::size_t{2},
+                "faulted task_get_special_port allocated a bootstrap right");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted task_get_special_port changed flags");
+}
+
+void testMachMessage2TaskAuditTokenRequest() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr std::uint32_t requestSize = 40;
+    constexpr std::uint32_t receiveCapacity = 424;
+    constexpr std::uint32_t replySize = 72;
+    constexpr std::uint32_t replyAndTrailerSize = 80;
+    constexpr std::uint32_t messageBits = 0x1513;
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto taskName = static_cast<std::uint32_t>(state.rax);
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto replyName = static_cast<std::uint32_t>(state.rax);
+
+    std::array<std::uint8_t, requestSize> request{};
+    const auto encode32 = [&request](std::size_t offset,
+                                     std::uint32_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, messageBits);
+    encode32(4, requestSize);
+    encode32(8, taskName);
+    encode32(12, replyName);
+    encode32(20, 3405); // task_info
+    request[28] = 1;    // native little-endian NDR integer representation
+    encode32(32, 15);   // TASK_AUDIT_TOKEN
+    encode32(36, 8);    // TASK_AUDIT_TOKEN_COUNT
+
+    addressSpace.mapAnonymous(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task audit-token message");
+    addressSpace.writeBytes(messageAddress, request);
+    addressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task audit-token stack arguments");
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U},
+        receiveCapacity);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+
+    audit_token_t expectedToken{};
+    mach_msg_type_number_t expectedCount = TASK_AUDIT_TOKEN_COUNT;
+    expectEqual(task_info(mach_task_self(), TASK_AUDIT_TOKEN,
+                          reinterpret_cast<task_info_t>(&expectedToken),
+                          &expectedCount),
+                KERN_SUCCESS,
+                "host TASK_AUDIT_TOKEN setup query failed");
+    expectEqual(expectedCount, mach_msg_type_number_t{8},
+                "host TASK_AUDIT_TOKEN setup count differs");
+
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(requestSize) << 32U) |
+                messageBits;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) |
+                taskName;
+    state.r8 = std::uint64_t{3405} << 32U;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "task_info audit-token mach_msg2 did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "task_info audit-token mach_msg2 changed flags");
+    expectEqual(addressSpace.readU32(messageAddress), std::uint32_t{0x1200},
+                "task_info audit-token reply bits differ");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 4}),
+                replySize, "task_info audit-token reply size differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 12}),
+                replyName, "task_info audit-token reply port differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 20}),
+                std::uint32_t{3505},
+                "task_info audit-token reply ID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 32}),
+                std::uint32_t{0},
+                "task_info audit-token reply RetCode differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 36}),
+                std::uint32_t{8},
+                "task_info audit-token reply count differs");
+    for (std::size_t index = 0; index < 8; ++index) {
+        expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
+                        messageAddress.value + 40U + index * 4U}),
+                    static_cast<std::uint32_t>(expectedToken.val[index]),
+                    "task_info audit-token reply value differs");
+    }
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 72}),
+                std::uint32_t{0},
+                "task_info audit-token trailer type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 76}),
+                std::uint32_t{8},
+                "task_info audit-token trailer size differs");
+    expectEqual(replyAndTrailerSize, std::uint32_t{80},
+                "task_info audit-token reply fixture size differs");
+
+    rosa::darwin::MachDispatcher faultDispatcher;
+    rosa::x86::X86State setupState;
+    setupState.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    faultDispatcher.dispatch(addressSpace, setupState,
+                             rosa::guest::GuestAddress{0x1000});
+    setupState.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    faultDispatcher.dispatch(addressSpace, setupState,
+                             rosa::guest::GuestAddress{0x1000});
+    rosa::guest::AddressSpace faultAddressSpace;
+    faultAddressSpace.mapSegment(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read, request,
+        "read-only task audit-token message");
+    faultAddressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task audit-token fault stack");
+    faultAddressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U},
+        receiveCapacity);
+    faultAddressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+    auto faultState = state;
+    faultState.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        faultDispatcher.dispatch(
+            faultAddressSpace, faultState,
+            rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("mach_msg2") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "task_info audit-token accepted a read-only reply buffer");
+    expectEqual(faultDispatcher.portSpace().size(), std::size_t{2},
+                "faulted task_info audit-token changed the port namespace");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted task_info audit-token changed flags");
+}
+
+void testMachMessage2TaskSetDebugControlPortRequest() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr rosa::guest::GuestAddress optionsPage{0xA000};
+    constexpr rosa::guest::GuestAddress optionsAddress{0xA100};
+    constexpr rosa::guest::GuestAddress outputAddress{0xA200};
+    constexpr std::uint32_t requestSize = 52;
+    constexpr std::uint32_t receiveSize = 44;
+    constexpr std::uint32_t replySize = 36;
+    constexpr std::uint32_t messageBits = 0x80001513;
+    constexpr std::uint64_t guard = 0x71B75ACE;
+
+    const auto setupPorts = [=](rosa::darwin::MachDispatcher &dispatcher,
+                                rosa::guest::AddressSpace &addressSpace) {
+        addressSpace.mapAnonymous(
+            optionsPage, rosa::guest::guestPageSize,
+            rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+            "task_set_special_port construction arguments");
+        std::array<std::uint8_t, 24> options{};
+        const std::uint32_t flags = 0x31;
+        std::memcpy(options.data(), &flags, sizeof(flags));
+        addressSpace.writeBytes(optionsAddress, options);
+
+        rosa::x86::X86State state;
+        state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+        dispatcher.dispatch(addressSpace, state,
+                            rosa::guest::GuestAddress{0x1000});
+        const auto taskName = static_cast<std::uint32_t>(state.rax);
+        state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+        dispatcher.dispatch(addressSpace, state,
+                            rosa::guest::GuestAddress{0x1000});
+        const auto replyName = static_cast<std::uint32_t>(state.rax);
+        state = {};
+        state.rax = rosa::darwin::MachDispatcher::portConstructTrapNumber;
+        state.rdi = taskName;
+        state.rsi = optionsAddress.value;
+        state.rdx = guard;
+        state.r10 = outputAddress.value;
+        dispatcher.dispatch(addressSpace, state,
+                            rosa::guest::GuestAddress{0x1000});
+        expectEqual(state.rax, std::uint64_t{0},
+                    "task_set_special_port guarded-port setup failed");
+        return std::array<std::uint32_t, 3>{
+            taskName, replyName, addressSpace.readU32(outputAddress)};
+    };
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::guest::AddressSpace addressSpace;
+    const auto [taskName, replyName, specialName] =
+        setupPorts(dispatcher, addressSpace);
+    const auto *specialPort = dispatcher.portSpace().lookup(
+        rosa::darwin::GuestMachPortName{specialName});
+    expect(specialPort != nullptr && specialPort->hasReceiveRight &&
+               specialPort->sendUrefs == 1,
+           "task_set_special_port setup produced the wrong guarded right");
+
+    std::array<std::uint8_t, requestSize> request{};
+    const auto encode32 = [&request](std::size_t offset,
+                                     std::uint32_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, messageBits);
+    encode32(4, requestSize);
+    encode32(8, taskName);
+    encode32(12, replyName);
+    encode32(20, 3410); // task_set_special_port
+    encode32(24, 1);    // one port descriptor
+    encode32(28, specialName);
+    request[32] = 0xF8; // live descriptor padding is unspecified
+    request[33] = 0x7F;
+    request[34] = 0x5A;
+    request[35] = 0xA5;
+    request[36] = 0xC3;
+    request[37] = 0x3C;
+    request[38] = 19; // MACH_MSG_TYPE_COPY_SEND
+    request[39] = 0;  // MACH_MSG_PORT_DESCRIPTOR
+    request[44] = 1;  // native little-endian NDR integer representation
+    encode32(48, 10); // TASK_DEBUG_CONTROL_PORT
+
+    addressSpace.mapAnonymous(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task_set_special_port message");
+    addressSpace.writeBytes(messageAddress, request);
+    addressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task_set_special_port stack arguments");
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(requestSize) << 32U) |
+                messageBits;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) |
+                taskName;
+    state.r8 = std::uint64_t{3410} << 32U;
+    state.r9 = (static_cast<std::uint64_t>(replyName) << 32U) | 1U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "task_set_special_port mach_msg2 did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "task_set_special_port mach_msg2 changed flags");
+    expectEqual(addressSpace.readU32(messageAddress), std::uint32_t{0x1200},
+                "task_set_special_port reply bits differ");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 4}),
+                replySize, "task_set_special_port reply size differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 12}),
+                replyName, "task_set_special_port reply port differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 20}),
+                std::uint32_t{3510},
+                "task_set_special_port reply ID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 32}),
+                std::uint32_t{0},
+                "task_set_special_port reply RetCode differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 36}),
+                std::uint32_t{0},
+                "task_set_special_port trailer type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 40}),
+                std::uint32_t{8},
+                "task_set_special_port trailer size differs");
+    expect(dispatcher.taskDebugControlPort() &&
+               dispatcher.taskDebugControlPort()->value == specialName,
+           "task_set_special_port did not bind the debug-control port");
+    specialPort = dispatcher.portSpace().lookup(
+        rosa::darwin::GuestMachPortName{specialName});
+    expect(specialPort != nullptr && specialPort->hasReceiveRight &&
+               specialPort->sendUrefs == 1,
+           "COPY_SEND changed the caller's guarded-port urefs");
+
+    rosa::darwin::MachDispatcher faultDispatcher;
+    rosa::guest::AddressSpace faultAddressSpace;
+    const auto faultNames = setupPorts(faultDispatcher, faultAddressSpace);
+    expectEqual(faultNames,
+                std::array<std::uint32_t, 3>{taskName, replyName, specialName},
+                "task_set_special_port fault setup names differ");
+    faultAddressSpace.mapSegment(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read, request,
+        "read-only task_set_special_port message");
+    faultAddressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task_set_special_port fault stack");
+    faultAddressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    faultAddressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+    auto faultState = state;
+    faultState.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        faultDispatcher.dispatch(
+            faultAddressSpace, faultState,
+            rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("mach_msg2") !=
+                  std::string_view::npos;
+    }
+    expect(faulted,
+           "task_set_special_port accepted a read-only reply buffer");
+    expect(!faultDispatcher.taskDebugControlPort(),
+           "faulted task_set_special_port changed task special-port state");
+    const auto *faultPort = faultDispatcher.portSpace().lookup(
+        rosa::darwin::GuestMachPortName{specialName});
+    expect(faultPort != nullptr && faultPort->hasReceiveRight &&
+               faultPort->sendUrefs == 1,
+           "faulted task_set_special_port changed guarded-port rights");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted task_set_special_port changed flags");
+}
+
+void testMachMessage2SemaphoreCreateRequest() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr std::uint32_t requestSize = 40;
+    constexpr std::uint32_t receiveSize = 48;
+    constexpr std::uint32_t messageBits = 0x1513;
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto taskName = static_cast<std::uint32_t>(state.rax);
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto replyName = static_cast<std::uint32_t>(state.rax);
+
+    std::array<std::uint8_t, requestSize> request{};
+    const auto encode32 = [&request](std::size_t offset,
+                                     std::uint32_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, messageBits);
+    encode32(4, requestSize);
+    encode32(8, taskName);
+    encode32(12, replyName);
+    encode32(20, 3418); // semaphore_create
+    request[28] = 1;    // native little-endian NDR integer representation
+    encode32(32, 0);    // SYNC_POLICY_FIFO
+    encode32(36, 0);    // initial value
+
+    addressSpace.mapAnonymous(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "semaphore_create message");
+    addressSpace.writeBytes(messageAddress, request);
+    addressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "semaphore_create stack arguments");
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(requestSize) << 32U) |
+                messageBits;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) |
+                taskName;
+    state.r8 = std::uint64_t{3418} << 32U;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "semaphore_create mach_msg2 did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "semaphore_create mach_msg2 changed flags");
+    expectEqual(addressSpace.readU32(messageAddress),
+                std::uint32_t{0x80001200},
+                "semaphore_create reply bits differ");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 4}),
+                std::uint32_t{40}, "semaphore_create reply size differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 12}),
+                replyName, "semaphore_create reply port differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 20}),
+                std::uint32_t{3518}, "semaphore_create reply ID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 24}),
+                std::uint32_t{1},
+                "semaphore_create descriptor count differs");
+    const auto semaphoreName = addressSpace.readU32(
+        rosa::guest::GuestAddress{messageAddress.value + 28});
+    const auto descriptorTail = addressSpace.readBytes(
+        rosa::guest::GuestAddress{messageAddress.value + 38}, 2);
+    expectEqual(descriptorTail[0], std::uint8_t{17},
+                "semaphore_create descriptor disposition differs");
+    expectEqual(descriptorTail[1], std::uint8_t{0},
+                "semaphore_create descriptor type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 40}),
+                std::uint32_t{0}, "semaphore_create trailer type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 44}),
+                std::uint32_t{8}, "semaphore_create trailer size differs");
+    const auto *semaphorePort = dispatcher.portSpace().lookup(
+        rosa::darwin::GuestMachPortName{semaphoreName});
+    expect(semaphorePort != nullptr &&
+               semaphorePort->type ==
+                   rosa::darwin::GuestPortType::Semaphore &&
+               !semaphorePort->hasReceiveRight &&
+               semaphorePort->sendUrefs == 1 &&
+               semaphorePort->sendOnceUrefs == 0 &&
+               semaphorePort->optionFlags == 0 &&
+               semaphorePort->context == 0,
+           "semaphore_create returned an invalid guest semaphore right");
+}
+
+void testMachMessage2RestartableRangesRegisterRequest() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr std::uint32_t requestSize = 276;
+    constexpr std::uint32_t receiveSize = 44;
+    constexpr std::uint32_t messageBits = 0x1513;
+    constexpr std::array<std::uint64_t, 15> locations{
+        0x7FF802A1BFF3ULL, 0x7FF802A1C09AULL, 0x7FF802A1C45AULL,
+        0x7FF802A1C65AULL, 0x7FF802A1C85AULL, 0x7FF802A1C287ULL,
+        0x7FF802A1CA47ULL, 0x7FF802A1C30BULL, 0x7FF802A1CACBULL,
+        0x7FF802A1C19AULL, 0x7FF802A1C55AULL, 0x7FF802A1C75AULL,
+        0x7FF802A1C95AULL, 0x7FF802A1C38BULL, 0x7FF802A1CB4BULL,
+    };
+    constexpr std::array<std::uint16_t, 15> lengths{
+        0x66, 0x5A, 0x5A, 0x5A, 0x63, 0x5A, 0x63, 0x5A,
+        0x63, 0x54, 0x54, 0x54, 0x54, 0x54, 0x54,
+    };
+    constexpr std::array<std::uint16_t, 15> recoveryOffsets{
+        0x66, 0xA9, 0xAB, 0xAD, 0xAA, 0x5A, 0x63, 0x5A,
+        0x63, 0x9A, 0x9A, 0x9A, 0x9A, 0x54, 0x54,
+    };
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto taskName = static_cast<std::uint32_t>(state.rax);
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x1000});
+    const auto replyName = static_cast<std::uint32_t>(state.rax);
+
+    std::array<std::uint8_t, requestSize> request{};
+    const auto encode16 = [&request](std::size_t offset,
+                                     std::uint16_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    const auto encode32 = [&request](std::size_t offset,
+                                     std::uint32_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    const auto encode64 = [&request](std::size_t offset,
+                                     std::uint64_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, messageBits);
+    encode32(4, requestSize);
+    encode32(8, taskName);
+    encode32(12, replyName);
+    encode32(20, 8000);
+    request[28] = 1;
+    encode32(32, static_cast<std::uint32_t>(locations.size()));
+    for (std::size_t index = 0; index < locations.size(); ++index) {
+        const auto offset = 36U + index * 16U;
+        encode64(offset, locations[index]);
+        encode16(offset + 8U, lengths[index]);
+        encode16(offset + 10U, recoveryOffsets[index]);
+        encode32(offset + 12U, 0);
+    }
+
+    addressSpace.mapAnonymous(
+        messageAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task_restartable_ranges_register message");
+    addressSpace.writeBytes(messageAddress, request);
+    addressSpace.mapAnonymous(
+        stackAddress, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "task_restartable_ranges_register stack arguments");
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(requestSize) << 32U) |
+                messageBits;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) |
+                taskName;
+    state.r8 = std::uint64_t{8000} << 32U;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state,
+                        rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    expectEqual(state.rax, std::uint64_t{0},
+                "restartable-ranges mach_msg2 did not complete");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "restartable-ranges mach_msg2 changed flags");
+    expectEqual(addressSpace.readU32(messageAddress), std::uint32_t{0x1200},
+                "restartable-ranges reply bits differ");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 4U}),
+                std::uint32_t{36},
+                "restartable-ranges reply size differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 12U}),
+                replyName, "restartable-ranges reply port differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 20U}),
+                std::uint32_t{8100},
+                "restartable-ranges reply ID differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 32U}),
+                std::uint32_t{6},
+                "translated restartable-ranges result differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 36U}),
+                std::uint32_t{0},
+                "restartable-ranges trailer type differs");
+    expectEqual(addressSpace.readU32(
+                    rosa::guest::GuestAddress{messageAddress.value + 40U}),
+                std::uint32_t{8},
+                "restartable-ranges trailer size differs");
+}
+
 void testMachMessage2MachVmMapRequest() {
     constexpr rosa::guest::GuestAddress messageAddress{0x8000};
     constexpr rosa::guest::GuestAddress stackAddress{0x9000};
@@ -19035,6 +29878,42 @@ void testIrVerification() {
     builder.exitBlock(rosa::guest::GuestAddress{0x100E});
     const auto block = std::move(builder).finish();
     expect(rosa::ir::verify(block).empty(), "valid R1 IR failed verification");
+}
+
+void testLocalRegisterAllocatorReusesDeadValues() {
+    constexpr std::array<std::uint8_t, 5> observedCode{
+        0x44, 0x33, 0x64, 0x8B, 0x20};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802AE1635ULL};
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip, 1);
+    expectEqual(block.decoded().size(), std::size_t{1},
+                "allocator regression block instruction count differs");
+    expect(block.intermediateRepresentation().valueCount > 8,
+           "allocator regression block no longer exceeds the physical temporary set");
+    expect(!block.program().bytes.empty(),
+           "allocator regression block produced no ARM64 code");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8028};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 0x0F0F0F0F);
+    rosa::x86::X86State state;
+    state.rbx = page.value;
+    state.rcx = 2;
+    state.r12 = 0xAAAAAAAAFF00FF00ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r12, std::uint64_t{0xF00FF00F},
+                "register-reused indexed XOR result differs");
+    expectEqual(state.rbx, page.value,
+                "register-reused indexed XOR changed its base");
+    expectEqual(state.rcx, std::uint64_t{2},
+                "register-reused indexed XOR changed its index");
+    expectEqual(state.rflags, std::uint64_t{0x86},
+                "register-reused indexed XOR flags differ");
 }
 
 rosa::x86::X86State execute(std::span<const std::uint8_t> code) {
@@ -19584,6 +30463,495 @@ void testAnd32BitRegisterWithGuestMemory() {
                 "faulted AND dword memory changed its destination");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "faulted AND dword memory changed flags");
+
+    constexpr std::array<std::uint8_t, 8> ripCode{
+        0x44, 0x23, 0x3D, 0x9E, 0x6B, 0xE4, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802A19727ULL};
+    constexpr rosa::guest::GuestAddress ripSource{
+        rip.value + 7 + 0x40E46B9EULL};
+    const auto ripDecoded = decoder.decodeBlock(ripCode, rip);
+    expect(ripDecoded[0].opcode == rosa::x86::Opcode::AndRegMem,
+           "RIP-relative AND r32 opcode differs");
+    expectEqual(ripDecoded[0].length, std::uint8_t{7},
+                "RIP-relative AND r32 length differs");
+    const auto ripDestination =
+        std::get<rosa::x86::RegisterOperand>(ripDecoded[0].operands[0]);
+    const auto ripMemory =
+        std::get<rosa::x86::MemoryOperand>(ripDecoded[0].operands[1]);
+    expect(ripDestination.reg == rosa::x86::Register::R15 &&
+               ripDestination.width == 32 && !ripMemory.hasBase &&
+               ripMemory.ripRelative && !ripMemory.index &&
+               ripMemory.displacement == 0x40E46B9E &&
+               ripMemory.width == 32,
+           "AND r15d, dword [rip+disp32] operands differ");
+    expect(rosa::debug::dumpX86(ripDecoded).find(
+               "and r15d, dword [rip+0x40e46b9e]") != std::string::npos,
+           "RIP-relative AND r32 dump differs");
+
+    const rosa::guest::GuestAddress ripSourcePage{
+        ripSource.value & ~(rosa::guest::guestPageSize - 1)};
+    addressSpace.mapAnonymous(ripSourcePage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU32(ripSource, 0x80FF00FF);
+    const auto ripBlock = translator.translate(ripCode, rip);
+    rosa::x86::X86State ripState;
+    ripState.r15 = 0xFFFFFFFF7FFFFFFFULL;
+    ripState.rflags = 0xAD7;
+    static_cast<void>(ripBlock.execute(ripState, &addressSpace));
+    expectEqual(ripState.r15, std::uint64_t{0x00FF00FF},
+                "RIP-relative AND r32 result or zero-extension differs");
+    expectEqual(addressSpace.readU32(ripSource),
+                std::uint32_t{0x80FF00FF},
+                "RIP-relative AND r32 changed guest memory");
+
+    rosa::guest::AddressSpace unmappedRipAddressSpace;
+    rosa::x86::X86State ripFaultState;
+    ripFaultState.r15 = 0xAAAAAAAA55555555ULL;
+    ripFaultState.rflags = 0xBD7;
+    rejected = false;
+    try {
+        static_cast<void>(ripBlock.execute(ripFaultState,
+                                           &unmappedRipAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "RIP-relative AND r32 accepted unmapped memory");
+    expectEqual(ripFaultState.r15, std::uint64_t{0xAAAAAAAA55555555ULL},
+                "faulted RIP-relative AND r32 changed its destination");
+    expectEqual(ripFaultState.rflags, std::uint64_t{0xBD7},
+                "faulted RIP-relative AND r32 changed flags");
+}
+
+void testAnd32BitRegisterWithRspSibMemory() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x23, 0x4C, 0x24, 0xF0, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C82EB1ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegMem,
+           "AND r32, dword [rsp+disp8] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "AND r32, dword [rsp+disp8] length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 32,
+           "AND r32, dword [rsp+disp8] destination differs");
+    expect(memory.base == rosa::x86::Register::Rsp && memory.hasBase &&
+               !memory.ripRelative && !memory.index &&
+               memory.displacement == -0x10 && memory.width == 32,
+           "AND r32, dword [rsp+disp8] memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "and ecx, dword [rsp-0x10]") != std::string::npos,
+           "AND r32, dword [rsp+disp8] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress source{0x81E8};
+    constexpr std::array<std::uint8_t, 4> idtrLimit{
+        0xFF, 0x0F, 0x00, 0x00};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(source, idtrLimit);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    rosa::x86::X86State state;
+    state.rcx = 0xFFFFFFFF00000FFFULL;
+    state.rsp = source.value + 0x10;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rcx, std::uint64_t{0xFFF},
+                "AND r32, dword [rsp+disp8] result differs");
+    expectEqual(state.rsp, source.value + 0x10,
+                "AND r32, dword [rsp+disp8] changed RSP");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 2U},
+                "AND r32, dword [rsp+disp8] flags differ");
+    expect(addressSpace.readBytes(source, idtrLimit.size()) ==
+               std::vector<std::uint8_t>(idtrLimit.begin(), idtrLimit.end()),
+           "AND r32, dword [rsp+disp8] changed guest memory");
+}
+
+void testAnd32BitRegisterWithIndexedSibMemory() {
+    constexpr std::array<std::uint8_t, 9> code{
+        0x41, 0x23, 0x94, 0xB6, 0x28, 0x08, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C694F9ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegMem,
+           "indexed-SIB AND opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8},
+                "indexed-SIB AND length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx &&
+               destination.width == 32,
+           "indexed-SIB AND destination differs");
+    expect(memory.base == rosa::x86::Register::R14 &&
+               memory.index == rosa::x86::Register::Rsi &&
+               memory.scale == 4 && memory.displacement == 0x828 &&
+               memory.width == 32,
+           "indexed-SIB AND memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "and edx, dword [r14+rsi*4+0x828]") !=
+               std::string::npos,
+           "indexed-SIB AND dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress source{0x8868};
+    constexpr std::array<std::uint8_t, 4> sourceBytes{
+        0x0F, 0x0F, 0x0F, 0x0F};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(source, sourceBytes);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    rosa::x86::X86State state;
+    state.r14 = page.value;
+    state.rsi = 0x10;
+    state.rdx = 0xAAAAAAAAFFFFFFFCULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rdx, std::uint64_t{0x0F0F0F0C},
+                "indexed-SIB AND result differs");
+    expectEqual(state.r14, page.value,
+                "indexed-SIB AND changed its base");
+    expectEqual(state.rsi, std::uint64_t{0x10},
+                "indexed-SIB AND changed its index");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 2U},
+                "indexed-SIB AND flags differ");
+    expect(addressSpace.readBytes(source, sourceBytes.size()) ==
+               std::vector<std::uint8_t>(sourceBytes.begin(),
+                                         sourceBytes.end()),
+           "indexed-SIB AND changed guest memory");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.r14 = page.value;
+    faultState.rsi = 0x10;
+    faultState.rdx = 0x11223344FFFFFFFCULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "unmapped indexed-SIB AND did not fault");
+    expectEqual(faultState.rdx, std::uint64_t{0x11223344FFFFFFFCULL},
+                "faulted indexed-SIB AND changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted indexed-SIB AND changed flags");
+}
+
+void testAnd32BitRegisterIntoIndexedGuestMemory() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x46, 0x21, 0x44, 0x92, 0x34, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C6ACEAULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndMemReg,
+           "memory-destination AND opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "memory-destination AND length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rdx &&
+               memory.index == rosa::x86::Register::R10 &&
+               memory.scale == 4 && memory.displacement == 0x34 &&
+               memory.width == 32 && source.reg == rosa::x86::Register::R8 &&
+               source.width == 32,
+           "and dword [rdx+r10*4+0x34], r8d operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "and dword [rdx+r10*4+0x34], r8d") !=
+               std::string::npos,
+           "memory-destination AND dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8050};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 0xF0F00FF0U);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "and_guest_memory.i32") != std::string::npos,
+           "memory-destination AND did not lower through guest-memory IR");
+    rosa::x86::X86State state;
+    state.rdx = page.value;
+    state.r10 = 7;
+    state.r8 = 0xAABBCCDD0FF0F0FFULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0x00F000F0U},
+                "memory-destination AND result differs");
+    expectEqual(state.rdx, page.value,
+                "memory-destination AND changed its base");
+    expectEqual(state.r10, std::uint64_t{7},
+                "memory-destination AND changed its index");
+    expectEqual(state.r8, std::uint64_t{0xAABBCCDD0FF0F0FFULL},
+                "memory-destination AND changed its source");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{1U << 2U},
+                "memory-destination AND defined flags differ");
+
+    constexpr rosa::guest::GuestAddress crossPage{0x1000};
+    rosa::guest::AddressSpace crossPageAddressSpace;
+    crossPageAddressSpace.mapAnonymous(
+        crossPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> tailBytes{0xA5, 0x5A};
+    crossPageAddressSpace.writeBytes(
+        rosa::guest::GuestAddress{0x1FFE}, tailBytes);
+    rosa::x86::X86State faultState;
+    faultState.rdx = 0x1FAE;
+    faultState.r10 = 7;
+    faultState.r8 = 0xAABBCCDD0FF0F0FFULL;
+    faultState.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(
+            block.execute(faultState, &crossPageAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page memory-destination AND did not fault");
+    expect(crossPageAddressSpace.readBytes(
+               rosa::guest::GuestAddress{0x1FFE}, tailBytes.size()) ==
+               std::vector<std::uint8_t>(tailBytes.begin(), tailBytes.end()),
+           "faulted memory-destination AND partially changed memory");
+    expectEqual(faultState.rdx, std::uint64_t{0x1FAE},
+                "faulted memory-destination AND changed its base");
+    expectEqual(faultState.r10, std::uint64_t{7},
+                "faulted memory-destination AND changed its index");
+    expectEqual(faultState.r8,
+                std::uint64_t{0xAABBCCDD0FF0F0FFULL},
+                "faulted memory-destination AND changed its source");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "faulted memory-destination AND changed flags");
+}
+
+void testAndImmediateIntoGuestWord() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x66, 0x41, 0x81, 0x67, 0x2E, 0x7F, 0xFE, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AB4071ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndMemImm,
+           "AND word [memory], imm16 opcode differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R15 &&
+               memory.displacement == 0x2E && memory.width == 16 &&
+               immediate.value == 0xFE7F && immediate.width == 16,
+           "AND word [r15+0x2e], 0xfe7f operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "and word [r15+0x2e], 0xfe7f") != std::string::npos,
+           "AND word [memory], imm16 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x812E};
+    constexpr std::array<std::uint8_t, 2> initial{0xFF, 0xFF};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, initial);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AB4071ULL});
+    rosa::x86::X86State state;
+    state.r15 = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expect(addressSpace.readBytes(target, 2) ==
+               std::vector<std::uint8_t>({0x7F, 0xFE}),
+           "AND word immediate stored the wrong result");
+    expectEqual(state.r15, std::uint64_t{0x8100},
+                "AND word immediate changed its base");
+    expectEqual(state.rflags, std::uint64_t{0x82},
+                "AND word immediate flags differ");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    readOnlyAddressSpace.writeBytes(target, initial);
+    expectEqual(readOnlyAddressSpace.protect(
+                    page, rosa::guest::guestPageSize,
+                    rosa::guest::Permission::Read),
+                rosa::guest::ProtectResult::Success,
+                "could not make AND word target read-only");
+    state.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(state, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "AND word immediate accepted read-only memory");
+    expect(readOnlyAddressSpace.readBytes(target, 2) ==
+               std::vector<std::uint8_t>(initial.begin(), initial.end()),
+           "faulted AND word immediate changed memory");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "faulted AND word immediate changed flags");
+
+    constexpr std::array<std::uint8_t, 5> qwordCode{
+        0x48, 0x83, 0x21, 0x03, 0xC3};
+    const auto qwordDecoded = decoder.decodeBlock(
+        qwordCode, rosa::guest::GuestAddress{0x7FF802A17C66ULL});
+    expect(qwordDecoded[0].opcode == rosa::x86::Opcode::AndMemImm &&
+               qwordDecoded[0].length == 4,
+           "AND qword [memory], imm8 opcode or length differs");
+    const auto qwordMemory =
+        std::get<rosa::x86::MemoryOperand>(qwordDecoded[0].operands[0]);
+    const auto qwordImmediate =
+        std::get<rosa::x86::ImmediateOperand>(qwordDecoded[0].operands[1]);
+    expect(qwordMemory.base == rosa::x86::Register::Rcx &&
+               qwordMemory.displacement == 0 && qwordMemory.width == 64 &&
+               qwordImmediate.value == 3 && qwordImmediate.width == 8,
+           "AND qword [rcx], 3 operands differ");
+    expect(rosa::debug::dumpX86(qwordDecoded).find(
+               "and qword [rcx], 0x3") != std::string::npos,
+           "AND qword [memory], imm8 dump differs");
+
+    constexpr rosa::guest::GuestAddress qwordTarget{0x8180};
+    addressSpace.writeU64(qwordTarget, 0xAABBCCDDEEFF0007ULL);
+    const auto qwordBlock = translator.translate(
+        qwordCode, rosa::guest::GuestAddress{0x7FF802A17C66ULL});
+    rosa::x86::X86State qwordState;
+    qwordState.rcx = qwordTarget.value;
+    qwordState.rflags = 0x8D7;
+    static_cast<void>(qwordBlock.execute(qwordState, &addressSpace));
+    expectEqual(addressSpace.readU64(qwordTarget), std::uint64_t{3},
+                "AND qword immediate stored the wrong result");
+    expectEqual(qwordState.rcx, qwordTarget.value,
+                "AND qword immediate changed its base");
+    expectEqual(qwordState.rflags, std::uint64_t{0x6},
+                "AND qword immediate flags differ");
+
+    constexpr rosa::guest::GuestAddress boundaryPage{0x9000};
+    constexpr rosa::guest::GuestAddress boundaryTarget{0x9FFC};
+    constexpr std::array<std::uint8_t, 4> boundaryBytes{
+        0x07, 0x00, 0xFF, 0xEE};
+    rosa::guest::AddressSpace boundaryAddressSpace;
+    boundaryAddressSpace.mapAnonymous(
+        boundaryPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    boundaryAddressSpace.writeBytes(boundaryTarget, boundaryBytes);
+    rosa::x86::X86State boundaryState;
+    boundaryState.rcx = boundaryTarget.value;
+    boundaryState.rflags = 0xAD7;
+    rejected = false;
+    try {
+        static_cast<void>(
+            qwordBlock.execute(boundaryState, &boundaryAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "cross-page AND qword immediate did not fault");
+    expect(boundaryAddressSpace.readBytes(boundaryTarget, 4) ==
+               std::vector<std::uint8_t>(boundaryBytes.begin(),
+                                         boundaryBytes.end()),
+           "faulted cross-page AND qword immediate changed memory");
+    expectEqual(boundaryState.rflags, std::uint64_t{0xAD7},
+                "faulted cross-page AND qword immediate changed flags");
+}
+
+void testAndImmediateIntoGuestByte() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x80, 0x60, 0x48, 0xF0, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802D10E9BULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndMemImm,
+           "AND byte [memory], imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "AND byte [memory], imm8 length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rax &&
+               memory.displacement == 0x48 && memory.width == 8 &&
+               immediate.value == 0xF0 && immediate.width == 8,
+           "AND byte [rax+0x48], 0xf0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "and byte [rax+0x48], 0xf0") != std::string::npos,
+           "AND byte [memory], imm8 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8148};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        page, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 1>{0xAB});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.rax = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readBytes(target, 1).front(),
+                std::uint8_t{0xA0},
+                "AND byte immediate stored the wrong result");
+    expectEqual(state.rax, std::uint64_t{0x8100},
+                "AND byte immediate changed its base");
+    expectEqual(state.rflags, std::uint64_t{0x86},
+                "AND byte immediate flags differ");
+
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(
+        page, rosa::guest::guestPageSize, rosa::guest::Permission::Read,
+        std::array<std::uint8_t, 0x149>{},
+        "read-only byte AND immediate target");
+    rosa::x86::X86State faultState;
+    faultState.rax = 0x8100;
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("permissions") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "AND byte immediate accepted read-only memory");
+    expectEqual(readOnlyAddressSpace.readBytes(target, 1).front(),
+                std::uint8_t{0},
+                "faulted AND byte immediate changed memory");
+    expectEqual(faultState.rax, std::uint64_t{0x8100},
+                "faulted AND byte immediate changed its base");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted AND byte immediate changed flags");
 }
 
 void testBitScanForward32() {
@@ -19744,7 +31112,7 @@ void testBitTestRegisterImmediate32() {
         expect(rejected, message);
     };
     constexpr std::array<std::uint8_t, 4> wrongExtension{
-        0x0F, 0xBA, 0xEE, 0x09};
+        0x0F, 0xBA, 0xFE, 0x09};
     constexpr std::array<std::uint8_t, 5> rexW{
         0x48, 0x0F, 0xBA, 0xE6, 0x09};
     constexpr std::array<std::uint8_t, 5> rexR{
@@ -19752,9 +31120,81 @@ void testBitTestRegisterImmediate32() {
     constexpr std::array<std::uint8_t, 5> rexX{
         0x42, 0x0F, 0xBA, 0xE6, 0x09};
     expectRejected(wrongExtension, "non-BT 0F BA extension was accepted");
-    expectRejected(rexW, "BT r64 form was accepted");
     expectRejected(rexR, "REX.R BT extension was accepted");
     expectRejected(rexX, "REX.X BT form was accepted");
+    const auto rexWDecoded = decoder.decodeBlock(
+        rexW, rosa::guest::GuestAddress{0x6000}, 1);
+    const auto rexWSource =
+        std::get<rosa::x86::RegisterOperand>(
+            rexWDecoded[0].operands[0]);
+    expect(rexWDecoded[0].opcode == rosa::x86::Opcode::BitTestRegImm &&
+               rexWSource.reg == rosa::x86::Register::Rsi &&
+               rexWSource.width == 64,
+           "BT r64 operand differs");
+}
+
+void testBitSetResetRegisterImmediate64() {
+    constexpr std::array<std::uint8_t, 6> setCode{
+        0x48, 0x0F, 0xBA, 0xE8, 0x37, 0xC3};
+    constexpr std::array<std::uint8_t, 6> resetCode{
+        0x48, 0x0F, 0xBA, 0xF0, 0x37, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802AB3B68ULL};
+    constexpr std::uint64_t bit = std::uint64_t{1} << 55U;
+    const rosa::x86::Decoder decoder;
+    const auto setDecoded = decoder.decodeBlock(setCode, observedRip);
+    const auto resetDecoded = decoder.decodeBlock(
+        resetCode, rosa::guest::GuestAddress{observedRip.value + 7});
+    expect(setDecoded[0].opcode == rosa::x86::Opcode::BitSetRegImm,
+           "BTS r64, imm8 opcode differs");
+    expect(resetDecoded[0].opcode == rosa::x86::Opcode::BitResetRegImm,
+           "BTR r64, imm8 opcode differs");
+    const auto setDestination =
+        std::get<rosa::x86::RegisterOperand>(setDecoded[0].operands[0]);
+    expect(setDestination.reg == rosa::x86::Register::Rax &&
+               setDestination.width == 64,
+           "BTS rax destination differs");
+    expect(rosa::debug::dumpX86(setDecoded).find("bts rax, 0x37") !=
+               std::string::npos,
+           "BTS rax dump differs");
+    expect(rosa::debug::dumpX86(resetDecoded).find("btr rax, 0x37") !=
+               std::string::npos,
+           "BTR rax dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto setBlock = translator.translate(setCode, observedRip);
+    const auto resetBlock = translator.translate(
+        resetCode, rosa::guest::GuestAddress{observedRip.value + 7});
+    rosa::x86::X86State state;
+    state.rax = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(setBlock.execute(state));
+    expectEqual(state.rax, bit, "BTS did not set bit 55");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "BTS clear original bit did not clear CF");
+
+    state.rax = bit | 0x1234;
+    state.rflags = 0xAD6;
+    static_cast<void>(setBlock.execute(state));
+    expectEqual(state.rax, bit | 0x1234,
+                "BTS changed bits outside its destination");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "BTS set original bit did not set CF");
+
+    state.rax = bit | 0x1234;
+    state.rflags = 0xAD6;
+    static_cast<void>(resetBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1234},
+                "BTR did not clear bit 55");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "BTR set original bit did not set CF");
+
+    state.rax = 0x1234;
+    state.rflags = 0xAD7;
+    static_cast<void>(resetBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1234},
+                "BTR changed a clear destination bit");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "BTR clear original bit did not clear CF");
 }
 
 void testBitTestRegisterIndex32() {
@@ -19808,6 +31248,91 @@ void testBitTestRegisterIndex32() {
     static_cast<void>(block.execute(maskedState));
     expectEqual(maskedState.rflags, std::uint64_t{0xAD7},
                 "BT r32, r32 did not mask its register index");
+
+    constexpr std::array<std::uint8_t, 5> extendedCode{
+        0x44, 0x0F, 0xA3, 0xE8, 0xC3};
+    constexpr rosa::guest::GuestAddress extendedRip{0x7FF802C8F2F1ULL};
+    const auto extendedDecoded = decoder.decodeBlock(extendedCode, extendedRip);
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::BitTestRegReg,
+           "REX.R BT r32, r32 opcode differs");
+    expectEqual(extendedDecoded[0].length, std::uint8_t{4},
+                "REX.R BT r32, r32 length differs");
+    const auto extendedValue =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[0]);
+    const auto extendedIndex =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[1]);
+    expect(extendedValue.reg == rosa::x86::Register::Rax &&
+               extendedValue.width == 32 &&
+               extendedIndex.reg == rosa::x86::Register::R13 &&
+               extendedIndex.width == 32,
+           "BT eax, r13d operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find("bt eax, r13d") !=
+               std::string::npos,
+           "BT eax, r13d dump differs");
+
+    const auto extendedBlock = translator.translate(extendedCode, extendedRip);
+    rosa::x86::X86State extendedSetState;
+    extendedSetState.rax = 0xFFFFFFFF80000000ULL;
+    extendedSetState.r13 = 0x123400000000003FULL;
+    extendedSetState.rflags = 0xAD6;
+    static_cast<void>(extendedBlock.execute(extendedSetState));
+    expectEqual(extendedSetState.rax, std::uint64_t{0xFFFFFFFF80000000ULL},
+                "REX.R BT changed its value operand");
+    expectEqual(extendedSetState.r13,
+                std::uint64_t{0x123400000000003FULL},
+                "REX.R BT changed its index operand");
+    expectEqual(extendedSetState.rflags, std::uint64_t{0xAD7},
+                "REX.R BT set-CF semantics differ");
+
+    extendedSetState.rax = 0;
+    extendedSetState.r13 = 0x3F;
+    extendedSetState.rflags = 0xAD7;
+    static_cast<void>(extendedBlock.execute(extendedSetState));
+    expectEqual(extendedSetState.rflags, std::uint64_t{0xAD6},
+                "REX.R BT clear-CF semantics differ");
+
+    // Exact live corecrypto probe: the register index is masked modulo 64,
+    // and BT preserves every flag except CF.
+    constexpr std::array<std::uint8_t, 5> qwordCode{
+        0x48, 0x0F, 0xA3, 0xD6, 0xC3};
+    constexpr rosa::guest::GuestAddress qwordRip{0x7FF802C1402BULL};
+    const auto qwordDecoded = decoder.decodeBlock(qwordCode, qwordRip);
+    expect(qwordDecoded[0].opcode == rosa::x86::Opcode::BitTestRegReg,
+           "BT r64, r64 opcode differs");
+    const auto qwordValue =
+        std::get<rosa::x86::RegisterOperand>(qwordDecoded[0].operands[0]);
+    const auto qwordIndex =
+        std::get<rosa::x86::RegisterOperand>(qwordDecoded[0].operands[1]);
+    expect(qwordValue.reg == rosa::x86::Register::Rsi &&
+               qwordValue.width == 64 &&
+               qwordIndex.reg == rosa::x86::Register::Rdx &&
+               qwordIndex.width == 64,
+           "BT rsi, rdx operands differ");
+    expect(rosa::debug::dumpX86(qwordDecoded).find("bt rsi, rdx") !=
+               std::string::npos,
+           "BT rsi, rdx dump differs");
+    const auto qwordBlock = translator.translate(qwordCode, qwordRip);
+    rosa::x86::X86State qwordState;
+    qwordState.rsi = UINT64_C(0x8000000100000000);
+    qwordState.rdx = 96;
+    qwordState.rflags = 0xAD6;
+    static_cast<void>(qwordBlock.execute(qwordState));
+    expectEqual(qwordState.rflags, std::uint64_t{0xAD7},
+                "BT r64 did not mask its set-bit index modulo 64");
+    expectEqual(qwordState.rsi, UINT64_C(0x8000000100000000),
+                "BT r64 changed its value operand");
+    expectEqual(qwordState.rdx, std::uint64_t{96},
+                "BT r64 changed its index operand");
+    qwordState.rdx = 127;
+    qwordState.rflags = 0xAD7;
+    static_cast<void>(qwordBlock.execute(qwordState));
+    expectEqual(qwordState.rflags, std::uint64_t{0xAD7},
+                "BT r64 did not test masked bit 63");
+    qwordState.rsi = 0;
+    qwordState.rflags = 0xAD7;
+    static_cast<void>(qwordBlock.execute(qwordState));
+    expectEqual(qwordState.rflags, std::uint64_t{0xAD6},
+                "BT r64 clear-bit semantics differ");
 }
 
 void testBitTestGuestDwordImmediate() {
@@ -20034,6 +31559,71 @@ void testBitScanReverse64() {
     // The destination is architecturally undefined for a zero source.
 }
 
+void testBitScanReverse32() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x0F, 0xBD, 0xF2, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802A196CBULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::BitScanReverseRegReg,
+           "BSR r32, r32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "BSR r32, r32 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rsi &&
+               destination.width == 32 &&
+               source.reg == rosa::x86::Register::Rdx && source.width == 32,
+           "BSR esi, edx operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("bsr esi, edx") !=
+               std::string::npos,
+           "BSR r32 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802A196CBULL});
+    rosa::x86::X86State nonzeroState;
+    nonzeroState.rsi = UINT64_MAX;
+    nonzeroState.rdx = 0xAAAAAAAA80000100ULL;
+    nonzeroState.rflags = 0x8D7;
+    static_cast<void>(block.execute(nonzeroState));
+    expectEqual(nonzeroState.rsi, std::uint64_t{31},
+                "BSR r32 result or zero extension differs");
+    expectEqual(nonzeroState.rdx, std::uint64_t{0xAAAAAAAA80000100ULL},
+                "BSR r32 changed its source");
+    expectEqual(nonzeroState.rflags, std::uint64_t{0x897},
+                "BSR r32 nonzero ZF semantics differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.rsi = 0x7FFF00000000ULL;
+    zeroState.rdx = 0;
+    zeroState.rflags = 0x897;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rsi, std::uint64_t{0x7FFF00000000ULL},
+                "BSR r32 zero-source deterministic destination differs");
+    expectEqual(zeroState.rflags, std::uint64_t{0x8D7},
+                "BSR r32 zero-source ZF semantics differ");
+
+    constexpr std::array<std::uint8_t, 5> extendedCode{
+        0x45, 0x0F, 0xBD, 0xE7, 0xC3};
+    const auto extendedDecoded = decoder.decodeBlock(
+        extendedCode, rosa::guest::GuestAddress{0x2000});
+    const auto extendedDestination =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[0]);
+    const auto extendedSource =
+        std::get<rosa::x86::RegisterOperand>(extendedDecoded[0].operands[1]);
+    expect(extendedDestination.reg == rosa::x86::Register::R12 &&
+               extendedDestination.width == 32 &&
+               extendedSource.reg == rosa::x86::Register::R15 &&
+               extendedSource.width == 32,
+           "extended BSR r32 operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find("bsr r12d, r15d") !=
+               std::string::npos,
+           "extended BSR r32 dump differs");
+}
+
 void testLegacyAnd32Immediate() {
     constexpr std::array<std::uint8_t, 4> code{0x83, 0xE1, 0x1F, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -20093,6 +31683,54 @@ void testAnd8BitAccumulatorImmediate() {
     expectEqual(zeroState.rflags & definedLogicFlags,
                 std::uint64_t{(1U << 2U) | (1U << 6U)},
                 "AND AL, imm8 zero defined flags differ");
+}
+
+void testAndAccumulatorImmediate() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x25, 0x00, 0xF0, 0x00, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AE7F6EULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegImm,
+           "AND EAX, imm32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "AND EAX, imm32 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate =
+        std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 32 && immediate.width == 32 &&
+               immediate.value == 0xF000,
+           "AND EAX, imm32 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("and eax, 0xf000") !=
+               std::string::npos,
+           "AND EAX, imm32 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AE7F6EULL});
+    rosa::x86::X86State state;
+    state.rax = 0xFFFFFFFF0000416DULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x4000},
+                "AND EAX, imm32 did not zero-extend the result");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 2U},
+                "AND EAX, imm32 flags differ");
+
+    constexpr std::array<std::uint8_t, 7> rexCode{
+        0x48, 0x25, 0x00, 0xF0, 0xFF, 0xFF, 0xC3};
+    const auto rexBlock = translator.translate(
+        rexCode, rosa::guest::GuestAddress{0x2000});
+    state.rax = 0xFEDCBA9876543210ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(rexBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xFEDCBA9876543000ULL},
+                "AND RAX, imm32 did not sign-extend the immediate");
 }
 
 void testAnd8BitRegisterImmediate() {
@@ -20683,6 +32321,39 @@ void testGuestSharedCacheParsingAndMapping() {
     }
     expect(dynamicWriteRejected, "shared-cache dynamic data accepted a guest write");
 
+    constexpr auto fsgetpathNumber = UINT64_C(0x020001AB);
+    constexpr rosa::guest::GuestAddress fsgetpathOutputPage{0x8000};
+    constexpr rosa::guest::GuestAddress fsgetpathOutput{0x8100};
+    addressSpace.mapAnonymous(fsgetpathOutputPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher syscallDispatcher(&cache);
+    rosa::x86::X86State fsgetpathState;
+    fsgetpathState.rax = fsgetpathNumber;
+    fsgetpathState.rdi = fsgetpathOutput.value;
+    fsgetpathState.rsi = 0x400;
+    fsgetpathState.rdx = dynamicAddress.value + 16;
+    fsgetpathState.r10 = addressSpace.readU64(
+        rosa::guest::GuestAddress{dynamicAddress.value + 24});
+    fsgetpathState.rflags = 0xAD7;
+    static_cast<void>(syscallDispatcher.dispatch(
+        addressSpace, fsgetpathState,
+        rosa::guest::GuestAddress{0x7FF802AEEBC0ULL}));
+    const auto expectedCachePath =
+        std::filesystem::canonical(fixture.mainPath()).string();
+    expectEqual(fsgetpathState.rax, expectedCachePath.size() + 1U,
+                "cache fsgetpath returned the wrong length");
+    expectEqual(fsgetpathState.rflags, std::uint64_t{0xAD6},
+                "cache fsgetpath did not clear BSD carry");
+    const auto resolvedCachePath = addressSpace.readBytes(
+        fsgetpathOutput, expectedCachePath.size() + 1U);
+    expectEqual(std::string(resolvedCachePath.begin(),
+                            resolvedCachePath.end() - 1),
+                expectedCachePath,
+                "cache fsgetpath returned the wrong path");
+    expectEqual(resolvedCachePath.back(), std::uint8_t{0},
+                "cache fsgetpath omitted its null terminator");
+
     rosa::x86::X86State provenanceState;
     provenanceState.rip = SharedCacheFixture::regionStart + 0x100;
     rosa::dbt::Dispatcher provenanceDispatcher(addressSpace, 1, nullptr,
@@ -20949,8 +32620,10 @@ void testHotGuestBlockDiagnostics() {
 void testX86Commpage() {
     rosa::guest::AddressSpace addressSpace;
     constexpr std::uint64_t continuousTimebase = 0x0123456789ABCDEFULL;
+    constexpr std::uint64_t bootTimeUsec = 0x00123456789ABCDEULL;
     constexpr std::uint64_t dyldFlags = 0xFEDCBA9876543210ULL;
-    rosa::darwin::mapX86Commpage(addressSpace, continuousTimebase, dyldFlags);
+    rosa::darwin::mapX86Commpage(addressSpace, continuousTimebase,
+                                 bootTimeUsec, dyldFlags);
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageCpuCapabilities64Offset}),
@@ -20975,6 +32648,30 @@ void testX86Commpage() {
     expectEqual(loadState.rflags, std::uint64_t{0x8D7},
                 "x86 commpage capability load changed flags");
 
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageCpuCapabilitiesOffset}),
+                static_cast<std::uint32_t>(
+                    rosa::darwin::x86CommpageCpuCapabilities64),
+                "x86 commpage legacy CPU capabilities differ");
+    constexpr std::array<std::uint8_t, 13> loadLegacyCapabilities{
+        0x48, 0xB9, 0x20, 0x00, 0xE0, 0xFF, 0xFF,
+        0x7F, 0x00, 0x00, 0x8B, 0x09, 0xC3};
+    const auto legacyCapabilitiesBlock = translator.translate(
+        loadLegacyCapabilities,
+        rosa::guest::GuestAddress{0x7FF802E7D2FDULL});
+    rosa::x86::X86State legacyCapabilitiesState;
+    legacyCapabilitiesState.rcx = UINT64_MAX;
+    legacyCapabilitiesState.rflags = 0x2;
+    static_cast<void>(legacyCapabilitiesBlock.execute(
+        legacyCapabilitiesState, &addressSpace));
+    expectEqual(legacyCapabilitiesState.rcx,
+                static_cast<std::uint64_t>(static_cast<std::uint32_t>(
+                    rosa::darwin::x86CommpageCpuCapabilities64)),
+                "generated legacy capability probe differs");
+    expectEqual(legacyCapabilitiesState.rflags, std::uint64_t{0x2},
+                "legacy capability probe changed flags");
+
     const auto version = addressSpace.readBytes(
         rosa::guest::GuestAddress{rosa::darwin::x86CommpageBase.value +
                                   rosa::darwin::x86CommpageVersionOffset},
@@ -20983,6 +32680,102 @@ void testX86Commpage() {
                 std::vector<std::uint8_t>{
                     static_cast<std::uint8_t>(rosa::darwin::x86CommpageVersion), 0},
                 "x86 commpage version differs");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{
+                        rosa::darwin::x86CommpageBase.value +
+                        rosa::darwin::x86CommpagePhysicalCpuCountOffset},
+                    1)
+                    .front(),
+                rosa::darwin::x86CommpagePhysicalCpuCount,
+                "x86 commpage physical CPU count differs");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{
+                        rosa::darwin::x86CommpageBase.value +
+                        rosa::darwin::x86CommpageActiveCpuCountOffset},
+                    1)
+                    .front(),
+                rosa::darwin::x86CommpageActiveCpuCount,
+                "x86 commpage active CPU count differs");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{
+                        rosa::darwin::x86CommpageBase.value +
+                        rosa::darwin::x86CommpageLogicalCpuCountOffset},
+                    1)
+                    .front(),
+                rosa::darwin::x86CommpageLogicalCpuCount,
+                "x86 commpage logical CPU count differs");
+    expectEqual(addressSpace.readBytes(
+                    rosa::guest::GuestAddress{
+                        rosa::darwin::x86CommpageBase.value +
+                        rosa::darwin::x86CommpageCpuClusterCountOffset},
+                    1)
+                    .front(),
+                rosa::darwin::x86CommpageCpuClusterCount,
+                "x86 commpage CPU cluster count differs");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageMemorySizeOffset}),
+                rosa::darwin::x86CommpageMemorySize,
+                "x86 commpage memory size differs");
+
+    // Exact malloc probe: r14 holds commpage+0x10, so disp8 0x25 reads
+    // _COMM_PAGE_PHYSICAL_CPUS at commpage+0x35.
+    constexpr std::array<std::uint8_t, 6> loadPhysicalCpuCount{
+        0x41, 0x0F, 0xB6, 0x56, 0x25, 0xC3};
+    const auto physicalCpuBlock = translator.translate(
+        loadPhysicalCpuCount,
+        rosa::guest::GuestAddress{0x7FF802C75724ULL});
+    rosa::x86::X86State physicalCpuState;
+    physicalCpuState.r14 = rosa::darwin::x86CommpageBase.value + 0x10;
+    physicalCpuState.rdx = UINT64_MAX;
+    physicalCpuState.rflags = 0x8D7;
+    static_cast<void>(
+        physicalCpuBlock.execute(physicalCpuState, &addressSpace));
+    expectEqual(
+        physicalCpuState.rdx,
+        static_cast<std::uint64_t>(rosa::darwin::x86CommpagePhysicalCpuCount),
+        "generated malloc probe read the wrong physical CPU count");
+    expectEqual(physicalCpuState.rflags, std::uint64_t{0x8D7},
+                "physical CPU commpage load changed flags");
+    constexpr std::array<std::uint8_t, 6> loadLogicalCpuCount{
+        0x41, 0x0F, 0xB6, 0x4E, 0x26, 0xC3};
+    const auto logicalCpuBlock = translator.translate(
+        loadLogicalCpuCount,
+        rosa::guest::GuestAddress{0x7FF802C7572FULL});
+    rosa::x86::X86State logicalCpuState;
+    logicalCpuState.r14 = rosa::darwin::x86CommpageBase.value + 0x10;
+    logicalCpuState.rcx = UINT64_MAX;
+    logicalCpuState.rflags = 0xAD7;
+    static_cast<void>(
+        logicalCpuBlock.execute(logicalCpuState, &addressSpace));
+    expectEqual(
+        logicalCpuState.rcx,
+        static_cast<std::uint64_t>(rosa::darwin::x86CommpageLogicalCpuCount),
+        "generated malloc probe read the wrong logical CPU count");
+    expectEqual(logicalCpuState.rflags, std::uint64_t{0xAD7},
+                "logical CPU commpage load changed flags");
+
+    // Exact malloc probe: r12 holds commpage+0x1e, so disp8 0x1a reads the
+    // uint64_t _COMM_PAGE_MEMORY_SIZE at commpage+0x38.
+    constexpr std::array<std::uint8_t, 6> loadMemorySize{
+        0x4D, 0x8B, 0x6C, 0x24, 0x1A, 0xC3};
+    const auto memorySizeBlock = translator.translate(
+        loadMemorySize,
+        rosa::guest::GuestAddress{0x7FF802C71B53ULL});
+    rosa::x86::X86State memorySizeState;
+    memorySizeState.r12 = rosa::darwin::x86CommpageBase.value + 0x1E;
+    memorySizeState.r13 = UINT64_MAX;
+    memorySizeState.rflags = 0x6;
+    static_cast<void>(
+        memorySizeBlock.execute(memorySizeState, &addressSpace));
+    expectEqual(memorySizeState.r13,
+                rosa::darwin::x86CommpageMemorySize,
+                "generated malloc probe read the wrong memory size");
+    expectEqual(memorySizeState.r12,
+                rosa::darwin::x86CommpageBase.value + 0x1E,
+                "memory-size commpage load changed its base");
+    expectEqual(memorySizeState.rflags, std::uint64_t{0x6},
+                "memory-size commpage load changed flags");
     expectEqual(addressSpace.readBytes(
                     rosa::guest::GuestAddress{
                         rosa::darwin::x86CommpageBase.value +
@@ -21031,10 +32824,73 @@ void testX86Commpage() {
     expectEqual(dtraceState.rflags & definedLogicFlags,
                 std::uint64_t{(1U << 2U) | (1U << 6U)},
                 "generated dyld DTrace gate flags differ");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageCpuFamilyOffset}),
+                rosa::darwin::x86CommpageCpuFamily,
+                "x86 commpage CPU family differs");
+    constexpr std::array<std::uint8_t, 14> loadCpuFamily{
+        0x48, 0xB8, 0x10, 0x00, 0xE0, 0xFF, 0xFF,
+        0x7F, 0x00, 0x00, 0x8B, 0x40, 0x30, 0xC3};
+    const auto cpuFamilyBlock = translator.translate(
+        loadCpuFamily, rosa::guest::GuestAddress{0x3000});
+    rosa::x86::X86State cpuFamilyState;
+    cpuFamilyState.rflags = 0x8D7;
+    static_cast<void>(
+        cpuFamilyBlock.execute(cpuFamilyState, &addressSpace));
+    expectEqual(cpuFamilyState.rax,
+                static_cast<std::uint64_t>(rosa::darwin::x86CommpageCpuFamily),
+                "generated platform resolver read the wrong CPU family");
+    expectEqual(cpuFamilyState.rflags, std::uint64_t{0x8D7},
+                "generated platform CPU-family load changed flags");
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageContinuousTimebaseOffset}),
                 continuousTimebase, "x86 commpage continuous-time base differs");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
+                    rosa::darwin::x86CommpageBase.value +
+                    rosa::darwin::x86CommpageBootTimeUsecOffset}),
+                bootTimeUsec, "x86 commpage boot time differs");
+    // Exact live libsystem_kernel sequence: movabs rax, commpage+0xc8;
+    // mov rax,[rax]; ret.
+    constexpr std::array<std::uint8_t, 14> loadBootTime{
+        0x48, 0xB8, 0xC8, 0x00, 0xE0, 0xFF, 0xFF,
+        0x7F, 0x00, 0x00, 0x48, 0x8B, 0x00, 0xC3};
+    const auto bootTimeBlock = translator.translate(
+        loadBootTime, rosa::guest::GuestAddress{0x7FF802E40031ULL});
+    rosa::x86::X86State bootTimeState;
+    bootTimeState.rflags = 0x8D7;
+    static_cast<void>(bootTimeBlock.execute(bootTimeState, &addressSpace));
+    expectEqual(bootTimeState.rax, bootTimeUsec,
+                "generated libsystem boot-time load read the wrong value");
+    expectEqual(bootTimeState.rflags, std::uint64_t{0x8D7},
+                "x86 commpage boot-time load changed flags");
+    expectEqual(
+        addressSpace.readBytes(
+            rosa::guest::GuestAddress{
+                rosa::darwin::x86CommpageBase.value +
+                rosa::darwin::x86CommpageNewTimeOfDayDataOffset},
+            rosa::darwin::x86CommpageNewTimeOfDayDataSize),
+        std::vector<std::uint8_t>(
+            rosa::darwin::x86CommpageNewTimeOfDayDataSize, 0),
+        "x86 commpage disabled time-of-day record differs");
+    // Exact first live load from ___commpage_gettimeofday_internal. A zero
+    // TimeStamp_tick selects the kernel fallback after the stable snapshot.
+    constexpr std::array<std::uint8_t, 5> loadTimeOfDayTimestamp{
+        0x4D, 0x8B, 0x3C, 0x24, 0xC3};
+    const auto timeOfDayBlock = translator.translate(
+        loadTimeOfDayTimestamp,
+        rosa::guest::GuestAddress{0x7FF802E313EAULL});
+    rosa::x86::X86State timeOfDayState;
+    timeOfDayState.r12 = rosa::darwin::x86CommpageBase.value +
+                         rosa::darwin::x86CommpageNewTimeOfDayDataOffset;
+    timeOfDayState.r15 = UINT64_MAX;
+    timeOfDayState.rflags = 0x8D7;
+    static_cast<void>(timeOfDayBlock.execute(timeOfDayState, &addressSpace));
+    expectEqual(timeOfDayState.r15, std::uint64_t{0},
+                "generated time-of-day load did not select the fallback");
+    expectEqual(timeOfDayState.rflags, std::uint64_t{0x8D7},
+                "time-of-day commpage load changed flags");
     expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{
                     rosa::darwin::x86CommpageBase.value +
                     rosa::darwin::x86CommpageDyldFlagsOffset}),
@@ -21256,6 +33112,128 @@ void testIndirectGuestMemoryCallFault() {
                 "failed indirect call changed RSP");
 }
 
+void testRipRelativeIndirectGuestMemoryCall() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0xFF, 0x15, 0xA0, 0x23, 0xB1, 0x40};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802BA1A6AULL};
+    constexpr rosa::guest::GuestAddress pointerAddress{0x7FF8436B3E10ULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF802C4FA30ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expectEqual(decoded.size(), std::size_t{1},
+                "RIP-relative indirect CALL did not terminate its block");
+    expect(decoded[0].opcode == rosa::x86::Opcode::CallMem,
+           "RIP-relative indirect CALL opcode differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.ripRelative && !memory.hasBase && !memory.index &&
+               memory.width == 64 && memory.displacement == 0x40B123A0,
+           "RIP-relative indirect CALL operand differs");
+    expectEqual(decoded[0].fallthrough->value, rip.value + code.size(),
+                "RIP-relative indirect CALL fallthrough differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "call qword [rip+0x40b123a0] ; 0x7ff8436b3e10") !=
+               std::string::npos,
+           "RIP-relative indirect CALL dump differs");
+
+    constexpr rosa::guest::GuestAddress pointerPage{
+        pointerAddress.value & ~(rosa::guest::guestPageSize - 1)};
+    constexpr rosa::guest::GuestAddress stackPage{0x700000000000ULL};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        pointerPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(pointerAddress, target.value);
+    addressSpace.mapAnonymous(
+        stackPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State state;
+    state.rip = rip.value;
+    state.rsp = stackPage.value + 0x100;
+    state.rflags = 0x8D7;
+    const auto exit = block.execute(state, &addressSpace);
+    expect(exit == rosa::dbt::BlockExit::Call,
+           "RIP-relative indirect CALL produced the wrong block exit");
+    expectEqual(state.rip, target.value,
+                "RIP-relative indirect CALL selected the wrong target");
+    expectEqual(state.rsp, stackPage.value + 0x100,
+                "RIP-relative indirect CALL block changed RSP before dispatch");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative indirect CALL changed flags");
+
+    constexpr rosa::guest::GuestAddress codePage{
+        rip.value & ~(rosa::guest::guestPageSize - 1)};
+    constexpr rosa::guest::GuestAddress targetPage{
+        target.value & ~(rosa::guest::guestPageSize - 1)};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    std::array<std::uint8_t, rosa::guest::guestPageSize> codeBytes{};
+    const auto codeOffset = static_cast<std::size_t>(rip.value - codePage.value);
+    std::copy(code.begin(), code.end(), codeBytes.begin() + codeOffset);
+    codeBytes[codeOffset + code.size()] = 0xC3;
+    std::array<std::uint8_t, rosa::guest::guestPageSize> targetBytes{};
+    targetBytes[static_cast<std::size_t>(target.value - targetPage.value)] = 0xC3;
+    rosa::guest::AddressSpace dispatchAddressSpace;
+    dispatchAddressSpace.mapSegment(
+        codePage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Execute,
+        codeBytes);
+    dispatchAddressSpace.mapSegment(
+        targetPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Execute,
+        targetBytes);
+    dispatchAddressSpace.mapAnonymous(
+        pointerPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    dispatchAddressSpace.writeU64(pointerAddress, target.value);
+    dispatchAddressSpace.mapAnonymous(
+        stackPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::x86::X86State dispatchState;
+    dispatchState.rip = rip.value;
+    dispatchState.rsp = stackPage.value + 0x100;
+    dispatchState.rflags = 0x8D7;
+    dispatchAddressSpace.writeU64(
+        rosa::guest::GuestAddress{dispatchState.rsp}, sentinel.value);
+    rosa::dbt::Dispatcher dispatcher(dispatchAddressSpace);
+    const auto result = dispatcher.run(dispatchState, 8, sentinel);
+    expectEqual(result.executedBlocks, std::size_t{3},
+                "RIP-relative indirect CALL block count differs");
+    expectEqual(dispatchState.rsp, stackPage.value + 0x108,
+                "RIP-relative indirect CALL/return did not restore RSP");
+    expectEqual(dispatchAddressSpace.readU64(
+                    rosa::guest::GuestAddress{stackPage.value + 0xF8}),
+                rip.value + code.size(),
+                "RIP-relative indirect CALL pushed the wrong return address");
+    expectEqual(dispatchState.rflags, std::uint64_t{0x8D7},
+                "dispatched RIP-relative indirect CALL changed flags");
+
+    rosa::guest::AddressSpace faultAddressSpace;
+    faultAddressSpace.mapAnonymous(
+        stackPage, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::x86::X86State faultState;
+    faultState.rip = rip.value;
+    faultState.rsp = stackPage.value + 0x100;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &faultAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected,
+           "RIP-relative indirect CALL accepted an unmapped target pointer");
+    expectEqual(faultState.rip, rip.value,
+                "target-faulted indirect CALL changed RIP");
+    expectEqual(faultState.rsp, stackPage.value + 0x100,
+                "target-faulted indirect CALL changed RSP");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "target-faulted indirect CALL changed flags");
+}
+
 void testIndirectGuestRegisterCall() {
     constexpr rosa::guest::GuestAddress codeBase{0x1000};
     constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
@@ -21383,6 +33361,164 @@ void testRegisterIndirectJump() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "JMP register changed flags");
 }
 
+void testRipRelativeMemoryIndirectJump() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x700000000000ULL};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 48> code{
+        0xFF, 0x25, 0x0A, 0x00, 0x00, 0x00, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0x20, 0x10, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0x48, 0xB8, 0x2A, 0, 0, 0, 0, 0,
+        0, 0, 0xC3, 0, 0, 0, 0, 0,
+    };
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        std::span<const std::uint8_t>{code}.first(6), codeBase);
+    expect(decoded[0].opcode == rosa::x86::Opcode::JmpMem,
+           "RIP-relative memory JMP opcode differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.ripRelative && !memory.hasBase && !memory.index &&
+               memory.displacement == 0xA && memory.width == 64,
+           "RIP-relative memory JMP operand differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(codeBase, rosa::guest::guestPageSize,
+                            rosa::guest::Permission::Read |
+                                rosa::guest::Permission::Execute,
+                            code);
+    addressSpace.mapAnonymous(stackBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize - 8;
+    state.rflags = 0x8D7;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp}, sentinel.value);
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 4, sentinel);
+    expectEqual(state.rax, std::uint64_t{42},
+                "RIP-relative memory JMP selected target differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative memory JMP changed flags");
+    expectEqual(result.executedBlocks, std::size_t{2},
+                "RIP-relative memory JMP block count differs");
+}
+
+void testBasedMemoryIndirectJump() {
+    constexpr rosa::guest::GuestAddress instructionAddress{
+        0x7FF802A5BD7AULL};
+    constexpr rosa::guest::GuestAddress tableBase{0x8000};
+    constexpr std::uint64_t target = 0x7FF802A5BF90ULL;
+    constexpr std::array<std::uint8_t, 6> code{
+        0xFF, 0xA0, 0x10, 0x02, 0x00, 0x00};
+
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expectEqual(decoded.size(), std::size_t{1},
+                "based memory JMP did not terminate its block");
+    expect(decoded[0].opcode == rosa::x86::Opcode::JmpMem,
+           "based memory JMP opcode differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.hasBase && !memory.ripRelative && !memory.index &&
+               memory.base == rosa::x86::Register::Rax &&
+               memory.displacement == 0x210 && memory.width == 64,
+           "based memory JMP operand differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "jmp qword [rax+0x210]") != std::string::npos,
+           "based memory JMP dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(
+        tableBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "indirect JMP table");
+    addressSpace.writeU64(
+        rosa::guest::GuestAddress{tableBase.value + 0x210}, target);
+    rosa::x86::X86State state;
+    state.rip = instructionAddress.value;
+    state.rax = tableBase.value;
+    state.rsp = 0x7000000FF000ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rip, target,
+                "based memory JMP selected target differs");
+    expectEqual(state.rax, tableBase.value,
+                "based memory JMP changed its base register");
+    expectEqual(state.rsp, std::uint64_t{0x7000000FF000ULL},
+                "based memory JMP changed RSP");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "based memory JMP changed flags");
+
+    rosa::x86::X86State faultState;
+    faultState.rip = instructionAddress.value;
+    faultState.rax = 0x9000;
+    faultState.rsp = 0x7000000FF000ULL;
+    faultState.rflags = 0x8D7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") !=
+                  std::string_view::npos;
+    }
+    expect(faulted, "based memory JMP accepted an unmapped target slot");
+    expectEqual(faultState.rip, instructionAddress.value,
+                "faulted based memory JMP changed RIP");
+    expectEqual(faultState.rax, std::uint64_t{0x9000},
+                "faulted based memory JMP changed its base register");
+    expectEqual(faultState.rsp, std::uint64_t{0x7000000FF000ULL},
+                "faulted based memory JMP changed RSP");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7},
+                "faulted based memory JMP changed flags");
+}
+
+void testSetOverflowLowByteRegister() {
+    constexpr std::uint64_t overflow = std::uint64_t{1} << 11U;
+    constexpr std::array<std::uint8_t, 4> code{
+        0x0F, 0x90, 0xC2, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802A3EFE5ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccReg &&
+               decoded[0].condition == rosa::x86::Condition::Overflow,
+           "SETO opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "SETO length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rdx &&
+               destination.width == 8,
+           "SETO DL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("seto dl") !=
+               std::string::npos,
+           "SETO DL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    rosa::x86::X86State state;
+    state.rdx = 0x1122334455667788ULL;
+    state.rflags = 0xD6 | overflow;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdx, std::uint64_t{0x1122334455667701ULL},
+                "taken SETO did not merge one into DL");
+    expectEqual(state.rflags, std::uint64_t{0xD6 | overflow},
+                "taken SETO changed flags");
+
+    state.rdx = 0xFFEEDDCCBBAA9988ULL;
+    state.rflags = 0xD6;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdx, std::uint64_t{0xFFEEDDCCBBAA9900ULL},
+                "not-taken SETO did not merge zero into DL");
+    expectEqual(state.rflags, std::uint64_t{0xD6},
+                "not-taken SETO changed flags");
+}
+
 void testSetBelowLowByteRegister() {
     constexpr std::uint64_t carry = std::uint64_t{1} << 0U;
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x92, 0xC3, 0xC3};
@@ -21420,6 +33556,54 @@ void testSetBelowLowByteRegister() {
                 "not-taken SETB did not merge zero into BL");
     expectEqual(state.rflags, std::uint64_t{0x896 & ~carry},
                 "not-taken SETB changed flags");
+}
+
+void testSetAboveLowByteRegister() {
+    constexpr std::uint64_t carryFlag = std::uint64_t{1} << 0U;
+    constexpr std::uint64_t zeroFlag = std::uint64_t{1} << 6U;
+    constexpr std::array<std::uint8_t, 4> observedCode{
+        0x0F, 0x97, 0xC0, 0xC3}; // seta al
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802AC1311ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccReg &&
+               decoded[0].condition == rosa::x86::Condition::Above,
+           "SETA opcode or condition differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(
+        decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 8,
+           "SETA AL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("seta al") !=
+               std::string::npos,
+           "SETA dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667788ULL;
+    state.rflags = 0x896 & ~(carryFlag | zeroFlag);
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667701ULL},
+                "taken SETA did not merge one into AL");
+    expectEqual(state.rflags, std::uint64_t{0x896 & ~(carryFlag | zeroFlag)},
+                "taken SETA changed flags");
+
+    state.rax = 0xFFEEDDCCBBAA9988ULL;
+    state.rflags = 0x896 | carryFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xFFEEDDCCBBAA9900ULL},
+                "carry-blocked SETA did not merge zero into AL");
+    expectEqual(state.rflags, std::uint64_t{0x896 | carryFlag},
+                "carry-blocked SETA changed flags");
+
+    state.rax = 0x8877665544332211ULL;
+    state.rflags = 0x896 | zeroFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x8877665544332200ULL},
+                "zero-blocked SETA did not merge zero into AL");
+    expectEqual(state.rflags, std::uint64_t{0x896 | zeroFlag},
+                "zero-blocked SETA changed flags");
 }
 
 void testSetEqualLowByteRegister() {
@@ -21494,6 +33678,172 @@ void testSetNotEqualLowByteRegister() {
                 "not-taken SETNE did not merge zero into AL");
     expectEqual(state.rflags, std::uint64_t{0x891 | zeroFlag},
                 "not-taken SETNE changed flags");
+}
+
+void testSetNotSignLowByteRegister() {
+    constexpr std::uint64_t signFlag = std::uint64_t{1} << 7U;
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x99, 0xC1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802AEB275ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccReg &&
+               decoded[0].condition == rosa::x86::Condition::NotSign,
+           "SETNS opcode or condition differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 8,
+           "SETNS CL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("setns cl") !=
+               std::string::npos,
+           "SETNS dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802AEB275ULL});
+    rosa::x86::X86State state;
+    state.rcx = 0x1122334455667788ULL;
+    state.rflags = 0x846 & ~signFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x1122334455667701ULL},
+                "taken SETNS did not merge one into CL");
+    expectEqual(state.rflags, std::uint64_t{0x846 & ~signFlag},
+                "taken SETNS changed flags");
+
+    state.rcx = 0xFFEEDDCCBBAA9988ULL;
+    state.rflags = 0x846 | signFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xFFEEDDCCBBAA9900ULL},
+                "not-taken SETNS did not merge zero into CL");
+    expectEqual(state.rflags, std::uint64_t{0x846 | signFlag},
+                "not-taken SETNS changed flags");
+
+    constexpr std::array<std::uint8_t, 4> signCode{
+        0x0F, 0x98, 0xC0, 0xC3};
+    const auto signDecoded = decoder.decodeBlock(
+        signCode, rosa::guest::GuestAddress{0x7FF802AC41BAULL});
+    expect(signDecoded[0].opcode == rosa::x86::Opcode::SetccReg &&
+               signDecoded[0].condition == rosa::x86::Condition::Sign,
+           "SETS opcode or condition differs");
+    const auto signDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            signDecoded[0].operands[0]);
+    expect(signDestination.reg == rosa::x86::Register::Rax &&
+               signDestination.width == 8,
+           "SETS AL destination differs");
+    expect(rosa::debug::dumpX86(signDecoded).find("sets al") !=
+               std::string::npos,
+           "SETS AL dump differs");
+    const auto signBlock = translator.translate(
+        signCode, rosa::guest::GuestAddress{0x7FF802AC41BAULL});
+    state.rax = 0x1122334455667788ULL;
+    state.rflags = 0x846 | signFlag;
+    static_cast<void>(signBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667701ULL},
+                "taken SETS did not merge one into AL");
+    expectEqual(state.rflags, std::uint64_t{0x846 | signFlag},
+                "taken SETS changed flags");
+
+    state.rax = 0xFFEEDDCCBBAA9988ULL;
+    state.rflags = 0x846 & ~signFlag;
+    static_cast<void>(signBlock.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xFFEEDDCCBBAA9900ULL},
+                "not-taken SETS did not merge zero into AL");
+    expectEqual(state.rflags, std::uint64_t{0x846 & ~signFlag},
+                "not-taken SETS changed flags");
+}
+
+void testSetBelowOrEqualLowByteRegister() {
+    constexpr std::uint64_t carryFlag = std::uint64_t{1} << 0U;
+    constexpr std::uint64_t zeroFlag = std::uint64_t{1} << 6U;
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x96, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(
+        code, rosa::guest::GuestAddress{0x7FF802B09399ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccReg &&
+               decoded[0].condition == rosa::x86::Condition::BelowOrEqual,
+           "SETBE opcode or condition differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 8,
+           "SETBE AL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("setbe al") !=
+               std::string::npos,
+           "SETBE dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(
+        code, rosa::guest::GuestAddress{0x7FF802B09399ULL});
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667788ULL;
+    state.rflags = 0x2 | carryFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667701ULL},
+                "SETBE did not take with CF set");
+
+    state.rax = 0x1122334455667788ULL;
+    state.rflags = 0x2 | zeroFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667701ULL},
+                "SETBE did not take with ZF set");
+
+    state.rax = 0x1122334455667788ULL;
+    state.rflags = 0x2;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667700ULL},
+                "SETBE took with CF and ZF clear");
+    expectEqual(state.rflags, std::uint64_t{0x2},
+                "SETBE changed flags");
+}
+
+void testSetLessLowByteRegister() {
+    constexpr std::uint64_t signFlag = std::uint64_t{1} << 7U;
+    constexpr std::uint64_t overflowFlag = std::uint64_t{1} << 11U;
+    constexpr std::array<std::uint8_t, 4> observedCode{
+        0x0F, 0x9C, 0xC0, 0xC3}; // setl al
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802C71C4CULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccReg &&
+               decoded[0].condition == rosa::x86::Condition::Less,
+           "SETL opcode or condition differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 8,
+           "SETL AL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("setl al") !=
+               std::string::npos,
+           "SETL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667788ULL;
+    state.rflags = 0x2 | signFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667701ULL},
+                "SETL did not take with SF set and OF clear");
+    expectEqual(state.rflags, std::uint64_t{0x2 | signFlag},
+                "taken SETL changed flags");
+
+    state.rax = 0xFFEEDDCCBBAA9988ULL;
+    state.rflags = 0x2 | overflowFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xFFEEDDCCBBAA9901ULL},
+                "SETL did not take with SF clear and OF set");
+    expectEqual(state.rflags, std::uint64_t{0x2 | overflowFlag},
+                "overflow SETL changed flags");
+
+    state.rax = 0x8877665544332211ULL;
+    state.rflags = 0x2 | signFlag | overflowFlag;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x8877665544332200ULL},
+                "SETL took with equal SF and OF");
+    expectEqual(state.rflags,
+                std::uint64_t{0x2 | signFlag | overflowFlag},
+                "not-taken SETL changed flags");
 }
 
 void testSetGreaterExtendedLowByteRegister() {
@@ -21624,6 +33974,74 @@ void testSetEqualRipRelativeGuestByte() {
                 "faulted RIP-relative SETE changed flags");
 }
 
+void testSetEqualSibGuestByte() {
+    constexpr std::array<std::uint8_t, 7> code{
+        0x41, 0x0F, 0x94, 0x44, 0x24, 0x08, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802C25F8CULL};
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress destination{0x8008};
+    constexpr std::uint64_t zeroFlag = std::uint64_t{1} << 6U;
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expectEqual(decoded.size(), std::size_t{2},
+                "SIB SETE decoded an unexpected instruction count");
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccMem &&
+               decoded[0].condition == rosa::x86::Condition::Equal,
+           "SIB SETE opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{6},
+                "SIB SETE length differs");
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::R12 && memory.hasBase &&
+               !memory.index && !memory.ripRelative && memory.width == 8 &&
+               memory.displacement == 8,
+           "SIB SETE operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("sete byte [r12+0x8]") !=
+               std::string::npos,
+           "SIB SETE dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State state;
+    state.r12 = page.value;
+    state.rflags = 0x897 | zeroFlag;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readBytes(destination, 1).front(),
+                std::uint8_t{1}, "taken SIB SETE stored the wrong byte");
+    expectEqual(state.r12, page.value, "SIB SETE changed its base register");
+    expectEqual(state.rflags, std::uint64_t{0x897 | zeroFlag},
+                "SIB SETE changed flags");
+
+    std::array<std::uint8_t, rosa::guest::guestPageSize> readOnlyBytes{};
+    readOnlyBytes[destination.value - page.value] = 0xA5;
+    rosa::guest::AddressSpace readOnlyAddressSpace;
+    readOnlyAddressSpace.mapSegment(page, readOnlyBytes.size(),
+                                    rosa::guest::Permission::Read,
+                                    readOnlyBytes);
+    rosa::x86::X86State faultState;
+    faultState.r12 = page.value;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &readOnlyAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("permissions") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "SIB SETE accepted a read-only destination");
+    expectEqual(readOnlyAddressSpace.readBytes(destination, 1).front(),
+                std::uint8_t{0xA5},
+                "faulted SIB SETE changed guest memory");
+    expectEqual(faultState.r12, page.value,
+                "faulted SIB SETE changed its base register");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted SIB SETE changed flags");
+}
+
 void testSetAboveOrEqualGuestByte() {
     constexpr std::array<std::uint8_t, 8> observed{
         0x0F, 0x93, 0x83, 0xCE, 0x00, 0x00, 0x00, 0xC3};
@@ -21730,6 +34148,93 @@ void testSetAboveOrEqualGuestByte() {
                 std::uint8_t{0}, "faulted SETAE changed guest memory");
     expectEqual(faultState.rflags, std::uint64_t{0xAD6},
                 "faulted SETAE changed flags");
+}
+
+void testConditionalMoveNotEqual32FromGuestMemory() {
+    constexpr std::array<std::uint8_t, 8> code{
+        0x0F, 0x45, 0x85, 0x08, 0xFF, 0xFF, 0xFF, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802A186CFULL};
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress source{0x8008};
+    constexpr std::uint64_t zeroFlag = std::uint64_t{1} << 6U;
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccRegMem &&
+               decoded[0].condition == rosa::x86::Condition::NotEqual,
+           "memory CMOVNE opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{7},
+                "memory CMOVNE length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 32 &&
+               memory.base == rosa::x86::Register::Rbp &&
+               memory.width == 32 && memory.hasBase && !memory.index &&
+               memory.displacement == -0xF8,
+           "memory CMOVNE operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "cmovne eax, dword [rbp-0xf8]") != std::string::npos,
+           "memory CMOVNE dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeU32(source, 0xAABBCCDDU);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State taken;
+    taken.rax = 0x1122334455667788ULL;
+    taken.rbp = page.value + 0x100;
+    taken.rflags = 0x897 & ~zeroFlag;
+    static_cast<void>(block.execute(taken, &addressSpace));
+    expectEqual(taken.rax, std::uint64_t{0xAABBCCDD},
+                "taken memory CMOVNE result differs");
+    expectEqual(taken.rbp, page.value + 0x100,
+                "memory CMOVNE changed its base register");
+    expectEqual(taken.rflags, std::uint64_t{0x897 & ~zeroFlag},
+                "taken memory CMOVNE changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rax = 0x1122334455667788ULL;
+    notTaken.rbp = page.value + 0x100;
+    notTaken.rflags = 0x897 | zeroFlag;
+    static_cast<void>(block.execute(notTaken, &addressSpace));
+    expectEqual(notTaken.rax, std::uint64_t{0x55667788},
+                "untaken memory CMOVNE destination differs");
+    expectEqual(notTaken.rflags, std::uint64_t{0x897 | zeroFlag},
+                "untaken memory CMOVNE changed flags");
+
+    for (const auto flags : std::array<std::uint64_t, 2>{
+             std::uint64_t{0x897 & ~zeroFlag},
+             std::uint64_t{0x897 | zeroFlag}}) {
+        rosa::guest::AddressSpace unmappedAddressSpace;
+        rosa::x86::X86State faultState;
+        faultState.rax = 0x1122334455667788ULL;
+        faultState.rbp = page.value + 0x100;
+        faultState.rip = rip.value;
+        faultState.rflags = flags;
+        bool rejected = false;
+        try {
+            static_cast<void>(block.execute(faultState,
+                                            &unmappedAddressSpace));
+        } catch (const std::runtime_error &error) {
+            rejected = std::string_view(error.what()).find("unmapped") !=
+                       std::string_view::npos;
+        }
+        expect(rejected,
+               "memory CMOVNE skipped its architectural source read");
+        expectEqual(faultState.rax, std::uint64_t{0x1122334455667788ULL},
+                    "faulted memory CMOVNE changed its destination");
+        expectEqual(faultState.rbp, page.value + 0x100,
+                    "faulted memory CMOVNE changed its base");
+        expectEqual(faultState.rip, rip.value,
+                    "faulted memory CMOVNE changed RIP");
+        expectEqual(faultState.rflags, flags,
+                    "faulted memory CMOVNE changed flags");
+    }
 }
 
 void testConditionalMoveBelow64() {
@@ -21980,6 +34485,56 @@ void testConditionalMoveAbove64() {
     }
 }
 
+void testConditionalMoveBelowOrEqual32() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x0F, 0x46, 0xD9, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802D0504AULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               decoded[0].condition == rosa::x86::Condition::BelowOrEqual,
+           "CMOVBE r32 opcode or condition differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rbx &&
+               destination.width == 32 &&
+               source.reg == rosa::x86::Register::Rcx && source.width == 32,
+           "CMOVBE ebx, ecx operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmovbe ebx, ecx") !=
+               std::string::npos,
+           "CMOVBE ebx, ecx dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    for (const auto flags : {std::uint64_t{0x3}, std::uint64_t{0x42},
+                             std::uint64_t{0x43}}) {
+        rosa::x86::X86State taken;
+        taken.rbx = UINT64_C(0xFFFFFFFF89ABCDEF);
+        taken.rcx = UINT64_C(0xFEDCBA9812345678);
+        taken.rflags = flags;
+        static_cast<void>(block.execute(taken));
+        expectEqual(taken.rbx, std::uint64_t{0x12345678},
+                    "taken CMOVBE r32 did not zero-extend its source");
+        expectEqual(taken.rcx, UINT64_C(0xFEDCBA9812345678),
+                    "CMOVBE changed its source");
+        expectEqual(taken.rflags, flags, "taken CMOVBE changed flags");
+    }
+
+    rosa::x86::X86State notTaken;
+    notTaken.rbx = UINT64_C(0xFFFFFFFF89ABCDEF);
+    notTaken.rcx = UINT64_C(0xFEDCBA9812345678);
+    notTaken.rflags = 0x2;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rbx, std::uint64_t{0x89ABCDEF},
+                "untaken CMOVBE r32 did not clear destination upper bits");
+    expectEqual(notTaken.rcx, UINT64_C(0xFEDCBA9812345678),
+                "untaken CMOVBE changed its source");
+    expectEqual(notTaken.rflags, std::uint64_t{0x2},
+                "untaken CMOVBE changed flags");
+}
+
 void testConditionalMoveEqual64() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x0F, 0x44, 0xC8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -22076,6 +34631,265 @@ void testConditionalMoveNotEqual64Extended() {
                 "untaken CMOVNE changed source");
     expectEqual(notTaken.rflags, std::uint64_t{0x897 | zeroFlag},
                 "untaken CMOVNE changed flags");
+}
+
+void testConditionalMoveNotEqual32Legacy() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x0F, 0x45, 0xC2, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802AB296BULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               decoded[0].condition == rosa::x86::Condition::NotEqual,
+           "legacy CMOVNE r32 opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "legacy CMOVNE r32 length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax &&
+               destination.width == 32 &&
+               source.reg == rosa::x86::Register::Rdx &&
+               source.width == 32,
+           "legacy CMOVNE eax, edx operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmovne eax, edx") !=
+               std::string::npos,
+           "legacy CMOVNE eax, edx dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State taken;
+    taken.rax = UINT64_MAX;
+    taken.rdx = 0xAABBCCDD10203040ULL;
+    taken.rflags = 0x8D7 & ~zeroFlag;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rax, std::uint64_t{0x10203040},
+                "taken legacy CMOVNE r32 did not zero-extend its result");
+    expectEqual(taken.rdx, std::uint64_t{0xAABBCCDD10203040ULL},
+                "legacy CMOVNE r32 changed its source");
+    expectEqual(taken.rflags, std::uint64_t{0x8D7 & ~zeroFlag},
+                "taken legacy CMOVNE r32 changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rax = 0xAABBCCDD11223344ULL;
+    notTaken.rdx = UINT64_MAX;
+    notTaken.rflags = 0x8D7 | zeroFlag;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rax, std::uint64_t{0x11223344},
+                "untaken legacy CMOVNE r32 did not clear upper bits");
+    expectEqual(notTaken.rdx, UINT64_MAX,
+                "untaken legacy CMOVNE r32 changed its source");
+    expectEqual(notTaken.rflags, std::uint64_t{0x8D7 | zeroFlag},
+                "untaken legacy CMOVNE r32 changed flags");
+}
+
+void testConditionalMoveSign64() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x48, 0x0F, 0x48, 0xCF, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802ADEDBDULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               decoded[0].condition == rosa::x86::Condition::Sign,
+           "CMOVS opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "CMOVS length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 64 &&
+               source.reg == rosa::x86::Register::Rdi &&
+               source.width == 64,
+           "CMOVS rcx, rdi operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmovs rcx, rdi") !=
+               std::string::npos,
+           "CMOVS rcx, rdi dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State taken;
+    taken.rcx = 0x1111;
+    taken.rdi = 0xAABBCCDDEEFF0011ULL;
+    taken.rflags = 0x8D7 | (1U << 7U);
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rcx, std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                "taken CMOVS result differs");
+    expectEqual(taken.rflags, std::uint64_t{0x8D7 | (1U << 7U)},
+                "taken CMOVS changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rcx = 0x1122334455667788ULL;
+    notTaken.rdi = UINT64_MAX;
+    notTaken.rflags = 0x8D7 & ~(1U << 7U);
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rcx, std::uint64_t{0x1122334455667788ULL},
+                "untaken CMOVS changed destination");
+    expectEqual(notTaken.rdi, UINT64_MAX,
+                "untaken CMOVS changed source");
+    expectEqual(notTaken.rflags, std::uint64_t{0x8D7 & ~(1U << 7U)},
+                "untaken CMOVS changed flags");
+
+    constexpr std::array<std::uint8_t, 5> notSignCode{
+        0x48, 0x0F, 0x49, 0xF1, 0xC3};
+    const auto notSignDecoded = decoder.decodeBlock(
+        notSignCode, rosa::guest::GuestAddress{0x7FF802ADF87DULL});
+    expect(notSignDecoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               notSignDecoded[0].condition == rosa::x86::Condition::NotSign,
+           "CMOVNS opcode or condition differs");
+    const auto notSignDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            notSignDecoded[0].operands[0]);
+    const auto notSignSource =
+        std::get<rosa::x86::RegisterOperand>(
+            notSignDecoded[0].operands[1]);
+    expect(notSignDestination.reg == rosa::x86::Register::Rsi &&
+               notSignDestination.width == 64 &&
+               notSignSource.reg == rosa::x86::Register::Rcx &&
+               notSignSource.width == 64,
+           "CMOVNS rsi, rcx operands differ");
+    expect(rosa::debug::dumpX86(notSignDecoded).find(
+               "cmovns rsi, rcx") != std::string::npos,
+           "CMOVNS rsi, rcx dump differs");
+    const auto notSignBlock = translator.translate(
+        notSignCode, rosa::guest::GuestAddress{0x7FF802ADF87DULL});
+    rosa::x86::X86State notSignTaken;
+    notSignTaken.rsi = 0x1111;
+    notSignTaken.rcx = 0xAABBCCDDEEFF0011ULL;
+    notSignTaken.rflags = 0x8D7 & ~(1U << 7U);
+    static_cast<void>(notSignBlock.execute(notSignTaken));
+    expectEqual(notSignTaken.rsi,
+                std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                "taken CMOVNS result differs");
+
+    rosa::x86::X86State notSignNotTaken;
+    notSignNotTaken.rsi = 0x1122334455667788ULL;
+    notSignNotTaken.rcx = UINT64_MAX;
+    notSignNotTaken.rflags = 0x8D7 | (1U << 7U);
+    static_cast<void>(notSignBlock.execute(notSignNotTaken));
+    expectEqual(notSignNotTaken.rsi,
+                std::uint64_t{0x1122334455667788ULL},
+                "untaken CMOVNS changed destination");
+
+    constexpr std::array<std::uint8_t, 4> legacyCode{
+        0x0F, 0x48, 0xCA, 0xC3};
+    constexpr rosa::guest::GuestAddress legacyAddress{0x7FF802A1B206ULL};
+    const auto legacyDecoded = decoder.decodeBlock(legacyCode, legacyAddress);
+    expect(legacyDecoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               legacyDecoded[0].condition == rosa::x86::Condition::Sign,
+           "legacy CMOVS r32 opcode or condition differs");
+    expectEqual(legacyDecoded[0].length, std::uint8_t{3},
+                "legacy CMOVS r32 length differs");
+    const auto legacyDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            legacyDecoded[0].operands[0]);
+    const auto legacySource = std::get<rosa::x86::RegisterOperand>(
+        legacyDecoded[0].operands[1]);
+    expect(legacyDestination.reg == rosa::x86::Register::Rcx &&
+               legacyDestination.width == 32 &&
+               legacySource.reg == rosa::x86::Register::Rdx &&
+               legacySource.width == 32,
+           "cmovs ecx, edx operands differ");
+    expect(rosa::debug::dumpX86(legacyDecoded).find(
+               "cmovs ecx, edx") != std::string::npos,
+           "cmovs ecx, edx dump differs");
+
+    const auto legacyBlock = translator.translate(legacyCode, legacyAddress);
+    rosa::x86::X86State legacyTaken;
+    legacyTaken.rcx = 0xAABBCCDD11223344ULL;
+    legacyTaken.rdx = 0x88776655DEADBEEFULL;
+    legacyTaken.rflags = 0x8D7 | (1U << 7U);
+    static_cast<void>(legacyBlock.execute(legacyTaken));
+    expectEqual(legacyTaken.rcx, std::uint64_t{0xDEADBEEFULL},
+                "taken legacy CMOVS r32 result differs");
+    expectEqual(legacyTaken.rdx,
+                std::uint64_t{0x88776655DEADBEEFULL},
+                "legacy CMOVS r32 changed its source");
+    expectEqual(legacyTaken.rflags,
+                std::uint64_t{0x8D7 | (1U << 7U)},
+                "taken legacy CMOVS r32 changed flags");
+
+    rosa::x86::X86State legacyNotTaken;
+    legacyNotTaken.rcx = 0xAABBCCDD11223344ULL;
+    legacyNotTaken.rdx = UINT64_MAX;
+    legacyNotTaken.rflags = 0x8D7 & ~(1U << 7U);
+    static_cast<void>(legacyBlock.execute(legacyNotTaken));
+    expectEqual(legacyNotTaken.rcx, std::uint64_t{0x11223344},
+                "untaken legacy CMOVS r32 did not clear upper bits");
+    expectEqual(legacyNotTaken.rdx, UINT64_MAX,
+                "untaken legacy CMOVS r32 changed its source");
+    expectEqual(legacyNotTaken.rflags,
+                std::uint64_t{0x8D7 & ~(1U << 7U)},
+                "untaken legacy CMOVS r32 changed flags");
+}
+
+void testConditionalMoveLessOrEqual64() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x48, 0x0F, 0x4E, 0xC8, 0xC3}; // cmovle rcx, rax; ret
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802D19EC6ULL};
+    constexpr std::uint64_t zero = std::uint64_t{1} << 6U;
+    constexpr std::uint64_t sign = std::uint64_t{1} << 7U;
+    constexpr std::uint64_t overflow = std::uint64_t{1} << 11U;
+
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               decoded[0].condition ==
+                   rosa::x86::Condition::LessOrEqual,
+           "CMOVLE opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{4},
+                "CMOVLE length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 64 &&
+               source.reg == rosa::x86::Register::Rax &&
+               source.width == 64,
+           "CMOVLE rcx, rax operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmovle rcx, rax") !=
+               std::string::npos,
+           "CMOVLE rcx, rax dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    const auto expectMove = [&block](std::uint64_t flags,
+                                     std::string_view context) {
+        rosa::x86::X86State state;
+        state.rax = 0xAABBCCDDEEFF0011ULL;
+        state.rcx = 0x1122334455667788ULL;
+        state.rflags = flags;
+        static_cast<void>(block.execute(state));
+        expectEqual(state.rcx, std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                    context);
+        expectEqual(state.rax, std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                    "CMOVLE changed its source");
+        expectEqual(state.rflags, flags, "taken CMOVLE changed flags");
+    };
+    expectMove(0x2 | zero, "CMOVLE did not take when ZF was set");
+    expectMove(0x2 | sign, "CMOVLE did not take when SF differed from OF");
+    expectMove(0x2 | overflow,
+               "CMOVLE did not take when OF differed from SF");
+
+    const auto expectNoMove = [&block](std::uint64_t flags,
+                                       std::string_view context) {
+        rosa::x86::X86State state;
+        state.rax = 0x1A;
+        state.rcx = 1;
+        state.rflags = flags;
+        static_cast<void>(block.execute(state));
+        expectEqual(state.rcx, std::uint64_t{1}, context);
+        expectEqual(state.rax, std::uint64_t{0x1A},
+                    "untaken CMOVLE changed its source");
+        expectEqual(state.rflags, flags, "untaken CMOVLE changed flags");
+    };
+    expectNoMove(0x2,
+                 "live CMOVLE case moved when ZF=0 and SF equaled OF");
+    expectNoMove(0x2 | sign | overflow,
+                 "CMOVLE moved when SF and OF were both set");
 }
 
 void testConditionalMoveEqual32Extended() {
@@ -22452,6 +35266,26 @@ void testSignedLessOrEqualConditional() {
     expectEqual(greater.rip, std::uint64_t{0x1002},
                 "JLE took with ZF clear and SF equal to OF");
     expectEqual(greater.rflags, std::uint64_t{0x2}, "JLE changed flags");
+
+    constexpr std::array<std::uint8_t, 6> nearCode{
+        0x0F, 0x8E, 0x83, 0x00, 0x00, 0x00};
+    constexpr rosa::guest::GuestAddress nearRip{0x7FF802B08EDEULL};
+    const auto nearDecoded = decoder.decodeBlock(nearCode, nearRip);
+    expect(nearDecoded[0].condition == rosa::x86::Condition::LessOrEqual &&
+               nearDecoded[0].branchTarget &&
+               nearDecoded[0].branchTarget->value == 0x7FF802B08F67ULL &&
+               nearDecoded[0].fallthrough &&
+               nearDecoded[0].fallthrough->value == 0x7FF802B08EE4ULL,
+           "JLE rel32 target or fallthrough differs");
+    const auto nearBlock = translator.translate(nearCode, nearRip);
+    equal.rflags = 0x42;
+    static_cast<void>(nearBlock.execute(equal));
+    expectEqual(equal.rip, std::uint64_t{0x7FF802B08F67ULL},
+                "JLE rel32 did not take with ZF set");
+    greater.rflags = 0x2;
+    static_cast<void>(nearBlock.execute(greater));
+    expectEqual(greater.rip, std::uint64_t{0x7FF802B08EE4ULL},
+                "JLE rel32 took with ZF clear and SF equal to OF");
 }
 
 void testSignLongConditional() {
@@ -22475,6 +35309,45 @@ void testSignLongConditional() {
     expectEqual(notTaken.rip, std::uint64_t{0x1006},
                 "JS took with SF clear");
     expectEqual(notTaken.rflags, std::uint64_t{0x2}, "JS changed flags");
+}
+
+void testOverflowLongConditional() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x0F, 0x80, 0xD2, 0x01, 0x00, 0x00};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802C8E12EULL};
+    constexpr std::uint64_t overflowFlag = std::uint64_t{1} << 11U;
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::JccRelative &&
+               decoded[0].condition == rosa::x86::Condition::Overflow,
+           "JO rel32 opcode or condition differs");
+    expectEqual(decoded[0].branchTarget->value,
+                std::uint64_t{0x7FF802C8E306ULL},
+                "JO rel32 target differs");
+    expectEqual(decoded[0].fallthrough->value,
+                std::uint64_t{0x7FF802C8E134ULL},
+                "JO rel32 fallthrough differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "jo 0x7ff802c8e306") != std::string::npos,
+           "JO rel32 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State taken;
+    taken.rflags = 0x2 | overflowFlag;
+    static_cast<void>(block.execute(taken));
+    expectEqual(taken.rip, std::uint64_t{0x7FF802C8E306ULL},
+                "JO rel32 did not take with OF set");
+    expectEqual(taken.rflags, std::uint64_t{0x2 | overflowFlag},
+                "taken JO rel32 changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rflags = 0xAD7 & ~overflowFlag;
+    static_cast<void>(block.execute(notTaken));
+    expectEqual(notTaken.rip, std::uint64_t{0x7FF802C8E134ULL},
+                "JO rel32 took with OF clear");
+    expectEqual(notTaken.rflags, std::uint64_t{0xAD7 & ~overflowFlag},
+                "untaken JO rel32 changed flags");
 }
 
 void testSignShortConditional() {
@@ -22501,6 +35374,60 @@ void testSignShortConditional() {
                 "short JS took with SF clear");
     expectEqual(notTaken.rflags, std::uint64_t{0x2},
                 "not-taken short JS changed flags");
+}
+
+void testCsHintedShortConditionals() {
+    constexpr std::array<std::uint8_t, 3> equalCode{0x2E, 0x74, 0x72};
+    constexpr rosa::guest::GuestAddress equalAddress{0x7FF802A1C083ULL};
+    const rosa::x86::Decoder decoder;
+    const auto equalDecoded = decoder.decodeBlock(equalCode, equalAddress);
+    expect(equalDecoded[0].opcode == rosa::x86::Opcode::JccRelative &&
+               equalDecoded[0].condition == rosa::x86::Condition::Equal,
+           "CS-hinted JE opcode or condition differs");
+    expectEqual(equalDecoded[0].length, std::uint8_t{3},
+                "CS-hinted JE length differs");
+    expectEqual(equalDecoded[0].branchTarget->value,
+                std::uint64_t{0x7FF802A1C0F8ULL},
+                "CS-hinted JE target differs");
+    expectEqual(equalDecoded[0].fallthrough->value,
+                std::uint64_t{0x7FF802A1C086ULL},
+                "CS-hinted JE fallthrough differs");
+    expect(rosa::debug::dumpX86(equalDecoded).find(
+               "je 0x7ff802a1c0f8") != std::string::npos,
+           "CS-hinted JE dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto equalBlock = translator.translate(equalCode, equalAddress);
+    rosa::x86::X86State taken;
+    taken.rflags = 0x2 | (1U << 6U);
+    static_cast<void>(equalBlock.execute(taken));
+    expectEqual(taken.rip, std::uint64_t{0x7FF802A1C0F8ULL},
+                "CS-hinted JE did not take with ZF set");
+    expectEqual(taken.rflags, std::uint64_t{0x42},
+                "CS-hinted JE changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rflags = 0x2;
+    static_cast<void>(equalBlock.execute(notTaken));
+    expectEqual(notTaken.rip, std::uint64_t{0x7FF802A1C086ULL},
+                "CS-hinted JE took with ZF clear");
+
+    constexpr std::array<std::uint8_t, 3> notEqualCode{0x2E, 0x75, 0x76};
+    constexpr rosa::guest::GuestAddress notEqualAddress{0x2000};
+    const auto notEqualDecoded =
+        decoder.decodeBlock(notEqualCode, notEqualAddress);
+    expect(notEqualDecoded[0].opcode == rosa::x86::Opcode::JccRelative &&
+               notEqualDecoded[0].condition ==
+                   rosa::x86::Condition::NotEqual &&
+               notEqualDecoded[0].length == 3,
+           "CS-hinted JNE decode differs");
+    const auto notEqualBlock =
+        translator.translate(notEqualCode, notEqualAddress);
+    rosa::x86::X86State notEqualTaken;
+    notEqualTaken.rflags = 0x2;
+    static_cast<void>(notEqualBlock.execute(notEqualTaken));
+    expectEqual(notEqualTaken.rip, std::uint64_t{0x2079},
+                "CS-hinted JNE target differs");
 }
 
 void testNotSignShortConditional() {
@@ -22531,6 +35458,26 @@ void testNotSignShortConditional() {
                 "JNS took with SF set");
     expectEqual(notTaken.rflags, std::uint64_t{0x82},
                 "not-taken JNS changed flags");
+
+    constexpr std::array<std::uint8_t, 6> nearCode{
+        0x0F, 0x89, 0x53, 0x02, 0x00, 0x00};
+    constexpr rosa::guest::GuestAddress nearRip{0x7FF802B087CDULL};
+    const auto nearDecoded = decoder.decodeBlock(nearCode, nearRip);
+    expect(nearDecoded[0].condition == rosa::x86::Condition::NotSign &&
+               nearDecoded[0].branchTarget &&
+               nearDecoded[0].branchTarget->value == 0x7FF802B08A26ULL &&
+               nearDecoded[0].fallthrough &&
+               nearDecoded[0].fallthrough->value == 0x7FF802B087D3ULL,
+           "JNS rel32 target or fallthrough differs");
+    const auto nearBlock = translator.translate(nearCode, nearRip);
+    taken.rflags = 0x2;
+    static_cast<void>(nearBlock.execute(taken));
+    expectEqual(taken.rip, std::uint64_t{0x7FF802B08A26ULL},
+                "JNS rel32 did not take with SF clear");
+    notTaken.rflags = 0x82;
+    static_cast<void>(nearBlock.execute(notTaken));
+    expectEqual(notTaken.rip, std::uint64_t{0x7FF802B087D3ULL},
+                "JNS rel32 took with SF set");
 }
 
 void testUnsignedAboveOrEqualShortConditional() {
@@ -22569,6 +35516,13 @@ void testControlledMachOParsing() {
         sawMain |= command.command == rosa::macho::lcMain;
     }
     expect(sawMain, "controlled Mach-O does not contain parsed LC_MAIN");
+    constexpr std::array<std::uint8_t, 16> expectedUuid{
+        0xE0, 0x8F, 0xEF, 0x1A, 0x86, 0x9A, 0x3D, 0xA3,
+        0x9A, 0x85, 0x62, 0x13, 0xBE, 0x73, 0xE0, 0xAF};
+    expect(file.uuid().has_value(),
+           "controlled Mach-O does not contain parsed LC_UUID");
+    expectEqual(*file.uuid(), expectedUuid,
+                "controlled Mach-O UUID differs");
 
     rosa::guest::AddressSpace addressSpace;
     const rosa::macho::Loader loader;
@@ -22669,6 +35623,7 @@ int main() {
         {"R1 decoder", testDecoderR1},
         {"extended register and signed immediate", testDecoderExtendedRegisterAndSignedImmediate},
         {"legacy MOV 32-bit immediate", testLegacyMov32ImmediateGeneratedExecution},
+        {"legacy MOV 16-bit immediate", testLegacyMov16ImmediateGeneratedExecution},
         {"legacy MOV low-byte immediate",
          testLegacyMovLowByteImmediateGeneratedExecution},
         {"REX extended MOV low-byte immediate",
@@ -22680,18 +35635,30 @@ int main() {
         {"PUSH imm32 generated execution and fault",
          testPushImm32GeneratedExecutionAndFault},
         {"PUSH register generated execution", testPushRegisterGeneratedExecution},
+        {"PUSH guest memory generated execution",
+         testPushGuestMemoryGeneratedExecution},
         {"POP register generated execution", testPopRegisterGeneratedExecution},
+        {"LEAVE generated execution", testLeaveGeneratedExecution},
         {"SUB register imm32 generated execution", testSubRegImm32GeneratedExecution},
         {"SUB register imm8 generated execution", testSubRegImm8GeneratedExecution},
+        {"SBB register zero generated execution",
+         testSbbRegisterZeroGeneratedExecution},
+        {"SBB register from itself generated execution",
+         testSbbRegisterFromItselfGeneratedExecution},
+        {"ADC register zero generated execution",
+         testAdcRegisterZeroGeneratedExecution},
         {"SUB register from register", testSubRegisterFromRegister},
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
         {"SUB 32-bit register from guest memory", testSub32BitRegisterFromGuestMemory},
         {"SUB 64-bit register from indexed guest memory",
          testSub64BitRegisterFromIndexedGuestMemory},
+        {"SUB register from guest memory destination",
+         testSubtractRegisterFromGuestMemoryDestination},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register from indexed guest memory",
          testAddRegisterFromIndexedGuestMemory},
         {"ADD register to guest memory", testAddRegisterToGuestMemory},
+        {"ADD register to SIB guest memory", testAddRegisterToSibGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
         {"ADD low-byte registers", testAddLowByteRegisters},
         {"ADD guest byte to low register", testAddGuestByteToLowRegister},
@@ -22703,11 +35670,15 @@ int main() {
         {"INC 8-bit guest memory", testIncrement8BitGuestMemory},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},
         {"INC 32-bit guest memory", testIncrement32BitGuestMemory},
+        {"INC 32-bit SIB guest memory", testIncrement32BitSibGuestMemory},
         {"INC 64-bit guest memory", testIncrement64BitGuestMemory},
         {"DEC 64-bit guest memory", testDecrement64BitGuestMemory},
+        {"DEC 32-bit guest memory", testDecrement32BitGuestMemory},
         {"DEC 8-bit scaled guest memory",
          testDecrement8BitScaledGuestMemory},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
+        {"CMP 32-bit register with GS-absolute guest memory",
+         testCompare32BitRegisterWithGsAbsoluteMemory},
         {"CMP byte register with scaled guest memory",
          testCompareByteRegisterWithScaledGuestMemory},
         {"legacy CMP 32-bit register with guest memory",
@@ -22715,18 +35686,29 @@ int main() {
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},
         {"CMP 64-bit register with RIP-relative guest memory",
          testCompare64BitRegisterWithRipRelativeGuestMemory},
+        {"CMP guest word with extended register",
+         testCompareGuestWordWithExtendedRegister},
         {"CMP guest memory with 64-bit register",
          testCompareGuestMemoryWith64BitRegister},
         {"CMP guest byte with register", testCompareGuestByteWithRegister},
+        {"CMP RIP-relative guest byte with register",
+         testCompareRipRelativeGuestByteWithRegister},
         {"LOCK CMPXCHG guest dword", testLockedCompareExchangeGuestDword},
+        {"LOCK CMPXCHG guest qword", testLockedCompareExchangeGuestQword},
         {"LOCK CMPXCHG16B guest pair", testLockedCompareExchangeGuestPair},
         {"XCHG guest dword with register", testExchangeGuestDwordWithRegister},
         {"XCHG guest qword with register", testExchangeGuestQwordWithRegister},
         {"LOCK OR guest dword immediate", testLockedOrGuestDwordImmediate},
+        {"LOCK OR guest word immediate", testLockedOrGuestWordImmediate},
         {"LOCK ADD guest qword register", testLockedAddGuestQwordRegister},
         {"LOCK XADD guest dword register",
          testLockedExchangeAddGuestDwordRegister},
+        {"LOCK XADD guest qword register",
+         testLockedExchangeAddGuestQwordRegister},
         {"LOCK INC guest dword", testLockedIncrementGuestDword},
+        {"LOCK INC RIP-relative guest dword",
+         testLockedIncrementRipRelativeGuestDword},
+        {"LOCK DEC guest dword", testLockedDecrementGuestDword},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP SIB guest memory with 32-bit immediate",
          testCompareGuestSibMemoryWith32BitImmediate},
@@ -22751,6 +35733,7 @@ int main() {
         {"CMP 32-bit register with short immediate",
          testCompare32BitRegisterWithShortImmediate},
         {"CMP 8-bit registers", testCompare8BitRegisters},
+        {"CMP 16-bit registers", testCompare16BitRegisters},
         {"CMP 64-bit registers", testCompare64BitRegisters},
         {"CMP 32-bit registers", testCompare32BitRegisters},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
@@ -22785,12 +35768,18 @@ int main() {
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
         {"MOV guest GS memory to 32-bit register",
          testMovGuestGsMemoryTo32BitRegister},
+        {"MOV guest GS memory with no-base scaled index",
+         testMovGuestGsMemoryWithNoBaseScaledIndex},
+        {"MOV immediate to guest GS memory",
+         testMovImmediateToGuestGsMemory},
         {"MOV 64-bit register to guest GS memory",
          testMov64BitRegisterToGuestGsMemory},
         {"MOV guest memory to register with no-index SIB",
          testMovGuestMemoryToRegisterWithNoIndexSib},
         {"MOV guest memory to 32-bit register with scaled index",
          testMovGuestMemoryTo32BitRegisterWithScaledIndex},
+        {"MOV guest memory to 16-bit register with index",
+         testMovGuestMemoryTo16BitRegisterWithIndex},
         {"MOV guest memory to 32-bit register", testMovGuestMemoryTo32BitRegister},
         {"MOV guest memory to byte register", testMovGuestMemoryToByteRegister},
         {"MOV RIP-relative guest byte to register",
@@ -22803,8 +35792,12 @@ int main() {
          testMovsxLowByteRegisterTo32BitRegister},
         {"MOVSX guest byte to 32-bit register",
          testMovsxGuestByteTo32BitRegister},
+        {"MOVSX guest word with scaled index to 32-bit register",
+         testMovsxGuestWordWithScaledIndexTo32BitRegister},
         {"MOVZX guest byte to 32-bit register",
          testMovzxGuestByteTo32BitRegister},
+        {"MOVZX RIP-relative guest byte to 32-bit register",
+         testMovzxRipRelativeGuestByteTo32BitRegister},
         {"MOVZX guest byte with SIB to 64-bit register",
          testMovzxGuestByteWithSibTo64BitRegister},
         {"MOVZX 16-bit register to 32-bit register",
@@ -22812,6 +35805,8 @@ int main() {
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},
         {"MOVZX guest word with scaled index", testMovzxGuestWordWithScaledIndex},
         {"MOVSXD scaled guest dword", testMovsxdScaledGuestDword},
+        {"MOVSXD RIP-relative guest dword",
+         testMovsxdRipRelativeGuestDword},
         {"MOVSXD register", testMovsxdRegister},
         {"CDQE generated execution", testCdqeGeneratedExecution},
         {"legacy MOV guest memory to 32-bit register",
@@ -22823,6 +35818,10 @@ int main() {
         {"legacy TEST 32-bit register generated execution",
          testLegacyTest32BitRegisterGeneratedExecution},
         {"legacy TEST low-byte generated execution", testLegacyTestLowByteGeneratedExecution},
+        {"TEST guest byte/register generated execution",
+         testTestGuestByteRegisterGeneratedExecution},
+        {"TEST guest dword/register with scaled index",
+         testTestGuestDwordRegisterWithScaledIndex},
         {"TEST accumulator immediate generated execution",
          testTestAccumulatorImmediateGeneratedExecution},
         {"TEST register immediate generated execution",
@@ -22832,6 +35831,7 @@ int main() {
         {"TEST guest byte immediate generated execution",
          testTestGuestByteImmediateGeneratedExecution},
         {"LFENCE generated execution", testLfenceGeneratedExecution},
+        {"SIDT generated execution", testSidtGeneratedExecution},
         {"multi-byte NOP generated execution",
          testMultiByteNopGeneratedExecution},
         {"RDTSC generated execution", testRdtscGeneratedExecution},
@@ -22849,16 +35849,35 @@ int main() {
          testShiftRightArithmetic64ImmediateGeneratedExecution},
         {"ROL 16-bit immediate generated execution",
          testRotateLeft16ImmediateGeneratedExecution},
+        {"ROL 32-bit immediate generated execution",
+         testRotateLeft32ImmediateGeneratedExecution},
+        {"ROL 64-bit immediate generated execution",
+         testRotateLeft64ImmediateGeneratedExecution},
+        {"ROL 32-bit CL generated execution",
+         testRotateLeft32ClGeneratedExecution},
+        {"ROR 64-bit immediate generated execution",
+         testRotateRight64ImmediateGeneratedExecution},
         {"SHR CL generated execution", testShiftRightClGeneratedExecution},
         {"NOT 32-bit generated execution", testNot32GeneratedExecution},
         {"NEG 64-bit generated execution", testNeg64GeneratedExecution},
         {"REP MOVSB generated execution", testRepMovsbGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
+        {"unsigned byte DIV generated execution",
+         testUnsignedDivideByteGeneratedExecution},
+        {"unsigned qword register DIV generated execution",
+         testUnsignedDivideQwordRegisterGeneratedExecution},
+        {"unsigned dword memory DIV generated execution",
+         testUnsignedDivideDwordMemoryGeneratedExecution},
+        {"signed dword register IDIV generated execution",
+         testSignedDivideDwordRegisterGeneratedExecution},
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
         {"signed IMUL 64-bit RIP-relative memory execution",
          testSignedMultiply64RipMemoryGeneratedExecution},
         {"signed IMUL 64-bit immediate generated execution",
          testSignedMultiply64ImmediateGeneratedExecution},
+        {"signed IMUL 64-bit memory immediate generated execution",
+         testSignedMultiply64MemoryImmediateGeneratedExecution},
+        {"SHLD generated execution", testShiftLeftDoubleGeneratedExecution},
         {"SHRD generated execution", testShiftRightDoubleGeneratedExecution},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"OR 8-bit registers generated execution", testOr8BitRegistersGeneratedExecution},
@@ -22868,11 +35887,15 @@ int main() {
          testOr32BitRegisterFromGuestMemory},
         {"OR 8-bit register into indexed guest memory",
          testOr8BitRegisterIntoIndexedGuestMemory},
+        {"OR 32-bit register into indexed guest memory",
+         testOr32BitRegisterIntoIndexedGuestMemory},
         {"OR immediate into guest byte memory",
          testOrImmediateIntoGuestByteMemory},
         {"OR short immediate generated execution", testOrShortImmediateGeneratedExecution},
         {"OR 32-bit registers generated execution", testOr32BitRegistersGeneratedExecution},
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
+        {"XOR 8-bit registers generated execution",
+         testXor8BitRegistersGeneratedExecution},
         {"XOR 32-bit register from guest memory",
          testXor32BitRegisterFromGuestMemory},
         {"XOR byte register from scaled guest memory",
@@ -22884,12 +35907,15 @@ int main() {
         {"XOR 32-bit register immediate", testXor32BitRegisterImmediate},
         {"XOR 64-bit accumulator immediate", testXor64BitAccumulatorImmediate},
         {"XOR 8-bit accumulator immediate", testXor8BitAccumulatorImmediate},
+        {"XOR 8-bit register immediate", testXor8BitRegisterImmediate},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PXOR guest memory generated execution",
          testPxorGuestMemoryGeneratedExecution},
         {"PAND RIP-relative guest memory generated execution",
          testPandRipGuestMemoryGeneratedExecution},
+        {"PAND register generated execution",
+         testPandRegisterGeneratedExecution},
         {"PTEST register generated execution", testPtestRegisterGeneratedExecution},
         {"PCMPEQB guest memory generated execution",
          testPcmpeqbGuestMemoryGeneratedExecution},
@@ -22897,9 +35923,21 @@ int main() {
          testPcmpeqbRegisterGeneratedExecution},
         {"PCMPEQD register generated execution",
          testPcmpeqdRegisterGeneratedExecution},
+        {"packed dword shift and add generated execution",
+         testPackedDwordShiftAndAddGeneratedExecution},
+        {"packed qword logical right shift immediate",
+         testPackedQwordLogicalRightShiftImmediate},
+        {"packed horizontal add and MOVD extract",
+         testPackedHorizontalAddAndMovdExtract},
         {"PANDN register generated execution", testPandnRegisterGeneratedExecution},
         {"PMOVMSKB generated execution", testPmovmskbGeneratedExecution},
+        {"PMOVSXBD RIP-relative memory generated execution",
+         testPmovsxbdRipMemoryGeneratedExecution},
+        {"PMOVSXDQ RIP-relative memory generated execution",
+         testPmovsxdqRipMemoryGeneratedExecution},
+        {"PADDQ register execution", testPaddqRegisterExecution},
         {"PSHUFD register execution", testPshufdRegisterExecution},
+        {"SHUFPD register execution", testShufpdRegisterExecution},
         {"PALIGNR register execution", testPalignrRegisterExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVAPS register to RIP-relative guest memory",
@@ -22911,6 +35949,9 @@ int main() {
         {"MOVUPS register to RIP-relative guest memory",
          testMovupsRegisterToRipRelativeGuestMemory},
         {"MOVUPS guest memory to register", testMovupsGuestMemoryToRegister},
+        {"VEX XMM short-copy instructions", testVexXmmShortCopyInstructions},
+        {"VEX YMM broadcast and store", testVexYmmBroadcastAndStore},
+        {"VEX YMM memory load", testVexYmmMemoryLoad},
         {"MOVDQA register to guest memory", testMovdqaRegisterToGuestMemory},
         {"MOVDQA guest memory to register", testMovdqaGuestMemoryToRegister},
         {"MOVDQU register to guest memory", testMovdquRegisterToGuestMemory},
@@ -22919,10 +35960,18 @@ int main() {
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
         {"PSHUFB register execution", testPshufbRegisters},
+        {"PSHUFB RIP-relative guest memory",
+         testPshufbRipRelativeGuestMemory},
+        {"PUNPCKLWD register execution", testPunpcklwdRegisters},
         {"POR register execution", testPorRegisters},
         {"MOVD register to XMM", testMovdRegisterToXmm},
+        {"MOVD guest memory to XMM", testMovdGuestMemoryToXmm},
         {"MOVD XMM to guest memory", testMovdXmmToGuestMemory},
+        {"MOVSS XMM to guest memory", testMovssXmmToGuestMemory},
+        {"EXTRACTPS XMM to guest memory", testExtractpsXmmToGuestMemory},
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},
+        {"PINSRD register to XMM", testPinsrdRegisterToXmm},
+        {"PINSRQ register to XMM", testPinsrqRegisterToXmm},
         {"PINSRB register to XMM", testPinsrbRegisterToXmm},
         {"PBLENDW registers", testPblendwRegisters},
         {"register move execution", testRegisterMoveExecution},
@@ -22933,27 +35982,60 @@ int main() {
         {"legacy 32-bit register move execution", testLegacyRegisterMove32Execution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
+        {"Darwin bsdthread_register", testDarwinBsdthreadRegister},
         {"Darwin getpid", testDarwinGetpid},
+        {"Darwin gettimeofday", testDarwinGettimeofday},
+        {"Darwin issetugid", testDarwinIssetugid},
+        {"Darwin ioctl standard descriptor type",
+         testDarwinIoctlStandardDescriptorType},
         {"Darwin Sandbox syscall check", testDarwinSandboxSyscallCheck},
         {"Darwin AMFI dyld policy", testDarwinAmfiDyldPolicy},
         {"Darwin lockdown-mode sysctl", testDarwinLockdownModeSysctl},
+        {"Darwin 64-bit user-stack sysctl", testDarwinUserStack64Sysctl},
         {"Darwin boot-arguments sysctl", testDarwinBootArgsSysctl},
         {"Darwin kernel-version sysctl", testDarwinKernelVersionSysctl},
+        {"Darwin product-version sysctl", testDarwinProductVersionSysctl},
+        {"Darwin iOS-support-version sysctl",
+         testDarwinIosSupportVersionSysctl},
+        {"Darwin OS-variant-status sysctl",
+         testDarwinOsVariantStatusSysctl},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
+        {"Darwin FeatureFlags shm_open probe",
+         testDarwinFeatureFlagsShmOpenProbe},
+        {"Darwin csops unsigned status", testDarwinCsopsUnsignedStatus},
+        {"Darwin csops_audittoken unsigned DER entitlements",
+         testDarwinCsopsAuditTokenUnsignedDerEntitlements},
+        {"Darwin open/read urandom nocancel",
+         testDarwinOpenAndReadUrandomNoCancel},
         {"Darwin open guest root directory",
          testDarwinOpenGuestRootDirectory},
         {"Darwin openat guest cryptex directory",
          testDarwinOpenatGuestCryptexDirectory},
         {"Darwin duplicate guest descriptor",
          testDarwinDuplicateGuestDescriptor},
-        {"unsupported Darwin fstatat64 diagnostic",
-         testUnsupportedDarwinFstatat64Diagnostic},
+        {"Darwin stat64 mapped file", testDarwinStat64MappedFile},
+        {"Darwin getfsstat64 synthetic root",
+         testDarwinGetfsstat64SyntheticRoot},
+        {"Darwin access chroot marker", testDarwinAccessChrootMarker},
+        {"Darwin access mapped directory", testDarwinAccessMappedDirectory},
+        {"Darwin getattrlist root volume", testDarwinGetattrlistRootVolume},
+        {"Darwin getattrlist mapped-file full path",
+         testDarwinGetattrlistMappedFileFullPath},
+        {"Darwin fstatat64 synthetic directory",
+         testDarwinFstatat64SyntheticDirectory},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
+        {"Darwin mmap read-only user file", testDarwinMmapReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
+        {"Darwin simple-ASL socket flow", testDarwinSimpleAslSocketFlow},
         {"Darwin close guest descriptor", testDarwinCloseGuestDescriptor},
         {"Darwin proc_info set dyld images", testDarwinProcInfoSetDyldImages},
         {"Darwin proc_info rejects invalid dyld images",
          testDarwinProcInfoRejectsInvalidDyldImages},
+        {"Darwin proc_info unique identifier",
+         testDarwinProcInfoUniqueIdentifier},
+        {"Darwin proc_info short BSD info",
+         testDarwinProcInfoShortBsdInfo},
+        {"Darwin mprotect", testDarwinMprotect},
         {"Darwin munmap", testDarwinMunmap},
         {"generated Darwin munmap", testGeneratedDarwinMunmap},
         {"generated Darwin getpid", testGeneratedDarwinGetpid},
@@ -22969,6 +36051,7 @@ int main() {
          testDarwinThreadFastSetCthreadSelf},
         {"generated Darwin thread_fast_set_cthread_self",
          testGeneratedDarwinThreadFastSetCthreadSelf},
+        {"Mach thread-self trap", testMachThreadSelfTrap},
         {"Mach task-self trap", testMachTaskSelfTrap},
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
         {"Mach host-self trap", testMachHostSelfTrap},
@@ -22977,6 +36060,7 @@ int main() {
         {"Mach port deallocate trap", testMachPortDeallocateTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
         {"Mach port construct trap", testMachPortConstructTrap},
+        {"Mach VM allocate trap", testMachVmAllocateTrap},
         {"Mach VM deallocate trap", testMachVmDeallocateTrap},
         {"generated Mach VM deallocate trap",
          testGeneratedMachVmDeallocateTrap},
@@ -22987,10 +36071,26 @@ int main() {
         {"Mach message2 diagnostic", testMachMessage2Diagnostic},
         {"Mach message2 host basic-info request",
          testMachMessage2HostBasicInfoRequest},
+        {"Mach message2 host priority-info request",
+         testMachMessage2HostPriorityInfoRequest},
+        {"Mach message2 host clock-service request",
+         testMachMessage2HostClockServiceRequest},
+        {"Mach message2 task bootstrap-port request",
+         testMachMessage2TaskGetBootstrapPortRequest},
+        {"Mach message2 task audit-token request",
+         testMachMessage2TaskAuditTokenRequest},
+        {"Mach message2 task debug-control-port request",
+         testMachMessage2TaskSetDebugControlPortRequest},
+        {"Mach message2 semaphore-create request",
+         testMachMessage2SemaphoreCreateRequest},
+        {"Mach message2 restartable-ranges request",
+         testMachMessage2RestartableRangesRegisterRequest},
         {"Mach message2 mach_vm_map request",
          testMachMessage2MachVmMapRequest},
         {"unsupported Mach trap diagnostic", testUnsupportedMachTrapDiagnostic},
         {"IR verification", testIrVerification},
+        {"local register allocator reuses dead values",
+         testLocalRegisterAllocatorReusesDeadValues},
         {"R1 generated execution", testR1ExecutesGeneratedCode},
         {"add carry/zero flags", testAddFlagsCarryAndZero},
         {"add signed-overflow flags", testAddFlagsSignedOverflow},
@@ -23007,16 +36107,28 @@ int main() {
          testAnd64BitRegisterWithGuestMemory},
         {"AND 32-bit register with guest memory",
          testAnd32BitRegisterWithGuestMemory},
+        {"AND 32-bit register with RSP SIB memory",
+         testAnd32BitRegisterWithRspSibMemory},
+        {"AND 32-bit register with indexed SIB memory",
+         testAnd32BitRegisterWithIndexedSibMemory},
+        {"AND 32-bit register into indexed guest memory",
+         testAnd32BitRegisterIntoIndexedGuestMemory},
+        {"AND immediate into guest word", testAndImmediateIntoGuestWord},
+        {"AND immediate into guest byte", testAndImmediateIntoGuestByte},
         {"BT 32-bit register with immediate", testBitTestRegisterImmediate32},
+        {"BTS/BTR 64-bit register with immediate",
+         testBitSetResetRegisterImmediate64},
         {"BT 32-bit register with register index",
          testBitTestRegisterIndex32},
         {"BT guest dword with immediate", testBitTestGuestDwordImmediate},
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},
         {"BSWAP 32-bit register", testByteSwap32},
+        {"BSR 32-bit registers", testBitScanReverse32},
         {"BSR 64-bit registers", testBitScanReverse64},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
         {"AND 8-bit accumulator immediate", testAnd8BitAccumulatorImmediate},
+        {"AND accumulator immediate", testAndAccumulatorImmediate},
         {"AND 8-bit register immediate", testAnd8BitRegisterImmediate},
         {"AND 32-bit register immediate", testAnd32BitRegisterImmediate},
         {"guest address space", testGuestAddressSpace},
@@ -23035,28 +36147,49 @@ int main() {
         {"R2 taken conditional", testR2TakenConditional},
         {"indirect guest-memory call", testIndirectGuestMemoryCall},
         {"indirect guest-memory call fault", testIndirectGuestMemoryCallFault},
+        {"RIP-relative indirect guest-memory call",
+         testRipRelativeIndirectGuestMemoryCall},
         {"indirect guest-register call", testIndirectGuestRegisterCall},
         {"unsigned-below conditional", testUnsignedBelowConditional},
         {"unsigned-below long conditional", testUnsignedBelowLongConditional},
         {"register-indirect jump", testRegisterIndirectJump},
+        {"RIP-relative memory-indirect jump",
+         testRipRelativeMemoryIndirectJump},
+        {"based memory-indirect jump", testBasedMemoryIndirectJump},
+        {"set overflow low-byte register", testSetOverflowLowByteRegister},
         {"set below low-byte register", testSetBelowLowByteRegister},
+        {"set above low-byte register", testSetAboveLowByteRegister},
         {"set equal RIP-relative guest byte",
          testSetEqualRipRelativeGuestByte},
+        {"set equal SIB guest byte", testSetEqualSibGuestByte},
         {"set equal low-byte register", testSetEqualLowByteRegister},
         {"set not-equal low-byte register", testSetNotEqualLowByteRegister},
+        {"set not-sign low-byte register", testSetNotSignLowByteRegister},
+        {"set below-or-equal low-byte register",
+         testSetBelowOrEqualLowByteRegister},
+        {"set less low-byte register", testSetLessLowByteRegister},
         {"set greater extended low-byte register",
          testSetGreaterExtendedLowByteRegister},
         {"set above-or-equal guest byte", testSetAboveOrEqualGuestByte},
         {"conditional move below 64-bit", testConditionalMoveBelow64},
+        {"conditional move not-equal 32-bit from guest memory",
+         testConditionalMoveNotEqual32FromGuestMemory},
         {"conditional move below 32-bit", testConditionalMoveBelow32},
         {"conditional move above-or-equal 64-bit",
          testConditionalMoveAboveOrEqual64},
         {"conditional move above-or-equal 32-bit",
          testConditionalMoveAboveOrEqual32},
         {"conditional move above 64-bit", testConditionalMoveAbove64},
+        {"conditional move below-or-equal 32-bit",
+         testConditionalMoveBelowOrEqual32},
         {"conditional move equal 64-bit", testConditionalMoveEqual64},
         {"conditional move not-equal extended 64-bit",
          testConditionalMoveNotEqual64Extended},
+        {"conditional move not-equal legacy 32-bit",
+         testConditionalMoveNotEqual32Legacy},
+        {"conditional move sign 64-bit", testConditionalMoveSign64},
+        {"conditional move less-or-equal 64-bit",
+         testConditionalMoveLessOrEqual64},
         {"conditional move equal extended 32-bit",
          testConditionalMoveEqual32Extended},
         {"unsigned-above conditional", testUnsignedAboveConditional},
@@ -23072,7 +36205,9 @@ int main() {
          testSignedGreaterOrEqualConditional},
         {"signed-less-or-equal conditional", testSignedLessOrEqualConditional},
         {"sign long conditional", testSignLongConditional},
+        {"overflow long conditional", testOverflowLongConditional},
         {"sign short conditional", testSignShortConditional},
+        {"CS-hinted short conditionals", testCsHintedShortConditionals},
         {"not-sign short conditional", testNotSignShortConditional},
         {"unsigned-above-or-equal short conditional",
          testUnsignedAboveOrEqualShortConditional},
