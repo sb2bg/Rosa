@@ -37,6 +37,10 @@ class OptimizedLoop {
 [[nodiscard]] std::unique_ptr<OptimizedLoop>
 compileOptimizedLoop(const ir::Block &block);
 
+// Performs the inexpensive structural check used to identify blocks worth
+// warming up. This never initializes LLVM or compiles native code.
+[[nodiscard]] bool canCompileOptimizedLoop(const ir::Block &block) noexcept;
+
 [[nodiscard]] bool llvmBackendAvailable() noexcept;
 
 } // namespace rosa::dbt

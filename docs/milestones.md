@@ -32,7 +32,7 @@ This is not a general x86 executor.
 
 ## R3 — controlled Mach-O: implemented for controlled fixtures
 
-- the build produces an x86_64 Mach-O using the native arm64 Apple toolchain as a cross-target linker;
+- the build produces x86_64 Mach-O assembly fixtures and a controlled C `main` fixture using the native arm64 Apple toolchain as a cross-target compiler and linker;
 - robust parsing of 64-bit x86 executable headers, load commands, segments, `LC_MAIN`, and x86_64 `LC_UNIXTHREAD` entry state;
 - `rosa inspect`, including segment and load-command views;
 - `rosa run` starts at the Mach-O's real `LC_MAIN` entry;
@@ -50,24 +50,55 @@ Dynamic-library commands are parsed but not acted upon.
 - only BSD-class `write` and `exit` are implemented;
 - guest buffers are copied through guest memory;
 - the fixture prints `hello from Intel Darwin` and exits with status zero;
+- a minimal checked-in entry stub passes the direct-entry Darwin `argc`/`argv` stack to a real Clang-compiled `main(int, char **)`, which validates guest arguments, exercises LLVM hot-loop promotion, returns 42, and exits cleanly;
 - no output helper or interpreter fallback exists.
 
-## R5 — x86 dyld startup: shared-cache transition and guest policy/VFS reached
+## R5 — ordinary dynamically linked C `main`: implemented for the tested userspace
 
 - universal Mach-O x86_64 slice selection works for a manually supplied dyld;
 - the controlled app and all six dyld segments map together at explicit guest addresses;
 - Rosa enters dyld's x86_64 `LC_UNIXTHREAD` entry with the initial stack;
 - a manually supplied x86_64 dyld cache plus six subcaches is validated and mapped intact as 28 guest mappings at slide zero;
 - `shared_region_check_np` succeeds and dyld recognizes/accesses the cache metadata;
-- diagnostic one-instruction translations have advanced through 1,079,752 executed blocks and 24,954 unique translations of the tested unmodified dyld;
+- the original single-instruction diagnostic path advanced through more than 4.1 million executed blocks and 65,000 unique translations of the tested unmodified dyld and shared-cache userspace;
+- the normal bounded-block path executes the same startup in roughly 784,000 blocks and 12,847 translations, consuming about 3.97 MiB in one pooled `MAP_JIT` arena mapping;
 - dyld has parsed and repeatedly traversed application Mach-O structures, dispatched internal callbacks and jump tables, used vector string operations, consulted the x86 commpage, and entered deeper load-command/address-calculation paths;
 - the trace has reached BSD `proc_info(PROC_INFO_CALL_SET_DYLD_IMAGES)`, `munmap`, sysctl/AMFI/Sandbox policy, and synthetic root/cryptex VFS operations, plus guest `VM_PROT_COPY`;
 - dyld enters dyld-in-cache and successfully unmaps the standalone dyld image;
 - trap 24 constructs explicit guest-only `MPO_REPLY_PORT` receive rights with fault-atomic copyout; subsequent deallocation/refcount and observed `mach_msg2` operations use the same namespace;
-- cache-PC provenance still records only `/usr/lib/dyld` (image index 2) as executed;
-- the next loud failure is guest `fstatat64` for `System/Library/dyld/` relative to the synthetic `/System/Cryptexes/OS` descriptor.
+- x86_64 `stat64`, `fstat64`, `fstatat64`, `getfsstat64`, and controlled descriptor/path operations use explicit guest layouts rather than copying arm64 host structures;
+- cache-PC provenance records execution in 21 images, including libSystem, libsystem_kernel, libsystem_pthread, libsystem_platform, libc, malloc, dispatch, Objective-C, libc++abi, XPC, trace, secinit, container management, and libsystem_darwin;
+- a normal Clang-driver-linked x86_64 Mach-O with `LC_MAIN` and an `LC_LOAD_DYLIB` dependency on `/usr/lib/libSystem.B.dylib` completes dyld and library initialization;
+- libc formats the program's `printf`, crosses Darwin `write_nocancel`, returns from the ordinary `main`, and exits with status zero;
+- an `-O2` scalar prime-sieve application completes ten passes to one million through the same ordinary dynamic path, verifies 78,498 primes and their sum, and exercises about 28.7 million guest blocks;
+- that application-driven frontier added register-direct unsigned 32-bit `DIV`, with focused decode, IR, execution, and fault-semantics coverage;
+- no custom `_start`, static link, binary patch, interpreter fallback, or Rosetta runtime execution is involved in that frontier run.
 
-No non-dyld cached system image resolution or execution is yet verified. `libSystem` initialization, application initialization, and transfer to guest `main` have not begun. The next slice must define the x86_64 Darwin `stat64` ABI and synthetic VFS metadata; copying an arm64 host `stat` is explicitly not acceptable.
+This proves deliberately small ordinary applications, not general macOS
+compatibility. The next compatibility frontier is a richer C program that
+exercises heap allocation, file I/O, environment access, and additional libc
+paths. The next performance frontier is compiling memory-bearing hot loops or
+linking translated blocks into traces.
+
+### R5 performance snapshot
+
+On the current M1 Pro host, the uncached release path is roughly 0.09 seconds,
+down from 1.23 seconds before pooled executable allocation, non-retained
+runtime listings, lazy shared-cache page rebasing, allocation-free scalar
+guest memory, release IPO, and 16-instruction dyld blocks. Peak resident size
+is about 96 MB rather than 956 MB. The opt-in persistent translation cache
+stores relocatable AArch64 and publishes a warm 4 MiB cache image as one JIT
+batch. Across five alternating process batches, a baseline-only warm build ran
+in 50.5–53.8 ms while Rosetta ran the same fixture in 8.1–8.4 ms, leaving about
+a 6.5x gap rather than 37x. The next structural speed work is direct block/trace
+linking; process-persistent compilation has removed most repeated frontend and
+publication cost.
+
+The scalar prime sieve exposes the steady-state gap more clearly: across eleven
+alternating warm process trials, the same x86_64 binary had a 28.5 ms Rosetta
+median and a 598.1 ms baseline Rosa median, or 21.0x. Its marking and reduction
+loops contain guest memory operations and therefore cannot enter the current
+register-only LLVM loop tier.
 
 ## Verification notes
 

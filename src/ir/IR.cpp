@@ -963,6 +963,18 @@ void Builder::updateAdcFlags(ValueId lhs, ValueId rhs, ValueId carry,
     });
 }
 
+void Builder::updateSbbFlags(ValueId lhs, ValueId rhs, ValueId borrow,
+                             Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateSbbFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = lhs,
+        .rhs = rhs,
+        .third = borrow,
+    });
+}
+
 void Builder::updateIncFlags(ValueId original, ValueId result, Width width,
                              guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -1681,6 +1693,15 @@ std::vector<std::string> verify(const Block &block) {
             if (operation.width != Width::I32 &&
                 operation.width != Width::I64) {
                 errors.emplace_back("update_adc_flags requires i32 or i64");
+            }
+            break;
+        case Opcode::UpdateSbbFlags:
+            checkUse(operation.lhs, "left");
+            checkUse(operation.rhs, "right");
+            checkUse(operation.third, "borrow");
+            if (operation.width != Width::I32 &&
+                operation.width != Width::I64) {
+                errors.emplace_back("update_sbb_flags requires i32 or i64");
             }
             break;
         case Opcode::UpdateIncFlags:

@@ -5,7 +5,7 @@ Rosa implements only the x86_64 Darwin operations reached by the controlled fixt
 | Guest operation | Guest `RAX` | Guest arguments | Host action |
 | --- | ---: | --- | --- |
 | `exit` | `0x02000001` | status in `RDI` | terminate the guest dispatch loop |
-| `write` | `0x02000004` | fd in `RDI`, address in `RSI`, count in `RDX` | copy guest bytes, then call host `write` |
+| `write` / `write_nocancel` | `0x02000004` / `0x0200018d` | fd in `RDI`, address in `RSI`, count in `RDX` | copy guest bytes, then call host `write` |
 | `open` | `0x02000005` | guest path/flags/mode | open controlled user files or allocate synthetic guest directory descriptors for the observed root operations |
 | `close` | `0x02000006` | guest fd | remove a task-local guest descriptor |
 | `getpid` | `0x02000014` | none | return the single Rosa process identity used by the current one-process model |
@@ -15,6 +15,7 @@ Rosa implements only the x86_64 Darwin operations reached by the controlled fixt
 | `sysctl` | `0x020000ca` | x86 Darwin MIB and guest buffers | implement name-to-OID plus observed lockdown, boot-argument, and kernel-version reads |
 | `shared_region_check_np` | `0x02000126` | guest address-pointer in `RDI` | copy out the installed Intel cache base, or return `EINVAL` when no compatible cache exists |
 | `proc_info` | `0x02000150` | observed `PROC_INFO_CALL_SET_DYLD_IMAGES` arguments | register/finalize guest TASK_DYLD_INFO metadata without copying or forwarding its pointer |
+| `stat64` / `fstat64` / `fstatat64` | `0x02000152` / `0x02000153` / `0x020001d6` | controlled guest path or descriptor plus output | translate metadata into the explicit 144-byte x86_64 Darwin stat layout |
 | `thread_selfid` | `0x02000174` | none | return guest thread ID 1 |
 | `__mac_syscall` | `0x0200017d` | guest policy/call/request | implement the observed Sandbox map-with-linking check and unrestricted development AMFI dyld policy |
 | `fsgetpath` | `0x020001ab` | guest output buffer/size and guest fsid/object ID | implement only dyld's empty identity-tuple probe, returning `ENOTSUP` without touching output |
@@ -24,7 +25,7 @@ Rosa implements only the x86_64 Darwin operations reached by the controlled fixt
 
 The x86 `syscall` instruction exits generated ARM64 to `darwin::SyscallDispatcher`. It is never converted to an ARM `svc`. Generated code records the next RIP in guest `RIP`/`RCX` and the input flags in guest `R11`. Successful writes clear x86 `CF`; host errors place `errno` in guest `RAX` and set `CF`.
 
-The controlled write implementation accepts stdout and stderr and rejects writes over 16 MiB. Guest root/cryptex descriptors never open or traverse the host root. `kern.version` is obtained with a host-owned buffer because native and Rosetta x86 callers observe the same current kernel string; only copied bytes enter guest memory. Every unsupported number reports its guest RIP and six ABI arguments. `fstatat64` additionally decodes its guest path and output pointer before failing. There is no generic syscall-number passthrough and no assumption that arm64 host numbers or structures match x86 Darwin.
+The controlled write implementation accepts stdout and stderr and rejects writes over 16 MiB. Guest root/cryptex descriptors never open or traverse the host root. `kern.version` is obtained with a host-owned buffer because native and Rosetta x86 callers observe the same current kernel string; only copied bytes enter guest memory. Every unsupported number reports its guest RIP and six ABI arguments. There is no generic syscall-number passthrough and no assumption that arm64 host numbers or structures match x86 Darwin.
 
 The x86 machdep class currently implements only `thread_fast_set_cthread_self` (call 3). It validates/canonicalizes the guest cthread pointer into explicit guest `GSBASE` state and returns the x86 `USER_CTHREAD` selector. It never changes a host segment register.
 
@@ -49,4 +50,9 @@ For dyld bring-up Rosa also maps a sparse, read-only x86 commpage at `0x7fffffe0
 
 For trap 24 the observed target is guest task-self `0x103`; options flags are `0x1000` (`MPO_REPLY_PORT`), the queue-limit field and both special fields are zero, context is zero, and the queue limit defaults to 5. Output faults roll the new right back. Repeated constructions allocate deterministic task-local names (`0x203`, `0x303`, `0x403`, ...).
 
-The current trace has entered dyld-in-cache and unmapped standalone dyld. Its first unsupported Darwin boundary is `fstatat64(6, "System/Library/dyld/", guest_stat, 0)` relative to the synthetic guest cryptex directory. General filesystem metadata, directory enumeration, signals, most Mach messages, and most Darwin structures remain unsupported and fail diagnostically.
+The current frontier enters dyld-in-cache, unmaps standalone dyld, initializes
+the required shared-cache libraries, transfers to an ordinary C `main`, and
+prints through libc's `write_nocancel` path before exiting successfully.
+General filesystem metadata, directory enumeration, signals, most Mach
+messages, and most Darwin structures remain unsupported and fail
+diagnostically.

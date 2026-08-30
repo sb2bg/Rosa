@@ -17,7 +17,7 @@ naive local value-to-register assignment
         ↓
 custom AArch64 encoder
         ↓
-MAP_JIT code buffer
+pooled MAP_JIT code arena
         ↓
 generated ARM64 and narrow semantic helpers mutate X86State
         ↓
@@ -44,7 +44,22 @@ Observed 8/16/32/64-bit arithmetic and comparison forms eagerly compute `CF`, `P
 
 ## Control flow and cache
 
-The decoder ends blocks at direct/indirect transfers, conditional branches, calls, returns, or syscalls. A cache owns one `MAP_JIT` translation per guest start RIP. Generated conditional exits test the relevant stored x86 flag bits with AArch64 test branches. The dispatcher has an explicit block limit and fetches only from executable guest mappings. The dyld experiment deliberately caps translations at one guest instruction so the first missing semantic is isolated; this remains generated code, not interpretation.
+The decoder ends blocks at direct/indirect transfers, conditional branches,
+calls, returns, or syscalls. A cache owns one immutable translation per guest
+start RIP. Generated conditional exits test the relevant stored x86 flag bits
+with AArch64 test branches. The dispatcher has an explicit block limit and
+fetches only from executable guest mappings. The dyld path caps straight-line
+translations at 16 guest instructions: control-flow boundaries usually end
+them earlier, while the cap keeps unsupported-instruction diagnostics
+attributable without paying a dispatch and cache entry per instruction.
+
+An opt-in persistent cache stores source bytes, immutable generated AArch64,
+block-exit metadata, and fixed-width helper-pointer relocations. Its build
+fingerprint rejects incompatible emitters. On a hit, source bytes are checked
+before execution, helper pointers are adjusted for the current ASLR slide, all
+cached programs are published as one JIT batch, and decoded x86 metadata is
+reconstructed only if diagnostics request it. Writable executable mappings
+still use the in-process source/version invalidation path.
 
 ## Mach-O boundary
 
@@ -52,7 +67,7 @@ The parser accepts little-endian, 64-bit x86 executables and dynamic linkers and
 
 The loader maps every nonempty segment at its guest virtual address plus an optional slide. File bytes are copied, the remaining virtual size is zero-filled, and `initprot` becomes guest permissions. No-access `__PAGEZERO` is represented sparsely. The startup builder creates a 16-byte-aligned stack containing `argc`, `argv`, `envp`, `apple[]`, their null terminators, and strings.
 
-Rosa relies on dyld guest code to interpret application and cache structures. A manually supplied Intel shared cache is validated with all declared subcaches, mapped as private file-backed guest regions at slide zero, fixed up from version-2 slide metadata, and accompanied by a guest dynamic-data page. `shared_region_check_np` returns its guest base; no cache pointer is passed to the host kernel.
+Rosa relies on dyld guest code to interpret application and cache structures. A manually supplied Intel shared cache is validated with all declared subcaches, mapped as private file-backed guest regions at slide zero, and accompanied by a guest dynamic-data page. Version-2 chained fixups are applied once per 4 KiB guest page on first access rather than eagerly rewriting the entire cache. `shared_region_check_np` returns its guest base; no cache pointer is passed to the host kernel.
 
 Parsed cache image metadata resolves an executed guest PC to cache image index, UUID, and path. Fatal diagnostics include that provenance, recent guest instructions, registers, mappings, translation counts, hot blocks, and the guest Mach-port summary. This has verified execution in cache image 2, `/usr/lib/dyld`; it has not yet observed execution in another cached image.
 
@@ -62,7 +77,14 @@ Generated code recognizes x86 `0F 05`, records `RCX`, `R11`, and the next guest 
 
 ## Executable memory
 
-`ExecutableCode` allocates with Apple's `MAP_JIT`. Writes occur inside an explicit `pthread_jit_write_protect_np(0/1)` scope, followed by instruction-cache invalidation. The code is not modified after publication. The abstraction owns and unmaps the allocation with RAII.
+`ExecutableArena` allocates 16 MiB chunks with Apple's `MAP_JIT` and bump
+allocates aligned immutable translations inside them. Each publication occurs
+inside an explicit `pthread_jit_write_protect_np(0/1)` scope and is followed by
+instruction-cache invalidation. An `ExecutableCode` keeps the shared arena
+alive; the arena unmaps its chunks with RAII after the last translated block
+releases them. A one-off generated function uses the same abstraction with a
+page-sized arena rather than reserving a full chunk. Persistent-cache programs
+are copied together and invalidate each contiguous arena range once.
 
 ## Current constraints
 
@@ -74,4 +96,16 @@ Generated code recognizes x86 `0F 05`, records `RCX`, `R11`, and the next guest 
 - only version-2 x86 shared-cache slide fixups; no general Mach-O binding/rebase engine;
 - instruction encodings remain deliberately incomplete and are added only after an observed failure.
 
-The current dyld experiment reaches 1,079,752 executed blocks and 24,954 unique translations. It has recognized the mapped Intel cache, entered dyld-in-cache, registered TASK_DYLD_INFO, made guest cache data privately writable with `VM_PROT_COPY`, unmapped standalone dyld, constructed and maintained guest Mach rights, queried guest policy/kernel metadata, and opened synthetic guest root/cryptex directory capabilities. The first failure is `fstatat64(470)` for `System/Library/dyld/`, relative to the synthetic `/System/Cryptexes/OS` descriptor. Correct support requires an explicit x86_64 Darwin `stat64` structure and synthetic VFS metadata. No non-dyld cached image execution, `libSystem` initialization, application initialization, or guest `main` has been verified.
+On the tested userspace, the ordinary C fixture completes through dyld,
+21 shared-cache images, libSystem initialization, libc `printf`, return from
+`main`, and guest exit. With 16-instruction translation bounds it executes
+about 784,000 blocks, creates about 12,847 translations, and consumes about
+3.97 MiB in one JIT arena mapping. Unsupported instructions and Darwin
+operations still fail with their precise guest address and diagnostic state.
+
+The scalar prime-sieve fixture uses the same dynamic path but executes about
+28.7 million blocks. It makes the current tiering boundary concrete: internal
+self-edge batching keeps repeated baseline blocks inside generated code, but
+guest byte loads and stores still cross checked helpers, and the LLVM tier does
+not yet accept memory-bearing loops. On the M1 Pro development host this leaves
+a roughly 21.0x median gap to Rosetta for the same scalar x86_64 binary.

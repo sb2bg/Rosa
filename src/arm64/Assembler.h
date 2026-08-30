@@ -32,6 +32,11 @@ inline constexpr XRegister x19{19};
 struct Program {
     std::vector<std::uint8_t> bytes;
     std::vector<std::string> listing;
+    std::vector<std::uint32_t> pointerRelocations;
+};
+
+struct RelocatablePointer {
+    std::uint64_t value{};
 };
 
 struct Label {
@@ -40,8 +45,21 @@ struct Label {
 
 class Assembler {
   public:
+    explicit Assembler(bool recordListing = true)
+        : recordListing_(recordListing) {
+        // Runtime blocks average well below this size. Reserving once avoids
+        // repeatedly reallocating the instruction stream while it is emitted.
+        words_.reserve(128);
+        labelPositions_.reserve(8);
+        fixups_.reserve(8);
+        if (recordListing_) {
+            listing_.reserve(128);
+        }
+    }
+
     void mov(XRegister destination, XRegister source);
     void movImmediate(XRegister destination, std::uint64_t value);
+    void movImmediate(XRegister destination, RelocatablePointer pointer);
     void add(XRegister destination, XRegister lhs, XRegister rhs);
     void sub(XRegister destination, XRegister lhs, XRegister rhs);
     void lslImmediate(XRegister destination, XRegister source, std::uint8_t shift);
@@ -104,6 +122,8 @@ class Assembler {
     std::vector<std::string> listing_;
     std::vector<std::optional<std::size_t>> labelPositions_;
     std::vector<Fixup> fixups_;
+    std::vector<std::uint32_t> pointerRelocations_;
+    bool recordListing_{};
 };
 
 } // namespace rosa::arm64

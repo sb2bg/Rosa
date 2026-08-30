@@ -149,6 +149,7 @@ enum class Opcode {
     VmovupsRegMem,
     VmovupsYmmRegMem,
     VmovupsYmmMemReg,
+    VmovapsYmmRegMem,
     VmovapsYmmMemReg,
     Vzeroupper,
     MovdqaRegReg,

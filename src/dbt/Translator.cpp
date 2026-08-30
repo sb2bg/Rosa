@@ -1159,7 +1159,7 @@ loadGuest8(GuestExecutionContext *context, x86::X86State *state, std::uint64_t a
             throw std::runtime_error("generated guest load has no address space");
         }
         context->loadedValue =
-            context->addressSpace->readBytes(guest::GuestAddress{address}, 1).front();
+            context->addressSpace->readU8(guest::GuestAddress{address});
         return state;
     } catch (...) {
         if (context != nullptr) {
@@ -1183,8 +1183,8 @@ repeatMoveByte(GuestExecutionContext *context, x86::X86State *state) noexcept {
         const auto decrement = (state->rflags & flagDirection) != 0;
         while (state->rcx != 0) {
             currentAddress = state->rsi;
-            const auto value = context->addressSpace->readBytes(
-                guest::GuestAddress{currentAddress}, 1);
+            const std::array value{context->addressSpace->readU8(
+                guest::GuestAddress{currentAddress})};
             currentAddress = state->rdi;
             context->addressSpace->writeBytes(
                 guest::GuestAddress{currentAddress}, value);
@@ -1210,10 +1210,8 @@ loadGuest16(GuestExecutionContext *context, x86::X86State *state,
         if (context == nullptr || context->addressSpace == nullptr) {
             throw std::runtime_error("generated guest load has no address space");
         }
-        const auto bytes =
-            context->addressSpace->readBytes(guest::GuestAddress{address}, 2);
-        context->loadedValue = static_cast<std::uint64_t>(bytes[0]) |
-                               (static_cast<std::uint64_t>(bytes[1]) << 8U);
+        context->loadedValue =
+            context->addressSpace->readU16(guest::GuestAddress{address});
         return state;
     } catch (...) {
         if (context != nullptr) {
@@ -1434,6 +1432,67 @@ updateAdcFlags64(x86::X86State *state, std::uint64_t lhs,
         flags |= flagSign;
     }
     if (((~(lhs ^ rhs) & (lhs ^ result)) >> 63U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+updateSbbFlags32(x86::X86State *state, std::uint64_t lhsValue,
+                 std::uint64_t rhsValue, std::uint64_t borrowValue) {
+    const auto lhs = static_cast<std::uint32_t>(lhsValue);
+    const auto rhs = static_cast<std::uint32_t>(rhsValue);
+    const auto borrow = static_cast<std::uint32_t>(borrowValue & 1U);
+    const auto wideSubtrahend = static_cast<std::uint64_t>(rhs) + borrow;
+    const auto result = static_cast<std::uint32_t>(
+        static_cast<std::uint64_t>(lhs) - wideSubtrahend);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (static_cast<std::uint64_t>(lhs) < wideSubtrahend) {
+        flags |= flagCarry;
+    }
+    if ((std::popcount(static_cast<unsigned>(result & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (((lhs ^ rhs ^ result) & 0x10U) != 0) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result & 0x80000000U) != 0) {
+        flags |= flagSign;
+    }
+    if ((((lhs ^ rhs) & (lhs ^ result)) & 0x80000000U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+updateSbbFlags64(x86::X86State *state, std::uint64_t lhs,
+                 std::uint64_t rhs, std::uint64_t borrowValue) {
+    const auto borrow = borrowValue & 1U;
+    const auto subtrahend = rhs + borrow;
+    const auto result = lhs - subtrahend;
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (subtrahend < rhs || lhs < subtrahend) {
+        flags |= flagCarry;
+    }
+    if ((std::popcount(static_cast<unsigned>(result & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (((lhs ^ rhs ^ result) & 0x10U) != 0) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result >> 63U) != 0) {
+        flags |= flagSign;
+    }
+    if ((((lhs ^ rhs) & (lhs ^ result)) >> 63U) != 0) {
         flags |= flagOverflow;
     }
     state->rflags = flags;
@@ -1670,9 +1729,8 @@ orGuest8(GuestExecutionContext *context, x86::X86State *state,
         context->addressSpace->validateAccess(
             guest::GuestAddress{address}, 1,
             guest::Permission::Read | guest::Permission::Write);
-        const auto original = context->addressSpace
-                                  ->readBytes(guest::GuestAddress{address}, 1)
-                                  .front();
+        const auto original = context->addressSpace->readU8(
+            guest::GuestAddress{address});
         const auto result = static_cast<std::uint8_t>(
             original | static_cast<std::uint8_t>(sourceValue));
         const std::array bytes{result};
@@ -1754,9 +1812,8 @@ andGuest8(GuestExecutionContext *context, x86::X86State *state,
         context->addressSpace->validateAccess(
             guest::GuestAddress{address}, 1,
             guest::Permission::Read | guest::Permission::Write);
-        const auto original = context->addressSpace
-                                  ->readBytes(guest::GuestAddress{address}, 1)
-                                  .front();
+        const auto original = context->addressSpace->readU8(
+            guest::GuestAddress{address});
         const auto result = static_cast<std::uint8_t>(
             original & static_cast<std::uint8_t>(sourceValue));
         const std::array bytes{result};
@@ -1784,11 +1841,8 @@ andGuest16(GuestExecutionContext *context, x86::X86State *state,
         context->addressSpace->validateAccess(
             guest::GuestAddress{address}, width,
             guest::Permission::Read | guest::Permission::Write);
-        const auto bytes = context->addressSpace->readBytes(
-            guest::GuestAddress{address}, width);
-        const auto original = static_cast<std::uint16_t>(
-            static_cast<std::uint16_t>(bytes[0]) |
-            (static_cast<std::uint16_t>(bytes[1]) << 8U));
+        const auto original = context->addressSpace->readU16(
+            guest::GuestAddress{address});
         const auto result = static_cast<std::uint16_t>(
             original & static_cast<std::uint16_t>(sourceValue));
         const std::array resultBytes{
@@ -1874,9 +1928,8 @@ incrementGuest8(GuestExecutionContext *context, x86::X86State *state,
         context->addressSpace->validateAccess(
             guest::GuestAddress{address}, 1,
             guest::Permission::Read | guest::Permission::Write);
-        const auto original = context->addressSpace
-                                  ->readBytes(guest::GuestAddress{address}, 1)
-                                  .front();
+        const auto original = context->addressSpace->readU8(
+            guest::GuestAddress{address});
         const auto result = static_cast<std::uint8_t>(original + 1U);
         const std::array resultBytes{result};
         context->addressSpace->writeBytes(guest::GuestAddress{address},
@@ -1899,11 +1952,8 @@ incrementGuest16(GuestExecutionContext *context, x86::X86State *state,
         if (context == nullptr || context->addressSpace == nullptr) {
             throw std::runtime_error("generated 16-bit guest increment has no address space");
         }
-        const auto bytes =
-            context->addressSpace->readBytes(guest::GuestAddress{address}, 2);
-        const auto original = static_cast<std::uint16_t>(
-            static_cast<std::uint16_t>(bytes[0]) |
-            (static_cast<std::uint16_t>(bytes[1]) << 8U));
+        const auto original = context->addressSpace->readU16(
+            guest::GuestAddress{address});
         const auto result = static_cast<std::uint16_t>(original + 1U);
         const std::array resultBytes{
             static_cast<std::uint8_t>(result),
@@ -2118,9 +2168,8 @@ decrementGuest8(GuestExecutionContext *context, x86::X86State *state,
         context->addressSpace->validateAccess(
             guest::GuestAddress{address}, 1,
             guest::Permission::Read | guest::Permission::Write);
-        const auto original = context->addressSpace
-                                  ->readBytes(guest::GuestAddress{address}, 1)
-                                  .front();
+        const auto original = context->addressSpace->readU8(
+            guest::GuestAddress{address});
         const auto result = static_cast<std::uint8_t>(original - 1U);
         const std::array resultBytes{result};
         context->addressSpace->writeBytes(guest::GuestAddress{address},
@@ -2549,11 +2598,8 @@ lockedOrGuest16(GuestExecutionContext *context, x86::X86State *state,
         context->addressSpace->validateAccess(
             guest::GuestAddress{address}, width,
             guest::Permission::Read | guest::Permission::Write);
-        const auto bytes = context->addressSpace->readBytes(
-            guest::GuestAddress{address}, width);
-        const auto original = static_cast<std::uint16_t>(
-            static_cast<std::uint16_t>(bytes[0]) |
-            (static_cast<std::uint16_t>(bytes[1]) << 8U));
+        const auto original = context->addressSpace->readU16(
+            guest::GuestAddress{address});
         const auto result = static_cast<std::uint16_t>(
             original | static_cast<std::uint16_t>(immediateValue));
         const std::array resultBytes{
@@ -3152,12 +3198,12 @@ updateShiftRightDoubleFlags64(x86::X86State *state, std::uint64_t original,
     return state;
 }
 
-template <typename Pointer> std::uint64_t pointerBits(Pointer pointer) {
+template <typename Pointer> arm64::RelocatablePointer pointerBits(Pointer pointer) {
     static_assert(std::is_pointer_v<Pointer>);
     static_assert(sizeof(pointer) == sizeof(std::uint64_t));
     std::uint64_t result = 0;
     std::memcpy(&result, &pointer, sizeof(result));
-    return result;
+    return arm64::RelocatablePointer{result};
 }
 
 ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
@@ -3880,7 +3926,8 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
-        case x86::Opcode::VmovupsYmmRegMem: {
+        case x86::Opcode::VmovupsYmmRegMem:
+        case x86::Opcode::VmovapsYmmRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
                     "internal decoder error: YMM VMOVUPS load operand count");
@@ -3921,7 +3968,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 address = builder.add(address, displacement, ir::Width::I64,
                                       instruction.address);
             }
-            builder.loadGuestYmm(address, destination, false,
+            builder.loadGuestYmm(
+                address, destination,
+                instruction.opcode == x86::Opcode::VmovapsYmmRegMem,
                                  instruction.address);
             break;
         }
@@ -4742,9 +4791,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto immediate =
                 std::get<x86::ImmediateOperand>(instruction.operands[1]);
             if ((reg.width != 32 && reg.width != 64) ||
-                immediate.value != 0) {
+                immediate.width != 8) {
                 throw std::runtime_error(
-                    "only SBB r32/r64, 0 is implemented");
+                    "only SBB r32/r64, imm8 is implemented");
             }
             const auto width =
                 reg.width == 32 ? ir::Width::I32 : ir::Width::I64;
@@ -4752,11 +4801,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 reg.reg, width, instruction.address);
             const auto borrow = builder.evaluateCondition(
                 x86::Condition::Below, instruction.address);
-            const auto result = builder.sub(lhs, borrow, width,
+            const auto rhs = builder.constant(immediate.value, width,
+                                              instruction.address);
+            const auto subtrahend = builder.add(rhs, borrow, width,
+                                                instruction.address);
+            const auto result = builder.sub(lhs, subtrahend, width,
                                             instruction.address);
             builder.writeGuestRegister(reg.reg, result, width,
                                        instruction.address);
-            builder.updateSubFlags(lhs, borrow, result, width,
+            builder.updateSbbFlags(lhs, rhs, borrow, width,
                                    instruction.address);
             break;
         }
@@ -5241,11 +5294,13 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 throw std::runtime_error("internal decoder error: neg operand count");
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
-            if (reg.width != 8 && reg.width != 32 && reg.width != 64) {
+            if (reg.width != 8 && reg.width != 16 && reg.width != 32 &&
+                reg.width != 64) {
                 throw std::runtime_error(
-                    "only 8-, 32-, and 64-bit NEG are implemented");
+                    "only 8-, 16-, 32-, and 64-bit NEG are implemented");
             }
             const auto width = reg.width == 8    ? ir::Width::I8
+                               : reg.width == 16 ? ir::Width::I16
                                : reg.width == 32 ? ir::Width::I32
                                                  : ir::Width::I64;
             const auto zero = builder.constant(0, width, instruction.address);
@@ -5309,16 +5364,21 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto source =
                 std::get<x86::RegisterOperand>(instruction.operands[0]);
-            if (source.width != 8 && source.width != 64) {
+            if (source.width != 8 && source.width != 32 &&
+                source.width != 64) {
                 throw std::runtime_error(
-                    "only unsigned byte and qword register DIV are implemented");
+                    "only unsigned byte, dword, and qword register DIV are implemented");
             }
             const auto divisor = builder.readGuestRegister(
                 source.reg,
-                source.width == 8 ? ir::Width::I8 : ir::Width::I64,
+                source.width == 8    ? ir::Width::I8
+                : source.width == 32 ? ir::Width::I32
+                                     : ir::Width::I64,
                 instruction.address);
             if (source.width == 8) {
                 builder.divideUnsignedByte(divisor, instruction.address);
+            } else if (source.width == 32) {
+                builder.divideUnsignedDword(divisor, instruction.address);
             } else {
                 builder.divideUnsignedQword(divisor, instruction.address);
             }
@@ -5603,12 +5663,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);
             if (destination.width != memory.width ||
-                (destination.width != 8 && destination.width != 32)) {
+                (destination.width != 8 && destination.width != 16 &&
+                 destination.width != 32)) {
                 throw std::runtime_error(
-                    "only byte/dword register-from-memory OR is implemented");
+                    "only byte/word/dword register-from-memory OR is implemented");
             }
-            const auto width = destination.width == 8 ? ir::Width::I8
-                                                       : ir::Width::I32;
+            const auto width = destination.width == 8    ? ir::Width::I8
+                               : destination.width == 16 ? ir::Width::I16
+                                                         : ir::Width::I32;
             auto address = memory.ripRelative
                                ? builder.constant(
                                      instruction.address.value +
@@ -7695,10 +7757,12 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
     }
 
     auto block = std::move(builder).finish();
+#ifndef NDEBUG
     const auto errors = ir::verify(block);
     if (!errors.empty()) {
         throw std::runtime_error("IR verification failed: " + errors.front());
     }
+#endif
     return block;
 }
 
@@ -7792,6 +7856,7 @@ bool isSafelyRepeatableOperation(const ir::Operation &operation) {
     case ir::Opcode::EvaluateCondition:
     case ir::Opcode::UpdateAddFlags:
     case ir::Opcode::UpdateAdcFlags:
+    case ir::Opcode::UpdateSbbFlags:
     case ir::Opcode::UpdateIncFlags:
     case ir::Opcode::UpdateDecFlags:
     case ir::Opcode::UpdateSubFlags:
@@ -7825,8 +7890,9 @@ bool hasInternalSelfEdge(const ir::Block &block) {
     });
 }
 
-arm64::Program compileToArm64(const ir::Block &block) {
-    arm64::Assembler assembler;
+arm64::Program compileToArm64(const ir::Block &block,
+                              bool retainProgramListing) {
+    arm64::Assembler assembler(retainProgramListing);
     const auto hostRegisters = allocateHostRegisters(block);
     const auto hostRegister = [&](ir::ValueId value) {
         if (value.value >= hostRegisters.size()) {
@@ -7841,6 +7907,7 @@ arm64::Program compileToArm64(const ir::Block &block) {
     for (const auto &operation : block.operations) {
         hasHelperCall |= operation.opcode == ir::Opcode::UpdateAddFlags ||
                          operation.opcode == ir::Opcode::UpdateAdcFlags ||
+                         operation.opcode == ir::Opcode::UpdateSbbFlags ||
                          operation.opcode == ir::Opcode::UpdateIncFlags ||
                          (operation.opcode == ir::Opcode::UpdateDecFlags &&
                           operation.width != ir::Width::I64) ||
@@ -8055,9 +8122,10 @@ arm64::Program compileToArm64(const ir::Block &block) {
                  *operation.condition != x86::Condition::NotEqual &&
                  *operation.condition != x86::Condition::Sign &&
                  *operation.condition != x86::Condition::NotSign &&
-                 *operation.condition != x86::Condition::LessOrEqual)) {
+                 *operation.condition != x86::Condition::LessOrEqual &&
+                 *operation.condition != x86::Condition::Greater)) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 32- and 64-bit register CMOVB/CMOVBE/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVLE");
+                    "ARM64 backend only implements 32- and 64-bit register CMOVB/CMOVBE/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVLE/CMOVG");
             }
             constexpr std::uint8_t carryFlagBit = 0;
             constexpr std::uint8_t zeroFlagBit = 6;
@@ -8093,6 +8161,14 @@ arm64::Program compileToArm64(const ir::Block &block) {
                 assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
                 assembler.tbz(arm64::x17, signFlagBit, notTaken);
                 assembler.bind(taken);
+            } else if (*operation.condition == x86::Condition::Greater) {
+                constexpr std::uint8_t overflowFlagBit = 11;
+                assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
+                assembler.lsrImmediate(
+                    arm64::x17, arm64::x16,
+                    overflowFlagBit - signFlagBit);
+                assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
+                assembler.tbnz(arm64::x17, signFlagBit, notTaken);
             } else {
                 assembler.tbnz(arm64::x16, carryFlagBit, notTaken);
                 assembler.tbnz(arm64::x16, zeroFlagBit, notTaken);
@@ -9372,6 +9448,17 @@ arm64::Program compileToArm64(const ir::Block &block) {
                     : pointerBits(&updateAdcFlags64));
             assembler.blr(arm64::x16);
             break;
+        case ir::Opcode::UpdateSbbFlags:
+            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x2, hostRegister(*operation.rhs));
+            assembler.mov(arm64::x3, hostRegister(*operation.third));
+            assembler.movImmediate(
+                arm64::x16,
+                operation.width == ir::Width::I32
+                    ? pointerBits(&updateSbbFlags32)
+                    : pointerBits(&updateSbbFlags64));
+            assembler.blr(arm64::x16);
+            break;
         case ir::Opcode::UpdateIncFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
@@ -9691,16 +9778,80 @@ arm64::Program compileToArm64(const ir::Block &block) {
 } // namespace
 
 TranslatedBlock::TranslatedBlock(std::vector<x86::DecodedInstruction> decoded, ir::Block ir,
-                                 arm64::Program program)
+                                 arm64::Program program,
+                                 std::shared_ptr<arm64::ExecutableArena> executableArena,
+                                 std::size_t maximumInstructions,
+                                 std::optional<bool> cachedInternalSelfEdge,
+                                 std::optional<guest::GuestAddress>
+                                     cachedCallReturnAddress)
     : decoded_(std::move(decoded)), ir_(std::move(ir)), program_(std::move(program)),
-      executable_(program_.bytes) {
-    hasInternalSelfEdge_ = hasInternalSelfEdge(ir_);
-    optimizedLoop_ = compileOptimizedLoop(ir_);
+      executable_(std::move(executableArena), program_.bytes) {
+    if (decoded_.empty()) {
+        throw std::invalid_argument(
+            "translated block has no decoded instructions");
+    }
+    maximumInstructions_ = maximumInstructions;
+    lastInstructionAddress_ = decoded_.back().address;
+    for (const auto &instruction : decoded_) {
+        sourceBytes_.insert(
+            sourceBytes_.end(), instruction.bytes.begin(),
+            instruction.bytes.begin() + instruction.length);
+    }
+    hasInternalSelfEdge_ =
+        cachedInternalSelfEdge.value_or(
+            ::rosa::dbt::hasInternalSelfEdge(ir_));
+    optimizationCandidate_ =
+        llvmBackendAvailable() && canCompileOptimizedLoop(ir_);
     for (const auto &operation : ir_.operations) {
         if (operation.opcode == ir::Opcode::ExitBlock && operation.exitKind == ir::ExitKind::Call) {
             callReturnAddress_ = operation.fallthrough;
         }
     }
+    if (cachedCallReturnAddress) {
+        callReturnAddress_ = cachedCallReturnAddress;
+    }
+}
+
+TranslatedBlock::TranslatedBlock(
+    std::vector<std::uint8_t> sourceBytes, guest::GuestAddress start,
+    guest::GuestAddress lastInstructionAddress,
+    std::size_t maximumInstructions, arm64::Program program,
+    arm64::ExecutableCode executable,
+    bool cachedInternalSelfEdge,
+    std::optional<guest::GuestAddress> cachedCallReturnAddress)
+    : sourceBytes_(std::move(sourceBytes)),
+      lastInstructionAddress_(lastInstructionAddress),
+      maximumInstructions_(maximumInstructions), ir_(ir::Block{.start = start}),
+      program_(std::move(program)), executable_(std::move(executable)),
+      callReturnAddress_(cachedCallReturnAddress),
+      hasInternalSelfEdge_(cachedInternalSelfEdge) {}
+
+const std::vector<x86::DecodedInstruction> &TranslatedBlock::decoded() const {
+    if (decoded_.empty()) {
+        decoded_ = x86::Decoder{}.decodeBlock(sourceBytes_, ir_.start,
+                                              maximumInstructions_);
+    }
+    return decoded_;
+}
+
+void TranslatedBlock::promoteOptimizedLoopIfHot(std::size_t remainingBudget) {
+    if (optimizationCandidate_ && optimizedLoop_ == nullptr &&
+        executionCount_ >= optimizedLoopWarmupExecutions &&
+        remainingBudget >= optimizedLoopMinimumRemainingExecutions) {
+        optimizedLoop_ = compileOptimizedLoop(ir_);
+        optimizationCandidate_ = optimizedLoop_ != nullptr;
+    }
+}
+
+std::size_t
+TranslatedBlock::executionBatchLimit(std::size_t requested) const noexcept {
+    if (!optimizationCandidate_ || optimizedLoop_ != nullptr ||
+        executionCount_ >= optimizedLoopWarmupExecutions) {
+        return requested;
+    }
+    const auto remainingWarmup =
+        optimizedLoopWarmupExecutions - executionCount_;
+    return requested < remainingWarmup ? requested : remainingWarmup;
 }
 
 BlockExit TranslatedBlock::execute(x86::X86State &state,
@@ -9784,8 +9935,41 @@ TranslatedBlock Translator::translate(std::span<const std::uint8_t> code, guest:
                                       std::size_t maximumInstructions) const {
     auto decoded = decoder_.decodeBlock(code, start, maximumInstructions);
     auto intermediate = lowerToIr(decoded);
-    auto program = compileToArm64(intermediate);
-    return TranslatedBlock(std::move(decoded), std::move(intermediate), std::move(program));
+    auto program = compileToArm64(intermediate, retainProgramListing_);
+    return TranslatedBlock(std::move(decoded), std::move(intermediate),
+                           std::move(program), executableArena_,
+                           maximumInstructions);
+}
+
+TranslatedBlock Translator::loadCached(
+    std::vector<std::uint8_t> sourceBytes, guest::GuestAddress start,
+    guest::GuestAddress lastInstructionAddress,
+    std::size_t maximumInstructions, arm64::Program program,
+    arm64::ExecutableCode executable,
+    bool internalSelfEdge,
+    std::optional<guest::GuestAddress> callReturnAddress) const {
+    return TranslatedBlock(std::move(sourceBytes), start,
+                           lastInstructionAddress, maximumInstructions,
+                           std::move(program), std::move(executable),
+                           internalSelfEdge, callReturnAddress);
+}
+
+std::uint64_t translationHelperAnchor() noexcept {
+    auto pointer = &updateLogicFlags8;
+    std::uint64_t result{};
+    static_assert(sizeof(pointer) == sizeof(result));
+    std::memcpy(&result, &pointer, sizeof(result));
+    return result;
+}
+
+std::uint64_t translationCacheBuildFingerprint() noexcept {
+    constexpr std::string_view buildStamp = __DATE__ " " __TIME__;
+    std::uint64_t hash = UINT64_C(1469598103934665603);
+    for (const auto character : buildStamp) {
+        hash ^= static_cast<std::uint8_t>(character);
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
 }
 
 } // namespace rosa::dbt

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <fstream>
-#include <iterator>
 #include <limits>
 #include <stdexcept>
 
@@ -118,8 +117,26 @@ MachOFile MachOFile::open(const std::filesystem::path &path) {
     if (!input) {
         throw std::runtime_error("failed to open Mach-O file: " + path.string());
     }
-    std::vector<std::uint8_t> bytes(std::istreambuf_iterator<char>(input), {});
-    if (input.bad()) {
+    input.seekg(0, std::ios::end);
+    const auto end = input.tellg();
+    if (end < 0 || static_cast<std::uintmax_t>(end) >
+                       std::numeric_limits<std::size_t>::max()) {
+        throw std::runtime_error("failed to size Mach-O file: " +
+                                 path.string());
+    }
+    const auto size = static_cast<std::size_t>(end);
+    if (size > static_cast<std::size_t>(
+                   std::numeric_limits<std::streamsize>::max())) {
+        throw std::runtime_error("Mach-O file is too large to read: " +
+                                 path.string());
+    }
+    std::vector<std::uint8_t> bytes(size);
+    input.seekg(0, std::ios::beg);
+    if (size != 0) {
+        input.read(reinterpret_cast<char *>(bytes.data()),
+                   static_cast<std::streamsize>(size));
+    }
+    if (!input || input.gcount() != static_cast<std::streamsize>(size)) {
         throw std::runtime_error("failed while reading Mach-O file: " + path.string());
     }
     return parse(std::move(bytes));

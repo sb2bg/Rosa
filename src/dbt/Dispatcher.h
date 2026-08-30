@@ -8,12 +8,15 @@
 #include "x86/Registers.h"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <span>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace rosa::dbt {
@@ -43,12 +46,18 @@ class Dispatcher {
         std::size_t maximumInstructionsPerBlock = std::numeric_limits<std::size_t>::max(),
         TimestampCounterReader timestampCounterReader = nullptr,
         const darwin::GuestSharedCache *sharedCache = nullptr,
-        const std::array<std::uint8_t, 16> &executableUuid = {})
+        const std::array<std::uint8_t, 16> &executableUuid = {},
+        bool retainProgramListings = false,
+        bool collectTimings = false,
+        std::optional<std::filesystem::path> persistentCachePath =
+            std::nullopt)
         : addressSpace_(addressSpace),
+          cache_(retainProgramListings, std::move(persistentCachePath)),
           syscallDispatcher_(sharedCache, executableUuid),
           sharedCache_(sharedCache),
           maximumInstructionsPerBlock_(maximumInstructionsPerBlock),
-          timestampCounterReader_(timestampCounterReader) {}
+          timestampCounterReader_(timestampCounterReader),
+          collectTimings_(collectTimings) {}
 
     [[nodiscard]] DispatchResult
     run(x86::X86State &state, std::size_t maximumBlocks,
@@ -57,6 +66,9 @@ class Dispatcher {
     [[nodiscard]] const BlockCache &cache() const noexcept { return cache_; }
     [[nodiscard]] std::size_t executedBlocks() const noexcept { return executedBlocks_; }
     [[nodiscard]] std::size_t translatedBlocks() const noexcept { return cache_.size(); }
+    [[nodiscard]] std::chrono::nanoseconds translationTime() const noexcept {
+        return translationTime_;
+    }
     [[nodiscard]] std::vector<guest::GuestAddress> recentBlocks() const;
     [[nodiscard]] std::vector<BlockExecutionCount>
     hotBlocks(std::size_t minimumExecutions = 16, std::size_t limit = 8) const;
@@ -86,6 +98,8 @@ class Dispatcher {
     const darwin::GuestSharedCache *sharedCache_{};
     std::size_t maximumInstructionsPerBlock_;
     TimestampCounterReader timestampCounterReader_{};
+    bool collectTimings_{};
+    std::chrono::nanoseconds translationTime_{};
     std::size_t executedBlocks_{};
     static constexpr std::size_t recentBlockCapacity = 16;
     std::array<guest::GuestAddress, recentBlockCapacity> recentBlocks_{};

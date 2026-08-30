@@ -50,6 +50,7 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
     recentBlockCount_ = 0;
     nextRecentBlock_ = 0;
     cache_.resetExecutionCounts();
+    translationTime_ = {};
     executedCacheImageIndexes_.clear();
     cacheImageExecutions_.clear();
     while (result.executedBlocks < maximumBlocks) {
@@ -64,13 +65,20 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
                 ? dispatchEntry.block
                 : cache_.findCurrent(blockAddress, executableVersion);
         if (block == nullptr) {
+            const auto translationStart = collectTimings_
+                                              ? std::chrono::steady_clock::now()
+                                              : std::chrono::steady_clock::time_point{};
             block = &cache_.getOrTranslate(
                 blockAddress, codeAt(blockAddress),
                 maximumInstructionsPerBlock_, executableVersion);
+            if (collectTimings_) {
+                translationTime_ += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - translationStart);
+            }
         }
         dispatchEntry = DispatchCacheEntry{blockAddress.value,
                                            executableVersion, block};
-        if (sharedCache_ != nullptr) {
+        if (sharedCache_ != nullptr && block->executionCount() == 0) {
             if (const auto *image = sharedCache_->imageForAddress(blockAddress);
                 image != nullptr &&
                 executedCacheImageIndexes_.insert(image->index).second) {
@@ -81,9 +89,15 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
                 });
             }
         }
+        const auto remainingBlocks = maximumBlocks - result.executedBlocks;
+        auto batchLimit = remainingBlocks;
+        if (block->isOptimizationCandidate()) {
+            block->promoteOptimizedLoopIfHot(remainingBlocks);
+            batchLimit = block->executionBatchLimit(remainingBlocks);
+        }
         const auto execution = block->executeRepeated(
             state, addressSpace_, timestampCounterReader_,
-            maximumBlocks - result.executedBlocks);
+            batchLimit);
         result.executedBlocks += execution.executionCount;
         executedBlocks_ += execution.executionCount;
         block->recordExecutions(execution.executionCount);
@@ -137,7 +151,7 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
         case BlockExit::Syscall: {
             const auto outcome =
                 syscallDispatcher_.dispatch(addressSpace_, state,
-                                            block->decoded().back().address);
+                                            block->lastInstructionAddress());
             if (outcome.exited) {
                 result.translatedBlocks = cache_.size();
                 result.exited = true;

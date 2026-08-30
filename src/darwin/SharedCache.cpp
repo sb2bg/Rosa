@@ -317,9 +317,14 @@ SlideInfo2 parseSlideInfo2(std::span<const std::uint8_t> bytes,
     return result;
 }
 
-void applySlideInfo2(std::span<std::uint8_t> mappingBytes,
-                     const SharedCacheMapping &mapping, std::uint64_t slide) {
-    const auto info = parseSlideInfo2(mapping.slideInfo, mapping);
+void applySlideInfo2Page(std::span<std::uint8_t> mappingBytes,
+                         std::span<const std::uint8_t> slideInfo,
+                         const SlideInfo2 &info, std::uint64_t slide,
+                         std::size_t page) {
+    if (page >= info.pageStartsCount) {
+        throw std::runtime_error(
+            "dyld shared cache slide page lies outside its mapping");
+    }
     const auto valueMask = ~info.deltaMask;
     const auto deltaShift =
         static_cast<unsigned>(std::countr_zero(info.deltaMask)) - 2U;
@@ -362,33 +367,28 @@ void applySlideInfo2(std::span<std::uint8_t> mappingBytes,
         }
     };
 
-    for (std::uint32_t page = 0; page < info.pageStartsCount; ++page) {
-        const auto start = readU16(
-            mapping.slideInfo,
-            info.pageStartsOffset +
-                static_cast<std::size_t>(page) * sizeof(std::uint16_t));
-        const auto attributes = static_cast<std::uint16_t>(
-            start & slidePageAttributes);
-        if (attributes == slidePageNoRebase) {
-            continue;
-        }
-        if (attributes == 0) {
-            applyChain(page, start);
-            continue;
-        }
-        auto extraIndex = static_cast<std::uint32_t>(
-            start & slidePageIndexMask);
-        while (true) {
-            const auto extra = readU16(
-                mapping.slideInfo,
-                info.pageExtrasOffset +
-                    static_cast<std::size_t>(extraIndex) *
-                        sizeof(std::uint16_t));
-            applyChain(page, extra);
-            ++extraIndex;
-            if ((extra & slidePageEnd) != 0) {
-                break;
-            }
+    const auto start = readU16(
+        slideInfo, info.pageStartsOffset + page * sizeof(std::uint16_t));
+    const auto attributes = static_cast<std::uint16_t>(
+        start & slidePageAttributes);
+    if (attributes == slidePageNoRebase) {
+        return;
+    }
+    if (attributes == 0) {
+        applyChain(static_cast<std::uint32_t>(page), start);
+        return;
+    }
+    auto extraIndex = static_cast<std::uint32_t>(
+        start & slidePageIndexMask);
+    while (true) {
+        const auto extra = readU16(
+            slideInfo,
+            info.pageExtrasOffset +
+                static_cast<std::size_t>(extraIndex) * sizeof(std::uint16_t));
+        applyChain(static_cast<std::uint32_t>(page), extra);
+        ++extraIndex;
+        if ((extra & slidePageEnd) != 0) {
+            break;
         }
     }
 }
@@ -940,9 +940,16 @@ void GuestSharedCache::mapInto(guest::AddressSpace &addressSpace) const {
     }
     for (const auto &mapping : mappings_) {
         if (!mapping.slideInfo.empty()) {
-            auto bytes = addressSpace.mutablePrivateFileMappingBytes(
-                guest::GuestAddress{mapping.address.value + slide()});
-            applySlideInfo2(bytes, mapping, slide());
+            const auto info = parseSlideInfo2(mapping.slideInfo, mapping);
+            addressSpace.installLazyFilePageTransform(
+                guest::GuestAddress{mapping.address.value + slide()},
+                info.pageSize,
+                [slideInfo = mapping.slideInfo, info,
+                 cacheSlide = slide()](std::span<std::uint8_t> bytes,
+                                       std::size_t page) {
+                    applySlideInfo2Page(bytes, slideInfo, info, cacheSlide,
+                                        page);
+                });
         }
     }
     if (dynamicDataSize_ == 0) {

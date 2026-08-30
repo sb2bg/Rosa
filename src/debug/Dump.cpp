@@ -1034,7 +1034,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(
                               instruction.operands[0]))
-                   << ", " << (memory.width == 8 ? "byte" : "dword")
+                   << ", "
+                   << (memory.width == 8    ? "byte"
+                       : memory.width == 16 ? "word"
+                                            : "dword")
                    << " ["
                    << (memory.ripRelative ? "rip"
                                           : x86::registerName(memory.base));
@@ -2122,10 +2125,13 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               .reg);
             break;
         }
-        case x86::Opcode::VmovupsYmmRegMem: {
+        case x86::Opcode::VmovupsYmmRegMem:
+        case x86::Opcode::VmovapsYmmRegMem: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);
-            stream << "vmovups "
+            stream << (instruction.opcode == x86::Opcode::VmovapsYmmRegMem
+                           ? "vmovaps "
+                           : "vmovups ")
                    << x86::ymmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0])
@@ -3010,6 +3016,12 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::UpdateAdcFlags:
             stream << "update_adc_flags." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", "
+                   << valueName(*operation.rhs) << ", "
+                   << valueName(*operation.third);
+            break;
+        case ir::Opcode::UpdateSbbFlags:
+            stream << "update_sbb_flags." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", "
                    << valueName(*operation.rhs) << ", "
                    << valueName(*operation.third);

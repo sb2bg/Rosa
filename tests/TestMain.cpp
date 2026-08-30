@@ -3457,6 +3457,15 @@ void testAssemblerEncodings() {
                 "MOVN immediate was not encoded compactly");
     expectEqual(complementAssembler.words().front(), std::uint32_t{0x92811A80},
                 "MOVN immediate encoding differs");
+
+    rosa::arm64::Assembler noListingAssembler(false);
+    noListingAssembler.movImmediate(rosa::arm64::x0, 42);
+    noListingAssembler.ret();
+    const auto noListingProgram = std::move(noListingAssembler).finish();
+    expect(noListingProgram.listing.empty(),
+           "disabled ARM64 diagnostics retained a program listing");
+    expect(!noListingProgram.bytes.empty(),
+           "disabled ARM64 diagnostics discarded generated code");
 }
 
 void testR0ExecutesGeneratedCode() {
@@ -3468,6 +3477,86 @@ void testR0ExecutesGeneratedCode() {
     using Entry = std::uint64_t (*)();
     expectEqual(code.entry<Entry>()(), std::uint64_t{0x1234},
                 "generated R0 function returned the wrong value");
+}
+
+void testExecutableArenaReusesMappings() {
+    auto arena = std::make_shared<rosa::arm64::ExecutableArena>(64U * 1024U);
+
+    rosa::arm64::Assembler firstAssembler;
+    firstAssembler.movImmediate(rosa::arm64::x0, 0x1234);
+    firstAssembler.ret();
+    const auto firstProgram = std::move(firstAssembler).finish();
+    rosa::arm64::ExecutableCode first(arena, firstProgram.bytes);
+
+    rosa::arm64::Assembler secondAssembler;
+    secondAssembler.movImmediate(rosa::arm64::x0, 0x5678);
+    secondAssembler.ret();
+    const auto secondProgram = std::move(secondAssembler).finish();
+    rosa::arm64::ExecutableCode second(arena, secondProgram.bytes);
+
+    expectEqual(arena->mappingCount(), std::size_t{1},
+                "small generated functions did not share one JIT mapping");
+    expectEqual(arena->allocatedBytes(), std::size_t{64U * 1024U},
+                "executable arena allocation size differs");
+    expect(arena->usedBytes() >= first.size() + second.size(),
+           "executable arena did not account for published code");
+
+    using Entry = std::uint64_t (*)();
+    expectEqual(first.entry<Entry>()(), std::uint64_t{0x1234},
+                "first arena function returned the wrong value");
+    expectEqual(second.entry<Entry>()(), std::uint64_t{0x5678},
+                "second arena function returned the wrong value");
+}
+
+void testPersistentTranslationCacheRoundTrip() {
+    std::array<char, 39> pathTemplate{};
+    constexpr std::string_view pattern =
+        "/tmp/rosa-translation-cache-XXXXXX";
+    std::copy(pattern.begin(), pattern.end(), pathTemplate.begin());
+    const auto descriptor = ::mkstemp(pathTemplate.data());
+    expect(descriptor >= 0,
+           "could not create persistent translation-cache fixture");
+    ::close(descriptor);
+    const std::filesystem::path path(pathTemplate.data());
+    constexpr rosa::guest::GuestAddress start{0x1000};
+    constexpr std::array<std::uint8_t, 5> code{
+        0x48, 0x83, 0xC0, 0x01, // add rax, 1
+        0xC3,                   // ret
+    };
+    try {
+        {
+            rosa::dbt::BlockCache cache(false, path);
+            auto &block = cache.getOrTranslate(start, code, 16, 1);
+            expectEqual(cache.persistentHitCount(), std::size_t{0},
+                        "cold translation unexpectedly hit persistent cache");
+            expect(!block.program().pointerRelocations.empty(),
+                   "helper-bearing block omitted pointer relocations");
+            rosa::x86::X86State state;
+            state.rax = 41;
+            expect(block.execute(state) == rosa::dbt::BlockExit::Return,
+                   "cold cached block returned the wrong exit kind");
+            expectEqual(state.rax, std::uint64_t{42},
+                        "cold cached block produced the wrong result");
+        }
+        {
+            rosa::dbt::BlockCache cache(false, path);
+            auto &block = cache.getOrTranslate(start, code, 16, 1);
+            expectEqual(cache.persistentHitCount(), std::size_t{1},
+                        "warm translation missed persistent cache");
+            rosa::x86::X86State state;
+            state.rax = 41;
+            expect(block.execute(state) == rosa::dbt::BlockExit::Return,
+                   "warm cached block returned the wrong exit kind");
+            expectEqual(state.rax, std::uint64_t{42},
+                        "warm cached block produced the wrong result");
+            expectEqual(block.decoded().size(), std::size_t{2},
+                        "warm cached block could not reconstruct diagnostics");
+        }
+    } catch (...) {
+        ::unlink(path.c_str());
+        throw;
+    }
+    ::unlink(path.c_str());
 }
 
 void testAssemblerLabels() {
@@ -4271,6 +4360,43 @@ void testSbbRegisterZeroGeneratedExecution() {
                 "SBB RDX, 0 wrap result differs");
     expectEqual(observedWrapState.rflags, std::uint64_t{0x97},
                 "SBB RDX, 0 wrap flags differ");
+
+    constexpr std::array<std::uint8_t, 5> negativeImmediateCode{
+        0x48, 0x83, 0xD9, 0xFF, 0xC3};
+    constexpr rosa::guest::GuestAddress negativeImmediateRip{
+        0x7FF802D07612ULL};
+    const auto negativeImmediate = decoder.decodeBlock(
+        negativeImmediateCode, negativeImmediateRip);
+    expect(negativeImmediate[0].opcode == rosa::x86::Opcode::SbbRegImm &&
+               negativeImmediate[0].length == 4,
+           "SBB RCX, -1 decode differs");
+    expect(rosa::debug::dumpX86(negativeImmediate).find(
+               "sbb rcx, 0xffffffffffffffff") != std::string::npos,
+           "SBB RCX, -1 dump differs");
+    const auto negativeImmediateBlock = translator.translate(
+        negativeImmediateCode, negativeImmediateRip);
+
+    rosa::x86::X86State negativeImmediateBorrowState;
+    negativeImmediateBorrowState.rcx = 1;
+    negativeImmediateBorrowState.rflags = 0x97;
+    static_cast<void>(negativeImmediateBlock.execute(
+        negativeImmediateBorrowState));
+    expectEqual(negativeImmediateBorrowState.rcx, std::uint64_t{1},
+                "SBB RCX, -1 with borrow result differs");
+    expectEqual(negativeImmediateBorrowState.rflags, std::uint64_t{0x13},
+                "SBB RCX, -1 with borrow flags differ");
+
+    rosa::x86::X86State negativeImmediateOverflowState;
+    negativeImmediateOverflowState.rcx = INT64_MAX;
+    negativeImmediateOverflowState.rflags = 0x2;
+    static_cast<void>(negativeImmediateBlock.execute(
+        negativeImmediateOverflowState));
+    expectEqual(negativeImmediateOverflowState.rcx,
+                UINT64_C(0x8000000000000000),
+                "SBB RCX, -1 overflow result differs");
+    expectEqual(negativeImmediateOverflowState.rflags,
+                std::uint64_t{0x887},
+                "SBB RCX, -1 overflow flags differ");
 }
 
 void testSbbRegisterFromItselfGeneratedExecution() {
@@ -12600,12 +12726,9 @@ void testMovsxLowByteRegisterTo32BitRegister() {
     };
     constexpr std::array<std::uint8_t, 4> noRex{
         0x0F, 0xBE, 0xCE, 0xC3};
-    constexpr std::array<std::uint8_t, 4> memory{
-        0x40, 0x0F, 0xBE, 0x0E};
     constexpr std::array<std::uint8_t, 4> rexW{
         0x48, 0x0F, 0xBE, 0xCE};
     expectRejected(noRex, "legacy high-byte MOVSX source was accepted");
-    expectRejected(memory, "MOVSX byte memory form was accepted");
     expectRejected(rexW, "MOVSX r64, r8 was accepted");
 }
 
@@ -12707,6 +12830,44 @@ void testMovsxGuestByteTo32BitRegister() {
                 "MOVSX r64 byte memory changed its base");
     expectEqual(observedState.rflags, std::uint64_t{0xBD7},
                 "MOVSX r64 byte memory changed flags");
+
+    constexpr std::array<std::uint8_t, 5> extendedMemoryCode{
+        0x45, 0x0F, 0xBE, 0x2F, 0xC3};
+    const auto extendedMemoryDecoded = decoder.decodeBlock(
+        extendedMemoryCode,
+        rosa::guest::GuestAddress{0x7FF802D058FCULL});
+    const auto extendedMemoryDestination =
+        std::get<rosa::x86::RegisterOperand>(
+            extendedMemoryDecoded[0].operands[0]);
+    const auto extendedMemory =
+        std::get<rosa::x86::MemoryOperand>(
+            extendedMemoryDecoded[0].operands[1]);
+    expect(extendedMemoryDecoded[0].opcode ==
+                   rosa::x86::Opcode::MovsxRegMem &&
+               extendedMemoryDecoded[0].length == 4 &&
+               extendedMemoryDestination.reg == rosa::x86::Register::R13 &&
+               extendedMemoryDestination.width == 32 &&
+               extendedMemory.base == rosa::x86::Register::R15 &&
+               extendedMemory.width == 8,
+           "extended MOVSX r32 byte memory decode differs");
+    expect(rosa::debug::dumpX86(extendedMemoryDecoded).find(
+               "movsx r13d, byte [r15]") != std::string::npos,
+           "extended MOVSX r32 byte memory dump differs");
+    const auto extendedMemoryBlock = translator.translate(
+        extendedMemoryCode,
+        rosa::guest::GuestAddress{0x7FF802D058FCULL}, 1);
+    rosa::x86::X86State extendedMemoryState;
+    extendedMemoryState.r15 = source.value;
+    extendedMemoryState.r13 = UINT64_MAX;
+    extendedMemoryState.rflags = 0xAD7;
+    static_cast<void>(extendedMemoryBlock.execute(
+        extendedMemoryState, &addressSpace));
+    expectEqual(extendedMemoryState.r13, std::uint64_t{0xFFFFFF80},
+                "extended MOVSX r32 byte memory result differs");
+    expectEqual(extendedMemoryState.r15, source.value,
+                "extended MOVSX r32 byte memory changed its base");
+    expectEqual(extendedMemoryState.rflags, std::uint64_t{0xAD7},
+                "extended MOVSX r32 byte memory changed flags");
 
     rosa::guest::AddressSpace unmapped;
     rosa::x86::X86State faultState;
@@ -14139,6 +14300,21 @@ void testMultiByteNopGeneratedExecution() {
                std::string::npos,
            "single-byte NOP dump differs");
 
+    constexpr std::array<std::uint8_t, 3> operandSizeNopCode{
+        0x66, 0x90, 0xC3};
+    const auto operandSizeNopDecoded = decoder.decodeBlock(
+        operandSizeNopCode, rosa::guest::GuestAddress{0x7FF802E812BEULL});
+    expect(operandSizeNopDecoded[0].opcode == rosa::x86::Opcode::Nop &&
+               operandSizeNopDecoded[0].length == 2,
+           "operand-size-prefixed NOP differs");
+    auto operandSizeNopBlock = rosa::dbt::Translator{}.translate(
+        operandSizeNopCode, rosa::guest::GuestAddress{0x7FF802E812BEULL});
+    rosa::x86::X86State operandSizeNopState;
+    operandSizeNopState.rip = 0x7FF802E812BEULL;
+    expect(operandSizeNopBlock.execute(operandSizeNopState) ==
+               rosa::dbt::BlockExit::Return,
+           "operand-size-prefixed NOP block did not reach RET");
+
     constexpr std::array<std::uint8_t, 8> code{
         0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00, 0xC3};
     const auto decoded = decoder.decodeBlock(
@@ -15478,6 +15654,39 @@ void testNeg64GeneratedExecution() {
     expectEqual(overflow32.rflags, std::uint64_t{0x887},
                 "NEG r32 minimum flags differ");
 
+    constexpr std::array<std::uint8_t, 4> wordCode{
+        0x66, 0xF7, 0xDB, 0xC3};
+    constexpr rosa::guest::GuestAddress wordRip{0x7FF802D09716ULL};
+    const auto wordDecoded = decoder.decodeBlock(wordCode, wordRip);
+    expect(wordDecoded[0].opcode == rosa::x86::Opcode::NegReg &&
+               wordDecoded[0].length == 3,
+           "NEG r16 opcode or length differs");
+    const auto wordOperand =
+        std::get<rosa::x86::RegisterOperand>(wordDecoded[0].operands[0]);
+    expect(wordOperand.reg == rosa::x86::Register::Rbx &&
+               wordOperand.width == 16,
+           "NEG BX operand differs");
+    expect(rosa::debug::dumpX86(wordDecoded).find("neg bx") !=
+               std::string::npos,
+           "NEG BX dump differs");
+    const auto wordBlock = translator.translate(wordCode, wordRip);
+
+    rosa::x86::X86State wordOne;
+    wordOne.rbx = UINT64_C(0x1122334455660001);
+    static_cast<void>(wordBlock.execute(wordOne));
+    expectEqual(wordOne.rbx, UINT64_C(0x112233445566FFFF),
+                "NEG one BX result or merge differs");
+    expectEqual(wordOne.rflags, std::uint64_t{0x97},
+                "NEG one BX flags differ");
+
+    rosa::x86::X86State wordOverflow;
+    wordOverflow.rbx = UINT64_C(0x8877665544338000);
+    static_cast<void>(wordBlock.execute(wordOverflow));
+    expectEqual(wordOverflow.rbx, UINT64_C(0x8877665544338000),
+                "NEG minimum BX result or merge differs");
+    expectEqual(wordOverflow.rflags, std::uint64_t{0x887},
+                "NEG minimum BX flags differ");
+
     constexpr std::array<std::uint8_t, 3> byteCode{
         0xF6, 0xD9, 0xC3};
     constexpr rosa::guest::GuestAddress byteRip{0x7FF802A2DD72ULL};
@@ -15919,6 +16128,46 @@ void testUnsignedDivideQwordRegisterGeneratedExecution() {
                 "overflowing qword DIV changed RSI");
     expectEqual(overflow.rflags, std::uint64_t{0xCD7},
                 "overflowing qword DIV changed flags");
+}
+
+void testUnsignedDivideDwordRegisterGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{
+        0x41, 0xF7, 0xF3, 0xC3}; // div r11d; ret
+    constexpr rosa::guest::GuestAddress instructionAddress{0x1000007FBULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::DivReg,
+           "DIV r32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3},
+                "DIV r32 length differs");
+    const auto divisor =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(divisor.reg == rosa::x86::Register::R11 && divisor.width == 32,
+           "DIV R11D operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("div r11d") !=
+               std::string::npos,
+           "DIV R11D dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find(
+               "divide_unsigned_dword") != std::string::npos,
+           "DIV R11D IR differs");
+
+    rosa::x86::X86State state;
+    state.rax = UINT64_C(0xAAAAAAAA00000064);
+    state.rdx = UINT64_C(0xBBBBBBBB00000000);
+    state.r11 = UINT64_C(0xCCCCCCCC00000018);
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{4},
+                "DIV r32 quotient differs");
+    expectEqual(state.rdx, std::uint64_t{4},
+                "DIV r32 remainder differs");
+    expectEqual(state.r11, UINT64_C(0xCCCCCCCC00000018),
+                "DIV r32 changed its divisor register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "DIV r32 changed undefined flags");
 }
 
 void testUnsignedDivideDwordMemoryGeneratedExecution() {
@@ -17206,6 +17455,77 @@ void testOr32BitRegisterFromGuestMemory() {
                 "faulted OR r32 load changed its destination");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7},
                 "faulted OR r32 load changed flags");
+}
+
+void testOr16BitRegisterFromGuestMemory() {
+    constexpr std::array<std::uint8_t, 6> code{
+        0x66, 0x44, 0x0B, 0x7B, 0x10, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802D1A234ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrRegMem,
+           "OR r16, word [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5},
+                "OR r16, word [memory] length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory =
+        std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R15 &&
+               destination.width == 16 &&
+               memory.base == rosa::x86::Register::Rbx &&
+               memory.width == 16 && memory.displacement == 0x10,
+           "OR r15w, word [rbx+0x10] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "or r15w, word [rbx+0x10]") != std::string::npos,
+           "OR r15w, word [rbx+0x10] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress base{0x8100};
+    constexpr std::array<std::uint8_t, 2> source{0x01, 0x80};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    addressSpace.writeBytes(
+        rosa::guest::GuestAddress{base.value + 0x10}, source);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip, 1);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("load_guest.i16") != std::string::npos,
+           "OR word load did not lower through guest-memory IR");
+
+    rosa::x86::X86State state;
+    state.rbx = base.value;
+    state.r15 = UINT64_C(0x1122334455660002);
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r15, UINT64_C(0x1122334455668003),
+                "OR r16 memory result did not preserve upper bits");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) |
+        (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0x84},
+                "OR r16 memory defined flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rbx = base.value;
+    faultState.r15 = UINT64_C(0xAABBCCDDEEFF0002);
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(
+            block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") !=
+                   std::string_view::npos;
+    }
+    expect(rejected, "OR r16 load accepted unmapped guest memory");
+    expectEqual(faultState.r15, UINT64_C(0xAABBCCDDEEFF0002),
+                "faulted OR r16 load changed its destination");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7},
+                "faulted OR r16 load changed flags");
 }
 
 void testOrImmediateIntoGuestByteMemory() {
@@ -20593,6 +20913,51 @@ void testVexYmmMemoryLoad() {
                 "256-bit VMOVUPS changed its address base");
     expectEqual(state.rflags, std::uint64_t{0x8D7},
                 "256-bit VMOVUPS changed flags");
+
+    constexpr std::array<std::uint8_t, 5> alignedCode{
+        0xC5, 0xFC, 0x28, 0x0E, 0xC3};
+    const auto alignedDecoded =
+        decoder.decodeBlock(alignedCode, instructionAddress);
+    expect(alignedDecoded[0].opcode ==
+               rosa::x86::Opcode::VmovapsYmmRegMem &&
+               alignedDecoded[0].length == 4,
+           "256-bit VMOVAPS load opcode or length differs");
+    expect(rosa::debug::dumpX86(alignedDecoded).find(
+               "vmovaps ymm1, [rsi]") != std::string::npos,
+           "256-bit VMOVAPS load dump differs");
+    const auto alignedBlock =
+        translator.translate(alignedCode, instructionAddress);
+    state.rsi = target.value;
+    state.xmm[1] = {.low = 1, .high = 2};
+    state.ymmUpper[1] = {.low = 3, .high = 4};
+    state.rflags = 0x8D7;
+    static_cast<void>(alignedBlock.execute(state, &addressSpace));
+    expectEqual(state.xmm[1].low, lanes[0],
+                "256-bit VMOVAPS loaded the wrong first qword");
+    expectEqual(state.xmm[1].high, lanes[1],
+                "256-bit VMOVAPS loaded the wrong second qword");
+    expectEqual(state.ymmUpper[1].low, lanes[2],
+                "256-bit VMOVAPS loaded the wrong third qword");
+    expectEqual(state.ymmUpper[1].high, lanes[3],
+                "256-bit VMOVAPS loaded the wrong fourth qword");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "256-bit VMOVAPS changed flags");
+
+    state.rsi = target.value + 1;
+    state.xmm[1] = {.low = 0x11, .high = 0x22};
+    state.ymmUpper[1] = {.low = 0x33, .high = 0x44};
+    bool misaligned = false;
+    try {
+        static_cast<void>(alignedBlock.execute(state, &addressSpace));
+    } catch (const std::runtime_error &error) {
+        misaligned = std::string_view(error.what()).find(
+                         "32-byte aligned") != std::string_view::npos;
+    }
+    expect(misaligned, "256-bit VMOVAPS accepted a misaligned source");
+    expectEqual(state.xmm[1].low, std::uint64_t{0x11},
+                "misaligned VMOVAPS changed lower YMM state");
+    expectEqual(state.ymmUpper[1].high, std::uint64_t{0x44},
+                "misaligned VMOVAPS changed upper YMM state");
 
     constexpr rosa::guest::GuestAddress crossPageTarget{0x9FF0};
     rosa::guest::AddressSpace crossPageAddressSpace;
@@ -25414,6 +25779,115 @@ void testDarwinStat64MappedFile() {
                 "stat64 invalid output pointer returned the wrong errno");
     expect((state.rflags & std::uint64_t{1}) != 0,
            "stat64 invalid output pointer did not set BSD carry");
+}
+
+void testDarwinFstat64StandardDescriptor() {
+    constexpr auto fstat64Number = UINT64_C(0x02000153);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress statAddress{0x8100};
+    constexpr std::size_t guestStatSize = 144;
+
+    struct stat hostMetadata {};
+    expect(::fstat(STDOUT_FILENO, &hostMetadata) == 0,
+           "could not fstat the host stdout fixture");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, guestStatSize> sentinel = [] {
+        std::array<std::uint8_t, guestStatSize> bytes{};
+        bytes.fill(0xA5);
+        return bytes;
+    }();
+    addressSpace.writeBytes(statAddress, sentinel);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = fstat64Number;
+    state.rdi = STDOUT_FILENO;
+    state.rsi = statAddress.value;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state,
+        rosa::guest::GuestAddress{0x7FF802E30348ULL}));
+    expectEqual(state.rax, std::uint64_t{0},
+                "fstat64 stdout did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "fstat64 stdout did not clear BSD carry");
+
+    const auto metadata = addressSpace.readBytes(statAddress, guestStatSize);
+    std::uint16_t guestMode = 0;
+    std::int64_t guestSize = 0;
+    std::int32_t guestBlockSize = 0;
+    std::memcpy(&guestMode, metadata.data() + 4, sizeof(guestMode));
+    std::memcpy(&guestSize, metadata.data() + 96, sizeof(guestSize));
+    std::memcpy(&guestBlockSize, metadata.data() + 112,
+                sizeof(guestBlockSize));
+    expectEqual(guestMode, static_cast<std::uint16_t>(hostMetadata.st_mode),
+                "fstat64 stdout returned the wrong mode");
+    expectEqual(guestSize, static_cast<std::int64_t>(hostMetadata.st_size),
+                "fstat64 stdout returned the wrong size");
+    expectEqual(guestBlockSize,
+                static_cast<std::int32_t>(hostMetadata.st_blksize),
+                "fstat64 stdout returned the wrong block size");
+
+    addressSpace.writeBytes(statAddress, sentinel);
+    state.rax = fstat64Number;
+    state.rdi = STDOUT_FILENO;
+    state.rsi = page.value + rosa::guest::guestPageSize;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "fstat64 invalid output returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "fstat64 invalid output did not set BSD carry");
+    expect(std::ranges::equal(
+               addressSpace.readBytes(statAddress, guestStatSize), sentinel),
+           "faulted fstat64 changed a valid output buffer");
+
+    state.rax = fstat64Number;
+    state.rdi = 99;
+    state.rsi = statAddress.value;
+    bool unsupportedDescriptor = false;
+    try {
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        unsupportedDescriptor = std::string_view(error.what()).find(
+                                    "standard guest descriptor") !=
+                                std::string_view::npos;
+    }
+    expect(unsupportedDescriptor,
+           "unmodeled fstat64 descriptor did not fail loudly");
+}
+
+void testDarwinWriteNoCancel() {
+    constexpr auto writeNoCancelNumber = UINT64_C(0x0200018D);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read |
+                                  rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = writeNoCancelNumber;
+    state.rdi = STDOUT_FILENO;
+    state.rsi = page.value;
+    state.rdx = 0;
+    state.r10 = 0x4000;
+    state.rflags = 0xAD7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state,
+        rosa::guest::GuestAddress{0x7FF802E32C00ULL});
+    expect(!outcome.exited, "write_nocancel terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0},
+                "zero-length write_nocancel returned the wrong count");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "write_nocancel did not clear BSD carry");
+    expectEqual(state.r10, std::uint64_t{0x4000},
+                "write_nocancel changed an ignored argument register");
 }
 
 void testDarwinGetfsstat64SyntheticRoot() {
@@ -32676,8 +33150,9 @@ void testConditionalSelfEdgeBatching() {
         const auto translatedLoop =
             dispatcher.cache().blocks().find(codeBase.value + 10);
         expect(translatedLoop != dispatcher.cache().blocks().end() &&
-                   translatedLoop->second->usesOptimizedLoop(),
-               "conditional self-edge did not use the LLVM tier");
+                   translatedLoop->second->isOptimizationCandidate() &&
+                   !translatedLoop->second->usesOptimizedLoop(),
+               "cold conditional self-edge paid the LLVM compilation cost");
     }
 }
 
@@ -32688,9 +33163,37 @@ void testOptimizedDecrementLoopEdges() {
         0x75, 0xFB,       // jne back to dec
     };
     const rosa::dbt::Translator translator;
-    const auto block = translator.translate(code, codeBase);
+    auto block = translator.translate(code, codeBase);
+    expectEqual(block.isOptimizationCandidate(),
+                rosa::dbt::llvmBackendAvailable(),
+                "optimized decrement-loop candidacy differs");
+    expect(!block.usesOptimizedLoop(),
+           "decrement loop compiled before reaching the hot threshold");
+    expectEqual(block.executionBatchLimit(10000),
+                rosa::dbt::llvmBackendAvailable()
+                    ? rosa::dbt::TranslatedBlock::optimizedLoopWarmupExecutions
+                    : std::size_t{10000},
+                "decrement-loop warmup batch limit differs");
+    block.recordExecutions(
+        rosa::dbt::TranslatedBlock::optimizedLoopWarmupExecutions - 1);
+    block.promoteOptimizedLoopIfHot(
+        rosa::dbt::TranslatedBlock::optimizedLoopMinimumRemainingExecutions);
+    expect(!block.usesOptimizedLoop(),
+           "decrement loop promoted before reaching the hot threshold");
+    expectEqual(block.executionBatchLimit(10000),
+                rosa::dbt::llvmBackendAvailable() ? std::size_t{1}
+                                                  : std::size_t{10000},
+                "decrement-loop final warmup batch limit differs");
+    block.recordExecutions(1);
+    block.promoteOptimizedLoopIfHot(
+        rosa::dbt::TranslatedBlock::optimizedLoopMinimumRemainingExecutions -
+        1);
+    expect(!block.usesOptimizedLoop(),
+           "decrement loop promoted without enough remaining work");
+    block.promoteOptimizedLoopIfHot(
+        rosa::dbt::TranslatedBlock::optimizedLoopMinimumRemainingExecutions);
     expectEqual(block.usesOptimizedLoop(), rosa::dbt::llvmBackendAvailable(),
-                "optimized decrement-loop availability differs");
+                "optimized decrement-loop promotion differs");
 
     rosa::guest::AddressSpace addressSpace;
     rosa::x86::X86State state;
@@ -32742,6 +33245,60 @@ void testOptimizedDecrementLoopEdges() {
                 "wrapping optimized loop produced the wrong counter");
     expectEqual(state.rflags & UINT64_C(0x8D5), UINT64_C(0x95),
                 "wrapping optimized loop produced the wrong DEC flags");
+}
+
+void testOptimizedAddCompareLoop() {
+    constexpr rosa::guest::GuestAddress codeBase{0x1000};
+    constexpr rosa::guest::GuestAddress stackBase{0x8000};
+    constexpr rosa::guest::GuestAddress sentinel{UINT64_MAX};
+    constexpr std::array<std::uint8_t, 24> code{
+        0x48, 0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,             // mov rcx, 0
+        0x48, 0x83, 0xC1, 0x02, // add rcx, 2
+        0x48, 0x81, 0xF9, 0xB8, 0x0B, 0x00, 0x00, // cmp rcx, 3000
+        0x75, 0xF3, // jne back to add
+        0xC3,       // ret
+    };
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapSegment(
+        codeBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Execute,
+        code, "optimized-add-compare:__TEXT");
+    addressSpace.mapAnonymous(
+        stackBase, rosa::guest::guestPageSize,
+        rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+        "optimized-add-compare stack");
+    rosa::x86::X86State state;
+    state.rip = codeBase.value;
+    state.rsp = stackBase.value + rosa::guest::guestPageSize -
+                sizeof(std::uint64_t);
+    state.rflags = 0x203;
+    addressSpace.writeU64(rosa::guest::GuestAddress{state.rsp},
+                          sentinel.value);
+
+    rosa::dbt::Dispatcher dispatcher(addressSpace);
+    const auto result = dispatcher.run(state, 2000, sentinel);
+    expectEqual(result.executedBlocks, std::size_t{1501},
+                "add/compare loop block count differs");
+    expectEqual(result.translatedBlocks, std::size_t{3},
+                "add/compare loop translation count differs");
+    expectEqual(state.rcx, std::uint64_t{3000},
+                "add/compare loop produced the wrong counter");
+    expectEqual(state.rflags & UINT64_C(0x8D5), UINT64_C(0x44),
+                "add/compare loop produced the wrong CMP flags");
+
+    const auto translatedLoop =
+        dispatcher.cache().blocks().find(codeBase.value + 10);
+    expect(translatedLoop != dispatcher.cache().blocks().end(),
+           "add/compare loop block was not cached");
+    expectEqual(translatedLoop->second->executionCount(), std::size_t{1499},
+                "add/compare loop execution count differs");
+    expectEqual(translatedLoop->second->isOptimizationCandidate(),
+                rosa::dbt::llvmBackendAvailable(),
+                "generic add/compare loop candidacy differs");
+    expect(!translatedLoop->second->usesOptimizedLoop(),
+           "short generic add/compare loop paid the LLVM compilation cost");
 }
 
 void testTranslatedBlockInvalidationAfterExecutableWrite() {
@@ -35067,6 +35624,56 @@ void testConditionalMoveLessOrEqual64() {
                  "CMOVLE moved when SF and OF were both set");
 }
 
+void testConditionalMoveGreater64() {
+    constexpr std::array<std::uint8_t, 5> code{
+        0x49, 0x0F, 0x4F, 0xCE, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802D07632ULL};
+    constexpr std::uint64_t zero = std::uint64_t{1} << 6U;
+    constexpr std::uint64_t sign = std::uint64_t{1} << 7U;
+    constexpr std::uint64_t overflow = std::uint64_t{1} << 11U;
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               decoded[0].condition == rosa::x86::Condition::Greater &&
+               decoded[0].length == 4,
+           "CMOVG opcode, condition, or length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx &&
+               destination.width == 64 &&
+               source.reg == rosa::x86::Register::R14 &&
+               source.width == 64,
+           "CMOVG rcx, r14 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmovg rcx, r14") !=
+               std::string::npos,
+           "CMOVG rcx, r14 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    const auto execute = [&block](std::uint64_t flags) {
+        rosa::x86::X86State state;
+        state.rcx = 0x1111;
+        state.r14 = UINT64_C(0xAABBCCDDEEFF0011);
+        state.rflags = flags;
+        static_cast<void>(block.execute(state));
+        return state;
+    };
+    const auto taken = execute(0x2);
+    expectEqual(taken.rcx, UINT64_C(0xAABBCCDDEEFF0011),
+                "CMOVG did not take when ZF=0 and SF=OF=0");
+    expectEqual(taken.rflags, std::uint64_t{0x2},
+                "taken CMOVG changed flags");
+    const auto alsoTaken = execute(0x2 | sign | overflow);
+    expectEqual(alsoTaken.rcx, UINT64_C(0xAABBCCDDEEFF0011),
+                "CMOVG did not take when ZF=0 and SF=OF=1");
+    expectEqual(execute(0x2 | zero).rcx, std::uint64_t{0x1111},
+                "CMOVG took with ZF set");
+    expectEqual(execute(0x2 | sign).rcx, std::uint64_t{0x1111},
+                "CMOVG took when SF differed from OF");
+}
+
 void testConditionalMoveEqual32Extended() {
     constexpr std::array<std::uint8_t, 5> code{
         0x41, 0x0F, 0x44, 0xC0, 0xC3};
@@ -35794,6 +36401,9 @@ int main() {
 #endif
         {"arm64 assembler encodings", testAssemblerEncodings},
         {"R0 generated execution", testR0ExecutesGeneratedCode},
+        {"executable arena mapping reuse", testExecutableArenaReusesMappings},
+        {"persistent translation cache round trip",
+         testPersistentTranslationCacheRoundTrip},
         {"arm64 label fixups", testAssemblerLabels},
         {"R1 decoder", testDecoderR1},
         {"extended register and signed immediate", testDecoderExtendedRegisterAndSignedImmediate},
@@ -36041,6 +36651,8 @@ int main() {
          testUnsignedDivideByteGeneratedExecution},
         {"unsigned qword register DIV generated execution",
          testUnsignedDivideQwordRegisterGeneratedExecution},
+        {"unsigned dword register DIV generated execution",
+         testUnsignedDivideDwordRegisterGeneratedExecution},
         {"unsigned dword memory DIV generated execution",
          testUnsignedDivideDwordMemoryGeneratedExecution},
         {"signed dword register IDIV generated execution",
@@ -36060,6 +36672,8 @@ int main() {
          testOr8BitRegisterFromGuestMemory},
         {"OR 32-bit register from guest memory",
          testOr32BitRegisterFromGuestMemory},
+        {"OR 16-bit register from guest memory",
+         testOr16BitRegisterFromGuestMemory},
         {"OR 8-bit register into indexed guest memory",
          testOr8BitRegisterIntoIndexedGuestMemory},
         {"OR 32-bit register into indexed guest memory",
@@ -36189,6 +36803,9 @@ int main() {
         {"Darwin duplicate guest descriptor",
          testDarwinDuplicateGuestDescriptor},
         {"Darwin stat64 mapped file", testDarwinStat64MappedFile},
+        {"Darwin fstat64 standard descriptor",
+         testDarwinFstat64StandardDescriptor},
+        {"Darwin write_nocancel", testDarwinWriteNoCancel},
         {"Darwin getfsstat64 synthetic root",
          testDarwinGetfsstat64SyntheticRoot},
         {"Darwin access chroot marker", testDarwinAccessChrootMarker},
@@ -36317,6 +36934,7 @@ int main() {
         {"hot guest block diagnostics", testHotGuestBlockDiagnostics},
         {"conditional self-edge batching", testConditionalSelfEdgeBatching},
         {"optimized decrement-loop edges", testOptimizedDecrementLoopEdges},
+        {"optimized add/compare loop", testOptimizedAddCompareLoop},
         {"translated block invalidation after executable write",
          testTranslatedBlockInvalidationAfterExecutableWrite},
         {"x86 commpage", testX86Commpage},
@@ -36369,6 +36987,8 @@ int main() {
         {"conditional move sign 64-bit", testConditionalMoveSign64},
         {"conditional move less-or-equal 64-bit",
          testConditionalMoveLessOrEqual64},
+        {"conditional move greater 64-bit",
+         testConditionalMoveGreater64},
         {"conditional move equal extended 32-bit",
          testConditionalMoveEqual32Extended},
         {"unsigned-above conditional", testUnsignedAboveConditional},

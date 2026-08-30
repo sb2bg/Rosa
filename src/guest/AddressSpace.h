@@ -2,9 +2,11 @@
 
 #include "guest/Address.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -18,6 +20,7 @@ class GuestSharedCache;
 namespace rosa::guest {
 
 class PrivateFileMapping;
+class LazyFilePageTransform;
 
 inline constexpr std::size_t guestPageSize = 4096;
 
@@ -91,6 +94,8 @@ class AddressSpace {
 
     [[nodiscard]] std::uint64_t readU64(GuestAddress address) const;
     [[nodiscard]] std::uint32_t readU32(GuestAddress address) const;
+    [[nodiscard]] std::uint16_t readU16(GuestAddress address) const;
+    [[nodiscard]] std::uint8_t readU8(GuestAddress address) const;
     [[nodiscard]] std::vector<std::uint8_t> readBytes(GuestAddress address, std::size_t size) const;
     void validateAccess(GuestAddress address, std::size_t size,
                         Permission required) const;
@@ -116,6 +121,7 @@ class AddressSpace {
         std::vector<std::uint8_t> bytes;
         std::shared_ptr<PrivateFileMapping> fileBytes;
         std::size_t fileDataOffset{};
+        std::shared_ptr<LazyFilePageTransform> lazyFileTransform;
         std::vector<std::uint8_t> readableBytes;
         std::string label;
     };
@@ -134,12 +140,27 @@ class AddressSpace {
     void validateNewMapping(GuestAddress base, std::size_t size,
                             Permission permissions,
                             Permission maximumPermissions) const;
+    void installLazyFilePageTransform(
+        GuestAddress base, std::size_t pageSize,
+        std::function<void(std::span<std::uint8_t>, std::size_t)> transform);
+    static void materializeFileBytes(const Mapping &mapping,
+                                     std::size_t offset,
+                                     std::size_t size);
+    void invalidateMappingLookup() noexcept;
     [[nodiscard]] std::span<std::uint8_t>
     mutablePrivateFileMappingBytes(GuestAddress base);
 
     // Kept ordered by guest base address. Mapping creation is cold; lookups
     // occur on every translated memory/code access and use binary search.
     std::vector<Mapping> mappings_;
+    struct MappingLookupEntry {
+        std::uint64_t base{};
+        std::uint64_t end{};
+        std::size_t index{};
+        bool valid{};
+    };
+    static constexpr std::size_t mappingLookupSize = 16;
+    mutable std::array<MappingLookupEntry, mappingLookupSize> mappingLookup_{};
     // Changes only when executable bytes may have changed. The block cache can
     // therefore trust a matching version without re-reading guest code.
     std::uint64_t executableVersion_{};

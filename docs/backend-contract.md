@@ -97,9 +97,18 @@ Executable-code allocation is a backend capability with this logical lifecycle:
 4. synchronize the host instruction cache as required;
 5. transition to the host's executable state;
 6. publish an immutable entry point;
-7. revoke and free the mapping when the translated block dies.
+7. release the immutable allocation and free its arena mapping when the owning
+   code cache dies.
 
-The Apple Silicon implementation uses `MAP_JIT` and per-thread JIT write protection. Other hosts may use different mechanisms, but writable and executable transitions must stay explicit. A backend must never publish a partially relocated program.
+The Apple Silicon implementation pools immutable translations in bump-allocated
+`MAP_JIT` arenas and uses per-thread JIT write protection for each publication.
+Persistent programs encode helper addresses as fixed-width relocatable
+immediates. A cache load must validate its emitter fingerprint and guest source,
+resolve every helper for the current ASLR slide, and only then batch-publish
+the immutable programs.
+Other hosts may use different mechanisms, but writable and executable
+transitions must stay explicit. A backend must never publish a partially
+relocated program.
 
 ## Backend interface direction
 

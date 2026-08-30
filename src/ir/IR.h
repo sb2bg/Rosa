@@ -101,6 +101,7 @@ enum class Opcode {
     ReadTimestampCounter,
     UpdateAddFlags,
     UpdateAdcFlags,
+    UpdateSbbFlags,
     UpdateIncFlags,
     UpdateDecFlags,
     UpdateSubFlags,
@@ -305,6 +306,8 @@ class Builder {
     void updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                         guest::GuestAddress rip);
     void updateAdcFlags(ValueId lhs, ValueId rhs, ValueId carry, Width width,
+                        guest::GuestAddress rip);
+    void updateSbbFlags(ValueId lhs, ValueId rhs, ValueId borrow, Width width,
                         guest::GuestAddress rip);
     void updateIncFlags(ValueId original, ValueId result, Width width,
                         guest::GuestAddress rip);

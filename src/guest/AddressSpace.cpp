@@ -44,6 +44,50 @@ class PrivateFileMapping {
     std::size_t size_{};
 };
 
+class LazyFilePageTransform {
+  public:
+    using Transform =
+        std::function<void(std::span<std::uint8_t>, std::size_t)>;
+
+    LazyFilePageTransform(std::size_t dataOffset, std::size_t size,
+                          std::size_t pageSize, Transform transform)
+        : dataOffset_(dataOffset), size_(size), pageSize_(pageSize),
+          transformedPages_((size + pageSize - 1U) / pageSize),
+          transform_(std::move(transform)) {}
+
+    void materialize(const PrivateFileMapping &fileBytes,
+                     std::size_t dataOffset, std::size_t size) const {
+        if (size == 0) {
+            return;
+        }
+        if (dataOffset < dataOffset_ || dataOffset - dataOffset_ > size_ ||
+            size > size_ - (dataOffset - dataOffset_)) {
+            throw std::runtime_error(
+                "lazy guest file transform lies outside its backing mapping");
+        }
+        const auto firstByte = dataOffset - dataOffset_;
+        const auto lastByte = firstByte + size - 1U;
+        const auto firstPage = firstByte / pageSize_;
+        const auto lastPage = lastByte / pageSize_;
+        auto mappingBytes = std::span<std::uint8_t>(
+            fileBytes.data() + dataOffset_, size_);
+        for (auto page = firstPage; page <= lastPage; ++page) {
+            if (transformedPages_[page] != 0) {
+                continue;
+            }
+            transform_(mappingBytes, page);
+            transformedPages_[page] = 1;
+        }
+    }
+
+  private:
+    std::size_t dataOffset_{};
+    std::size_t size_{};
+    std::size_t pageSize_{};
+    mutable std::vector<std::uint8_t> transformedPages_;
+    Transform transform_;
+};
+
 namespace {
 
 class FileDescriptor final {
@@ -319,6 +363,7 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
             .maximumPermissions = maximumPermissions,
             .fileBytes = source.fileBytes,
             .fileDataOffset = source.fileDataOffset + offset,
+            .lazyFileTransform = source.lazyFileTransform,
             .label = source.label,
         };
         if (!source.bytes.empty()) {
@@ -385,6 +430,7 @@ ProtectResult AddressSpace::protect(GuestAddress address, std::uint64_t size,
         }
     }
     mappings_.swap(updated);
+    invalidateMappingLookup();
     if (changesExecutableMapping) {
         ++executableVersion_;
     }
@@ -423,6 +469,7 @@ DeallocateResult AddressSpace::deallocate(GuestAddress address,
             .maximumPermissions = source.maximumPermissions,
             .fileBytes = source.fileBytes,
             .fileDataOffset = source.fileDataOffset + offset,
+            .lazyFileTransform = source.lazyFileTransform,
             .label = source.label,
         };
         if (!source.bytes.empty()) {
@@ -484,6 +531,7 @@ DeallocateResult AddressSpace::deallocate(GuestAddress address,
         }
     }
     mappings_.swap(updated);
+    invalidateMappingLookup();
     if (removedExecutableMapping) {
         ++executableVersion_;
     }
@@ -498,6 +546,7 @@ void AddressSpace::insertMapping(Mapping mapping) {
             return candidate.base.value < value;
         });
     mappings_.insert(position, std::move(mapping));
+    invalidateMappingLookup();
     if (executable) {
         ++executableVersion_;
     }
@@ -555,6 +604,44 @@ void AddressSpace::validateNewMapping(GuestAddress base, std::size_t size,
     }
 }
 
+void AddressSpace::installLazyFilePageTransform(
+    GuestAddress base, std::size_t pageSize,
+    std::function<void(std::span<std::uint8_t>, std::size_t)> transform) {
+    if (pageSize == 0 || !transform) {
+        throw std::invalid_argument("lazy guest file transform is invalid");
+    }
+    const auto mapping = std::lower_bound(
+        mappings_.begin(), mappings_.end(), base.value,
+        [](const Mapping &candidate, std::uint64_t value) {
+            return candidate.base.value < value;
+        });
+    if (mapping == mappings_.end() || mapping->base != base ||
+        !mapping->fileBytes) {
+        throw std::runtime_error(
+            "lazy guest file transform requires an exact file mapping");
+    }
+    if ((mapping->size % pageSize) != 0) {
+        throw std::invalid_argument(
+            "lazy guest file transform page geometry is invalid");
+    }
+    mapping->lazyFileTransform = std::make_shared<LazyFilePageTransform>(
+        mapping->fileDataOffset, mapping->size, pageSize,
+        std::move(transform));
+}
+
+void AddressSpace::materializeFileBytes(const Mapping &mapping,
+                                        std::size_t offset,
+                                        std::size_t size) {
+    if (mapping.lazyFileTransform) {
+        mapping.lazyFileTransform->materialize(
+            *mapping.fileBytes, mapping.fileDataOffset + offset, size);
+    }
+}
+
+void AddressSpace::invalidateMappingLookup() noexcept {
+    mappingLookup_.fill({});
+}
+
 std::vector<MappingInfo> AddressSpace::mappingInfos() const {
     std::vector<MappingInfo> result;
     result.reserve(mappings_.size());
@@ -586,6 +673,23 @@ AddressSpace::mappingContaining(GuestAddress address) const noexcept {
 
 const AddressSpace::Mapping &AddressSpace::find(GuestAddress address, std::size_t size,
                                                 Permission required) const {
+    const auto page = address.value >> 12U;
+    const auto lookupIndex = static_cast<std::size_t>(
+        (page ^ (page >> 16U) ^ (page >> 32U)) &
+        (mappingLookupSize - 1U));
+    const auto &cached = mappingLookup_[lookupIndex];
+    if (cached.valid && cached.index < mappings_.size() &&
+        address.value >= cached.base && address.value < cached.end &&
+        size <= cached.end - address.value) {
+        const auto &mapping = mappings_[cached.index];
+        if (mapping.base.value == cached.base) {
+            if (!hasPermission(mapping.permissions, required)) {
+                throw std::runtime_error(
+                    "guest memory access violates mapping permissions");
+            }
+            return mapping;
+        }
+    }
     auto next = std::upper_bound(
         mappings_.begin(), mappings_.end(), address.value,
         [](std::uint64_t value, const Mapping &candidate) {
@@ -598,6 +702,12 @@ const AddressSpace::Mapping &AddressSpace::find(GuestAddress address, std::size_
                 throw std::runtime_error(
                     "guest memory access violates mapping permissions");
             }
+            mappingLookup_[lookupIndex] = MappingLookupEntry{
+                .base = next->base.value,
+                .end = next->base.value + next->size,
+                .index = static_cast<std::size_t>(next - mappings_.begin()),
+                .valid = true,
+            };
             return *next;
         }
     }
@@ -630,6 +740,7 @@ void AddressSpace::readInto(GuestAddress address,
 
         auto output = destination.begin() + static_cast<std::ptrdiff_t>(copied);
         if (mapping.fileBytes) {
+            materializeFileBytes(mapping, offset, chunk);
             const auto *source =
                 mapping.fileBytes->data() + mapping.fileDataOffset + offset;
             std::copy_n(source, chunk, output);
@@ -643,6 +754,20 @@ void AddressSpace::readInto(GuestAddress address,
 }
 
 std::uint64_t AddressSpace::readU64(GuestAddress address) const {
+    const auto &mapping = find(address, 1, Permission::Read);
+    const auto offset = static_cast<std::size_t>(address.value - mapping.base.value);
+    if (mapping.readableBytes.empty() &&
+        sizeof(std::uint64_t) <= mapping.size - offset) {
+        const auto *source = mapping.fileBytes
+                                 ? (materializeFileBytes(
+                                        mapping, offset, sizeof(std::uint64_t)),
+                                    mapping.fileBytes->data() +
+                                        mapping.fileDataOffset + offset)
+                                 : mapping.bytes.data() + offset;
+        std::uint64_t value{};
+        std::memcpy(&value, source, sizeof(value));
+        return value;
+    }
     std::array<std::uint8_t, sizeof(std::uint64_t)> bytes{};
     readInto(address, bytes);
     std::uint64_t value = 0;
@@ -653,6 +778,20 @@ std::uint64_t AddressSpace::readU64(GuestAddress address) const {
 }
 
 std::uint32_t AddressSpace::readU32(GuestAddress address) const {
+    const auto &mapping = find(address, 1, Permission::Read);
+    const auto offset = static_cast<std::size_t>(address.value - mapping.base.value);
+    if (mapping.readableBytes.empty() &&
+        sizeof(std::uint32_t) <= mapping.size - offset) {
+        const auto *source = mapping.fileBytes
+                                 ? (materializeFileBytes(
+                                        mapping, offset, sizeof(std::uint32_t)),
+                                    mapping.fileBytes->data() +
+                                        mapping.fileDataOffset + offset)
+                                 : mapping.bytes.data() + offset;
+        std::uint32_t value{};
+        std::memcpy(&value, source, sizeof(value));
+        return value;
+    }
     std::array<std::uint8_t, sizeof(std::uint32_t)> bytes{};
     readInto(address, bytes);
     std::uint32_t value = 0;
@@ -660,6 +799,43 @@ std::uint32_t AddressSpace::readU32(GuestAddress address) const {
         value |= static_cast<std::uint32_t>(bytes[index]) << (index * 8U);
     }
     return value;
+}
+
+std::uint16_t AddressSpace::readU16(GuestAddress address) const {
+    const auto &mapping = find(address, 1, Permission::Read);
+    const auto offset = static_cast<std::size_t>(address.value - mapping.base.value);
+    if (mapping.readableBytes.empty() &&
+        sizeof(std::uint16_t) <= mapping.size - offset) {
+        const auto *source = mapping.fileBytes
+                                 ? (materializeFileBytes(
+                                        mapping, offset, sizeof(std::uint16_t)),
+                                    mapping.fileBytes->data() +
+                                        mapping.fileDataOffset + offset)
+                                 : mapping.bytes.data() + offset;
+        std::uint16_t value{};
+        std::memcpy(&value, source, sizeof(value));
+        return value;
+    }
+    std::array<std::uint8_t, sizeof(std::uint16_t)> bytes{};
+    readInto(address, bytes);
+    return static_cast<std::uint16_t>(bytes[0]) |
+           static_cast<std::uint16_t>(
+               static_cast<std::uint16_t>(bytes[1]) << 8U);
+}
+
+std::uint8_t AddressSpace::readU8(GuestAddress address) const {
+    const auto &mapping = find(address, 1, Permission::Read);
+    const auto offset = static_cast<std::size_t>(address.value - mapping.base.value);
+    if (mapping.readableBytes.empty()) {
+        if (mapping.fileBytes) {
+            materializeFileBytes(mapping, offset, 1);
+            return mapping.fileBytes->data()[mapping.fileDataOffset + offset];
+        }
+        return mapping.bytes[offset];
+    }
+    std::array<std::uint8_t, sizeof(std::uint8_t)> bytes{};
+    readInto(address, bytes);
+    return bytes[0];
 }
 
 std::vector<std::uint8_t> AddressSpace::readBytes(GuestAddress address,
@@ -700,6 +876,28 @@ void AddressSpace::writeU32(GuestAddress address, std::uint32_t value) {
 }
 
 void AddressSpace::writeBytes(GuestAddress address, std::span<const std::uint8_t> bytes) {
+    if (bytes.empty()) {
+        return;
+    }
+    auto &firstMapping = find(address, 1, Permission::Write);
+    const auto firstOffset =
+        static_cast<std::size_t>(address.value - firstMapping.base.value);
+    if (bytes.size() <= firstMapping.size - firstOffset) {
+        if (firstMapping.fileBytes) {
+            materializeFileBytes(firstMapping, firstOffset, bytes.size());
+            std::memcpy(firstMapping.fileBytes->data() +
+                            firstMapping.fileDataOffset + firstOffset,
+                        bytes.data(), bytes.size());
+        } else {
+            std::memcpy(firstMapping.bytes.data() + firstOffset, bytes.data(),
+                        bytes.size());
+        }
+        if (isExecutable(firstMapping.permissions)) {
+            ++executableVersion_;
+        }
+        return;
+    }
+
     std::size_t validated = 0;
     auto validationCursor = address;
     bool changesExecutableBytes = false;
@@ -708,6 +906,9 @@ void AddressSpace::writeBytes(GuestAddress address, std::span<const std::uint8_t
         changesExecutableBytes |= isExecutable(mapping.permissions);
         const auto offset = static_cast<std::size_t>(validationCursor.value - mapping.base.value);
         const auto chunk = std::min(bytes.size() - validated, mapping.size - offset);
+        if (mapping.fileBytes) {
+            materializeFileBytes(mapping, offset, chunk);
+        }
         validated += chunk;
         validationCursor.value += chunk;
     }
@@ -737,6 +938,10 @@ std::span<const std::uint8_t> AddressSpace::executableBytes(GuestAddress address
     const auto &mapping = find(address, 1, Permission::Execute);
     const auto offset = static_cast<std::size_t>(address.value - mapping.base.value);
     if (mapping.fileBytes) {
+        // The returned span permits the decoder to inspect any remaining byte.
+        // Slide-bearing executable mappings are unusual, so preserve that span
+        // contract by materializing the whole remainder when one appears.
+        materializeFileBytes(mapping, offset, mapping.size - offset);
         return {mapping.fileBytes->data() + mapping.fileDataOffset + offset,
                 mapping.size - offset};
     }
@@ -758,6 +963,7 @@ AddressSpace::mutablePrivateFileMappingBytes(GuestAddress base) {
     if (isExecutable(mapping->permissions)) {
         ++executableVersion_;
     }
+    materializeFileBytes(*mapping, 0, mapping->size);
     return {mapping->fileBytes->data() + mapping->fileDataOffset,
             mapping->size};
 }

@@ -27,6 +27,9 @@ void Assembler::requireRegister(XRegister reg) {
 
 void Assembler::emit(std::uint32_t word, std::string text) {
     words_.push_back(word);
+    if (!recordListing_) {
+        return;
+    }
     try {
         listing_.push_back(std::move(text));
     } catch (...) {
@@ -42,7 +45,9 @@ void Assembler::emitFixup(std::uint32_t word, std::string text,
     try {
         fixups_.push_back(Fixup{kind, index, label});
     } catch (...) {
-        listing_.pop_back();
+        if (recordListing_) {
+            listing_.pop_back();
+        }
         words_.pop_back();
         throw;
     }
@@ -53,7 +58,9 @@ void Assembler::mov(XRegister destination, XRegister source) {
     requireRegister(source);
     const auto word = 0xAA0003E0U | (static_cast<std::uint32_t>(source.encoding) << 16U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "mov " + regName(destination) + ", " + regName(source));
+    emit(word, recordListing_
+                   ? "mov " + regName(destination) + ", " + regName(source)
+                   : std::string{});
 }
 
 void Assembler::movImmediate(XRegister destination, std::uint64_t value) {
@@ -89,14 +96,57 @@ void Assembler::movImmediate(XRegister destination, std::uint64_t value) {
                               : useMovn ? 0x92800000U : 0xD2800000U;
         const auto word = base | (halfword << 21U) | (static_cast<std::uint32_t>(immediate) << 5U) |
                           static_cast<std::uint32_t>(destination.encoding);
-        auto text = std::string(emittedFirst ? "movk "
-                                             : useMovn ? "movn " : "movz ") +
-                    regName(destination) + ", " + hexImmediate(immediate);
-        if (shift != 0) {
-            text += ", lsl #" + std::to_string(shift);
+        std::string text;
+        if (recordListing_) {
+            text = std::string(emittedFirst ? "movk "
+                                            : useMovn ? "movn " : "movz ") +
+                   regName(destination) + ", " + hexImmediate(immediate);
+            if (shift != 0) {
+                text += ", lsl #" + std::to_string(shift);
+            }
         }
         emit(word, std::move(text));
         emittedFirst = true;
+    }
+}
+
+void Assembler::movImmediate(XRegister destination,
+                             RelocatablePointer pointer) {
+    requireRegister(destination);
+    if (words_.size() >
+        std::numeric_limits<std::uint32_t>::max() / sizeof(std::uint32_t)) {
+        throw std::overflow_error("ARM64 pointer relocation offset overflows");
+    }
+    const auto firstWord = words_.size();
+    const auto firstListing = listing_.size();
+    try {
+        for (std::uint32_t halfword = 0; halfword < 4; ++halfword) {
+            const auto shift = halfword * 16U;
+            const auto immediate = static_cast<std::uint16_t>(
+                (pointer.value >> shift) & UINT64_C(0xFFFF));
+            const auto base = halfword == 0 ? 0xD2800000U : 0xF2800000U;
+            const auto word =
+                base | (halfword << 21U) |
+                (static_cast<std::uint32_t>(immediate) << 5U) |
+                static_cast<std::uint32_t>(destination.encoding);
+            std::string text;
+            if (recordListing_) {
+                text = std::string(halfword == 0 ? "movz " : "movk ") +
+                       regName(destination) + ", " + hexImmediate(immediate);
+                if (shift != 0) {
+                    text += ", lsl #" + std::to_string(shift);
+                }
+            }
+            emit(word, std::move(text));
+        }
+        pointerRelocations_.push_back(
+            static_cast<std::uint32_t>(firstWord * sizeof(std::uint32_t)));
+    } catch (...) {
+        words_.resize(firstWord);
+        if (recordListing_) {
+            listing_.resize(firstListing);
+        }
+        throw;
     }
 }
 
@@ -107,7 +157,10 @@ void Assembler::add(XRegister destination, XRegister lhs, XRegister rhs) {
     const auto word = 0x8B000000U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "add " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
+    emit(word, recordListing_
+                   ? "add " + regName(destination) + ", " + regName(lhs) +
+                         ", " + regName(rhs)
+                   : std::string{});
 }
 
 void Assembler::sub(XRegister destination, XRegister lhs, XRegister rhs) {
@@ -117,7 +170,10 @@ void Assembler::sub(XRegister destination, XRegister lhs, XRegister rhs) {
     const auto word = 0xCB000000U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "sub " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
+    emit(word, recordListing_
+                   ? "sub " + regName(destination) + ", " + regName(lhs) +
+                         ", " + regName(rhs)
+                   : std::string{});
 }
 
 void Assembler::lslImmediate(XRegister destination, XRegister source, std::uint8_t shift) {
@@ -135,8 +191,10 @@ void Assembler::lslImmediate(XRegister destination, XRegister source, std::uint8
     const auto word = 0xD3400000U | (immr << 16U) | (imms << 10U) |
                       (static_cast<std::uint32_t>(source.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "lsl " + regName(destination) + ", " + regName(source) + ", #" +
-                   std::to_string(shift));
+    emit(word, recordListing_
+                   ? "lsl " + regName(destination) + ", " + regName(source) +
+                         ", #" + std::to_string(shift)
+                   : std::string{});
 }
 
 void Assembler::lsrImmediate(XRegister destination, XRegister source, std::uint8_t shift) {
@@ -152,8 +210,10 @@ void Assembler::lsrImmediate(XRegister destination, XRegister source, std::uint8
     const auto word = 0xD340FC00U | (static_cast<std::uint32_t>(shift) << 16U) |
                       (static_cast<std::uint32_t>(source.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "lsr " + regName(destination) + ", " + regName(source) + ", #" +
-                   std::to_string(shift));
+    emit(word, recordListing_
+                   ? "lsr " + regName(destination) + ", " + regName(source) +
+                         ", #" + std::to_string(shift)
+                   : std::string{});
 }
 
 void Assembler::asrImmediate(XRegister destination, XRegister source,
@@ -171,8 +231,10 @@ void Assembler::asrImmediate(XRegister destination, XRegister source,
         0x9340FC00U | (static_cast<std::uint32_t>(shift) << 16U) |
         (static_cast<std::uint32_t>(source.encoding) << 5U) |
         static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "asr " + regName(destination) + ", " + regName(source) +
-                   ", #" + std::to_string(shift));
+    emit(word, recordListing_
+                   ? "asr " + regName(destination) + ", " + regName(source) +
+                         ", #" + std::to_string(shift)
+                   : std::string{});
 }
 
 void Assembler::reverseBytes32(XRegister destination, XRegister source) {
@@ -181,8 +243,10 @@ void Assembler::reverseBytes32(XRegister destination, XRegister source) {
     const auto word = 0x5AC00800U |
                       (static_cast<std::uint32_t>(source.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "rev w" + std::to_string(destination.encoding) + ", w" +
-                   std::to_string(source.encoding));
+    emit(word, recordListing_
+                   ? "rev w" + std::to_string(destination.encoding) + ", w" +
+                         std::to_string(source.encoding)
+                   : std::string{});
 }
 
 void Assembler::reverseBytes64(XRegister destination, XRegister source) {
@@ -191,7 +255,9 @@ void Assembler::reverseBytes64(XRegister destination, XRegister source) {
     const auto word = 0xDAC00C00U |
                       (static_cast<std::uint32_t>(source.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "rev " + regName(destination) + ", " + regName(source));
+    emit(word, recordListing_
+                   ? "rev " + regName(destination) + ", " + regName(source)
+                   : std::string{});
 }
 
 void Assembler::signExtend32(XRegister destination, XRegister source) {
@@ -200,8 +266,10 @@ void Assembler::signExtend32(XRegister destination, XRegister source) {
     const auto word = 0x93407C00U |
                       (static_cast<std::uint32_t>(source.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "sxtw " + regName(destination) + ", w" +
-                   std::to_string(source.encoding));
+    emit(word, recordListing_
+                   ? "sxtw " + regName(destination) + ", w" +
+                         std::to_string(source.encoding)
+                   : std::string{});
 }
 
 void Assembler::lslVariable(XRegister destination, XRegister source, XRegister shift) {
@@ -211,8 +279,10 @@ void Assembler::lslVariable(XRegister destination, XRegister source, XRegister s
     const auto word = 0x9AC02000U | (static_cast<std::uint32_t>(shift.encoding) << 16U) |
                       (static_cast<std::uint32_t>(source.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "lsl " + regName(destination) + ", " + regName(source) + ", " +
-                   regName(shift));
+    emit(word, recordListing_
+                   ? "lsl " + regName(destination) + ", " + regName(source) +
+                         ", " + regName(shift)
+                   : std::string{});
 }
 
 void Assembler::lsrVariable(XRegister destination, XRegister source,
@@ -225,8 +295,10 @@ void Assembler::lsrVariable(XRegister destination, XRegister source,
         (static_cast<std::uint32_t>(shift.encoding) << 16U) |
         (static_cast<std::uint32_t>(source.encoding) << 5U) |
         static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "lsr " + regName(destination) + ", " + regName(source) + ", " +
-                   regName(shift));
+    emit(word, recordListing_
+                   ? "lsr " + regName(destination) + ", " + regName(source) +
+                         ", " + regName(shift)
+                   : std::string{});
 }
 
 void Assembler::multiplyLow(XRegister destination, XRegister lhs, XRegister rhs) {
@@ -236,7 +308,10 @@ void Assembler::multiplyLow(XRegister destination, XRegister lhs, XRegister rhs)
     const auto word = 0x9B007C00U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "mul " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
+    emit(word, recordListing_
+                   ? "mul " + regName(destination) + ", " + regName(lhs) +
+                         ", " + regName(rhs)
+                   : std::string{});
 }
 
 void Assembler::multiplyHighUnsigned(XRegister destination, XRegister lhs, XRegister rhs) {
@@ -246,8 +321,10 @@ void Assembler::multiplyHighUnsigned(XRegister destination, XRegister lhs, XRegi
     const auto word = 0x9BC07C00U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "umulh " + regName(destination) + ", " + regName(lhs) + ", " +
-                   regName(rhs));
+    emit(word, recordListing_
+                   ? "umulh " + regName(destination) + ", " + regName(lhs) +
+                         ", " + regName(rhs)
+                   : std::string{});
 }
 
 void Assembler::extract(XRegister destination, XRegister high, XRegister low,
@@ -262,8 +339,10 @@ void Assembler::extract(XRegister destination, XRegister high, XRegister low,
                       (static_cast<std::uint32_t>(lsb) << 10U) |
                       (static_cast<std::uint32_t>(high.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "extr " + regName(destination) + ", " + regName(high) + ", " +
-                   regName(low) + ", #" + std::to_string(lsb));
+    emit(word, recordListing_
+                   ? "extr " + regName(destination) + ", " + regName(high) +
+                         ", " + regName(low) + ", #" + std::to_string(lsb)
+                   : std::string{});
 }
 
 void Assembler::bitAnd(XRegister destination, XRegister lhs, XRegister rhs) {
@@ -273,7 +352,10 @@ void Assembler::bitAnd(XRegister destination, XRegister lhs, XRegister rhs) {
     const auto word = 0x8A000000U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "and " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
+    emit(word, recordListing_
+                   ? "and " + regName(destination) + ", " + regName(lhs) +
+                         ", " + regName(rhs)
+                   : std::string{});
 }
 
 void Assembler::bitOr(XRegister destination, XRegister lhs, XRegister rhs) {
@@ -283,7 +365,10 @@ void Assembler::bitOr(XRegister destination, XRegister lhs, XRegister rhs) {
     const auto word = 0xAA000000U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "orr " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
+    emit(word, recordListing_
+                   ? "orr " + regName(destination) + ", " + regName(lhs) +
+                         ", " + regName(rhs)
+                   : std::string{});
 }
 
 void Assembler::bitOrShiftedLeft(XRegister destination, XRegister lhs,
@@ -299,8 +384,11 @@ void Assembler::bitOrShiftedLeft(XRegister destination, XRegister lhs,
                       (static_cast<std::uint32_t>(shift) << 10U) |
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "orr " + regName(destination) + ", " + regName(lhs) + ", " +
-                   regName(rhs) + ", lsl #" + std::to_string(shift));
+    emit(word, recordListing_
+                   ? "orr " + regName(destination) + ", " + regName(lhs) +
+                         ", " + regName(rhs) + ", lsl #" +
+                         std::to_string(shift)
+                   : std::string{});
 }
 
 void Assembler::bitXor(XRegister destination, XRegister lhs, XRegister rhs) {
@@ -310,7 +398,10 @@ void Assembler::bitXor(XRegister destination, XRegister lhs, XRegister rhs) {
     const auto word = 0xCA000000U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "eor " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs));
+    emit(word, recordListing_
+                   ? "eor " + regName(destination) + ", " + regName(lhs) +
+                         ", " + regName(rhs)
+                   : std::string{});
 }
 
 void Assembler::bitXorShiftedRight(XRegister destination, XRegister lhs,
@@ -326,8 +417,11 @@ void Assembler::bitXorShiftedRight(XRegister destination, XRegister lhs,
                       (static_cast<std::uint32_t>(shift) << 10U) |
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "eor " + regName(destination) + ", " + regName(lhs) + ", " +
-                   regName(rhs) + ", lsr #" + std::to_string(shift));
+    emit(word, recordListing_
+                   ? "eor " + regName(destination) + ", " + regName(lhs) +
+                         ", " + regName(rhs) + ", lsr #" +
+                         std::to_string(shift)
+                   : std::string{});
 }
 
 void Assembler::compare(XRegister lhs, XRegister rhs) {
@@ -336,7 +430,9 @@ void Assembler::compare(XRegister lhs, XRegister rhs) {
     const auto word = 0xEB00001FU |
                       (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U);
-    emit(word, "cmp " + regName(lhs) + ", " + regName(rhs));
+    emit(word, recordListing_
+                   ? "cmp " + regName(lhs) + ", " + regName(rhs)
+                   : std::string{});
 }
 
 void Assembler::conditionalSelectEqual(XRegister destination,
@@ -349,8 +445,11 @@ void Assembler::conditionalSelectEqual(XRegister destination,
                       (static_cast<std::uint32_t>(ifNotEqual.encoding) << 16U) |
                       (static_cast<std::uint32_t>(ifEqual.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "csel " + regName(destination) + ", " + regName(ifEqual) +
-                   ", " + regName(ifNotEqual) + ", eq");
+    emit(word, recordListing_
+                   ? "csel " + regName(destination) + ", " +
+                         regName(ifEqual) + ", " + regName(ifNotEqual) +
+                         ", eq"
+                   : std::string{});
 }
 
 void Assembler::ldr(XRegister destination, XRegister base, std::uint32_t byteOffset) {
@@ -363,8 +462,10 @@ void Assembler::ldr(XRegister destination, XRegister base, std::uint32_t byteOff
     const auto word = 0xF9400000U | (scaledOffset << 10U) |
                       (static_cast<std::uint32_t>(base.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "ldr " + regName(destination) + ", [" + regName(base) + ", #" +
-                   std::to_string(byteOffset) + "]");
+    emit(word, recordListing_
+                   ? "ldr " + regName(destination) + ", [" + regName(base) +
+                         ", #" + std::to_string(byteOffset) + "]"
+                   : std::string{});
 }
 
 void Assembler::ldr32(XRegister destination, XRegister base, std::uint32_t byteOffset) {
@@ -377,8 +478,11 @@ void Assembler::ldr32(XRegister destination, XRegister base, std::uint32_t byteO
     const auto word = 0xB9400000U | (scaledOffset << 10U) |
                       (static_cast<std::uint32_t>(base.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
-    emit(word, "ldr w" + std::to_string(destination.encoding) + ", [" + regName(base) + ", #" +
-                   std::to_string(byteOffset) + "]");
+    emit(word, recordListing_
+                   ? "ldr w" + std::to_string(destination.encoding) + ", [" +
+                         regName(base) + ", #" + std::to_string(byteOffset) +
+                         "]"
+                   : std::string{});
 }
 
 void Assembler::str(XRegister source, XRegister base, std::uint32_t byteOffset) {
@@ -391,14 +495,16 @@ void Assembler::str(XRegister source, XRegister base, std::uint32_t byteOffset) 
     const auto word = 0xF9000000U | (scaledOffset << 10U) |
                       (static_cast<std::uint32_t>(base.encoding) << 5U) |
                       static_cast<std::uint32_t>(source.encoding);
-    emit(word, "str " + regName(source) + ", [" + regName(base) + ", #" +
-                   std::to_string(byteOffset) + "]");
+    emit(word, recordListing_
+                   ? "str " + regName(source) + ", [" + regName(base) +
+                         ", #" + std::to_string(byteOffset) + "]"
+                   : std::string{});
 }
 
 void Assembler::blr(XRegister target) {
     requireRegister(target);
     emit(0xD63F0000U | (static_cast<std::uint32_t>(target.encoding) << 5U),
-         "blr " + regName(target));
+         recordListing_ ? "blr " + regName(target) : std::string{});
 }
 
 Label Assembler::makeLabel() {
@@ -425,7 +531,9 @@ void Assembler::b(Label label) {
     if (label.id >= labelPositions_.size()) {
         throw std::invalid_argument("cannot branch to an unknown ARM64 label");
     }
-    emitFixup(0x14000000U, "b L" + std::to_string(label.id),
+    emitFixup(0x14000000U,
+              recordListing_ ? "b L" + std::to_string(label.id)
+                             : std::string{},
               FixupKind::Branch26, label);
 }
 
@@ -435,8 +543,10 @@ void Assembler::cbz(XRegister value, Label label) {
         throw std::invalid_argument("cannot compare-branch to an unknown ARM64 label");
     }
     const auto word = 0xB4000000U | static_cast<std::uint32_t>(value.encoding);
-    emitFixup(word, "cbz " + regName(value) + ", L" +
-                        std::to_string(label.id),
+    emitFixup(word,
+              recordListing_ ? "cbz " + regName(value) + ", L" +
+                                   std::to_string(label.id)
+                             : std::string{},
               FixupKind::CompareBranch19, label);
 }
 
@@ -446,8 +556,10 @@ void Assembler::cbnz(XRegister value, Label label) {
         throw std::invalid_argument("cannot compare-branch to an unknown ARM64 label");
     }
     const auto word = 0xB5000000U | static_cast<std::uint32_t>(value.encoding);
-    emitFixup(word, "cbnz " + regName(value) + ", L" +
-                        std::to_string(label.id),
+    emitFixup(word,
+              recordListing_ ? "cbnz " + regName(value) + ", L" +
+                                   std::to_string(label.id)
+                             : std::string{},
               FixupKind::CompareBranch19, label);
 }
 
@@ -459,9 +571,11 @@ void Assembler::tbz(XRegister value, std::uint8_t bit, Label label) {
     const auto word = 0x36000000U | (static_cast<std::uint32_t>(bit >> 5U) << 31U) |
                       (static_cast<std::uint32_t>(bit & 0x1FU) << 19U) |
                       static_cast<std::uint32_t>(value.encoding);
-    emitFixup(word,
-              "tbz " + regName(value) + ", #" + std::to_string(bit) +
-                  ", L" + std::to_string(label.id),
+    emitFixup(word, recordListing_
+                        ? "tbz " + regName(value) + ", #" +
+                              std::to_string(bit) + ", L" +
+                              std::to_string(label.id)
+                        : std::string{},
               FixupKind::TestBranch14, label);
 }
 
@@ -473,9 +587,11 @@ void Assembler::tbnz(XRegister value, std::uint8_t bit, Label label) {
     const auto word = 0x37000000U | (static_cast<std::uint32_t>(bit >> 5U) << 31U) |
                       (static_cast<std::uint32_t>(bit & 0x1FU) << 19U) |
                       static_cast<std::uint32_t>(value.encoding);
-    emitFixup(word,
-              "tbnz " + regName(value) + ", #" + std::to_string(bit) +
-                  ", L" + std::to_string(label.id),
+    emitFixup(word, recordListing_
+                        ? "tbnz " + regName(value) + ", #" +
+                              std::to_string(bit) + ", L" +
+                              std::to_string(label.id)
+                        : std::string{},
               FixupKind::TestBranch14, label);
 }
 
@@ -547,6 +663,7 @@ Program Assembler::finish() && {
         program.bytes.push_back(static_cast<std::uint8_t>((word >> 24U) & 0xFFU));
     }
     program.listing = std::move(listing_);
+    program.pointerRelocations = std::move(pointerRelocations_);
     return program;
 }
 

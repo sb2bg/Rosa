@@ -59,11 +59,13 @@ constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 constexpr std::uint64_t syscallIssetugid = unixSyscallClass | 327U;
 constexpr std::uint64_t syscallProcInfo = unixSyscallClass | 336U;
 constexpr std::uint64_t syscallStat64 = unixSyscallClass | 338U;
+constexpr std::uint64_t syscallFstat64 = unixSyscallClass | 339U;
 constexpr std::uint64_t syscallGetfsstat64 = unixSyscallClass | 347U;
 constexpr std::uint64_t syscallBsdthreadRegister = unixSyscallClass | 366U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
 constexpr std::uint64_t syscallMac = unixSyscallClass | 381U;
 constexpr std::uint64_t syscallReadNoCancel = unixSyscallClass | 396U;
+constexpr std::uint64_t syscallWriteNoCancel = unixSyscallClass | 397U;
 constexpr std::uint64_t syscallOpenNoCancel = unixSyscallClass | 398U;
 constexpr std::uint64_t syscallCloseNoCancel = unixSyscallClass | 399U;
 constexpr std::uint64_t syscallFsgetpath = unixSyscallClass | 427U;
@@ -1650,6 +1652,38 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         setSuccess(state, 0);
         return {};
     }
+    if (number == syscallFstat64) {
+        const auto descriptor = std::bit_cast<std::int32_t>(
+            static_cast<std::uint32_t>(state.rdi));
+        if (descriptor != STDIN_FILENO && descriptor != STDOUT_FILENO &&
+            descriptor != STDERR_FILENO) {
+            throw unsupported(
+                state, syscallRip,
+                "fstat64 currently accepts only a standard guest descriptor");
+        }
+
+        struct stat hostMetadata {};
+        if (::fstat(descriptor, &hostMetadata) != 0) {
+            setError(state, errno);
+            return {};
+        }
+        const auto metadata = guestStat64FromHost(hostMetadata);
+        try {
+            addressSpace.validateAccess(guest::GuestAddress{state.rsi},
+                                        sizeof(metadata),
+                                        guest::Permission::Write);
+            addressSpace.writeBytes(
+                guest::GuestAddress{state.rsi},
+                std::span<const std::uint8_t>{
+                    reinterpret_cast<const std::uint8_t *>(&metadata),
+                    sizeof(metadata)});
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        setSuccess(state, 0);
+        return {};
+    }
     if (number == syscallGetattrlist) {
         std::optional<std::string> path;
         GuestAttrlist attributes{};
@@ -2333,7 +2367,7 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         }
         return {};
     }
-    if (number != syscallWrite) {
+    if (number != syscallWrite && number != syscallWriteNoCancel) {
         throw unsupported(state, syscallRip,
                           "only the currently provisioned Darwin bootstrap syscalls are implemented; this call is outside that set");
     }

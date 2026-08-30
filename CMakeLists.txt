@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.25)
 
 project(Rosa VERSION 0.1.0 LANGUAGES C CXX)
 
+include(CheckIPOSupported)
+
 if(NOT APPLE)
     message(FATAL_ERROR "Rosa's initial JIT backend currently requires macOS")
 endif()
@@ -18,6 +20,18 @@ set(ROSA_SANITIZERS "" CACHE STRING "Comma-separated Clang host sanitizers")
 option(ROSA_ENABLE_LLVM_JIT
        "Use LLVM as an optimizing JIT tier when development libraries are available"
        ON)
+option(ROSA_ENABLE_RELEASE_IPO
+       "Enable interprocedural optimization for release runtime builds"
+       ON)
+
+set(ROSA_RELEASE_IPO_AVAILABLE OFF)
+if(ROSA_ENABLE_RELEASE_IPO)
+    check_ipo_supported(RESULT ROSA_RELEASE_IPO_AVAILABLE
+                        OUTPUT ROSA_RELEASE_IPO_ERROR)
+    if(NOT ROSA_RELEASE_IPO_AVAILABLE)
+        message(STATUS "Rosa release IPO unavailable: ${ROSA_RELEASE_IPO_ERROR}")
+    endif()
+endif()
 
 set(ROSA_HAS_LLVM OFF)
 if(ROSA_ENABLE_LLVM_JIT)
@@ -87,6 +101,10 @@ endif()
 
 add_executable(rosa src/main.cpp)
 target_link_libraries(rosa PRIVATE rosa_core)
+if(ROSA_RELEASE_IPO_AVAILABLE)
+    set_property(TARGET rosa_core rosa PROPERTY
+                 INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
 
 set(ROSA_BENCHMARK_ENTRYPOINT
     "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/entrypoint-x86_64")
@@ -116,11 +134,46 @@ add_custom_target(
     VERBATIM
 )
 
+set(ROSA_FRONTIER_ORDINARY_C
+    "${CMAKE_CURRENT_BINARY_DIR}/frontier-fixtures/ordinary-c-x86_64")
+add_custom_command(
+    OUTPUT "${ROSA_FRONTIER_ORDINARY_C}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/frontier-fixtures"
+    COMMAND "${CMAKE_C_COMPILER}"
+            -target x86_64-apple-macos11
+            -O2
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/ordinary-c-x86_64.c"
+            -o "${ROSA_FRONTIER_ORDINARY_C}"
+    DEPENDS tests/fixtures/ordinary-c-x86_64.c
+    VERBATIM
+)
+add_custom_target(rosa_frontier_ordinary_c ALL
+                  DEPENDS "${ROSA_FRONTIER_ORDINARY_C}")
+
+set(ROSA_BENCHMARK_PRIME_SIEVE
+    "${CMAKE_CURRENT_BINARY_DIR}/benchmarks/prime-sieve-x86_64")
+add_custom_command(
+    OUTPUT "${ROSA_BENCHMARK_PRIME_SIEVE}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/benchmarks"
+    COMMAND "${CMAKE_C_COMPILER}"
+            -target x86_64-apple-macos11
+            -O2
+            "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/prime-sieve-x86_64.c"
+            -o "${ROSA_BENCHMARK_PRIME_SIEVE}"
+    DEPENDS benchmarks/prime-sieve-x86_64.c
+    VERBATIM
+)
+add_custom_target(rosa_benchmark_prime_sieve_fixture ALL
+                  DEPENDS "${ROSA_BENCHMARK_PRIME_SIEVE}")
+
 include(CTest)
 if(BUILD_TESTING)
     set(ROSA_TEST_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-fixtures")
     set(ROSA_TEST_MACHO "${ROSA_TEST_FIXTURE_DIR}/r2-x86_64")
     set(ROSA_TEST_HELLO_MACHO "${ROSA_TEST_FIXTURE_DIR}/hello-darwin-x86_64")
+    set(ROSA_TEST_C_MAIN_MACHO "${ROSA_TEST_FIXTURE_DIR}/c-main-x86_64")
     add_custom_command(
         OUTPUT "${ROSA_TEST_MACHO}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${ROSA_TEST_FIXTURE_DIR}"
@@ -151,6 +204,28 @@ if(BUILD_TESTING)
         VERBATIM
     )
     add_custom_target(rosa_test_hello_macho ALL DEPENDS "${ROSA_TEST_HELLO_MACHO}")
+    add_custom_command(
+        OUTPUT "${ROSA_TEST_C_MAIN_MACHO}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${ROSA_TEST_FIXTURE_DIR}"
+        COMMAND "${CMAKE_C_COMPILER}"
+                -target x86_64-apple-macos11
+                -std=c17
+                -O2
+                -fno-stack-protector
+                -nostdlib
+                -Wl,-e,_start
+                -Wl,-no_pie
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/c-main-start-x86_64.s"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/c-main-x86_64.c"
+                -lSystem
+                -o "${ROSA_TEST_C_MAIN_MACHO}"
+        DEPENDS
+            tests/fixtures/c-main-start-x86_64.s
+            tests/fixtures/c-main-x86_64.c
+        VERBATIM
+    )
+    add_custom_target(rosa_test_c_main_macho ALL
+                      DEPENDS "${ROSA_TEST_C_MAIN_MACHO}")
 
     option(ROSA_ENABLE_ROSETTA_DIFFERENTIAL_TESTS
            "Run x86 semantic differential tests when Apple Rosetta is available" ON)
@@ -192,11 +267,16 @@ if(BUILD_TESTING)
 
     add_executable(rosa_tests tests/TestMain.cpp)
     target_link_libraries(rosa_tests PRIVATE rosa_core)
+    if(ROSA_RELEASE_IPO_AVAILABLE)
+        set_property(TARGET rosa_tests PROPERTY
+                     INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
     target_compile_definitions(rosa_tests PRIVATE
         ROSA_TEST_MACHO_PATH="${ROSA_TEST_MACHO}"
         ROSA_TEST_HELLO_MACHO_PATH="${ROSA_TEST_HELLO_MACHO}"
     )
-    add_dependencies(rosa_tests rosa_test_macho rosa_test_hello_macho)
+    add_dependencies(rosa_tests rosa_test_macho rosa_test_hello_macho
+                     rosa_test_c_main_macho)
     if(ROSA_ROSETTA_PROBE_RESULT EQUAL 0)
         target_compile_definitions(rosa_tests PRIVATE
             ROSA_HAS_X86_ORACLE=1
@@ -209,4 +289,17 @@ if(BUILD_TESTING)
     set_tests_properties(rosa_hello_darwin PROPERTIES
         PASS_REGULAR_EXPRESSION "hello from Intel Darwin;guest exited: status=0"
     )
+    add_test(NAME rosa_c_main COMMAND rosa run --max-blocks 21000000
+             --dump-x86
+             "${ROSA_TEST_C_MAIN_MACHO}" -- rosa jit)
+    if(ROSA_HAS_LLVM)
+        set_tests_properties(rosa_c_main PROPERTIES
+            PASS_REGULAR_EXPRESSION
+                "C main returned 42;Execution tier: LLVM O2 hot loop;guest exited: status=0"
+        )
+    else()
+        set_tests_properties(rosa_c_main PROPERTIES
+            PASS_REGULAR_EXPRESSION "C main returned 42;guest exited: status=0"
+        )
+    endif()
 endif()

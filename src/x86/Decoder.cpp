@@ -220,13 +220,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 continue;
             }
 
-            if (opcode == 0x10U || opcode == 0x11U || opcode == 0x29U) {
-                if ((!vexL && opcode == 0x29U) || vexPrefix != 0 ||
+            if (opcode == 0x10U || opcode == 0x11U || opcode == 0x28U ||
+                opcode == 0x29U) {
+                if ((!vexL && (opcode == 0x28U || opcode == 0x29U)) ||
+                    vexPrefix != 0 ||
                     encodedVvvv != 0xFU ||
                     code.size() - cursor < 4) {
                     throw DecodeError(
                         address, remaining,
-                        "only memory VMOVUPS and 256-bit memory-store VMOVAPS are supported");
+                        "only memory VMOVUPS and 256-bit memory VMOVAPS are supported");
                 }
                 const auto modrm = code[cursor + 3];
                 const auto mode =
@@ -306,6 +308,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     instruction.operands.push_back(memory);
                     instruction.operands.push_back(XmmRegisterOperand{
                         static_cast<XmmRegister>(xmmEncoding)});
+                } else if (opcode == 0x28U) {
+                    instruction.opcode = Opcode::VmovapsYmmRegMem;
+                    instruction.operands.push_back(XmmRegisterOperand{
+                        static_cast<XmmRegister>(xmmEncoding)});
+                    instruction.operands.push_back(memory);
                 } else {
                     instruction.opcode = Opcode::VmovapsYmmMemReg;
                     instruction.operands.push_back(memory);
@@ -819,6 +826,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.fallthrough = relativeTarget(address, 2, 0);
             result.push_back(std::move(instruction));
             return result;
+        }
+
+        if (code[cursor] == 0x66U && code.size() - cursor >= 2 &&
+            code[cursor + 1] == 0x90U) {
+            instruction.opcode = Opcode::Nop;
+            instruction.length = 2;
+            instruction.bytes[0] = 0x66;
+            instruction.bytes[1] = 0x90;
+            result.push_back(std::move(instruction));
+            cursor += 2;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
         }
 
         if (code[cursor] == 0x90U) {
@@ -5474,11 +5495,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto opcode = code[cursor++];
-        if (hasOperandSizeOverride && opcode != 0x39U &&
-            opcode != 0x89U && opcode != 0x8BU && opcode != 0xFFU) {
+        if (hasOperandSizeOverride && opcode != 0x0BU && opcode != 0x39U &&
+            opcode != 0x89U && opcode != 0x8BU && opcode != 0xF7U &&
+            opcode != 0xFFU) {
             throw DecodeError(
                 address, remaining,
-                "operand-size override is only supported for 16-bit CMP, MOV, and memory INC in the general decoder");
+                "operand-size override is only supported for 16-bit OR, CMP, MOV, and memory INC in the general decoder");
         }
         if (hasGsOverride && opcode != 0x89U && opcode != 0x8BU &&
             opcode != 0xC7U &&
@@ -5765,6 +5787,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 secondOpcode != 0x48U &&
                 secondOpcode != 0x49U &&
                 secondOpcode != 0x4EU &&
+                secondOpcode != 0x4FU &&
                 secondOpcode != 0xA3U &&
                 secondOpcode != 0xA4U &&
                 secondOpcode != 0xBAU &&
@@ -5774,14 +5797,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 secondOpcode != 0xBDU) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVLE, BT, MOVSX, IMUL, SHLD, SHRD, BSF, and BSR register forms are supported from REX 0F");
+                    "only CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVLE/CMOVG, BT, MOVSX, IMUL, SHLD, SHRD, BSF, and BSR register forms are supported from REX 0F");
             }
             const bool isConditionalMove =
                 secondOpcode == 0x42U || secondOpcode == 0x43U ||
                 secondOpcode == 0x44U || secondOpcode == 0x45U ||
                 secondOpcode == 0x46U ||
                 secondOpcode == 0x47U || secondOpcode == 0x48U ||
-                secondOpcode == 0x49U || secondOpcode == 0x4EU;
+                secondOpcode == 0x49U || secondOpcode == 0x4EU ||
+                secondOpcode == 0x4FU;
             if (!rexW && !isConditionalMove && secondOpcode != 0xBAU &&
                 secondOpcode != 0xA3U && secondOpcode != 0xBEU &&
                 secondOpcode != 0xAFU &&
@@ -5810,7 +5834,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 secondOpcode == 0xAFU && rexW && mode == 0 &&
                 rmEncoding == 0x5U && !rexB && !rexX;
             const bool isMovsxMemory =
-                secondOpcode == 0xBEU && rexW && mode != 0x3U &&
+                secondOpcode == 0xBEU && mode != 0x3U &&
                 rmEncoding != 0x4U &&
                 !(mode == 0 && rmEncoding == 0x5U);
             if ((!isImulRipMemory && !isMovsxMemory && mode != 0x3U) ||
@@ -5872,7 +5896,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     }
                     instruction.opcode = Opcode::MovsxRegMem;
                     instruction.operands.push_back(
-                        RegisterOperand{encodedReg, 64});
+                        RegisterOperand{
+                            encodedReg,
+                            static_cast<std::uint8_t>(rexW ? 64U : 32U)});
                     instruction.operands.push_back(MemoryOperand{
                         encodedRm, displacement, 8});
                 } else if (rexW || rexX) {
@@ -5904,6 +5930,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                             ? Condition::NotSign
                                         : secondOpcode == 0x4EU
                                             ? Condition::LessOrEqual
+                                        : secondOpcode == 0x4FU
+                                            ? Condition::Greater
                                             : Condition::Equal;
                 const auto width =
                     static_cast<std::uint8_t>(rexW ? 64U : 32U);
@@ -6409,7 +6437,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (rexW || code.size() - cursor < 1) {
                 throw DecodeError(
                     address, remaining,
-                    "only OR r32, dword [memory] is supported from opcode 0B");
+                    "only OR r16/r32, word/dword [memory] is supported from opcode 0B");
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
@@ -6477,14 +6505,16 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     address, cursor - instructionStart, displacement));
             }
             instruction.opcode = Opcode::OrRegMem;
+            const auto width = static_cast<std::uint8_t>(
+                hasOperandSizeOverride ? 16U : 32U);
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(regEncoding, rexR), 32});
+                decodeRegister(regEncoding, rexR), width});
             instruction.operands.push_back(
                 ripRelative
-                    ? MemoryOperand{Register::Rax, displacement, 32,
+                    ? MemoryOperand{Register::Rax, displacement, width,
                                     std::nullopt, 1, false, true}
                     : MemoryOperand{decodeRegister(baseEncoding, rexB),
-                                    displacement, 32, index, scale});
+                                    displacement, width, index, scale});
         } else if (opcode == 0x2BU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated sub register, [base+disp]");
@@ -8159,6 +8189,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding =
                 static_cast<std::uint8_t>(modrm & 0x7U);
+            if (hasOperandSizeOverride && !rexW && extension != 0x3U) {
+                throw DecodeError(
+                    address, remaining,
+                    "operand-size override is only supported for register NEG from opcode F7");
+            }
             if (extension == 0x7U) {
                 if (mode != 0x3U || rexW || rexR || rexX) {
                     throw DecodeError(
@@ -8170,21 +8205,22 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     decodeRegister(rmEncoding, rexB), 32});
             } else if (extension == 0x6U) {
                 if (mode == 0x3U) {
-                    if (!rexW || rexR || rexX) {
+                    if (rexR || rexX) {
                         throw DecodeError(
                             address, remaining,
-                            "only DIV r64 is supported for register operands from opcode F7 /6");
+                            "unsupported REX bits for register DIV from opcode F7 /6");
                     }
                     instruction.opcode = Opcode::DivReg;
                     instruction.operands.push_back(RegisterOperand{
-                        decodeRegister(rmEncoding, rexB), 64});
+                        decodeRegister(rmEncoding, rexB),
+                        static_cast<std::uint8_t>(rexW ? 64U : 32U)});
                 } else {
                 if (rexW || rexR || rexX || mode > 0x2U ||
                     rmEncoding == 0x4U ||
                     (mode == 0 && rmEncoding == 0x5U)) {
                     throw DecodeError(
                         address, remaining,
-                        "only DIV r64 or dword [base+disp8/disp32] is supported from opcode F7 /6");
+                        "only DIV r32/r64 or dword [base+disp8/disp32] is supported from opcode F7 /6");
                 }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
@@ -8221,7 +8257,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                                      : Opcode::MulReg;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
-                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                static_cast<std::uint8_t>(
+                    rexW ? 64U : hasOperandSizeOverride ? 16U : 32U)});
             if (extension == 0x0U) {
                 if (code.size() - cursor < 4) {
                     throw DecodeError(address, remaining,
@@ -9391,11 +9428,6 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     "only register-direct ADD /0, OR /1, ADC /2, SBB /3, AND /4, SUB /5, XOR /6, and CMP /7 from opcode 83 are supported");
             }
             const auto immediate = std::bit_cast<std::int8_t>(code[cursor++]);
-            if (extension == 0x3U && immediate != 0) {
-                throw DecodeError(
-                    address, remaining,
-                    "only the observed SBB r32/r64, 0 form is supported");
-            }
             instruction.opcode = extension == 0   ? Opcode::AddRegImm
                                  : extension == 1 ? Opcode::OrRegImm
                                  : extension == 2 ? Opcode::AdcRegImm
