@@ -80,6 +80,15 @@ constexpr std::uint32_t hostGetClockServiceReplySize = 40U;
 constexpr std::uint32_t hostGetClockServiceReceiveSize =
     hostGetClockServiceReplySize + machMessageTrailerSize;
 constexpr std::uint32_t systemClockId = 0U;
+constexpr std::int32_t hostGetSpecialPortMessageId = 412;
+constexpr std::int32_t hostGetSpecialPortReplyId =
+    hostGetSpecialPortMessageId + 100;
+constexpr std::uint32_t hostGetSpecialPortRequestSize = 40U;
+constexpr std::uint32_t hostGetSpecialPortReplySize = 40U;
+constexpr std::uint32_t hostGetSpecialPortReceiveSize =
+    hostGetSpecialPortReplySize + machMessageTrailerSize;
+constexpr std::int32_t hostLocalNode = -1;
+constexpr std::uint32_t hostUnprivilegedPortSelector = 1U;
 constexpr std::int32_t taskInfoMessageId = 3405;
 constexpr std::int32_t taskInfoReplyId = taskInfoMessageId + 100;
 constexpr std::uint32_t taskInfoRequestSize = 40U;
@@ -327,6 +336,54 @@ std::optional<GuestMachPortName> decodeObservedHostClockServiceRequest(
             hostGetClockServiceMessageId ||
         !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr) ||
         decodeGuestInteger<std::uint32_t>(message, 32) != systemClockId) {
+        return std::nullopt;
+    }
+    return GuestMachPortName{receiveName};
+}
+
+std::optional<GuestMachPortName> decodeObservedHostGetSpecialPortRequest(
+    std::span<const std::uint8_t> message, const x86::X86State &state,
+    std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
+    const GuestPortSpace &portSpace) {
+    constexpr std::array<std::uint8_t, 8> nativeNdr{
+        0, 0, 0, 0, 1, 0, 0, 0};
+    constexpr auto observedBits =
+        machMessageTypeCopySend | (machMessageTypeMakeSendOnce << 8U);
+    const auto remoteName = static_cast<std::uint32_t>(state.r10);
+    const auto localName = static_cast<std::uint32_t>(state.r10 >> 32U);
+    const auto receiveName = static_cast<std::uint32_t>(state.r9 >> 32U);
+    const auto *hostPort = portSpace.lookup(GuestMachPortName{remoteName});
+    const auto *replyPort = portSpace.lookup(GuestMachPortName{localName});
+    if (state.rsi != observedMachMessage2Options ||
+        static_cast<std::uint32_t>(state.rdx) != observedBits ||
+        static_cast<std::uint32_t>(state.rdx >> 32U) !=
+            hostGetSpecialPortRequestSize ||
+        localName != receiveName || static_cast<std::uint32_t>(state.r8) != 0 ||
+        static_cast<std::int32_t>(state.r8 >> 32U) !=
+            hostGetSpecialPortMessageId ||
+        static_cast<std::uint32_t>(state.r9) != 0 ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority) !=
+            hostGetSpecialPortReceiveSize ||
+        static_cast<std::uint32_t>(receiveSizeAndPriority >> 32U) != 0 ||
+        timeout != 0 || message.size() != hostGetSpecialPortRequestSize ||
+        hostPort == nullptr || hostPort->type != GuestPortType::Host ||
+        hostPort->sendUrefs == 0 || replyPort == nullptr ||
+        replyPort->type != GuestPortType::Reply ||
+        !replyPort->hasReceiveRight) {
+        return std::nullopt;
+    }
+    if (decodeGuestInteger<std::uint32_t>(message, 0) != observedBits ||
+        decodeGuestInteger<std::uint32_t>(message, 4) !=
+            hostGetSpecialPortRequestSize ||
+        decodeGuestInteger<std::uint32_t>(message, 8) != remoteName ||
+        decodeGuestInteger<std::uint32_t>(message, 12) != localName ||
+        decodeGuestInteger<std::uint32_t>(message, 16) != 0 ||
+        decodeGuestInteger<std::int32_t>(message, 20) !=
+            hostGetSpecialPortMessageId ||
+        !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr) ||
+        decodeGuestInteger<std::int32_t>(message, 32) != hostLocalNode ||
+        decodeGuestInteger<std::uint32_t>(message, 36) !=
+            hostUnprivilegedPortSelector) {
         return std::nullopt;
     }
     return GuestMachPortName{receiveName};
@@ -785,6 +842,30 @@ encodeHostClockServiceReply(GuestMachPortName receiveName,
     encodeGuestInteger<std::uint32_t>(reply, 24, 1);
     encodeGuestInteger<std::uint32_t>(reply, 28,
                                       clockServiceName.value);
+    reply[38] = machMessageTypeMoveSend;
+    reply[39] = machMessagePortDescriptor;
+    encodeGuestInteger<std::uint32_t>(reply, 40, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 44,
+                                      machMessageTrailerSize);
+    return reply;
+}
+
+std::array<std::uint8_t, hostGetSpecialPortReceiveSize>
+encodeHostGetSpecialPortReply(GuestMachPortName receiveName,
+                              GuestMachPortName hostName) {
+    std::array<std::uint8_t, hostGetSpecialPortReceiveSize> reply{};
+    encodeGuestInteger<std::uint32_t>(
+        reply, 0, machMessageHeaderComplex |
+                      (machMessageTypeMoveSendOnce << 8U));
+    encodeGuestInteger<std::uint32_t>(reply, 4,
+                                      hostGetSpecialPortReplySize);
+    encodeGuestInteger<std::uint32_t>(reply, 8, 0);
+    encodeGuestInteger<std::uint32_t>(reply, 12, receiveName.value);
+    encodeGuestInteger<std::uint32_t>(reply, 16, 0);
+    encodeGuestInteger<std::int32_t>(reply, 20,
+                                     hostGetSpecialPortReplyId);
+    encodeGuestInteger<std::uint32_t>(reply, 24, 1);
+    encodeGuestInteger<std::uint32_t>(reply, 28, hostName.value);
     reply[38] = machMessageTypeMoveSend;
     reply[39] = machMessagePortDescriptor;
     encodeGuestInteger<std::uint32_t>(reply, 40, 0);
@@ -1666,6 +1747,35 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             }
             const auto reply = encodeHostClockServiceReply(
                 *receiveName, *clockService);
+            addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
+            state.rax = kernSuccess;
+            return;
+        }
+
+        if (const auto receiveName =
+                decodeObservedHostGetSpecialPortRequest(
+                    message, state, receiveSizeAndPriority, timeout,
+                    portSpace_)) {
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rdi},
+                    hostGetSpecialPortReceiveSize,
+                    guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            // libdispatch demotes its host-self send right through
+            // HOST_LOCAL_NODE/HOST_PORT. Rosa's guest is unprivileged, so
+            // XNU answers with another send right to the same host object.
+            const auto host = portSpace_.copyoutHostSendRight(
+                machPortUrefsMaximum);
+            if (!host) {
+                throw inspectUnsupportedMachMessage2(addressSpace, state,
+                                                     syscallRip);
+            }
+            const auto reply =
+                encodeHostGetSpecialPortReply(*receiveName, *host);
             addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
             state.rax = kernSuccess;
             return;

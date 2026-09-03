@@ -25243,6 +25243,81 @@ void testMachMessage2HostClockServiceRequest() {
            "host clock-service returned an invalid guest clock right");
 }
 
+void testMachMessage2HostGetSpecialPortRequest() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr std::uint32_t requestSize = 40;
+    constexpr std::uint32_t receiveSize = 48;
+    constexpr std::uint32_t replySize = 40;
+    constexpr std::uint32_t messageBits = 0x1513;
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::hostSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    const auto hostName = static_cast<std::uint32_t>(state.rax);
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    const auto replyName = static_cast<std::uint32_t>(state.rax);
+
+    std::array<std::uint8_t, requestSize> request{};
+    const auto encode32 = [&request](std::size_t offset, std::uint32_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, messageBits);
+    encode32(4, requestSize);
+    encode32(8, hostName);
+    encode32(12, replyName);
+    encode32(20, 412); // host_get_special_port
+    request[28] = 1;   // native little-endian NDR integer representation
+    encode32(32, 0xFFFFFFFFU); // HOST_LOCAL_NODE
+    encode32(36, 1);           // HOST_PORT
+
+    addressSpace.mapAnonymous(messageAddress, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+                              "host special-port message");
+    addressSpace.writeBytes(messageAddress, request);
+    addressSpace.mapAnonymous(stackAddress, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+                              "host special-port stack arguments");
+    addressSpace.writeU64(stackAddress, 0xDEADBEEF);
+    addressSpace.writeU64(rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    addressSpace.writeU64(rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(requestSize) << 32U) | messageBits;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) | hostName;
+    state.r8 = std::uint64_t{412} << 32U;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    expectEqual(state.rax, std::uint64_t{0}, "host special-port mach_msg2 did not return success");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "host special-port mach_msg2 changed flags");
+    expectEqual(addressSpace.readU32(messageAddress), std::uint32_t{0x80001200},
+                "host special-port reply bits differ");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{messageAddress.value + 4}),
+                replySize, "host special-port reply size differs");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{messageAddress.value + 12}),
+                replyName, "host special-port reply local port differs");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{messageAddress.value + 20}),
+                std::uint32_t{512}, "host special-port reply ID differs");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{messageAddress.value + 24}),
+                std::uint32_t{1}, "host special-port descriptor count differs");
+    const auto returnedName =
+        addressSpace.readU32(rosa::guest::GuestAddress{messageAddress.value + 28});
+    expectEqual(returnedName, hostName, "host special-port demotion returned the wrong port");
+    const auto *hostPort =
+        dispatcher.portSpace().lookup(rosa::darwin::GuestMachPortName{returnedName});
+    expect(hostPort != nullptr && hostPort->type == rosa::darwin::GuestPortType::Host &&
+               hostPort->sendUrefs == 2,
+           "host special-port demotion did not add a host send right");
+}
+
 void testMachMessage2TaskGetBootstrapPortRequest() {
     constexpr rosa::guest::GuestAddress messageAddress{0x8000};
     constexpr rosa::guest::GuestAddress stackAddress{0x9000};
@@ -31824,6 +31899,7 @@ int main() {
         {"Mach message2 host basic-info request", testMachMessage2HostBasicInfoRequest},
         {"Mach message2 host priority-info request", testMachMessage2HostPriorityInfoRequest},
         {"Mach message2 host clock-service request", testMachMessage2HostClockServiceRequest},
+        {"Mach message2 host special-port request", testMachMessage2HostGetSpecialPortRequest},
         {"Mach message2 task bootstrap-port request", testMachMessage2TaskGetBootstrapPortRequest},
         {"Mach message2 task audit-token request", testMachMessage2TaskAuditTokenRequest},
         {"Mach message2 task debug-control-port request",
