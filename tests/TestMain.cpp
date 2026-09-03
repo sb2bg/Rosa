@@ -5949,6 +5949,33 @@ void testDecrement32BitGuestMemory() {
                 "faulted DEC dword partially changed memory");
     expectEqual(faultState.r11, crossPageTarget.value - 8, "faulted DEC dword changed its base");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted DEC dword changed flags");
+
+    // Observed in libsqlite3: DEC dword [R12] with a no-index SIB.
+    constexpr std::array<std::uint8_t, 5> sibCode{0x41, 0xFF, 0x0C, 0x24, 0xC3};
+    const auto sibDecoded =
+        decoder.decodeBlock(sibCode, rosa::guest::GuestAddress{0x100050E80ULL});
+    expect(sibDecoded[0].opcode == rosa::x86::Opcode::DecMem,
+           "DEC dword no-index SIB opcode differs");
+    expectEqual(sibDecoded[0].length, std::uint8_t{4}, "DEC dword no-index SIB length differs");
+    const auto sibMemory = std::get<rosa::x86::MemoryOperand>(sibDecoded[0].operands[0]);
+    expect(sibMemory.base == rosa::x86::Register::R12 && !sibMemory.index &&
+               sibMemory.displacement == 0 && sibMemory.width == 32,
+           "DEC dword [r12] operand differs");
+    expect(rosa::debug::dumpX86(sibDecoded).find("dec dword [r12]") != std::string::npos,
+           "DEC dword no-index SIB dump differs");
+    const auto sibBlock =
+        translator.translate(sibCode, rosa::guest::GuestAddress{0x100050E80ULL});
+    constexpr rosa::guest::GuestAddress sibTarget{0x8200};
+    addressSpace.writeU32(sibTarget, UINT32_C(0x80000000));
+    rosa::x86::X86State sibState;
+    sibState.r12 = sibTarget.value;
+    sibState.rflags = 0x3;
+    static_cast<void>(sibBlock.execute(sibState, &addressSpace));
+    expectEqual(addressSpace.readU32(sibTarget), UINT32_C(0x7FFFFFFF),
+                "DEC dword no-index SIB result differs");
+    expectEqual(sibState.r12, sibTarget.value, "DEC dword no-index SIB changed its base");
+    expectEqual(sibState.rflags, std::uint64_t{0x817},
+                "DEC dword no-index SIB flags differ or CF changed");
 }
 
 void testDecrement8BitScaledGuestMemory() {

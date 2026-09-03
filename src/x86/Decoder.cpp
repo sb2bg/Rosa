@@ -9748,8 +9748,34 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     static_cast<std::uint8_t>(rexW ? 64U : 32U), std::nullopt,
                     1, false, true});
             } else if (extension == 0x1U && mode <= 0x2U && !rexR &&
-                       !rexX && rmEncoding != 0x4U &&
+                       (!rexX || rmEncoding == 0x4U) &&
                        !(mode == 0 && rmEncoding == 0x5U && !rexB)) {
+                auto base = decodeRegister(rmEncoding, rexB);
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
+                if (rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated DEC memory SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    const auto baseEncoding =
+                        static_cast<std::uint8_t>(sib & 0x7U);
+                    if (mode == 0 && baseEncoding == 0x5U && !rexB) {
+                        throw DecodeError(
+                            address, remaining,
+                            "no-base DEC memory SIB is not supported");
+                    }
+                    base = decodeRegister(baseEncoding, rexB);
+                    if (indexEncoding != 0x4U || rexX) {
+                        index = decodeRegister(indexEncoding, rexX);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
                     if (cursor >= code.size()) {
@@ -9767,8 +9793,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 instruction.opcode = Opcode::DecMem;
                 instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(rmEncoding, rexB), displacement,
-                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                    base, displacement,
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U), index, scale});
             } else if (extension == 0x0U && mode == 0x3U && !rexR && !rexX) {
                 instruction.opcode = Opcode::IncReg;
                 instruction.operands.push_back(RegisterOperand{
@@ -9900,7 +9926,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                        (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register/memory INC /0, register/based/RIP-relative dword/qword memory DEC /1, register/memory CALL /2, register/based/RIP-relative memory JMP /4, and based qword memory PUSH /6 are supported from opcode FF");
+                    "only register/memory INC /0, register/based/SIB/RIP-relative dword/qword memory DEC /1, register/memory CALL /2, register/based/RIP-relative memory JMP /4, and based qword memory PUSH /6 are supported from opcode FF");
             } else {
                 auto baseEncoding = rmEncoding;
                 if (rmEncoding == 0x4U) {
