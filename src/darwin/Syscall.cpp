@@ -1977,18 +1977,34 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
     if (number == syscallFstat64) {
         const auto descriptor = std::bit_cast<std::int32_t>(
             static_cast<std::uint32_t>(state.rdi));
-        if (descriptor != STDIN_FILENO && descriptor != STDOUT_FILENO &&
-            descriptor != STDERR_FILENO) {
-            throw unsupported(
-                state, syscallRip,
-                "fstat64 currently accepts only a standard guest descriptor");
+        struct stat hostMetadata {};
+        if (descriptor == STDIN_FILENO || descriptor == STDOUT_FILENO ||
+            descriptor == STDERR_FILENO) {
+            if (::fstat(descriptor, &hostMetadata) != 0) {
+                setError(state, errno);
+                return {};
+            }
+        } else {
+            // Guest descriptors stay metadata-only: stat the mapped host
+            // path instead of interpreting the guest descriptor as a host
+            // descriptor.
+            const auto *file = fileSpace_.lookup(GuestFileDescriptor{descriptor});
+            if (file == nullptr) {
+                setError(state, EBADF);
+                return {};
+            }
+            if (file->kind != GuestFileKind::HostReadOnlyFile) {
+                std::ostringstream reason;
+                reason << "fstat64 currently accepts only standard descriptors and mapped read-only files; got fd="
+                       << descriptor;
+                throw unsupported(state, syscallRip, reason.str());
+            }
+            if (::stat(file->guestPath.c_str(), &hostMetadata) != 0) {
+                setError(state, errno);
+                return {};
+            }
         }
 
-        struct stat hostMetadata {};
-        if (::fstat(descriptor, &hostMetadata) != 0) {
-            setError(state, errno);
-            return {};
-        }
         const auto metadata = guestStat64FromHost(hostMetadata);
         try {
             addressSpace.validateAccess(guest::GuestAddress{state.rsi},

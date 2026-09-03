@@ -23717,15 +23717,99 @@ void testDarwinFstat64StandardDescriptor() {
     state.rax = fstat64Number;
     state.rdi = 99;
     state.rsi = statAddress.value;
-    bool unsupportedDescriptor = false;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "fstat64 unknown descriptor returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "fstat64 unknown descriptor did not set BSD carry");
+}
+
+void testDarwinFstatHostReadOnlyFile() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto fstat64Number = UINT64_C(0x02000153);
+    constexpr std::uint32_t openDirectory = 0x00100000;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress statAddress{0x8200};
+    constexpr std::size_t guestStatSize = 144;
+    const auto fixturePath =
+        std::filesystem::canonical(std::filesystem::path{ROSA_TEST_HELLO_MACHO_PATH});
+    const auto fixtureString = fixturePath.string();
+    std::vector<std::uint8_t> fixtureBytes(fixtureString.begin(), fixtureString.end());
+    fixtureBytes.push_back(0);
+    struct stat hostMetadata{};
+    expect(::stat(fixturePath.c_str(), &hostMetadata) == 0,
+           "could not stat the host fstat fixture");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, fixtureBytes);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = O_RDONLY;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{3}, "fstat-test open returned the wrong descriptor");
+
+    state.rax = fstat64Number;
+    state.rdi = 3;
+    state.rsi = statAddress.value;
+    state.rflags = 0xAD7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30348ULL}));
+    expectEqual(state.rax, std::uint64_t{0}, "fstat64 mapped file did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6}, "fstat64 mapped file did not clear BSD carry");
+    const auto metadata = addressSpace.readBytes(statAddress, guestStatSize);
+    std::uint16_t guestMode = 0;
+    std::int64_t guestSize = 0;
+    std::memcpy(&guestMode, metadata.data() + 4, sizeof(guestMode));
+    std::memcpy(&guestSize, metadata.data() + 96, sizeof(guestSize));
+    expectEqual(guestMode, static_cast<std::uint16_t>(hostMetadata.st_mode),
+                "fstat64 mapped file returned the wrong mode");
+    expectEqual(guestSize, static_cast<std::int64_t>(hostMetadata.st_size),
+                "fstat64 mapped file returned the wrong size");
+
+    // An unmapped output buffer reports EFAULT without touching the descriptor.
+    state.rax = fstat64Number;
+    state.rdi = 3;
+    state.rsi = page.value + rosa::guest::guestPageSize;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "fstat64 mapped file with invalid output returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "fstat64 mapped file with invalid output did not set BSD carry");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+                "faulted fstat64 changed descriptor-space size");
+
+    // A valid descriptor of an unmodeled kind stays loud.
+    constexpr std::array<std::uint8_t, 2> directoryPath{'.', 0};
+    addressSpace.writeBytes(pathAddress, directoryPath);
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = openDirectory;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{4}, "fstat-test directory open failed");
+    state.rax = fstat64Number;
+    state.rdi = 4;
+    state.rsi = statAddress.value;
+    bool unsupportedKind = false;
     try {
         static_cast<void>(
             dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     } catch (const std::runtime_error &error) {
-        unsupportedDescriptor = std::string_view(error.what()).find("standard guest descriptor") !=
-                                std::string_view::npos;
+        unsupportedKind =
+            std::string_view(error.what()).find("mapped read-only files") != std::string_view::npos;
     }
-    expect(unsupportedDescriptor, "unmodeled fstat64 descriptor did not fail loudly");
+    expect(unsupportedKind, "fstat64 directory descriptor did not fail loudly");
 }
 
 void testDarwinWriteNoCancel() {
@@ -34295,6 +34379,7 @@ int main() {
         {"Darwin stat64 absent system databases", testDarwinStat64SystemDatabasesAbsent},
         {"Darwin stat64 relative path", testDarwinStat64RelativePath},
         {"Darwin fstat64 standard descriptor", testDarwinFstat64StandardDescriptor},
+        {"Darwin fstat64 mapped read-only file", testDarwinFstatHostReadOnlyFile},
         {"Darwin write_nocancel", testDarwinWriteNoCancel},
         {"Darwin getfsstat64 synthetic root", testDarwinGetfsstat64SyntheticRoot},
         {"Darwin access chroot marker", testDarwinAccessChrootMarker},
