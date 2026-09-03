@@ -16379,6 +16379,43 @@ void testXor8BitAccumulatorImmediate() {
                 "XOR AL, imm8 sign defined flags differ");
 }
 
+void testOr8BitAccumulatorImmediate() {
+    // Observed in libsqlite3: OR AL, 0x2 (opcode 0C).
+    constexpr std::array<std::uint8_t, 3> code{0x0C, 0x02, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10011ADE6ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrRegImm, "OR AL, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2}, "OR AL, imm8 length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 8,
+           "OR AL, imm8 destination differs");
+    expectEqual(std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]).value,
+                std::uint64_t{2}, "OR AL, imm8 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("or al, 0x2") != std::string::npos,
+           "OR AL, imm8 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10011ADE6ULL});
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667701ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667703ULL},
+                "OR AL, imm8 did not preserve upper RAX bytes");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 2U},
+                "OR AL, imm8 nonzero defined flags differ");
+
+    state.rax = 0xFFEEDDCCBBAA5580ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xFFEEDDCCBBAA5582ULL},
+                "OR AL, imm8 sign result changed upper RAX bytes");
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "OR AL, imm8 sign defined flags differ");
+}
+
 void testXor8BitRegisterImmediate() {
     constexpr std::array<std::uint8_t, 4> code{0x80, 0xF1, 0x01, 0xC3};
     constexpr rosa::guest::GuestAddress observedRip{0x7FF802AB6BFDULL};
@@ -32976,6 +33013,7 @@ int main() {
         {"XOR 32-bit register immediate", testXor32BitRegisterImmediate},
         {"XOR 64-bit accumulator immediate", testXor64BitAccumulatorImmediate},
         {"XOR 8-bit accumulator immediate", testXor8BitAccumulatorImmediate},
+        {"OR 8-bit accumulator immediate", testOr8BitAccumulatorImmediate},
         {"XOR 8-bit register immediate", testXor8BitRegisterImmediate},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
         {"XORPS guest memory generated execution", testXorpsGuestMemoryGeneratedExecution},
