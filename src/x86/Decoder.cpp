@@ -2217,11 +2217,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            if (mode == 0x3U && extension <= 1) {
+                instruction.opcode = extension == 0 ? Opcode::IncReg : Opcode::DecReg;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, false), 16});
+                const auto length = cursor + 3 - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor += 3;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
             if (extension != 0 || mode > 0x2U || rmEncoding == 0x4U ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only INC word [base+disp8/disp32] is supported");
+                    "only INC/DEC word register and INC word [base+disp8/disp32] are supported");
             }
             auto operandCursor = cursor + 3;
             std::int64_t displacement = 0;

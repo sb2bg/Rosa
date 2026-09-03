@@ -5381,6 +5381,39 @@ void testDecrement32BitRegister() {
                 "DEC EDI overflow flags differ or CF was not preserved");
 }
 
+void testDecrement16BitRegister() {
+    // Observed in libsqlite3: DEC AX with an operand-size override (66 FF /1).
+    constexpr std::array<std::uint8_t, 4> code{0x66, 0xFF, 0xC8, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000A8B7DULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::DecReg, "DEC r16 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "DEC r16 length differs");
+    const auto operand = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(operand.reg == rosa::x86::Register::Rax && operand.width == 16,
+           "DEC AX operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("dec ax") != std::string::npos,
+           "DEC AX dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000A8B7DULL});
+    rosa::x86::X86State state;
+    state.rax = 0xAABBCCDD00000000ULL;
+    state.rflags = 0x3;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xAABBCCDD0000FFFFULL},
+                "DEC AX did not preserve upper RAX bytes");
+    expectEqual(state.rflags, std::uint64_t{0x97},
+                "DEC AX flags differ or CF was not preserved");
+
+    state.rax = 0x1122334455668000ULL;
+    state.rflags = 0x2;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455667FFFULL},
+                "DEC AX overflow result differs");
+    expectEqual(state.rflags, std::uint64_t{0x816},
+                "DEC AX overflow flags differ or CF was not preserved");
+}
+
 void testDecrementLowByteRegister() {
     constexpr std::array<std::uint8_t, 3> code{0xFE, 0xC8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -33380,6 +33413,7 @@ int main() {
         {"INC 32-bit register", testIncrement32BitRegister},
         {"INC low-byte register", testIncrementLowByteRegister},
         {"DEC 32-bit register", testDecrement32BitRegister},
+        {"DEC 16-bit register", testDecrement16BitRegister},
         {"DEC low-byte register", testDecrementLowByteRegister},
         {"INC 8-bit guest memory", testIncrement8BitGuestMemory},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},

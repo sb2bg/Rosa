@@ -1555,6 +1555,11 @@ updateIncFlags32(x86::X86State *state, std::uint64_t original, std::uint64_t res
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateIncFlags16(x86::X86State *state, std::uint64_t original, std::uint64_t result) {
+    return updateIncFlags<std::uint16_t>(state, original, result);
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateIncFlags8(x86::X86State *state, std::uint64_t original, std::uint64_t result) {
     return updateIncFlags<std::uint8_t>(state, original, result);
 }
@@ -1593,6 +1598,11 @@ x86::X86State *updateDecFlags(x86::X86State *state, std::uint64_t originalValue,
 extern "C" __attribute__((noinline)) x86::X86State *
 updateDecFlags32(x86::X86State *state, std::uint64_t original, std::uint64_t result) {
     return updateDecFlags<std::uint32_t>(state, original, result);
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+updateDecFlags16(x86::X86State *state, std::uint64_t original, std::uint64_t result) {
+    return updateDecFlags<std::uint16_t>(state, original, result);
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
@@ -4279,6 +4289,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto width = destination.width == 8    ? ir::Width::I8
+                               : destination.width == 16 ? ir::Width::I16
                                : destination.width == 32 ? ir::Width::I32
                                                          : ir::Width::I64;
             const auto original =
@@ -4290,7 +4301,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 result = builder.bitAnd(result, mask, ir::Width::I64, instruction.address);
             }
             builder.writeGuestRegister(destination.reg, result,
-                                       width == ir::Width::I8 ? ir::Width::I8 : ir::Width::I64,
+                                       width == ir::Width::I8 || width == ir::Width::I16
+                                           ? width
+                                           : ir::Width::I64,
                                        instruction.address);
             builder.updateIncFlags(original, result, width, instruction.address);
             break;
@@ -4301,13 +4314,18 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto width = destination.width == 8    ? ir::Width::I8
+                               : destination.width == 16 ? ir::Width::I16
                                : destination.width == 32 ? ir::Width::I32
                                                          : ir::Width::I64;
             const auto original =
                 builder.readGuestRegister(destination.reg, width, instruction.address);
             const auto one = builder.constant(1, width, instruction.address);
             const auto result = builder.sub(original, one, width, instruction.address);
-            builder.writeGuestRegister(destination.reg, result, width, instruction.address);
+            builder.writeGuestRegister(destination.reg, result,
+                                       width == ir::Width::I8 || width == ir::Width::I16
+                                           ? width
+                                           : ir::Width::I64,
+                                       instruction.address);
             builder.updateDecFlags(original, result, width, instruction.address);
             break;
         }
@@ -10446,8 +10464,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
             assembler.movImmediate(
                 arm64::x16, operation.width == ir::Width::I8    ? pointerBits(&updateIncFlags8)
-                            : operation.width == ir::Width::I32 ? pointerBits(&updateIncFlags32)
-                                                                : pointerBits(&updateIncFlags64));
+                             : operation.width == ir::Width::I16 ? pointerBits(&updateIncFlags16)
+                             : operation.width == ir::Width::I32 ? pointerBits(&updateIncFlags32)
+                                                                 : pointerBits(&updateIncFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateDecFlags:
@@ -10500,7 +10519,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                 assembler.mov(arm64::x2, hostRegister(*operation.rhs));
                 assembler.movImmediate(arm64::x16, operation.width == ir::Width::I8
                                                        ? pointerBits(&updateDecFlags8)
-                                                       : pointerBits(&updateDecFlags32));
+                                                       : operation.width == ir::Width::I16
+                                                             ? pointerBits(&updateDecFlags16)
+                                                             : pointerBits(&updateDecFlags32));
                 assembler.blr(arm64::x16);
             }
             break;
