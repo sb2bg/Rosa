@@ -7644,6 +7644,12 @@ std::optional<std::size_t> deferredExitFlagUpdate(const ir::Block &block,
         !exit.condition) {
         return std::nullopt;
     }
+    if (*exit.condition == x86::Condition::ParityEven ||
+        *exit.condition == x86::Condition::ParityOdd) {
+        // ARM64 NZCV cannot express parity: always materialize guest PF and
+        // take the flag-test exit path instead.
+        return std::nullopt;
+    }
     const auto updateIndex = zeroFlagUpdateIndexAt(block, exitIndex);
     if (!updateIndex) {
         return std::nullopt;
@@ -9028,6 +9034,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                  *operation.condition != x86::Condition::Equal &&
                  *operation.condition != x86::Condition::NotEqual &&
                  *operation.condition != x86::Condition::Overflow &&
+                 *operation.condition != x86::Condition::NotOverflow &&
+                 *operation.condition != x86::Condition::ParityEven &&
+                 *operation.condition != x86::Condition::ParityOdd &&
                  *operation.condition != x86::Condition::Sign &&
                  *operation.condition != x86::Condition::NotSign &&
                  *operation.condition != x86::Condition::Less &&
@@ -9036,7 +9045,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                  *operation.condition != x86::Condition::Greater)) {
                 throw std::runtime_error(
                     "ARM64 backend only implements 32- and 64-bit register "
-                    "CMOVO/CMOVB/CMOVBE/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVL/CMOVGE/CMOVLE/CMOVG");
+                    "CMOVO/CMOVNO/CMOVP/CMOVNP/CMOVB/CMOVBE/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVL/CMOVGE/CMOVLE/CMOVG");
             }
             constexpr std::uint8_t carryFlagBit = 0;
             constexpr std::uint8_t zeroFlagBit = 6;
@@ -9141,6 +9150,15 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                 } else if (*operation.condition == x86::Condition::Overflow) {
                     constexpr std::uint8_t overflowFlagBit = 11;
                     assembler.tbz(arm64::x16, overflowFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::NotOverflow) {
+                    constexpr std::uint8_t overflowFlagBit = 11;
+                    assembler.tbnz(arm64::x16, overflowFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::ParityEven) {
+                    constexpr std::uint8_t parityFlagBit = 2;
+                    assembler.tbz(arm64::x16, parityFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::ParityOdd) {
+                    constexpr std::uint8_t parityFlagBit = 2;
+                    assembler.tbnz(arm64::x16, parityFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::Less) {
                     constexpr std::uint8_t overflowFlagBit = 11;
                     assembler.lsrImmediate(arm64::x17, arm64::x16, overflowFlagBit - signFlagBit);
@@ -9394,6 +9412,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             break;
         case ir::Opcode::EvaluateCondition: {
             if (*operation.condition != x86::Condition::Overflow &&
+                *operation.condition != x86::Condition::NotOverflow &&
+                *operation.condition != x86::Condition::ParityEven &&
+                *operation.condition != x86::Condition::ParityOdd &&
                 *operation.condition != x86::Condition::Equal &&
                 *operation.condition != x86::Condition::NotEqual &&
                 *operation.condition != x86::Condition::Below &&
@@ -9407,7 +9428,8 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                 *operation.condition != x86::Condition::Sign &&
                 *operation.condition != x86::Condition::NotSign) {
                 throw std::runtime_error("ARM64 backend only implements "
-                                          "overflow/equality/below/below-or-equal/less/greater/"
+                                          "overflow/not-overflow/parity/parity-odd/equality/below/"
+                                          "below-or-equal/less/greater/"
                                           "greater-or-equal/less-or-equal/"
                                           "above-or-equal/above/sign/not-sign condition values");
             }
@@ -9446,6 +9468,14 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                           static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
             if (*operation.condition == x86::Condition::Overflow) {
                 assembler.tbz(arm64::x16, overflowFlagBit, done);
+            } else if (*operation.condition == x86::Condition::NotOverflow) {
+                assembler.tbnz(arm64::x16, overflowFlagBit, done);
+            } else if (*operation.condition == x86::Condition::ParityEven) {
+                constexpr std::uint8_t parityFlagBit = 2;
+                assembler.tbz(arm64::x16, parityFlagBit, done);
+            } else if (*operation.condition == x86::Condition::ParityOdd) {
+                constexpr std::uint8_t parityFlagBit = 2;
+                assembler.tbnz(arm64::x16, parityFlagBit, done);
             } else if (*operation.condition == x86::Condition::Equal) {
                 assembler.tbz(arm64::x16, zeroFlagBit, done);
             } else if (*operation.condition == x86::Condition::NotEqual) {
@@ -10955,6 +10985,15 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                     case x86::Condition::Overflow:
                         assembler.bConditional(arm64::BranchCondition::NoOverflow, notTaken);
                         break;
+                    case x86::Condition::NotOverflow:
+                        assembler.bConditional(arm64::BranchCondition::Overflow, notTaken);
+                        break;
+                    case x86::Condition::ParityEven:
+                    case x86::Condition::ParityOdd:
+                        // Unreachable: flag deferral is disabled for parity
+                        // exits, which always take the flag-test path below.
+                        throw std::runtime_error(
+                            "ARM64 backend cannot test parity from deferred NZCV");
                     case x86::Condition::Equal:
                         assembler.bConditional(arm64::BranchCondition::NotEqual, notTaken);
                         break;
@@ -11000,6 +11039,14 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                                   static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
                     if (*operation.condition == x86::Condition::Overflow) {
                         assembler.tbz(arm64::x16, overflowFlagBit, notTaken);
+                    } else if (*operation.condition == x86::Condition::NotOverflow) {
+                        assembler.tbnz(arm64::x16, overflowFlagBit, notTaken);
+                    } else if (*operation.condition == x86::Condition::ParityEven) {
+                        constexpr std::uint8_t parityFlagBit = 2;
+                        assembler.tbz(arm64::x16, parityFlagBit, notTaken);
+                    } else if (*operation.condition == x86::Condition::ParityOdd) {
+                        constexpr std::uint8_t parityFlagBit = 2;
+                        assembler.tbnz(arm64::x16, parityFlagBit, notTaken);
                     } else if (*operation.condition == x86::Condition::Equal) {
                         assembler.tbz(arm64::x16, zeroFlagBit, notTaken);
                     } else if (*operation.condition == x86::Condition::NotEqual) {

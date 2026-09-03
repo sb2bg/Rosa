@@ -675,6 +675,12 @@ class LlvmEngine {
         switch (condition) {
         case x86::Condition::Overflow:
             return flags.overflow;
+        case x86::Condition::NotOverflow:
+            return builder.CreateNot(flags.overflow);
+        case x86::Condition::ParityEven:
+            return flags.parity;
+        case x86::Condition::ParityOdd:
+            return builder.CreateNot(flags.parity);
         case x86::Condition::Equal:
             return flags.zero;
         case x86::Condition::NotEqual:

@@ -70,6 +70,12 @@ const char *conditionName(x86::Condition condition) {
     switch (condition) {
     case x86::Condition::Overflow:
         return "o";
+    case x86::Condition::NotOverflow:
+        return "no";
+    case x86::Condition::ParityEven:
+        return "p";
+    case x86::Condition::ParityOdd:
+        return "np";
     case x86::Condition::Equal:
         return "e";
     case x86::Condition::NotEqual:

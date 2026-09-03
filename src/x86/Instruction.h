@@ -205,6 +205,9 @@ enum class Opcode {
 
 enum class Condition {
     Overflow,
+    NotOverflow,
+    ParityEven,
+    ParityOdd,
     Equal,
     NotEqual,
     Below,

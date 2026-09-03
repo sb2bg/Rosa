@@ -32252,6 +32252,68 @@ void testUnsignedBelowConditional() {
                 "not-taken JB changed guest flags");
 }
 
+void testOverflowParityShortConditionals() {
+    // Observed in libobjc under an Objective-C fixture: JO rel8.
+    const rosa::x86::Decoder decoder;
+    const rosa::dbt::Translator translator;
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802A34D62ULL};
+    constexpr std::array<std::uint8_t, 2> observedCode{0x70, 0x7A};
+    const auto observedDecoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(observedDecoded[0].opcode == rosa::x86::Opcode::JccRelative,
+           "observed JO rel8 opcode differs");
+    expect(observedDecoded[0].condition == rosa::x86::Condition::Overflow,
+           "observed JO rel8 condition differs");
+    expectEqual(observedDecoded[0].branchTarget->value, observedRip.value + 2 + 0x7A,
+                "observed JO rel8 target differs");
+
+    struct ShortJumpCase {
+        std::uint8_t opcode;
+        rosa::x86::Condition condition;
+        std::string_view name;
+        std::uint64_t takenFlags;
+        std::uint64_t notTakenFlags;
+    };
+    constexpr std::uint64_t overflowSet = 0x8D7;
+    constexpr std::uint64_t overflowClear = 0x8D7 & ~std::uint64_t{1U << 11U};
+    constexpr std::uint64_t parityClear = 0x8D7 & ~std::uint64_t{1U << 2U};
+    constexpr ShortJumpCase cases[] = {
+        {0x70, rosa::x86::Condition::Overflow, "jo", overflowSet, overflowClear},
+        {0x71, rosa::x86::Condition::NotOverflow, "jno", overflowClear, overflowSet},
+        {0x7A, rosa::x86::Condition::ParityEven, "jp", overflowSet, parityClear},
+        {0x7B, rosa::x86::Condition::ParityOdd, "jnp", parityClear, overflowSet},
+    };
+    for (const auto &jump : cases) {
+        const std::array<std::uint8_t, 2> code{jump.opcode, 0x02};
+        const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+        expect(decoded[0].opcode == rosa::x86::Opcode::JccRelative,
+               std::string(jump.name) + " rel8 opcode differs");
+        expect(decoded[0].condition == jump.condition,
+               std::string(jump.name) + " rel8 condition differs");
+        expectEqual(decoded[0].branchTarget->value, std::uint64_t{0x1004},
+                    std::string(jump.name) + " rel8 target differs");
+        expect(rosa::debug::dumpX86(decoded).find(std::string(jump.name) + " 0x1004") !=
+                   std::string::npos,
+               std::string(jump.name) + " rel8 dump differs");
+
+        const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+        rosa::x86::X86State taken;
+        taken.rflags = jump.takenFlags;
+        static_cast<void>(block.execute(taken));
+        expectEqual(taken.rip, std::uint64_t{0x1004},
+                    std::string(jump.name) + " did not take its branch");
+        expectEqual(taken.rflags, jump.takenFlags,
+                    std::string(jump.name) + " changed guest flags");
+
+        rosa::x86::X86State notTaken;
+        notTaken.rflags = jump.notTakenFlags;
+        static_cast<void>(block.execute(notTaken));
+        expectEqual(notTaken.rip, std::uint64_t{0x1002},
+                    std::string(jump.name) + " took its branch");
+        expectEqual(notTaken.rflags, jump.notTakenFlags,
+                    std::string(jump.name) + " changed guest flags when not taken");
+    }
+}
+
 void testUnsignedBelowLongConditional() {
     constexpr std::array<std::uint8_t, 6> code{0x0F, 0x82, 0x02, 0, 0, 0};
     const rosa::x86::Decoder decoder;
@@ -34956,6 +35018,7 @@ int main() {
         {"indexed indirect guest-memory call", testIndexedIndirectGuestMemoryCall},
         {"indirect guest-register call", testIndirectGuestRegisterCall},
         {"unsigned-below conditional", testUnsignedBelowConditional},
+        {"overflow/parity short conditionals", testOverflowParityShortConditionals},
         {"unsigned-below long conditional", testUnsignedBelowLongConditional},
         {"register-indirect jump", testRegisterIndirectJump},
         {"RIP-relative memory-indirect jump", testRipRelativeMemoryIndirectJump},

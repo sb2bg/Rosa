@@ -4934,11 +4934,13 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] == 0x2EU && code.size() - cursor >= 2 &&
             code[cursor + 1] >= 0x70U && code[cursor + 1] <= 0x7FU;
         const auto controlOffset = cursor + (hasBranchHint ? 1U : 0U);
-        if (code[controlOffset] == 0xEBU || code[controlOffset] == 0x72U ||
+        if (code[controlOffset] == 0xEBU || code[controlOffset] == 0x70U ||
+            code[controlOffset] == 0x71U || code[controlOffset] == 0x72U ||
             code[controlOffset] == 0x73U || code[controlOffset] == 0x74U ||
             code[controlOffset] == 0x75U || code[controlOffset] == 0x76U ||
             code[controlOffset] == 0x77U || code[controlOffset] == 0x78U ||
-            code[controlOffset] == 0x79U || code[controlOffset] == 0x7CU ||
+            code[controlOffset] == 0x79U || code[controlOffset] == 0x7AU ||
+            code[controlOffset] == 0x7BU || code[controlOffset] == 0x7CU ||
             code[controlOffset] == 0x7DU || code[controlOffset] == 0x7EU ||
             code[controlOffset] == 0x7FU) {
             if (code.size() - controlOffset < 2) {
@@ -4959,13 +4961,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.fallthrough =
                 guest::GuestAddress{address.value + length};
             if (opcode != 0xEBU) {
-                instruction.condition = opcode == 0x72U   ? Condition::Below
+                instruction.condition = opcode == 0x70U   ? Condition::Overflow
+                                        : opcode == 0x71U ? Condition::NotOverflow
+                                        : opcode == 0x72U ? Condition::Below
                                         : opcode == 0x73U ? Condition::AboveOrEqual
                                         : opcode == 0x74U ? Condition::Equal
                                         : opcode == 0x75U ? Condition::NotEqual
                                         : opcode == 0x76U ? Condition::BelowOrEqual
                                         : opcode == 0x78U ? Condition::Sign
                                         : opcode == 0x79U ? Condition::NotSign
+                                        : opcode == 0x7AU ? Condition::ParityEven
+                                        : opcode == 0x7BU ? Condition::ParityOdd
                                         : opcode == 0x7CU ? Condition::Less
                                         : opcode == 0x7DU ? Condition::GreaterOrEqual
                                         : opcode == 0x7EU ? Condition::LessOrEqual
