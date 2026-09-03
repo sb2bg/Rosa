@@ -2913,21 +2913,32 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if (code[cursor] == 0x66U && code.size() - cursor >= 3 &&
-            code[cursor + 1] == 0x0FU && code[cursor + 2] == 0xEFU) {
-            if (code.size() - cursor < 4) {
+            ((code[cursor + 1] == 0x0FU && code[cursor + 2] == 0xEFU) ||
+             (code.size() - cursor >= 5 && code[cursor + 1] >= 0x40U &&
+              code[cursor + 1] <= 0x4FU && code[cursor + 2] == 0x0FU &&
+              code[cursor + 3] == 0xEFU))) {
+            const auto rex = code[cursor + 1] == 0x0FU ? 0U : code[cursor + 1];
+            const auto rexR = (rex & 0x4U) != 0;
+            const auto rexB = (rex & 0x1U) != 0;
+            const auto modrmOffset =
+                code[cursor + 1] == 0x0FU ? cursor + 3 : cursor + 4;
+            if (code.size() - modrmOffset < 1) {
                 throw DecodeError(address, remaining,
                                   "truncated pxor xmm, xmm/m128");
             }
-            const auto modrm = code[cursor + 3];
+            const auto modrm = code[modrmOffset];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
-                static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
-            cursor += 4;
+            const auto destinationEncoding = static_cast<std::uint8_t>(
+                ((modrm >> 3U) & 0x7U) | (rexR ? 8U : 0U));
+            instruction.operands.push_back(XmmRegisterOperand{
+                static_cast<XmmRegister>(destinationEncoding)});
+            cursor = modrmOffset + 1;
             if (mode == 0x3U) {
                 instruction.opcode = Opcode::PxorRegReg;
                 instruction.operands.push_back(XmmRegisterOperand{
-                    static_cast<XmmRegister>(rmEncoding)});
+                    static_cast<XmmRegister>(
+                        static_cast<std::uint8_t>(rmEncoding | (rexB ? 8U : 0U)))});
             } else {
                 if (rmEncoding == 0x4U) {
                     throw DecodeError(
@@ -2959,7 +2970,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.opcode = Opcode::PxorRegMem;
                 instruction.operands.push_back(MemoryOperand{
                     ripRelative ? Register::Rax
-                                : decodeRegister(rmEncoding, false),
+                                : decodeRegister(rmEncoding, rexB),
                     displacement, 128, std::nullopt, 1, !ripRelative,
                     ripRelative});
             }

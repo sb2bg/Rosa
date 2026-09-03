@@ -16500,6 +16500,36 @@ void testPxorRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "PXOR changed flags");
 }
 
+void testPxorExtendedRegisterGeneratedExecution() {
+    // Observed in libsqlite3: PXOR XMM8, XMM8 with REX.RB (66 45 0F EF C0).
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x45, 0x0F, 0xEF, 0xC0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000FE0F6ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PxorRegReg,
+           "extended PXOR xmm, xmm opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "extended PXOR length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::XmmRegister::Xmm8,
+           "extended PXOR destination differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]).reg ==
+               rosa::x86::XmmRegister::Xmm8,
+           "extended PXOR source differs");
+    expect(rosa::debug::dumpX86(decoded).find("pxor xmm8, xmm8") != std::string::npos,
+           "extended PXOR dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000FE0F6ULL});
+    rosa::x86::X86State state;
+    state.xmm[8] = {.low = UINT64_MAX, .high = 0x0123456789ABCDEFULL};
+    state.xmm[0] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[8].low, std::uint64_t{0}, "extended PXOR low lane differs");
+    expectEqual(state.xmm[8].high, std::uint64_t{0}, "extended PXOR high lane differs");
+    expectEqual(state.xmm[0].low, UINT64_MAX, "extended PXOR clobbered xmm0");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "extended PXOR changed flags");
+}
+
 void testPxorGuestMemoryGeneratedExecution() {
     constexpr std::array<std::uint8_t, 9> code{0x66, 0x0F, 0xEF, 0x85, 0x70,
                                                0xFF, 0xFF, 0xFF, 0xC3};
@@ -32923,6 +32953,7 @@ int main() {
         {"XORPS guest memory generated execution", testXorpsGuestMemoryGeneratedExecution},
         {"XORPD register generated execution", testXorpdRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
+        {"PXOR extended register generated execution", testPxorExtendedRegisterGeneratedExecution},
         {"PXOR guest memory generated execution", testPxorGuestMemoryGeneratedExecution},
         {"PAND RIP-relative guest memory generated execution",
          testPandRipGuestMemoryGeneratedExecution},
