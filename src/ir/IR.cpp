@@ -282,6 +282,20 @@ ValueId Builder::multiplyHighUnsigned(ValueId lhs, ValueId rhs, Width width,
     return result;
 }
 
+ValueId Builder::multiplyHighSigned(ValueId lhs, ValueId rhs, Width width,
+                                    guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::MultiplyHighSigned,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = lhs,
+        .rhs = rhs,
+    });
+    return result;
+}
+
 ValueId Builder::shiftRightDouble(ValueId low, ValueId high, std::uint8_t count,
                                   Width width, guest::GuestAddress rip) {
     const auto result = nextValue();
@@ -1326,6 +1340,7 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::Xor:
         case Opcode::MultiplyLow:
         case Opcode::MultiplyHighUnsigned:
+        case Opcode::MultiplyHighSigned:
         case Opcode::ShiftRightDouble:
             checkUse(operation.lhs, "left");
             checkUse(operation.rhs, "right");

@@ -42,6 +42,7 @@ enum class Opcode {
     ShiftRightArithmetic,
     MultiplyLow,
     MultiplyHighUnsigned,
+    MultiplyHighSigned,
     ShiftRightDouble,
     And,
     Or,
@@ -192,6 +193,8 @@ class Builder {
     ValueId multiplyLow(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);
     ValueId multiplyHighUnsigned(ValueId lhs, ValueId rhs, Width width,
                                  guest::GuestAddress rip);
+    ValueId multiplyHighSigned(ValueId lhs, ValueId rhs, Width width,
+                               guest::GuestAddress rip);
     ValueId shiftRightDouble(ValueId low, ValueId high, std::uint8_t count, Width width,
                              guest::GuestAddress rip);
     ValueId bitAnd(ValueId lhs, ValueId rhs, Width width, guest::GuestAddress rip);

@@ -61,6 +61,7 @@ enum class Opcode {
     IdivReg,
     ImulRegReg,
     ImulRegMem,
+    ImulMem,
     ImulRegRegImm,
     ImulRegMemImm,
     ShldRegRegImm,

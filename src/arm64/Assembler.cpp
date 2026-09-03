@@ -405,8 +405,20 @@ void Assembler::multiplyHighUnsigned(XRegister destination, XRegister lhs, XRegi
                       (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
                       static_cast<std::uint32_t>(destination.encoding);
     emit(word, recordListing_
-                   ? "umulh " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs)
-                   : std::string{});
+                    ? "umulh " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs)
+                    : std::string{});
+}
+
+void Assembler::multiplyHighSigned(XRegister destination, XRegister lhs, XRegister rhs) {
+    requireRegister(destination);
+    requireRegister(lhs);
+    requireRegister(rhs);
+    const auto word = 0x9B407C00U | (static_cast<std::uint32_t>(rhs.encoding) << 16U) |
+                      (static_cast<std::uint32_t>(lhs.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, recordListing_
+                    ? "smulh " + regName(destination) + ", " + regName(lhs) + ", " + regName(rhs)
+                    : std::string{});
 }
 
 void Assembler::extract(XRegister destination, XRegister high, XRegister low, std::uint8_t lsb) {

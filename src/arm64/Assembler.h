@@ -109,6 +109,7 @@ class Assembler {
     void lsrVariable(XRegister destination, XRegister source, XRegister shift);
     void multiplyLow(XRegister destination, XRegister lhs, XRegister rhs);
     void multiplyHighUnsigned(XRegister destination, XRegister lhs, XRegister rhs);
+    void multiplyHighSigned(XRegister destination, XRegister lhs, XRegister rhs);
     void extract(XRegister destination, XRegister high, XRegister low, std::uint8_t lsb);
     void bitAnd(XRegister destination, XRegister lhs, XRegister rhs);
     void bitAnd32(XRegister destination, XRegister lhs, XRegister rhs);

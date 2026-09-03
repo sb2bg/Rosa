@@ -973,6 +973,19 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
+        case x86::Opcode::ImulMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << (memory.width == 32 ? "imul dword [" : "imul qword [")
+                   << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::DivReg:
             stream << "div "
                    << registerOperandName(
@@ -2834,6 +2847,10 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::MultiplyHighUnsigned:
             stream << "multiply_high_unsigned." << widthName(operation.width) << ' '
+                   << valueName(*operation.lhs) << ", " << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::MultiplyHighSigned:
+            stream << "multiply_high_signed." << widthName(operation.width) << ' '
                    << valueName(*operation.lhs) << ", " << valueName(*operation.rhs);
             break;
         case ir::Opcode::ShiftRightDouble:

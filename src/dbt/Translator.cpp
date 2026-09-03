@@ -4906,6 +4906,39 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             break;
         }
+        case x86::Opcode::ImulMem: {
+            if (instruction.operands.size() != 1 ||
+                !std::holds_alternative<x86::MemoryOperand>(instruction.operands[0])) {
+                throw std::runtime_error("internal decoder error: memory imul operand count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            if (memory.width != 64 || !memory.hasBase || memory.ripRelative || memory.index ||
+                memory.segment != x86::Segment::None) {
+                throw std::runtime_error("only based qword memory IMUL is implemented");
+            }
+            auto address =
+                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement =
+                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                     ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64, instruction.address);
+            }
+            const auto rhs = builder.loadGuest(address, ir::Width::I64, instruction.address);
+            // Read RAX after the load helper so no caller-saved IR value
+            // remains live across the helper boundary.
+            const auto lhs =
+                builder.readGuestRegister(x86::Register::Rax, ir::Width::I64, instruction.address);
+            const auto low = builder.multiplyLow(lhs, rhs, ir::Width::I64, instruction.address);
+            const auto high =
+                builder.multiplyHighSigned(lhs, rhs, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(x86::Register::Rax, low, ir::Width::I64,
+                                       instruction.address);
+            builder.writeGuestRegister(x86::Register::Rdx, high, ir::Width::I64,
+                                       instruction.address);
+            builder.updateSignedMultiplyFlags(lhs, rhs, ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::DivReg: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: div operand count");
@@ -6905,6 +6938,7 @@ bool preservesZeroFlagSource(ir::Opcode opcode) noexcept {
     case ir::Opcode::ShiftRightArithmetic:
     case ir::Opcode::MultiplyLow:
     case ir::Opcode::MultiplyHighUnsigned:
+    case ir::Opcode::MultiplyHighSigned:
     case ir::Opcode::ShiftRightDouble:
     case ir::Opcode::And:
     case ir::Opcode::Or:
@@ -6937,6 +6971,7 @@ bool isFlagSinkPure(ir::Opcode opcode) noexcept {
     case ir::Opcode::ShiftRightArithmetic:
     case ir::Opcode::MultiplyLow:
     case ir::Opcode::MultiplyHighUnsigned:
+    case ir::Opcode::MultiplyHighSigned:
     case ir::Opcode::ShiftRightDouble:
     case ir::Opcode::And:
     case ir::Opcode::Or:
@@ -7145,6 +7180,7 @@ bool isSafelyRepeatableOperation(const ir::Operation &operation) {
     case ir::Opcode::ShiftRightArithmetic:
     case ir::Opcode::MultiplyLow:
     case ir::Opcode::MultiplyHighUnsigned:
+    case ir::Opcode::MultiplyHighSigned:
     case ir::Opcode::ShiftRightDouble:
     case ir::Opcode::And:
     case ir::Opcode::Or:
@@ -7227,6 +7263,7 @@ void forwardFullWidthGuestReads(ir::Block &block, bool directMemoryLoop) {
         case ir::Opcode::ShiftRightArithmetic:
         case ir::Opcode::MultiplyLow:
         case ir::Opcode::MultiplyHighUnsigned:
+        case ir::Opcode::MultiplyHighSigned:
         case ir::Opcode::ShiftRightDouble:
         case ir::Opcode::And:
         case ir::Opcode::Or:
@@ -7377,6 +7414,7 @@ bool isPureBetweenFlagUpdates(ir::Opcode opcode) noexcept {
     case ir::Opcode::ShiftRightArithmetic:
     case ir::Opcode::MultiplyLow:
     case ir::Opcode::MultiplyHighUnsigned:
+    case ir::Opcode::MultiplyHighSigned:
     case ir::Opcode::ShiftRightDouble:
     case ir::Opcode::And:
     case ir::Opcode::Or:
@@ -8708,6 +8746,11 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.multiplyHighUnsigned(hostRegister(*operation.result),
                                            hostRegister(*operation.lhs),
                                            hostRegister(*operation.rhs));
+            break;
+        case ir::Opcode::MultiplyHighSigned:
+            assembler.multiplyHighSigned(hostRegister(*operation.result),
+                                         hostRegister(*operation.lhs),
+                                         hostRegister(*operation.rhs));
             break;
         case ir::Opcode::ShiftRightDouble:
             assembler.extract(hostRegister(*operation.result), hostRegister(*operation.rhs),

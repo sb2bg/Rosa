@@ -13748,6 +13748,52 @@ void testUnsignedMultiplyMemoryGeneratedExecution() {
                 "MUL memory nonzero-high defined flags differ");
 }
 
+void testSignedMultiplyMemoryGeneratedExecution() {
+    // Observed in libsqlite3: IMUL qword [r10] with REX.W.
+    constexpr std::array<std::uint8_t, 4> code{0x49, 0xF7, 0x2A, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x7FF802E6FF01ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ImulMem, "IMUL memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "IMUL memory length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::R10 && memory.displacement == 0 &&
+               memory.width == 64,
+           "IMUL qword [r10] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("imul qword [r10]") != std::string::npos,
+           "IMUL qword [r10] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 5);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x7FF802E6FF01ULL});
+    rosa::x86::X86State state;
+    state.rax = static_cast<std::uint64_t>(-3);
+    state.r10 = target.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, static_cast<std::uint64_t>(-15), "IMUL memory low result differs");
+    expectEqual(state.rdx, UINT64_MAX, "IMUL memory sign-extended high differs");
+    expectEqual(addressSpace.readU64(target), std::uint64_t{5},
+                "IMUL memory changed guest memory");
+    expectEqual(state.rflags, std::uint64_t{0xD6}, "IMUL memory no-overflow flags differ");
+
+    addressSpace.writeU64(target, 3);
+    rosa::x86::X86State wideState;
+    wideState.rax = 0x4000000000000000ULL;
+    wideState.r10 = target.value;
+    wideState.rflags = 0x2;
+    static_cast<void>(block.execute(wideState, &addressSpace));
+    expectEqual(wideState.rax, std::uint64_t{0xC000000000000000ULL},
+                "IMUL memory wide low differs");
+    expectEqual(wideState.rdx, std::uint64_t{0}, "IMUL memory wide high differs");
+    expectEqual(wideState.rflags, std::uint64_t{0x803},
+                "IMUL memory overflow defined flags differ");
+}
+
 void testUnsignedDivideByteGeneratedExecution() {
     constexpr std::array<std::uint8_t, 3> observedCode{0xF6, 0xF2, 0xC3}; // div dl
     constexpr rosa::guest::GuestAddress observedRip{0x7FF802C75758ULL};
@@ -32414,6 +32460,7 @@ int main() {
         {"REP MOVSB generated execution", testRepMovsbGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"unsigned MUL memory generated execution", testUnsignedMultiplyMemoryGeneratedExecution},
+        {"signed IMUL memory generated execution", testSignedMultiplyMemoryGeneratedExecution},
         {"unsigned byte DIV generated execution", testUnsignedDivideByteGeneratedExecution},
         {"unsigned qword register DIV generated execution",
          testUnsignedDivideQwordRegisterGeneratedExecution},
