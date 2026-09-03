@@ -22,6 +22,7 @@ Rosa implements only the x86_64 Darwin operations reached by the controlled fixt
 | `openat` | `0x020001cf` | guest dirfd/path/flags/mode | open the provisioned synthetic `System/Cryptexes/OS` directory relative to guest root |
 | `csrctl` | `0x020001e3` | observed `CSR_SYSCALL_CHECK` arguments | apply Rosa's explicit restrictive guest SIP policy |
 | `getentropy` | `0x020001f4` | guest buffer in `RDI`, size in `RSI` | validate at most 256 writable guest bytes, obtain host entropy, then copy into guest memory |
+| `map_with_linking_np` | `0x02000226` | guest regions/count/blob/size | over-map read-only file ranges into existing guest mappings and apply `DYLD_CHAINED_PTR_64` chained fixups through the blob's pre-resolved bind table |
 
 The x86 `syscall` instruction exits generated ARM64 to `darwin::SyscallDispatcher`. It is never converted to an ARM `svc`. Generated code records the next RIP in guest `RIP`/`RCX` and the input flags in guest `R11`. Successful writes clear x86 `CF`; host errors place `errno` in guest `RAX` and set `CF`.
 

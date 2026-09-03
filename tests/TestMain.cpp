@@ -22465,6 +22465,157 @@ void testDarwinMprotect() {
                 "mprotect with unknown protection bits returned the wrong errno");
 }
 
+void testDarwinMapWithLinking() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto mapWithLinkingNumber = UINT64_C(0x02000226);
+    constexpr auto pageSize = rosa::guest::guestPageSize;
+    constexpr rosa::guest::GuestAddress pathPage{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress targetPage{0x10000};
+    constexpr rosa::guest::GuestAddress requestPage{0x12000};
+    constexpr rosa::guest::GuestAddress regionsAddress{0x12000};
+    constexpr rosa::guest::GuestAddress blobAddress{0x13000};
+    constexpr std::uint64_t blobSize = 80;
+    constexpr auto readWrite = rosa::guest::Permission::Read | rosa::guest::Permission::Write;
+
+    // One page of file bytes: a bind chain entry at offset 0 (ordinal 0,
+    // addend 0x10, next 2 strides) followed by a rebase entry at offset 8
+    // (target 0x2000, next 0).
+    std::vector<std::uint8_t> fileBytes(pageSize, 0);
+    const auto writeFileU64 = [&fileBytes](std::size_t offset, std::uint64_t value) {
+        std::memcpy(fileBytes.data() + offset, &value, sizeof(value));
+    };
+    writeFileU64(0, 0x8010000010000000ULL);
+    writeFileU64(8, 0x2000ULL);
+
+    const auto filePath = std::filesystem::current_path() / "rosa-mwl-test.bin";
+    struct UnlinkGuard {
+        std::filesystem::path path;
+        ~UnlinkGuard() {
+            std::error_code error;
+            std::filesystem::remove(path, error);
+        }
+    };
+    const UnlinkGuard guard{filePath};
+    const auto hostFd = ::open(filePath.c_str(), O_CREAT | O_TRUNC | O_RDWR, 0600);
+    expect(hostFd >= 0, "could not create map_with_linking test file");
+    const auto written = ::write(hostFd, fileBytes.data(), fileBytes.size());
+    expect(written == static_cast<ssize_t>(fileBytes.size()),
+           "could not write map_with_linking test file");
+    expect(::close(hostFd) == 0, "could not close map_with_linking test file");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(pathPage, pageSize, readWrite);
+    addressSpace.mapAnonymous(targetPage, pageSize, readWrite);
+    addressSpace.mapAnonymous(requestPage, pageSize * 2, readWrite);
+    const auto fileString = filePath.string();
+    std::vector<std::uint8_t> pathBytes(fileString.begin(), fileString.end());
+    pathBytes.push_back(0);
+    addressSpace.writeBytes(pathAddress, pathBytes);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = O_RDONLY;
+    state.rdx = 0;
+    state.rflags = 0x2;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEE844ULL}));
+    expectEqual(state.rax, std::uint64_t{3},
+                "map_with_linking setup open returned the wrong descriptor");
+
+    // Blob: header (40 bytes), one-entry binds table, one-segment chains.
+    // Slide 0x100 rebases target 0x2000 to 0x2100; binds[0] 0x5000 plus
+    // addend 0x10 resolves to 0x5010.
+    std::vector<std::uint8_t> blob(blobSize, 0);
+    const auto writeBlobU16 = [&blob](std::size_t offset, std::uint16_t value) {
+        std::memcpy(blob.data() + offset, &value, sizeof(value));
+    };
+    const auto writeBlobU32 = [&blob](std::size_t offset, std::uint32_t value) {
+        std::memcpy(blob.data() + offset, &value, sizeof(value));
+    };
+    const auto writeBlobU64 = [&blob](std::size_t offset, std::uint64_t value) {
+        std::memcpy(blob.data() + offset, &value, sizeof(value));
+    };
+    writeBlobU32(0, 7);
+    writeBlobU16(4, 0x1000);
+    writeBlobU16(6, 2);
+    writeBlobU32(8, 40);
+    writeBlobU32(12, 1);
+    writeBlobU32(16, 48);
+    writeBlobU32(20, 32);
+    writeBlobU64(24, 0x100);
+    writeBlobU64(32, targetPage.value);
+    writeBlobU64(40, 0x5000);
+    writeBlobU32(48, 1);
+    writeBlobU32(52, 8);
+    writeBlobU32(56, 24);
+    writeBlobU16(60, 0x1000);
+    writeBlobU16(62, 2);
+    writeBlobU64(64, 0);
+    writeBlobU32(72, 0);
+    writeBlobU16(76, 1);
+    writeBlobU16(78, 0);
+    addressSpace.writeBytes(blobAddress, blob);
+
+    std::vector<std::uint8_t> region(sizeof(std::uint32_t) * 8, 0);
+    const auto writeRegionU32 = [&region](std::size_t offset, std::uint32_t value) {
+        std::memcpy(region.data() + offset, &value, sizeof(value));
+    };
+    const auto writeRegionU64 = [&region](std::size_t offset, std::uint64_t value) {
+        std::memcpy(region.data() + offset, &value, sizeof(value));
+    };
+    writeRegionU32(0, 3);
+    writeRegionU32(4, 3);
+    writeRegionU64(8, 0);
+    writeRegionU64(16, targetPage.value);
+    writeRegionU64(24, pageSize);
+    addressSpace.writeBytes(regionsAddress, region);
+
+    state.rax = mapWithLinkingNumber;
+    state.rdi = regionsAddress.value;
+    state.rsi = 1;
+    state.rdx = blobAddress.value;
+    state.r10 = blobSize;
+    state.r8 = 0;
+    state.r9 = 0;
+    state.rflags = 0x2;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802AEE80CULL}));
+    expectEqual(state.rax, std::uint64_t{0}, "map_with_linking did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x2}, "map_with_linking did not clear BSD carry");
+    expectEqual(addressSpace.readU64(targetPage), std::uint64_t{0x5010},
+                "map_with_linking bind fixup differs");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{targetPage.value + 8}),
+                std::uint64_t{0x2100}, "map_with_linking rebase fixup differs");
+
+    state.rax = mapWithLinkingNumber;
+    state.rsi = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "empty map_with_linking request returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "empty map_with_linking request did not set BSD carry");
+
+    writeRegionU32(0, 9);
+    addressSpace.writeBytes(regionsAddress, region);
+    state.rax = mapWithLinkingNumber;
+    state.rsi = 1;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "map_with_linking with an unknown descriptor returned the wrong errno");
+
+    state.rax = mapWithLinkingNumber;
+    state.rdx = 0x50000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "map_with_linking with an unmapped blob returned the wrong errno");
+}
+
 void testDarwinMunmap() {
     constexpr auto munmapNumber = UINT64_C(0x02000049);
     constexpr rosa::guest::GuestAddress mappingBase{0x4000};
@@ -30975,6 +31126,7 @@ int main() {
         {"Darwin proc_info unique identifier", testDarwinProcInfoUniqueIdentifier},
         {"Darwin proc_info short BSD info", testDarwinProcInfoShortBsdInfo},
         {"Darwin mprotect", testDarwinMprotect},
+        {"Darwin map_with_linking", testDarwinMapWithLinking},
         {"Darwin munmap", testDarwinMunmap},
         {"generated Darwin munmap", testGeneratedDarwinMunmap},
         {"generated Darwin getpid", testGeneratedDarwinGetpid},
