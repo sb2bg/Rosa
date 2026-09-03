@@ -5703,6 +5703,26 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.xorGuestMemoryXmm(address, destination, instruction.address);
             break;
         }
+        case x86::Opcode::XorpsRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: XORPS memory operand count");
+            }
+            const auto destination = std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement =
+                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                     ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64, instruction.address);
+            }
+            builder.xorGuestMemoryXmm(address, destination, instruction.address);
+            break;
+        }
         case x86::Opcode::PandRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: PAND register operand count");

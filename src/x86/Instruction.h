@@ -108,6 +108,7 @@ enum class Opcode {
     CmovccReg,
     CmovccRegMem,
     XorpsRegReg,
+    XorpsRegMem,
     XorpdRegReg,
     VxorpsRegRegReg,
     VxorpsYmmRegRegReg,

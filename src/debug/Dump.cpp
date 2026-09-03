@@ -1755,6 +1755,29 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             }
             break;
         }
+        case x86::Opcode::XorpsRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "xorps "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0]).reg)
+                   << ", ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(memory.displacement);
+            }
+            break;
+        }
         case x86::Opcode::PtestRegReg:
             stream << "ptest "
                    << x86::xmmRegisterName(

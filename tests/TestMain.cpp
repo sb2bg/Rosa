@@ -15951,6 +15951,48 @@ void testXorpsRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "XORPS changed flags");
 }
 
+void testXorpsGuestMemoryGeneratedExecution() {
+    // Observed in sqlite: XORPS xmm0, [RIP+disp32].
+    constexpr std::array<std::uint8_t, 8> code{0x0F, 0x57, 0x05, 0x75, 0x2A,
+                                              0x07, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10014E804ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorpsRegMem, "XORPS memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7}, "XORPS memory length differs");
+    const auto destination =
+        std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0, "XORPS memory destination differs");
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 128 &&
+               memory.displacement == 0x072A75,
+           "XORPS memory source differs");
+    expect(rosa::debug::dumpX86(decoded).find("xorps xmm0, [rip+0x72a75]") != std::string::npos,
+           "XORPS memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    constexpr rosa::guest::GuestAddress syntheticRip{0x7F00};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0x0123456789ABCDEFULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{target.value + 8}, 0xFEDCBA9876543210ULL);
+    const rosa::dbt::Translator translator;
+    // Execute at a synthetic RIP whose computed target stays in the page.
+    constexpr std::array<std::uint8_t, 8> executableCode{0x0F, 0x57, 0x05, 0xF9,
+                                                         0x01, 0x00, 0x00, 0xC3};
+    const auto block = translator.translate(executableCode, syntheticRip);
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x1111111111111111ULL, .high = 0x2222222222222222ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x1032547698BADCFEULL},
+                "XORPS memory low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0xDCFE98BA54761032ULL},
+                "XORPS memory high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "XORPS memory changed flags");
+}
+
 void testXorpdRegisterGeneratedExecution() {
     // Observed in sqlite: XORPD xmm2, xmm2.
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x57, 0xD2, 0xC3};
@@ -32353,6 +32395,7 @@ int main() {
         {"XOR 8-bit accumulator immediate", testXor8BitAccumulatorImmediate},
         {"XOR 8-bit register immediate", testXor8BitRegisterImmediate},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
+        {"XORPS guest memory generated execution", testXorpsGuestMemoryGeneratedExecution},
         {"XORPD register generated execution", testXorpdRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PXOR guest memory generated execution", testPxorGuestMemoryGeneratedExecution},
