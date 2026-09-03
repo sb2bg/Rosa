@@ -1543,6 +1543,62 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             return {};
         }
 
+        if (name.size() == 4 && name[0] == CTL_KERN && name[1] == KERN_PROC &&
+            name[2] == KERN_PROC_PID) {
+            // kern.proc.pid.<pid>: CoreFoundation reads its own kinfo_proc
+            // during process-name resolution. Rosa hosts a single guest
+            // process, so only its own PID is visible; serve the host
+            // kernel's record for that PID verbatim (same ABI).
+            if (state.r10 == 0 || state.r8 != 0 || state.r9 != 0) {
+                throw unsupported(
+                    state, syscallRip,
+                    "only a read or size query of guest kern.proc.pid is implemented");
+            }
+            if (name[3] != static_cast<std::uint32_t>(::getpid())) {
+                setError(state, ESRCH);
+                return {};
+            }
+            int hostMib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID,
+                              static_cast<int>(name[3])};
+            struct kinfo_proc info {};
+            std::size_t infoSize = sizeof(info);
+            if (::sysctl(hostMib, 4, &info, &infoSize, nullptr, 0) != 0) {
+                setError(state, errno);
+                return {};
+            }
+            std::uint64_t outputCapacity = 0;
+            try {
+                outputCapacity = addressSpace.readU64(
+                    guest::GuestAddress{state.r10});
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.r10}, sizeof(std::uint64_t),
+                    guest::Permission::Write);
+                if (state.rdx != 0 && outputCapacity >= infoSize) {
+                    addressSpace.validateAccess(
+                        guest::GuestAddress{state.rdx}, infoSize,
+                        guest::Permission::Write);
+                }
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            if (state.rdx != 0 && outputCapacity < infoSize) {
+                addressSpace.writeU64(guest::GuestAddress{state.r10}, infoSize);
+                setError(state, ENOMEM);
+                return {};
+            }
+            if (state.rdx != 0) {
+                addressSpace.writeBytes(
+                    guest::GuestAddress{state.rdx},
+                    std::span<const std::uint8_t>{
+                        reinterpret_cast<const std::uint8_t *>(&info),
+                        infoSize});
+            }
+            addressSpace.writeU64(guest::GuestAddress{state.r10}, infoSize);
+            setSuccess(state, 0);
+            return {};
+        }
+
         std::ostringstream reason;
         reason << "unsupported guest sysctl MIB";
         for (const auto component : name) {
