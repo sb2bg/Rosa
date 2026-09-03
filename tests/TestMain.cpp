@@ -8094,6 +8094,45 @@ void testLockedIncrementRipRelativeGuestDword() {
     expectEqual(state.rflags, std::uint64_t{0xBD7}, "faulted RIP-relative LOCK INC changed flags");
 }
 
+void testLockedIncrementGuestQword() {
+    // Observed in libc++ under an Objective-C fixture: LOCK INC qword [rsi+0x8].
+    constexpr std::array<std::uint8_t, 6> observedCode{0xF0, 0x48, 0xFF, 0x46, 0x08, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802D8E01AULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockIncMem, "LOCK INC opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "LOCK INC length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rsi && memory.width == 64 &&
+               memory.displacement == 8 && !memory.ripRelative,
+           "LOCK INC memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("lock inc qword [rsi+0x8]") != std::string::npos,
+           "LOCK INC dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("locked_increment_guest_memory.i64") != std::string::npos,
+           "LOCK INC did not lower through locked guest-memory IR");
+
+    addressSpace.writeU64(target, 0x7FFFFFFFFFFFFFFFULL);
+    rosa::x86::X86State overflowState;
+    overflowState.rsi = target.value - 8;
+    overflowState.rflags = 0x8D7;
+    static_cast<void>(block.execute(overflowState, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0x8000000000000000ULL},
+                "LOCK INC overflow result differs");
+    expectEqual(overflowState.rsi, target.value - 8, "LOCK INC changed its address base");
+    // ZF clears on the nonzero result; CF is preserved and PF/AF/SF/OF set here.
+    expectEqual(overflowState.rflags, std::uint64_t{0x897},
+                "LOCK INC overflow flags differ or changed CF");
+}
+
 void testLockedDecrementGuestDword() {
     constexpr std::array<std::uint8_t, 4> observedCode{0xF0, 0xFF, 0x08, 0xC3};
     constexpr rosa::guest::GuestAddress observedRip{0x7FF802C7201FULL};
@@ -34304,6 +34343,7 @@ int main() {
         {"LOCK INC guest dword", testLockedIncrementGuestDword},
         {"LOCK INC RIP-relative guest dword", testLockedIncrementRipRelativeGuestDword},
         {"LOCK DEC guest dword", testLockedDecrementGuestDword},
+        {"LOCK INC guest qword", testLockedIncrementGuestQword},
         {"LOCK DEC RIP-relative guest qword", testLockedDecrementRipRelativeGuestQword},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP SIB guest memory with 32-bit immediate", testCompareGuestSibMemoryWith32BitImmediate},

@@ -461,7 +461,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << (instruction.opcode == x86::Opcode::LockIncMem
-                           ? "lock inc dword ["
+                           ? (memory.width == 32 ? "lock inc dword ["
+                                                 : "lock inc qword [")
                            : memory.width == 32 ? "lock dec dword ["
                                                 : "lock dec qword [")
                    << (memory.ripRelative ? "rip"

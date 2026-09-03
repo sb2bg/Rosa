@@ -5459,11 +5459,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
                 const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !lockRexB;
-                if (extension != 0x1U || mode > 0x2U || lockRexR || lockRexX ||
-                    (mode == 0 && rmEncoding == 0x5U && lockRexB) || rmEncoding == 0x4U) {
+                if ((extension != 0x0U && extension != 0x1U) || mode > 0x2U || lockRexR ||
+                    lockRexX || (mode == 0 && rmEncoding == 0x5U && lockRexB) ||
+                    rmEncoding == 0x4U) {
                     throw DecodeError(
                         address, remaining,
-                        "only LOCK DEC dword/qword [base/RIP+disp8/disp32] is supported from prefix F0 FF /1");
+                        "only LOCK INC/DEC dword/qword [base/RIP+disp8/disp32] is supported from prefix F0 FF /0/1");
                 }
                 operandCursor += 2;
                 std::int64_t displacement = 0;
@@ -5487,7 +5488,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         address, operandCursor - instructionStart, displacement));
                 }
                 const auto width = static_cast<std::uint8_t>(lockRexW ? 64U : 32U);
-                instruction.opcode = Opcode::LockDecMem;
+                instruction.opcode = extension == 0x0U ? Opcode::LockIncMem
+                                                       : Opcode::LockDecMem;
                 instruction.operands.push_back(
                     ripRelative
                         ? MemoryOperand{Register::Rax, displacement, width,
