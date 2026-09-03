@@ -6241,6 +6241,46 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.horizontalAddXmmDwords(destination, source, instruction.address);
             break;
         }
+        case x86::Opcode::PmovzxbdXmmReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: PMOVZXBD operand count");
+            }
+            const auto destination = std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source = std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            // Read the source lane first: architecturally the low four
+            // source bytes feed all four destination dwords, so an
+            // in-place PMOVZXBD must not observe its own writes.
+            const auto sourceLow =
+                builder.readGuestXmmLane(source, false, instruction.address);
+            const auto byteMask =
+                builder.constant(0xFF, ir::Width::I64, instruction.address);
+            std::optional<ir::ValueId> lowWidened;
+            std::optional<ir::ValueId> highWidened;
+            for (std::uint8_t lane = 0; lane < 4; ++lane) {
+                auto byte = sourceLow;
+                if (lane != 0) {
+                    byte = builder.shiftRightLogical(sourceLow, static_cast<std::uint8_t>(lane * 8),
+                                                     ir::Width::I64, instruction.address);
+                }
+                byte = builder.bitAnd(byte, byteMask, ir::Width::I64, instruction.address);
+                const auto shift = static_cast<std::uint8_t>((lane % 2U) * 32U);
+                if (shift != 0) {
+                    byte = builder.shiftLeft(byte, shift, ir::Width::I64, instruction.address);
+                }
+                if (lane < 2) {
+                    lowWidened = lowWidened ? builder.bitOr(*lowWidened, byte, ir::Width::I64,
+                                                            instruction.address)
+                                            : byte;
+                } else {
+                    highWidened = highWidened ? builder.bitOr(*highWidened, byte, ir::Width::I64,
+                                                              instruction.address)
+                                              : byte;
+                }
+            }
+            builder.writeGuestXmmLane(destination, false, *lowWidened, instruction.address);
+            builder.writeGuestXmmLane(destination, true, *highWidened, instruction.address);
+            break;
+        }
         case x86::Opcode::PorRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: POR register operand count");

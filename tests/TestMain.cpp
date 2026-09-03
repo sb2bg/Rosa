@@ -17600,6 +17600,34 @@ void testPackedHorizontalAddAndMovdExtract() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVD XMM-to-register changed flags");
 }
 
+void testPmovzxbdRegisterToRegister() {
+    // Observed in libsqlite3: PMOVZXBD XMM2, XMM2 (in-place widening).
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0x38, 0x31, 0xD2, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x100082DCEULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PmovzxbdXmmReg, "PMOVZXBD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "PMOVZXBD length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm2 &&
+               source.reg == rosa::x86::XmmRegister::Xmm2,
+           "PMOVZXBD xmm2, xmm2 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("pmovzxbd xmm2, xmm2") != std::string::npos,
+           "PMOVZXBD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x100082DCEULL});
+    rosa::x86::X86State state;
+    state.xmm[2] = {.low = 0xDDCCBBAA04030201ULL, .high = 0xFFFFFFFFFFFFFFFFULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[2].low, std::uint64_t{0x0000000200000001ULL},
+                "PMOVZXBD low lane differs");
+    expectEqual(state.xmm[2].high, std::uint64_t{0x0000000400000003ULL},
+                "PMOVZXBD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "PMOVZXBD changed flags");
+}
+
 void testPandnRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0xDF, 0xC8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -33840,6 +33868,7 @@ int main() {
          testPackedDwordShiftAndAddGeneratedExecution},
         {"packed qword logical right shift immediate", testPackedQwordLogicalRightShiftImmediate},
         {"packed horizontal add and MOVD extract", testPackedHorizontalAddAndMovdExtract},
+        {"PMOVZXBD register to register", testPmovzxbdRegisterToRegister},
         {"PANDN register generated execution", testPandnRegisterGeneratedExecution},
         {"PMOVMSKB generated execution", testPmovmskbGeneratedExecution},
         {"PMOVSXBD RIP-relative memory generated execution",
