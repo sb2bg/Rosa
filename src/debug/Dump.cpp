@@ -2649,7 +2649,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         case x86::Opcode::MovqMemXmm: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "movq [" << x86::registerName(memory.base);
+            stream << "movq ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);

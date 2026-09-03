@@ -20025,6 +20025,46 @@ void testMovqXmmToGuestMemory() {
                 std::uint32_t{0xA5A5A5A5U}, "faulted extended-index MOVQ partially changed memory");
     expectEqual(crossPageState.xmm[1].low, std::uint64_t{0xD0C0B0A090807060ULL},
                 "faulted extended-index MOVQ changed its XMM source");
+
+    // Observed in libobjc under an Objective-C fixture: MOVQ [RIP+disp32], xmm0.
+    constexpr std::array<std::uint8_t, 9> ripRelativeCode{0x66, 0x0F, 0xD6, 0x05,
+                                                          0xDA, 0x0E, 0xC9, 0x40, 0xC3};
+    constexpr rosa::guest::GuestAddress ripRelativeRip{0x7FF802A1BAFEULL};
+    const auto ripRelativeDecoded = decoder.decodeBlock(ripRelativeCode, ripRelativeRip);
+    expect(ripRelativeDecoded[0].opcode == rosa::x86::Opcode::MovqMemXmm,
+           "RIP-relative MOVQ [memory], xmm opcode differs");
+    expectEqual(ripRelativeDecoded[0].length, std::uint8_t{8},
+                "RIP-relative MOVQ [memory], xmm length differs");
+    const auto ripRelativeMemory =
+        std::get<rosa::x86::MemoryOperand>(ripRelativeDecoded[0].operands[0]);
+    const auto ripRelativeSource =
+        std::get<rosa::x86::XmmRegisterOperand>(ripRelativeDecoded[0].operands[1]);
+    expect(ripRelativeMemory.ripRelative && !ripRelativeMemory.hasBase &&
+               !ripRelativeMemory.index && ripRelativeMemory.width == 64 &&
+               ripRelativeMemory.displacement == 0x40C90EDA &&
+               ripRelativeSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "movq [rip+0x40c90eda], xmm0 operands differ");
+    expectEqual(ripRelativeRip.value + ripRelativeDecoded[0].length +
+                    ripRelativeMemory.displacement,
+                std::uint64_t{0x7FF8436AC9E0ULL}, "RIP-relative MOVQ target differs");
+    expect(rosa::debug::dumpX86(ripRelativeDecoded).find("movq [rip+0x40c90eda], xmm0") !=
+               std::string::npos,
+           "RIP-relative MOVQ [memory], xmm dump differs");
+
+    constexpr rosa::guest::GuestAddress ripTarget{0x8200};
+    constexpr std::array<std::uint8_t, 9> ripExecuteCode{0x66, 0x0F, 0xD6, 0x05,
+                                                        0xF8, 0x71, 0x00, 0x00, 0xC3};
+    const auto ripBlock =
+        translator.translate(ripExecuteCode, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State ripState;
+    ripState.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    ripState.rflags = 0x8D7;
+    static_cast<void>(ripBlock.execute(ripState, &addressSpace));
+    expectEqual(addressSpace.readU64(ripTarget), std::uint64_t{0x0123456789ABCDEFULL},
+                "RIP-relative MOVQ stored the wrong XMM lane");
+    expectEqual(ripState.xmm[0].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "RIP-relative MOVQ changed its XMM source");
+    expectEqual(ripState.rflags, std::uint64_t{0x8D7}, "RIP-relative MOVQ changed flags");
 }
 
 void testMovqGuestMemoryToXmm() {

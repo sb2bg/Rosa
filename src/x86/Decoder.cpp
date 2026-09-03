@@ -3439,16 +3439,18 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[modrmOffset];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode > 0x2U || (mode == 0 && rmEncoding == 0x5U)) {
+            const bool ripRelative =
+                mode == 0 && rmEncoding == 0x5U && (rex & 0x1U) == 0;
+            if (mode > 0x2U || (mode == 0 && rmEncoding == 0x5U && (rex & 0x1U) != 0)) {
                 throw DecodeError(
                     address, remaining,
-                    "only MOVQ [base+index*scale+disp8/disp32], xmm memory operands are supported");
+                    "only MOVQ [base+index*scale+disp8/disp32/RIP], xmm memory operands are supported");
             }
             auto operandCursor = modrmOffset + 1;
             auto baseEncoding = rmEncoding;
             std::optional<Register> index;
             std::uint8_t scale = 1;
-            if (rmEncoding == 0x4U) {
+            if (!ripRelative && rmEncoding == 0x4U) {
                 if (operandCursor >= code.size()) {
                     throw DecodeError(address, remaining,
                                       "truncated MOVQ memory SIB");
@@ -3476,7 +3478,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                       "truncated MOVQ memory disp8");
                 }
                 displacement = std::bit_cast<std::int8_t>(code[operandCursor++]);
-            } else if (mode == 0x2U) {
+            } else if (mode == 0x2U || ripRelative) {
                 if (code.size() - operandCursor < 4) {
                     throw DecodeError(address, remaining,
                                       "truncated MOVQ memory disp32");
@@ -3484,10 +3486,18 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 displacement = readI32(code.subspan(operandCursor, 4));
                 operandCursor += 4;
             }
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, operandCursor - instructionStart, displacement));
+            }
             instruction.opcode = Opcode::MovqMemXmm;
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(baseEncoding, (rex & 0x1U) != 0),
-                displacement, 64, index, scale});
+            instruction.operands.push_back(
+                ripRelative
+                    ? MemoryOperand{Register::Rax, displacement, 64,
+                                    std::nullopt, 1, false, true}
+                    : MemoryOperand{
+                          decodeRegister(baseEncoding, (rex & 0x1U) != 0),
+                          displacement, 64, index, scale});
             instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
                 static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) |
                                           ((rex & 0x4U) != 0 ? 8U
