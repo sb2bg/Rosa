@@ -7406,6 +7406,50 @@ void testExchangeGuestQwordWithRegister() {
                 "faulted RIP-relative XCHG qword changed flags");
 }
 
+void testExchangeGuestQwordWithIndex() {
+    // Observed in CoreFoundation under an Objective-C fixture: XCHG rcx, [rax+rdx].
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0x87, 0x0C, 0x10, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802EB83A9ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::XchgMemReg,
+           "indexed XCHG qword opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "indexed XCHG qword length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(!memory.ripRelative && memory.hasBase &&
+               memory.base == rosa::x86::Register::Rax && memory.index &&
+               *memory.index == rosa::x86::Register::Rdx && memory.scale == 1 &&
+               memory.displacement == 0 && memory.width == 64,
+           "indexed XCHG qword memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rcx && source.width == 64,
+           "indexed XCHG qword source differs");
+    expect(rosa::debug::dumpX86(decoded).find("xchg qword [rax+rdx], rcx") != std::string::npos,
+           "indexed XCHG qword dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0xFEDCBA9876543210ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rax = target.value - 0x40;
+    state.rdx = 0x40;
+    state.rcx = 0x0123456789ABCDEFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0x0123456789ABCDEFULL},
+                "indexed XCHG qword stored the wrong value");
+    expectEqual(state.rcx, std::uint64_t{0xFEDCBA9876543210ULL},
+                "indexed XCHG qword returned the wrong old memory value");
+    expectEqual(state.rax, target.value - 0x40, "indexed XCHG qword changed its base");
+    expectEqual(state.rdx, std::uint64_t{0x40}, "indexed XCHG qword changed its index");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "indexed XCHG qword changed flags");
+}
+
 void testLockedAddGuestQwordRegister() {
     constexpr rosa::guest::GuestAddress instructionAddress{0x7FF7000249E1ULL};
     constexpr rosa::guest::GuestAddress target{0x7FF7000A5330ULL};
@@ -34718,6 +34762,7 @@ int main() {
         {"LOCK CMPXCHG16B guest pair", testLockedCompareExchangeGuestPair},
         {"XCHG guest dword with register", testExchangeGuestDwordWithRegister},
         {"XCHG guest qword with register", testExchangeGuestQwordWithRegister},
+        {"XCHG guest qword with index", testExchangeGuestQwordWithIndex},
         {"LOCK OR guest dword immediate", testLockedOrGuestDwordImmediate},
         {"LOCK OR guest word immediate", testLockedOrGuestWordImmediate},
         {"LOCK AND guest word immediate", testLockedAndGuestWordImmediate},

@@ -8329,11 +8329,39 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
-            if (rexX || mode > 0x2U || rmEncoding == 0x4U) {
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
+            if (mode > 0x2U || (mode == 0 && rmEncoding == 0x5U && rexB)) {
                 throw DecodeError(
                     address, remaining,
-                    "only XCHG dword/qword [base/RIP+disp8/disp32], register is supported");
+                    "only XCHG dword/qword [base+index*scale+disp8/disp32/RIP], register is supported");
+            }
+            auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (!ripRelative && rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated XCHG memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding =
+                    static_cast<std::uint8_t>(sib & 0x7U);
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(address, remaining,
+                                      "no-base SIB XCHG is not supported");
+                }
+                base = decodeRegister(baseEncoding, rexB);
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            } else if (!ripRelative && rexX) {
+                throw DecodeError(address, remaining,
+                                  "REX.X requires an XCHG memory SIB");
             }
             std::int64_t displacement = 0;
             if (ripRelative) {
@@ -8343,6 +8371,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 displacement = readI32(code.subspan(cursor, 4));
                 cursor += 4;
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
             } else if (mode == 0x1U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining,
@@ -8364,8 +8394,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 ripRelative
                     ? MemoryOperand{Register::Rax, displacement, operandWidth,
                                     std::nullopt, 1, false, true}
-                    : MemoryOperand{decodeRegister(rmEncoding, rexB),
-                                    displacement, operandWidth});
+                    : MemoryOperand{base, displacement, operandWidth,
+                                    index, scale});
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(
                     static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR),
