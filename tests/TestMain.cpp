@@ -20677,6 +20677,89 @@ void testDarwinKernelVersionSysctl() {
                 "faulted kern.version read changed its length");
 }
 
+void testDarwinHwNcpuSysctl() {
+    constexpr auto sysctlNumber = UINT64_C(0x020000CA);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress mibAddress{0x8000};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8100};
+    constexpr rosa::guest::GuestAddress lengthAddress{0x8180};
+    constexpr rosa::guest::GuestAddress nameAddress{0x8200};
+    constexpr std::string_view name = "hw.ncpu";
+    constexpr std::array<std::uint32_t, 2> nameToOid{0, 3};
+    constexpr std::array<std::uint32_t, 2> ncpuOid{6, 3};
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    std::array<std::uint8_t, sizeof(nameToOid)> mibBytes{};
+    std::memcpy(mibBytes.data(), nameToOid.data(), mibBytes.size());
+    addressSpace.writeBytes(mibAddress, mibBytes);
+    addressSpace.writeBytes(nameAddress,
+                            std::span<const std::uint8_t>{
+                                reinterpret_cast<const std::uint8_t *>(name.data()), name.size()});
+    addressSpace.writeU64(lengthAddress, 16);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = nameToOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = nameAddress.value;
+    state.r9 = name.size();
+    state.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30EECULL}));
+    expectEqual(state.rax, std::uint64_t{0}, "hw.ncpu name-to-OID did not succeed");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{8},
+                "hw.ncpu name-to-OID returned the wrong size");
+    const auto oidBytes = addressSpace.readBytes(outputAddress, sizeof(ncpuOid));
+    std::array<std::uint32_t, 2> actualOid{};
+    std::memcpy(actualOid.data(), oidBytes.data(), sizeof(actualOid));
+    expectEqual(actualOid, ncpuOid, "hw.ncpu returned the wrong guest MIB");
+
+    addressSpace.writeBytes(mibAddress, oidBytes);
+    addressSpace.writeU64(lengthAddress, 4);
+    state.rax = sysctlNumber;
+    state.rdi = mibAddress.value;
+    state.rsi = ncpuOid.size();
+    state.rdx = outputAddress.value;
+    state.r10 = lengthAddress.value;
+    state.r8 = 0;
+    state.r9 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "guest hw.ncpu read did not succeed");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{4},
+                "guest hw.ncpu read returned the wrong size");
+    std::int32_t count = 0;
+    const auto countBytes = addressSpace.readBytes(outputAddress, sizeof(count));
+    std::memcpy(&count, countBytes.data(), sizeof(count));
+    expect(count > 0 && count < 1024, "guest hw.ncpu count is implausible");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "guest hw.ncpu read did not clear BSD carry");
+
+    addressSpace.writeU64(lengthAddress, 0);
+    state.rax = sysctlNumber;
+    state.rdx = 0;
+    state.rflags = 0xBD7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "guest hw.ncpu size query failed");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{4},
+                "guest hw.ncpu size query returned the wrong size");
+
+    addressSpace.writeU64(lengthAddress, 2);
+    state.rax = sysctlNumber;
+    state.rdx = outputAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "short hw.ncpu buffer returned the wrong errno");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{0},
+                "short hw.ncpu buffer did not report zero copied bytes");
+}
+
 void testDarwinProductVersionSysctl() {
     constexpr auto sysctlNumber = UINT64_C(0x020000CA);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -31334,6 +31417,7 @@ int main() {
         {"Darwin 64-bit user-stack sysctl", testDarwinUserStack64Sysctl},
         {"Darwin boot-arguments sysctl", testDarwinBootArgsSysctl},
         {"Darwin kernel-version sysctl", testDarwinKernelVersionSysctl},
+        {"Darwin hw.ncpu sysctl", testDarwinHwNcpuSysctl},
         {"Darwin product-version sysctl", testDarwinProductVersionSysctl},
         {"Darwin iOS-support-version sysctl", testDarwinIosSupportVersionSysctl},
         {"Darwin OS-variant-status sysctl", testDarwinOsVariantStatusSysctl},

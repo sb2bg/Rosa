@@ -154,6 +154,7 @@ constexpr std::array<std::uint32_t, 2> guestProductVersionOid{1, 138};
 constexpr std::array<std::uint32_t, 2> guestIosSupportVersionOid{1, 140};
 constexpr std::array<std::uint32_t, 2> guestOsVariantStatusOid{1, 141};
 constexpr std::array<std::uint32_t, 2> guestUserStack64Oid{1, 59};
+constexpr std::array<std::uint32_t, 2> guestHwNcpuOid{6, 3};
 constexpr std::string_view guestLockdownModeName =
     "security.mac.lockdown_mode_state";
 constexpr std::string_view guestBootArgsName = "kern.bootargs";
@@ -164,6 +165,7 @@ constexpr std::string_view guestIosSupportVersionName =
     "kern.iossupportversion";
 constexpr std::string_view guestOsVariantStatusName =
     "kern.osvariant_status";
+constexpr std::string_view guestHwNcpuName = "hw.ncpu";
 constexpr std::uint32_t guestLockdownModeState = 0;
 constexpr std::array<std::uint8_t, 1> guestBootArgs{0};
 constexpr std::size_t guestPthreadRegistrationDataSize = 56;
@@ -194,6 +196,16 @@ std::vector<std::uint8_t> hostKernelVersion() {
     }
     bytes.resize(size);
     return bytes;
+}
+
+std::int32_t hostLogicalCpuCount() {
+    std::int32_t count = 0;
+    std::size_t size = sizeof(count);
+    if (::sysctlbyname(guestHwNcpuName.data(), &count, &size, nullptr, 0) != 0 ||
+        size != sizeof(count) || count <= 0) {
+        throw std::runtime_error("failed to query host hw.ncpu");
+    }
+    return count;
 }
 
 audit_token_t currentProcessAuditToken() {
@@ -1155,6 +1167,8 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
                 resultOid = guestIosSupportVersionOid;
             } else if (requestedName == guestOsVariantStatusName) {
                 resultOid = guestOsVariantStatusOid;
+            } else if (requestedName == guestHwNcpuName) {
+                resultOid = guestHwNcpuOid;
             } else {
                 std::ostringstream reason;
                 reason << "unsupported guest sysctl name \"" << requestedName
@@ -1222,6 +1236,46 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             }
             addressSpace.writeU64(guest::GuestAddress{state.r10},
                                   version.size());
+            setSuccess(state, 0);
+            return {};
+        }
+
+        if (std::ranges::equal(name, guestHwNcpuOid)) {
+            if (state.r10 == 0 || state.r8 != 0 || state.r9 != 0) {
+                throw unsupported(
+                    state, syscallRip,
+                    "only a read or size query of guest hw.ncpu is implemented");
+            }
+            // Native and Rosetta x86 callers observe the same host CPU
+            // count, so report it from a host-owned value like kern.version.
+            const auto count = hostLogicalCpuCount();
+            std::uint64_t outputCapacity = 0;
+            try {
+                outputCapacity = addressSpace.readU64(
+                    guest::GuestAddress{state.r10});
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.r10}, sizeof(std::uint64_t),
+                    guest::Permission::Write);
+                if (state.rdx != 0) {
+                    addressSpace.validateAccess(
+                        guest::GuestAddress{state.rdx}, sizeof(count),
+                        guest::Permission::Write);
+                }
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            if (state.rdx != 0 && outputCapacity < sizeof(count)) {
+                addressSpace.writeU64(guest::GuestAddress{state.r10}, 0);
+                setError(state, ENOMEM);
+                return {};
+            }
+            if (state.rdx != 0) {
+                std::array<std::uint8_t, sizeof(count)> countBytes{};
+                std::memcpy(countBytes.data(), &count, sizeof(count));
+                addressSpace.writeBytes(guest::GuestAddress{state.rdx}, countBytes);
+            }
+            addressSpace.writeU64(guest::GuestAddress{state.r10}, sizeof(count));
             setSuccess(state, 0);
             return {};
         }
