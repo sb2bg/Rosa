@@ -1927,32 +1927,33 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto mode =
                     static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
                 if (rexW || mode != 0x3U) {
-                    throw DecodeError(
-                        address, remaining,
-                        "only register-direct ADD r16, r16 is supported with operand-size override");
+                    // Memory-destination and REX.W forms fall through to
+                    // the general decoder; the 66 prefix is ignored there
+                    // for REX.W and selects word operands otherwise.
+                } else {
+                    instruction.opcode = Opcode::AddRegReg;
+                    instruction.operands.push_back(RegisterOperand{
+                        decodeRegister(
+                            static_cast<std::uint8_t>(modrm & 0x7U), rexB),
+                        16});
+                    instruction.operands.push_back(RegisterOperand{
+                        decodeRegister(static_cast<std::uint8_t>(
+                                           (modrm >> 3U) & 0x7U),
+                                       rexR),
+                        16});
+                    const auto length = testOpcodeOffset + 2 - instructionStart;
+                    instruction.length = static_cast<std::uint8_t>(length);
+                    std::copy_n(
+                        code.begin() +
+                            static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
+                    result.push_back(std::move(instruction));
+                    cursor = testOpcodeOffset + 2;
+                    if (result.size() == maximumInstructions) {
+                        return result;
+                    }
+                    continue;
                 }
-                instruction.opcode = Opcode::AddRegReg;
-                instruction.operands.push_back(RegisterOperand{
-                    decodeRegister(
-                        static_cast<std::uint8_t>(modrm & 0x7U), rexB),
-                    16});
-                instruction.operands.push_back(RegisterOperand{
-                    decodeRegister(static_cast<std::uint8_t>(
-                                       (modrm >> 3U) & 0x7U),
-                                   rexR),
-                    16});
-                const auto length = testOpcodeOffset + 2 - instructionStart;
-                instruction.length = static_cast<std::uint8_t>(length);
-                std::copy_n(
-                    code.begin() +
-                        static_cast<std::ptrdiff_t>(instructionStart),
-                    length, instruction.bytes.begin());
-                result.push_back(std::move(instruction));
-                cursor = testOpcodeOffset + 2;
-                if (result.size() == maximumInstructions) {
-                    return result;
-                }
-                continue;
             }
             if (testOpcodeOffset < code.size() && code[testOpcodeOffset] == 0x85U) {
                 if (code.size() - testOpcodeOffset < 2) {
@@ -5741,7 +5742,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto opcode = code[cursor++];
-        if (hasOperandSizeOverride && opcode != 0x03U && opcode != 0x0BU && opcode != 0x39U &&
+        if (hasOperandSizeOverride && opcode != 0x01U && opcode != 0x03U && opcode != 0x0BU && opcode != 0x39U &&
             opcode != 0x3BU && opcode != 0x89U && opcode != 0x8BU && opcode != 0xF7U &&
             opcode != 0xFFU) {
             throw DecodeError(
@@ -6393,7 +6394,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(RegisterOperand{destination, width});
                 instruction.operands.push_back(RegisterOperand{source, width});
             } else {
-                if (hasOperandSizeOverride || mode > 0x2U ||
+                if (mode > 0x2U ||
                     (rexX && rmEncoding != 0x4U)) {
                     throw DecodeError(
                         address, remaining,
@@ -6446,8 +6447,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     static_cast<void>(relativeTarget(
                         address, cursor - instructionStart, displacement));
                 }
-                const auto width =
-                    static_cast<std::uint8_t>(rexW ? 64U : 32U);
+                const auto width = static_cast<std::uint8_t>(
+                    rexW ? 64U : (hasOperandSizeOverride ? 16U : 32U));
                 instruction.opcode = Opcode::AddMemReg;
                 instruction.operands.push_back(MemoryOperand{
                     ripRelative ? Register::Rax : base, displacement, width,

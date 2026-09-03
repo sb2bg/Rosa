@@ -4921,6 +4921,39 @@ void testAddRegisterToGuestMemory() {
                 "faulted cross-page ADD dword changed its source");
     expectEqual(boundaryState.rflags, std::uint64_t{0xAD7},
                 "faulted cross-page ADD dword changed flags");
+
+    // Observed in libsqlite3: ADD word [rcx+0x1c], ax with an operand-size override.
+    constexpr std::array<std::uint8_t, 5> wordCode{0x66, 0x01, 0x41, 0x1C, 0xC3};
+    const auto wordDecoded =
+        decoder.decodeBlock(wordCode, rosa::guest::GuestAddress{0x1000FE9A2ULL});
+    expect(wordDecoded[0].opcode == rosa::x86::Opcode::AddMemReg &&
+               wordDecoded[0].length == 4,
+           "ADD word [memory], r16 opcode or length differs");
+    const auto wordMemory = std::get<rosa::x86::MemoryOperand>(wordDecoded[0].operands[0]);
+    const auto wordSource = std::get<rosa::x86::RegisterOperand>(wordDecoded[0].operands[1]);
+    expect(wordMemory.base == rosa::x86::Register::Rcx && wordMemory.displacement == 0x1C &&
+               wordMemory.width == 16 && wordSource.reg == rosa::x86::Register::Rax &&
+               wordSource.width == 16,
+           "ADD word [rcx+0x1c], ax operands differ");
+    expect(rosa::debug::dumpX86(wordDecoded).find("add word [rcx+0x1c], ax") != std::string::npos,
+           "ADD word [memory], r16 dump differs");
+
+    constexpr rosa::guest::GuestAddress wordTarget{0x821C};
+    addressSpace.writeBytes(wordTarget, std::array<std::uint8_t, 2>{0xFF, 0xFF});
+    const auto wordBlock =
+        translator.translate(wordCode, rosa::guest::GuestAddress{0x1000FE9A2ULL});
+    rosa::x86::X86State wordState;
+    wordState.rcx = 0x8200;
+    wordState.rax = 0xAABBCCDD00000001ULL;
+    wordState.rflags = 0x8D7;
+    static_cast<void>(wordBlock.execute(wordState, &addressSpace));
+    expectEqual(addressSpace.readU16(wordTarget), std::uint16_t{0},
+                "ADD word [memory], r16 result differs");
+    expectEqual(addressSpace.readBytes(rosa::guest::GuestAddress{wordTarget.value + 2}, 1).front(),
+                std::uint8_t{0}, "ADD word changed its adjacent byte");
+    expectEqual(wordState.rcx, std::uint64_t{0x8200}, "ADD word changed its base");
+    expectEqual(wordState.rax, std::uint64_t{0xAABBCCDD00000001ULL}, "ADD word changed its source");
+    expectEqual(wordState.rflags, std::uint64_t{0x57}, "ADD word carry/zero flags differ");
 }
 
 void testAddRegisterToSibGuestMemory() {

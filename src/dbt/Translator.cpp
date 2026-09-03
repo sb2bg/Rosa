@@ -1629,6 +1629,36 @@ extern "C" __attribute__((noinline)) x86::X86State *addGuest64(GuestExecutionCon
     }
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *addGuest16(GuestExecutionContext *context,
+                                                               x86::X86State *state,
+                                                               std::uint64_t address,
+                                                               std::uint64_t sourceValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated 16-bit guest add has no address space");
+        }
+        constexpr auto width = sizeof(std::uint16_t);
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, width,
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU16(guest::GuestAddress{address});
+        const auto source = static_cast<std::uint16_t>(sourceValue);
+        const auto result = static_cast<std::uint16_t>(original + source);
+        const std::array resultBytes{
+            static_cast<std::uint8_t>(result),
+            static_cast<std::uint8_t>(result >> 8U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, resultBytes);
+        return updateAddFlags16(state, original, source, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint16_t);
+        }
+        return nullptr;
+    }
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *addGuest32(GuestExecutionContext *context,
                                                                x86::X86State *state,
                                                                std::uint64_t address,
@@ -4134,11 +4164,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
-            if (memory.width != source.width || (memory.width != 32 && memory.width != 64)) {
+            if (memory.width != source.width ||
+                (memory.width != 16 && memory.width != 32 && memory.width != 64)) {
                 throw std::runtime_error(
-                    "only matching 32- and 64-bit memory-destination ADD is implemented");
+                    "only matching 16-, 32- and 64-bit memory-destination ADD is implemented");
             }
-            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto width = memory.width == 16    ? ir::Width::I16
+                               : memory.width == 32 ? ir::Width::I32
+                                                    : ir::Width::I64;
             auto address =
                 memory.ripRelative
                     ? builder.constant(instruction.address.value + instruction.length,
@@ -9181,9 +9214,10 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             break;
         }
         case ir::Opcode::AddGuestMemory: {
-            if (operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
+            if (operation.width != ir::Width::I16 && operation.width != ir::Width::I32 &&
+                operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 32- or 64-bit guest memory add");
+                    "ARM64 backend only implements 16-, 32-, or 64-bit guest memory add");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -9192,9 +9226,11 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x2, hostRegister(*operation.lhs));
             assembler.mov(arm64::x3, hostRegister(*operation.rhs));
             assembler.mov(arm64::x0, arm64::x19);
-            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
-                                                   ? pointerBits(&addGuest32)
-                                                   : pointerBits(&addGuest64));
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I16
+                                                   ? pointerBits(&addGuest16)
+                                                   : operation.width == ir::Width::I32
+                                                         ? pointerBits(&addGuest32)
+                                                         : pointerBits(&addGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

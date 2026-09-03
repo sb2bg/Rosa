@@ -1396,10 +1396,10 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::AddGuestMemory:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "source");
-            if (operation.width != Width::I32 &&
+            if (operation.width != Width::I16 && operation.width != Width::I32 &&
                 operation.width != Width::I64) {
                 errors.emplace_back(
-                    "add_guest_memory currently requires i32 or i64");
+                    "add_guest_memory currently requires i16, i32, or i64");
             }
             break;
         case Opcode::SubGuestMemory:
