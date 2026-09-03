@@ -1723,9 +1723,9 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "left");
             checkUse(operation.rhs, "right");
             checkUse(operation.third, "borrow");
-            if (operation.width != Width::I32 &&
+            if (operation.width != Width::I8 && operation.width != Width::I32 &&
                 operation.width != Width::I64) {
-                errors.emplace_back("update_sbb_flags requires i32 or i64");
+                errors.emplace_back("update_sbb_flags requires i8, i32, or i64");
             }
             break;
         case Opcode::UpdateIncFlags:

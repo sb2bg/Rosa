@@ -1427,6 +1427,39 @@ extern "C" __attribute__((noinline)) x86::X86State *updateAdcFlags64(x86::X86Sta
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *updateSbbFlags8(x86::X86State *state,
+                                                                     std::uint64_t lhsValue,
+                                                                     std::uint64_t rhsValue,
+                                                                     std::uint64_t borrowValue) {
+    const auto lhs = static_cast<std::uint8_t>(lhsValue);
+    const auto rhs = static_cast<std::uint8_t>(rhsValue);
+    const auto borrow = static_cast<std::uint8_t>(borrowValue & 1U);
+    const auto wideSubtrahend = static_cast<std::uint16_t>(rhs) + borrow;
+    const auto result =
+        static_cast<std::uint8_t>(static_cast<std::uint16_t>(lhs) - wideSubtrahend);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (static_cast<std::uint16_t>(lhs) < wideSubtrahend) {
+        flags |= flagCarry;
+    }
+    if ((std::popcount(static_cast<unsigned>(result)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (((lhs ^ rhs ^ result) & 0x10U) != 0) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result & 0x80U) != 0) {
+        flags |= flagSign;
+    }
+    if ((((lhs ^ rhs) & (lhs ^ result)) & 0x80U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *updateSbbFlags32(x86::X86State *state,
                                                                      std::uint64_t lhsValue,
                                                                      std::uint64_t rhsValue,
@@ -4429,10 +4462,13 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            if ((reg.width != 32 && reg.width != 64) || immediate.width != 8) {
-                throw std::runtime_error("only SBB r32/r64, imm8 is implemented");
+            if ((reg.width != 8 && reg.width != 32 && reg.width != 64) ||
+                immediate.width != 8) {
+                throw std::runtime_error("only SBB r8/r32/r64, imm8 is implemented");
             }
-            const auto width = reg.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto width = reg.width == 8    ? ir::Width::I8
+                               : reg.width == 32 ? ir::Width::I32
+                                                 : ir::Width::I64;
             const auto lhs = builder.readGuestRegister(reg.reg, width, instruction.address);
             const auto borrow =
                 builder.evaluateCondition(x86::Condition::Below, instruction.address);
@@ -10123,9 +10159,11 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
             assembler.mov(arm64::x3, hostRegister(*operation.third));
-            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
-                                                   ? pointerBits(&updateSbbFlags32)
-                                                   : pointerBits(&updateSbbFlags64));
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I8
+                                                   ? pointerBits(&updateSbbFlags8)
+                                                   : operation.width == ir::Width::I32
+                                                         ? pointerBits(&updateSbbFlags32)
+                                                         : pointerBits(&updateSbbFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateIncFlags:

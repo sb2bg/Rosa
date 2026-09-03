@@ -5682,7 +5682,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x34U &&
             code[cursor] != 0x00U && code[cursor] != 0x01U &&
             code[cursor] != 0x02U && code[cursor] != 0x03U &&
-            code[cursor] != 0x19U &&
+            code[cursor] != 0x19U && code[cursor] != 0x1CU &&
             code[cursor] != 0x88U &&
             code[cursor] != 0x89U &&
             code[cursor] != 0x8AU && code[cursor] != 0x8BU &&
@@ -5746,7 +5746,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x25U && opcode != 0x34U &&
             opcode != 0x00U && opcode != 0x01U && opcode != 0x02U &&
             opcode != 0x03U &&
-            opcode != 0x19U &&
+            opcode != 0x19U && opcode != 0x1CU &&
             opcode != 0x88U && opcode != 0x89U &&
             opcode != 0x8AU &&
             opcode != 0x8BU && opcode != 0x85U &&
@@ -5826,6 +5826,13 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 throw DecodeError(address, remaining, "truncated xor al, imm8");
             }
             instruction.opcode = Opcode::XorRegImm;
+            instruction.operands.push_back(RegisterOperand{Register::Rax, 8});
+            instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
+        } else if (opcode == 0x1CU) {
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining, "truncated sbb al, imm8");
+            }
+            instruction.opcode = Opcode::SbbRegImm;
             instruction.operands.push_back(RegisterOperand{Register::Rax, 8});
             instruction.operands.push_back(ImmediateOperand{code[cursor++], 8});
         } else if (opcode == 0x05U) {

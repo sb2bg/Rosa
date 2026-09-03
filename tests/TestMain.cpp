@@ -4012,6 +4012,42 @@ void testSbbRegisterFromItselfGeneratedExecution() {
     expectEqual(setState.rflags, std::uint64_t{0x97}, "SBB EAX, EAX set-carry flags differ");
 }
 
+void testSbbAccumulatorImmediateGeneratedExecution() {
+    // Observed in libsqlite3: SBB AL, 0xFF (opcode 1C).
+    constexpr std::array<std::uint8_t, 3> code{0x1C, 0xFF, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{0x10007A56FULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SbbRegImm, "SBB AL, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2}, "SBB AL, imm8 length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 8 &&
+               immediate.value == 0xFF && immediate.width == 8,
+           "SBB AL, 0xFF operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("sbb al, 0xff") != std::string::npos,
+           "SBB AL, 0xFF dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State clearState;
+    clearState.rax = 0xAABBCCDD12345600ULL;
+    clearState.rflags = 0x8D6;
+    static_cast<void>(block.execute(clearState));
+    expectEqual(clearState.rax, std::uint64_t{0xAABBCCDD12345601ULL},
+                "SBB AL, 0xFF with clear carry result differs");
+    expectEqual(clearState.rflags, std::uint64_t{0x13},
+                "SBB AL, 0xFF clear-carry flags differ");
+
+    rosa::x86::X86State setState;
+    setState.rax = 0xAABBCCDD12345600ULL;
+    setState.rflags = 0x8D7;
+    static_cast<void>(block.execute(setState));
+    expectEqual(setState.rax, std::uint64_t{0xAABBCCDD12345600ULL},
+                "SBB AL, 0xFF with set carry result differs");
+    expectEqual(setState.rflags, std::uint64_t{0x57}, "SBB AL, 0xFF set-carry flags differ");
+}
+
 void testAdcRegisterZeroGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x41, 0x83, 0xD4, 0x00, 0xC3};
     constexpr rosa::guest::GuestAddress observedRip{0x7FF802C71B79ULL};
@@ -32421,6 +32457,8 @@ int main() {
         {"SBB register zero generated execution", testSbbRegisterZeroGeneratedExecution},
         {"SBB register from itself generated execution",
          testSbbRegisterFromItselfGeneratedExecution},
+        {"SBB accumulator immediate generated execution",
+         testSbbAccumulatorImmediateGeneratedExecution},
         {"ADC register zero generated execution", testAdcRegisterZeroGeneratedExecution},
         {"SUB register from register", testSubRegisterFromRegister},
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
