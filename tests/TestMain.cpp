@@ -14819,6 +14819,22 @@ void testOrImmediateIntoGuestByteMemory() {
     expectEqual(std::get<rosa::x86::MemoryOperand>(negativeDecoded[0].operands[0]).displacement,
                 std::int64_t{-8}, "OR byte immediate disp8 was not sign-extended");
 
+    // Observed in libsystem_info: OR byte [r12+0x14], 1 with a no-index SIB.
+    constexpr std::array<std::uint8_t, 7> sibCode{0x41, 0x80, 0x4C, 0x24,
+                                                 0x14, 0x01, 0xC3};
+    const auto sibDecoded =
+        decoder.decodeBlock(sibCode, rosa::guest::GuestAddress{0x7FF802E86253ULL});
+    expect(sibDecoded[0].opcode == rosa::x86::Opcode::OrMemImm,
+           "SIB byte OR opcode differs");
+    expectEqual(sibDecoded[0].length, std::uint8_t{6}, "SIB byte OR length differs");
+    const auto sibMemory = std::get<rosa::x86::MemoryOperand>(sibDecoded[0].operands[0]);
+    const auto sibImmediate = std::get<rosa::x86::ImmediateOperand>(sibDecoded[0].operands[1]);
+    expect(sibMemory.base == rosa::x86::Register::R12 && sibMemory.displacement == 0x14 &&
+               sibMemory.width == 8 && !sibMemory.index && sibImmediate.value == 1,
+           "OR byte [r12+0x14], 1 operands differ");
+    expect(rosa::debug::dumpX86(sibDecoded).find("or byte [r12+0x14], 0x1") != std::string::npos,
+           "OR byte [r12+0x14], 1 dump differs");
+
     constexpr std::array<std::uint8_t, 8> ripRelativeCode{0x80, 0x0D, 0xEE, 0xEE,
                                                           0xA3, 0x40, 0x34, 0xC3};
     constexpr rosa::guest::GuestAddress ripRelativeRip{0x7FF802C75873ULL};
@@ -14893,6 +14909,20 @@ void testOrImmediateIntoGuestByteMemory() {
     expectEqual(readOnlyAddressSpace.readBytes(target, 1).front(), std::uint8_t{0x40},
                 "faulted immediate OR changed guest memory");
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "faulted immediate OR changed flags");
+
+    const auto sibBlock =
+        translator.translate(sibCode, rosa::guest::GuestAddress{0x7FF802E86253ULL});
+    constexpr std::array sibInitialByte{std::uint8_t{0x40}};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8014}, sibInitialByte);
+    rosa::x86::X86State sibState;
+    sibState.r12 = page.value;
+    sibState.rflags = 0x8D7;
+    static_cast<void>(sibBlock.execute(sibState, &addressSpace));
+    expectEqual(addressSpace.readBytes(rosa::guest::GuestAddress{0x8014}, 1).front(),
+                std::uint8_t{0x41}, "SIB byte OR result differs");
+    expectEqual(sibState.r12, page.value, "SIB byte OR changed its base");
+    expectEqual(sibState.rflags & definedLogicFlags, std::uint64_t{0x4},
+                "SIB byte OR defined flags differ");
 }
 
 void testOrShortImmediateGeneratedExecution() {

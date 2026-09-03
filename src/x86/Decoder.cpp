@@ -8572,15 +8572,39 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 continue;
             }
-            if (extension == 0x1U && mode <= 0x2U && rmEncoding != 0x4U) {
+            if (extension == 0x1U && mode <= 0x2U) {
                 const bool ripRelative =
                     mode == 0 && rmEncoding == 0x5U;
+                auto baseEncoding = rmEncoding;
+                bool hasBase = !ripRelative;
+                if (!ripRelative && rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated byte OR SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    hasBase = !(mode == 0 && baseEncoding == 0x5U);
+                    if (scaleBits != 0 || indexEncoding != 0x4U || rexX ||
+                        !hasBase) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only no-index SIB addressing is supported for byte OR");
+                    }
+                } else if (rexX) {
+                    throw DecodeError(address, remaining,
+                                      "REX.X requires a byte OR SIB operand");
+                }
                 std::int64_t displacement = 0;
-                if (ripRelative) {
+                if (ripRelative || (!hasBase && mode == 0) || mode == 0x2U) {
                     if (code.size() - cursor < 4) {
                         throw DecodeError(
                             address, remaining,
-                            "truncated RIP-relative byte OR disp32");
+                            "truncated byte OR disp32");
                     }
                     displacement = readI32(code.subspan(cursor, 4));
                     cursor += 4;
@@ -8591,13 +8615,6 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     }
                     displacement =
                         std::bit_cast<std::int8_t>(code[cursor++]);
-                } else if (mode == 0x2U) {
-                    if (code.size() - cursor < 4) {
-                        throw DecodeError(address, remaining,
-                                          "truncated byte OR disp32");
-                    }
-                    displacement = readI32(code.subspan(cursor, 4));
-                    cursor += 4;
                 }
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining,
@@ -8613,8 +8630,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     ripRelative
                         ? MemoryOperand{Register::Rax, displacement, 8,
                                         std::nullopt, 1, false, true}
-                        : MemoryOperand{decodeRegister(rmEncoding, rexB),
-                                        displacement, 8});
+                        : MemoryOperand{decodeRegister(baseEncoding, rexB),
+                                        displacement, 8, std::nullopt, 1,
+                                        hasBase, false});
                 instruction.operands.push_back(
                     ImmediateOperand{immediate, 8});
                 const auto length = cursor - instructionStart;
