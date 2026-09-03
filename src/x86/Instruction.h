@@ -176,6 +176,8 @@ enum class Opcode {
     MovqXmmReg,
     MovdMemXmm,
     MovssMemXmm,
+    MovsdRegMem,
+    MovsdMemXmm,
     MovdRegXmm,
     MovqXmmMem,
     MovqMemXmm,

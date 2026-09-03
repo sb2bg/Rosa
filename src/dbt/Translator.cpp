@@ -3901,6 +3901,56 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.writeGuestXmmLane(destination, true, zero, instruction.address);
             break;
         }
+        case x86::Opcode::MovsdRegMem:
+        case x86::Opcode::MovsdMemXmm: {
+            const bool isLoad = instruction.opcode == x86::Opcode::MovsdRegMem;
+            const auto memory = std::get<x86::MemoryOperand>(
+                instruction.operands[isLoad ? 1 : 0]);
+            const auto xmm = std::get<x86::XmmRegisterOperand>(
+                instruction.operands[isLoad ? 0 : 1]).reg;
+            if (instruction.operands.size() != 2 || memory.width != 64 ||
+                (memory.ripRelative ? memory.hasBase || memory.index.has_value()
+                                    : !memory.hasBase) ||
+                memory.segment != x86::Segment::None) {
+                throw std::runtime_error("unsupported qword scalar MOVSD addressing");
+            }
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                : memory.hasBase
+                    ? builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address)
+                    : builder.constant(0, ir::Width::I64, instruction.address);
+            if (memory.index) {
+                auto index =
+                    builder.readGuestRegister(*memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64, instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement =
+                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                     ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64, instruction.address);
+            }
+            if (isLoad) {
+                const auto value =
+                    builder.loadGuest(address, ir::Width::I64, instruction.address);
+                builder.writeGuestXmmLane(xmm, false, value, instruction.address);
+                builder.writeGuestXmmLane(
+                    xmm, true,
+                    builder.constant(0, ir::Width::I64, instruction.address),
+                    instruction.address);
+            } else {
+                const auto value = builder.readGuestXmmLane(xmm, false, instruction.address);
+                builder.storeGuest(address, value, ir::Width::I64, instruction.address);
+            }
+            break;
+        }
         case x86::Opcode::MovdMemXmm:
         case x86::Opcode::MovssMemXmm: {
             if (instruction.operands.size() != 2) {

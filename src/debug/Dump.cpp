@@ -2445,11 +2445,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         }
         case x86::Opcode::MovdMemXmm:
-        case x86::Opcode::MovssMemXmm: {
+        case x86::Opcode::MovssMemXmm:
+        case x86::Opcode::MovsdMemXmm: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << (instruction.opcode == x86::Opcode::MovssMemXmm
                            ? "movss dword ["
+                       : instruction.opcode == x86::Opcode::MovsdMemXmm
+                           ? "movsd qword ["
                            : "movd dword [")
                    << (memory.ripRelative ? "rip"
                                           : x86::registerName(memory.base));
@@ -2617,6 +2620,36 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "], "
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
+            break;
+        }
+        case x86::Opcode::MovsdRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "movsd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0]).reg)
+                   << ", qword [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.index) {
+                if (memory.ripRelative || memory.hasBase) {
+                    stream << '+';
+                }
+                stream << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
             break;
         }
         case x86::Opcode::MovqXmmMem: {
