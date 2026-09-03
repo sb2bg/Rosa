@@ -9282,6 +9282,37 @@ void testMovRegisterToGuestMemory() {
     expectEqual(faultState.rbp, std::uint64_t{0x8800},
                 "failed guest-memory MOV changed the base register");
     expectEqual(faultState.rdi, state.rdi, "failed guest-memory MOV changed the source register");
+
+    // Observed in libsqlite3: ADD byte [rcx+0x2], al (opcode 00).
+    constexpr std::array<std::uint8_t, 4> byteCode{0x00, 0x41, 0x02, 0xC3};
+    const auto byteDecoded =
+        decoder.decodeBlock(byteCode, rosa::guest::GuestAddress{0x1000F2382ULL});
+    expect(byteDecoded[0].opcode == rosa::x86::Opcode::AddMemReg,
+           "ADD byte [memory], r8 opcode differs");
+    expectEqual(byteDecoded[0].length, std::uint8_t{3}, "ADD byte [memory], r8 length differs");
+    const auto byteMemory = std::get<rosa::x86::MemoryOperand>(byteDecoded[0].operands[0]);
+    const auto byteSource = std::get<rosa::x86::RegisterOperand>(byteDecoded[0].operands[1]);
+    expect(byteMemory.base == rosa::x86::Register::Rcx && byteMemory.displacement == 2 &&
+               byteMemory.width == 8 && byteSource.reg == rosa::x86::Register::Rax &&
+               byteSource.width == 8,
+           "ADD byte [rcx+0x2], al operands differ");
+    expect(rosa::debug::dumpX86(byteDecoded).find("add byte [rcx+0x2], al") != std::string::npos,
+           "ADD byte [memory], r8 dump differs");
+    constexpr rosa::guest::GuestAddress byteTarget{0x8202};
+    addressSpace.writeBytes(byteTarget, std::array<std::uint8_t, 1>{0xFF});
+    const auto byteBlock =
+        translator.translate(byteCode, rosa::guest::GuestAddress{0x1000F2382ULL});
+    rosa::x86::X86State byteState;
+    byteState.rcx = 0x8200;
+    byteState.rax = 0xAABBCCDD00000001ULL;
+    byteState.rflags = 0x2;
+    static_cast<void>(byteBlock.execute(byteState, &addressSpace));
+    expectEqual(addressSpace.readBytes(byteTarget, 1).front(), std::uint8_t{0},
+                "ADD byte [memory], r8 result differs");
+    expectEqual(byteState.rcx, std::uint64_t{0x8200}, "ADD byte changed its base");
+    expectEqual(byteState.rax, std::uint64_t{0xAABBCCDD00000001ULL},
+                "ADD byte changed its source");
+    expectEqual(byteState.rflags, std::uint64_t{0x57}, "ADD byte carry/zero flags differ");
 }
 
 void testMovHighByteRegisterToGuestMemory() {
