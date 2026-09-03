@@ -9,16 +9,15 @@ std::vector<guest::GuestAddress> Dispatcher::recentBlocks() const {
     std::vector<guest::GuestAddress> result;
     result.reserve(recentBlockCount_);
     const auto first =
-        (nextRecentBlock_ + recentBlockCapacity - recentBlockCount_) %
-        recentBlockCapacity;
+        (nextRecentBlock_ + recentBlockCapacity - recentBlockCount_) % recentBlockCapacity;
     for (std::size_t index = 0; index < recentBlockCount_; ++index) {
         result.push_back(recentBlocks_[(first + index) % recentBlockCapacity]);
     }
     return result;
 }
 
-std::vector<BlockExecutionCount>
-Dispatcher::hotBlocks(std::size_t minimumExecutions, std::size_t limit) const {
+std::vector<BlockExecutionCount> Dispatcher::hotBlocks(std::size_t minimumExecutions,
+                                                       std::size_t limit) const {
     std::vector<BlockExecutionCount> result;
     result.reserve(cache_.size());
     for (const auto &[address, block] : cache_.blocks()) {
@@ -56,32 +55,26 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
     while (result.executedBlocks < maximumBlocks) {
         const auto blockAddress = guest::GuestAddress{state.rip};
         const auto executableVersion = addressSpace_.executableVersion();
-        auto &dispatchEntry = dispatchCache_[
-            (blockAddress.value >> 1U) & (dispatchCacheSize - 1U)];
-        auto *block =
-            dispatchEntry.block != nullptr &&
-                    dispatchEntry.address == blockAddress.value &&
-                    dispatchEntry.executableVersion == executableVersion
-                ? dispatchEntry.block
-                : cache_.findCurrent(blockAddress, executableVersion);
+        auto &dispatchEntry = dispatchCache_[(blockAddress.value >> 1U) & (dispatchCacheSize - 1U)];
+        auto *block = dispatchEntry.block != nullptr &&
+                              dispatchEntry.address == blockAddress.value &&
+                              dispatchEntry.executableVersion == executableVersion
+                          ? dispatchEntry.block
+                          : cache_.findCurrent(blockAddress, executableVersion);
         if (block == nullptr) {
-            const auto translationStart = collectTimings_
-                                              ? std::chrono::steady_clock::now()
-                                              : std::chrono::steady_clock::time_point{};
-            block = &cache_.getOrTranslate(
-                blockAddress, codeAt(blockAddress),
-                maximumInstructionsPerBlock_, executableVersion);
+            const auto translationStart = collectTimings_ ? std::chrono::steady_clock::now()
+                                                          : std::chrono::steady_clock::time_point{};
+            block = &cache_.getOrTranslate(blockAddress, codeAt(blockAddress),
+                                           maximumInstructionsPerBlock_, executableVersion);
             if (collectTimings_) {
                 translationTime_ += std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - translationStart);
             }
         }
-        dispatchEntry = DispatchCacheEntry{blockAddress.value,
-                                           executableVersion, block};
+        dispatchEntry = DispatchCacheEntry{blockAddress.value, executableVersion, block};
         if (sharedCache_ != nullptr && block->executionCount() == 0) {
             if (const auto *image = sharedCache_->imageForAddress(blockAddress);
-                image != nullptr &&
-                executedCacheImageIndexes_.insert(image->index).second) {
+                image != nullptr && executedCacheImageIndexes_.insert(image->index).second) {
                 cacheImageExecutions_.push_back(CacheImageExecution{
                     .image = image,
                     .firstRip = blockAddress,
@@ -92,12 +85,18 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
         const auto remainingBlocks = maximumBlocks - result.executedBlocks;
         auto batchLimit = remainingBlocks;
         if (block->isOptimizationCandidate()) {
+            const auto optimizationStart = collectTimings_
+                                               ? std::chrono::steady_clock::now()
+                                               : std::chrono::steady_clock::time_point{};
             block->promoteOptimizedLoopIfHot(remainingBlocks);
+            if (collectTimings_) {
+                optimizationTime_ += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - optimizationStart);
+            }
             batchLimit = block->executionBatchLimit(remainingBlocks);
         }
-        const auto execution = block->executeRepeated(
-            state, addressSpace_, timestampCounterReader_,
-            batchLimit);
+        const auto execution =
+            block->executeRepeated(state, addressSpace_, timestampCounterReader_, batchLimit);
         result.executedBlocks += execution.executionCount;
         executedBlocks_ += execution.executionCount;
         block->recordExecutions(execution.executionCount);
@@ -106,11 +105,9 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
             recentBlockCount_ = recentBlockCapacity;
             nextRecentBlock_ = 0;
         } else {
-            for (std::size_t repeated = 0;
-                 repeated < execution.executionCount; ++repeated) {
+            for (std::size_t repeated = 0; repeated < execution.executionCount; ++repeated) {
                 recentBlocks_[nextRecentBlock_] = blockAddress;
-                nextRecentBlock_ =
-                    (nextRecentBlock_ + 1) % recentBlockCapacity;
+                nextRecentBlock_ = (nextRecentBlock_ + 1) % recentBlockCapacity;
                 if (recentBlockCount_ < recentBlockCapacity) {
                     ++recentBlockCount_;
                 }
@@ -150,8 +147,7 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
         }
         case BlockExit::Syscall: {
             const auto outcome =
-                syscallDispatcher_.dispatch(addressSpace_, state,
-                                            block->lastInstructionAddress());
+                syscallDispatcher_.dispatch(addressSpace_, state, block->lastInstructionAddress());
             if (outcome.exited) {
                 result.translatedBlocks = cache_.size();
                 result.exited = true;
@@ -161,9 +157,11 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
             break;
         }
         case BlockExit::MemoryFault:
-            throw std::runtime_error("generated block reported a guest-memory fault without detail");
+            throw std::runtime_error(
+                "generated block reported a guest-memory fault without detail");
         case BlockExit::ExecutionFault:
-            throw std::runtime_error("generated block reported a guest execution fault without detail");
+            throw std::runtime_error(
+                "generated block reported a guest execution fault without detail");
         }
     }
     throw std::runtime_error("guest block limit reached before exit or return sentinel");

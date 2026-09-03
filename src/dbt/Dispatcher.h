@@ -46,18 +46,14 @@ class Dispatcher {
         std::size_t maximumInstructionsPerBlock = std::numeric_limits<std::size_t>::max(),
         TimestampCounterReader timestampCounterReader = nullptr,
         const darwin::GuestSharedCache *sharedCache = nullptr,
-        const std::array<std::uint8_t, 16> &executableUuid = {},
-        bool retainProgramListings = false,
+        const std::array<std::uint8_t, 16> &executableUuid = {}, bool retainProgramListings = false,
         bool collectTimings = false,
-        std::optional<std::filesystem::path> persistentCachePath =
-            std::nullopt)
+        std::optional<std::filesystem::path> persistentCachePath = std::nullopt)
         : addressSpace_(addressSpace),
           cache_(retainProgramListings, std::move(persistentCachePath)),
-          syscallDispatcher_(sharedCache, executableUuid),
-          sharedCache_(sharedCache),
+          syscallDispatcher_(sharedCache, executableUuid), sharedCache_(sharedCache),
           maximumInstructionsPerBlock_(maximumInstructionsPerBlock),
-          timestampCounterReader_(timestampCounterReader),
-          collectTimings_(collectTimings) {}
+          timestampCounterReader_(timestampCounterReader), collectTimings_(collectTimings) {}
 
     [[nodiscard]] DispatchResult
     run(x86::X86State &state, std::size_t maximumBlocks,
@@ -69,14 +65,16 @@ class Dispatcher {
     [[nodiscard]] std::chrono::nanoseconds translationTime() const noexcept {
         return translationTime_;
     }
+    [[nodiscard]] std::chrono::nanoseconds optimizationTime() const noexcept {
+        return optimizationTime_;
+    }
     [[nodiscard]] std::vector<guest::GuestAddress> recentBlocks() const;
-    [[nodiscard]] std::vector<BlockExecutionCount>
-    hotBlocks(std::size_t minimumExecutions = 16, std::size_t limit = 8) const;
+    [[nodiscard]] std::vector<BlockExecutionCount> hotBlocks(std::size_t minimumExecutions = 16,
+                                                             std::size_t limit = 8) const;
     [[nodiscard]] const darwin::MachDispatcher &machDispatcher() const noexcept {
         return syscallDispatcher_.machDispatcher();
     }
-    [[nodiscard]] const std::vector<CacheImageExecution> &
-    cacheImageExecutions() const noexcept {
+    [[nodiscard]] const std::vector<CacheImageExecution> &cacheImageExecutions() const noexcept {
         return cacheImageExecutions_;
     }
 
@@ -100,6 +98,7 @@ class Dispatcher {
     TimestampCounterReader timestampCounterReader_{};
     bool collectTimings_{};
     std::chrono::nanoseconds translationTime_{};
+    std::chrono::nanoseconds optimizationTime_{};
     std::size_t executedBlocks_{};
     static constexpr std::size_t recentBlockCapacity = 16;
     std::array<guest::GuestAddress, recentBlockCapacity> recentBlocks_{};
