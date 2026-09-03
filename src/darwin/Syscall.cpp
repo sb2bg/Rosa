@@ -62,6 +62,7 @@ constexpr std::uint64_t syscallGettimeofday = unixSyscallClass | 116U;
 constexpr std::uint64_t syscallCsops = unixSyscallClass | 169U;
 constexpr std::uint64_t syscallCsopsAuditToken = unixSyscallClass | 170U;
 constexpr std::uint64_t syscallMmap = unixSyscallClass | 197U;
+constexpr std::uint64_t syscallLseek = unixSyscallClass | 199U;
 constexpr std::uint64_t syscallSysctl = unixSyscallClass | 202U;
 constexpr std::uint64_t syscallGetattrlist = unixSyscallClass | 220U;
 constexpr std::uint64_t syscallShmOpen = unixSyscallClass | 266U;
@@ -1972,6 +1973,60 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             return {};
         }
         setSuccess(state, 0);
+        return {};
+    }
+    if (number == syscallLseek) {
+        const auto descriptor = std::bit_cast<std::int32_t>(
+            static_cast<std::uint32_t>(state.rdi));
+        const auto offset = std::bit_cast<std::int64_t>(state.rsi);
+        const auto whence = std::bit_cast<int>(static_cast<std::uint32_t>(state.rdx));
+        if (descriptor == STDIN_FILENO || descriptor == STDOUT_FILENO ||
+            descriptor == STDERR_FILENO) {
+            // Guest standard descriptors alias the host ones, so host
+            // semantics (including ESPIPE) are exactly right.
+            const auto result = ::lseek(descriptor, offset, whence);
+            if (result < 0) {
+                setError(state, errno);
+                return {};
+            }
+            setSuccess(state, static_cast<std::uint64_t>(result));
+            return {};
+        }
+        auto *file = fileSpace_.lookupMutable(GuestFileDescriptor{descriptor});
+        if (file == nullptr) {
+            setError(state, EBADF);
+            return {};
+        }
+        if (file->kind != GuestFileKind::HostReadOnlyFile) {
+            std::ostringstream reason;
+            reason << "lseek currently accepts only standard descriptors and mapped read-only files; got fd="
+                   << descriptor;
+            throw unsupported(state, syscallRip, reason.str());
+        }
+        if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END) {
+            setError(state, EINVAL);
+            return {};
+        }
+        __int128 base = 0;
+        if (whence == SEEK_CUR) {
+            base = static_cast<__int128>(file->offset);
+        } else if (whence == SEEK_END) {
+            struct stat hostMetadata {};
+            if (::stat(file->guestPath.c_str(), &hostMetadata) != 0) {
+                setError(state, errno);
+                return {};
+            }
+            base = static_cast<__int128>(hostMetadata.st_size);
+        }
+        const __int128 positioned = base + static_cast<__int128>(offset);
+        if (positioned < 0 ||
+            positioned > static_cast<__int128>(
+                              std::numeric_limits<std::int64_t>::max())) {
+            setError(state, EINVAL);
+            return {};
+        }
+        file->offset = static_cast<std::uint64_t>(positioned);
+        setSuccess(state, file->offset);
         return {};
     }
     if (number == syscallFstat64) {

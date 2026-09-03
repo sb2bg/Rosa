@@ -23812,6 +23812,108 @@ void testDarwinFstatHostReadOnlyFile() {
     expect(unsupportedKind, "fstat64 directory descriptor did not fail loudly");
 }
 
+void testDarwinLseekHostReadOnlyFile() {
+    // Observed under head: stdio seeks back over its read-ahead buffer.
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto readNumber = UINT64_C(0x02000003);
+    constexpr auto lseekNumber = UINT64_C(0x020000C7);
+    constexpr int seekSet = 0;
+    constexpr int seekCurrent = 1;
+    constexpr int seekEnd = 2;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress bufferAddress{0x8200};
+    const auto fixturePath =
+        std::filesystem::canonical(std::filesystem::path{ROSA_TEST_HELLO_MACHO_PATH});
+    std::ifstream fixtureStream(fixturePath, std::ios::binary);
+    std::vector<std::uint8_t> fixtureBytes((std::istreambuf_iterator<char>(fixtureStream)),
+                                           std::istreambuf_iterator<char>());
+    expect(fixtureBytes.size() > 32, "lseek test fixture is too small");
+
+    const auto fixtureString = fixturePath.string();
+    std::vector<std::uint8_t> pathBytes(fixtureString.begin(), fixtureString.end());
+    pathBytes.push_back(0);
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, pathBytes);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = O_RDONLY;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{3}, "lseek-test open returned the wrong descriptor");
+
+    const auto seek = [&](std::int64_t offset, int whence) {
+        state.rax = lseekNumber;
+        state.rdi = 3;
+        state.rsi = static_cast<std::uint64_t>(offset);
+        state.rdx = static_cast<std::uint64_t>(whence);
+        state.rflags = 0xAD7;
+        static_cast<void>(
+            dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    };
+    const auto read = [&](std::uint64_t count) {
+        state.rax = readNumber;
+        state.rdi = 3;
+        state.rsi = bufferAddress.value;
+        state.rdx = count;
+        state.rflags = 0xAD7;
+        static_cast<void>(
+            dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    };
+
+    seek(10, seekSet);
+    expectEqual(state.rax, std::uint64_t{10}, "lseek SEEK_SET returned the wrong position");
+    expectEqual(state.rflags, std::uint64_t{0xAD6}, "lseek SEEK_SET did not clear BSD carry");
+    read(4);
+    expectEqual(state.rax, std::uint64_t{4}, "post-seek read returned the wrong count");
+    expect(addressSpace.readBytes(bufferAddress, 4) ==
+               std::vector<std::uint8_t>(fixtureBytes.begin() + 10, fixtureBytes.begin() + 14),
+           "post-seek read returned the wrong bytes");
+
+    // SEEK_CUR backs up over the bytes just read, like stdio's seek-back.
+    seek(-4, seekCurrent);
+    expectEqual(state.rax, std::uint64_t{10}, "lseek SEEK_CUR returned the wrong position");
+    read(4);
+    expect(addressSpace.readBytes(bufferAddress, 4) ==
+               std::vector<std::uint8_t>(fixtureBytes.begin() + 10, fixtureBytes.begin() + 14),
+           "re-read after SEEK_CUR returned the wrong bytes");
+
+    seek(0, seekEnd);
+    expectEqual(state.rax, fixtureBytes.size(), "lseek SEEK_END returned the wrong size");
+    seek(-static_cast<std::int64_t>(fixtureBytes.size()), seekCurrent);
+    expectEqual(state.rax, std::uint64_t{0}, "lseek back to origin failed");
+
+    // Seeking before the origin is EINVAL and leaves the position alone.
+    seek(-1, seekSet);
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "negative lseek SEEK_SET returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0xAD7},
+                "negative lseek SEEK_SET did not set BSD carry");
+    read(4);
+    expect(addressSpace.readBytes(bufferAddress, 4) ==
+               std::vector<std::uint8_t>(fixtureBytes.begin(), fixtureBytes.begin() + 4),
+           "failed lseek moved the file position");
+
+    seek(0, 99);
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "lseek with a bad whence returned the wrong errno");
+
+    state.rax = lseekNumber;
+    state.rdi = 99;
+    state.rsi = 0;
+    state.rdx = seekSet;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "lseek unknown descriptor returned the wrong errno");
+}
+
 void testDarwinWriteNoCancel() {
     constexpr auto writeNoCancelNumber = UINT64_C(0x0200018D);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -34380,6 +34482,7 @@ int main() {
         {"Darwin stat64 relative path", testDarwinStat64RelativePath},
         {"Darwin fstat64 standard descriptor", testDarwinFstat64StandardDescriptor},
         {"Darwin fstat64 mapped read-only file", testDarwinFstatHostReadOnlyFile},
+        {"Darwin lseek mapped read-only file", testDarwinLseekHostReadOnlyFile},
         {"Darwin write_nocancel", testDarwinWriteNoCancel},
         {"Darwin getfsstat64 synthetic root", testDarwinGetfsstat64SyntheticRoot},
         {"Darwin access chroot marker", testDarwinAccessChrootMarker},
