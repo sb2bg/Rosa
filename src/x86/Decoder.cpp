@@ -2080,12 +2080,13 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto rex =
                 wordShortImmediateHasRex ? code[cursor + 1] : 0U;
-            if ((rex & 0xEU) != 0) {
+            if ((rex & 0xCU) != 0) {
                 throw DecodeError(
                     address, remaining,
-                    "CMP word immediate does not support REX.W/R/X");
+                    "CMP word immediate does not support REX.W/R");
             }
             const auto rexB = (rex & 0x1U) != 0;
+            const auto rexX = (rex & 0x2U) != 0;
             const auto modrm = code[wordShortImmediateOpcodeOffset + 1];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
@@ -2118,8 +2119,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         "no-base CMP word SIB is not supported");
                 }
                 base = decodeRegister(baseEncoding, rexB);
-                if (indexEncoding != 0x4U) {
-                    index = decodeRegister(indexEncoding, false);
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
                     scale = static_cast<std::uint8_t>(1U << scaleBits);
                 }
             }

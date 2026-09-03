@@ -8554,6 +8554,38 @@ void testCompareGuestWordWithShortImmediate() {
     }
     expect(rejected, "CMP word from unmapped guest memory did not fault");
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "failed CMP word changed flags");
+
+    // Observed in libsqlite3: CMP word [RBX+R12+0xc], 0 with a REX.X-indexed SIB.
+    constexpr std::array<std::uint8_t, 8> indexedCode{0x66, 0x42, 0x83, 0x7C,
+                                                      0x23, 0x0C, 0x00, 0xC3};
+    const auto indexedDecoded =
+        decoder.decodeBlock(indexedCode, rosa::guest::GuestAddress{0x1000E89B5ULL});
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "REX.X CMP word opcode differs");
+    expectEqual(indexedDecoded[0].length, std::uint8_t{7}, "REX.X CMP word length differs");
+    const auto indexedMemory = std::get<rosa::x86::MemoryOperand>(indexedDecoded[0].operands[0]);
+    const auto indexedImmediate =
+        std::get<rosa::x86::ImmediateOperand>(indexedDecoded[0].operands[1]);
+    expect(indexedMemory.base == rosa::x86::Register::Rbx && indexedMemory.index &&
+               *indexedMemory.index == rosa::x86::Register::R12 && indexedMemory.scale == 1 &&
+               indexedMemory.displacement == 0x0C && indexedMemory.width == 16 &&
+               indexedImmediate.value == 0 && indexedImmediate.width == 8,
+           "CMP word [rbx+r12+0xc], 0 operands differ");
+    expect(rosa::debug::dumpX86(indexedDecoded).find("cmp word [rbx+r12*1+0xc], 0x0") !=
+               std::string::npos,
+           "REX.X CMP word dump differs");
+    const auto indexedBlock =
+        translator.translate(indexedCode, rosa::guest::GuestAddress{0x1000E89B5ULL});
+    constexpr rosa::guest::GuestAddress indexedTarget{0x820C};
+    addressSpace.writeBytes(indexedTarget, zero);
+    rosa::x86::X86State indexedState;
+    indexedState.rbx = 0x8200;
+    indexedState.r12 = 0;
+    indexedState.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    expectEqual(indexedState.rflags, std::uint64_t{0x46}, "REX.X CMP word equal flags differ");
+    expectEqual(indexedState.rbx, std::uint64_t{0x8200}, "REX.X CMP word changed its base");
+    expectEqual(indexedState.r12, std::uint64_t{0}, "REX.X CMP word changed its index");
 }
 
 void testCompare16BitRegisterWithShortImmediate() {
