@@ -20238,6 +20238,52 @@ void testDarwinGeteuid() {
                 "geteuid did not apply successful BSD carry semantics");
 }
 
+void testDarwinGetrlimit() {
+    constexpr auto getrlimitNumber = UINT64_C(0x020000C2);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+
+    // RLIMIT_NOFILE with the libc POSIX flag bit, as observed from libsystem_c.
+    state.rax = getrlimitNumber;
+    state.rdi = 8 | 0x1000;
+    state.rsi = outputAddress.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E317A0ULL}));
+    expectEqual(state.rax, std::uint64_t{0}, "getrlimit did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6}, "getrlimit did not clear BSD carry");
+    struct rlimit expected{};
+    expect(::getrlimit(8, &expected) == 0, "could not query host RLIMIT_NOFILE");
+    std::array<std::uint8_t, 16> expectedBytes{};
+    std::memcpy(expectedBytes.data(), &expected, sizeof(expected));
+    expectEqual(addressSpace.readBytes(outputAddress, expectedBytes.size()),
+                std::vector<std::uint8_t>(expectedBytes.begin(), expectedBytes.end()),
+                "getrlimit did not copy out the host limits");
+
+    // Past RLIM_NLIMITS fails even with the flag bit set.
+    state.rax = getrlimitNumber;
+    state.rdi = 9 | 0x1000;
+    state.rsi = outputAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "out-of-range getrlimit returned the wrong errno");
+
+    // Unmapped output reports EFAULT.
+    state.rax = getrlimitNumber;
+    state.rdi = 8;
+    state.rsi = 0x9000;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "getrlimit with an unmapped output returned the wrong errno");
+}
+
 void testDarwinSigaction() {
     constexpr auto sigactionNumber = UINT64_C(0x0200002E);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -32059,6 +32105,7 @@ int main() {
         {"Darwin getpid", testDarwinGetpid},
         {"Darwin getuid", testDarwinGetuid},
         {"Darwin geteuid", testDarwinGeteuid},
+        {"Darwin getrlimit", testDarwinGetrlimit},
         {"Darwin sigaction", testDarwinSigaction},
         {"Darwin gettimeofday", testDarwinGettimeofday},
         {"Darwin issetugid", testDarwinIssetugid},

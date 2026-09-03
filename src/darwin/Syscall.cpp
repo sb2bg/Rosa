@@ -7,6 +7,7 @@
 #include <libproc.h>
 #include <mach/mach.h>
 #include <sys/random.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
@@ -43,6 +44,9 @@ constexpr std::uint64_t syscallClose = unixSyscallClass | 6U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
 constexpr std::uint64_t syscallGetuid = unixSyscallClass | 24U;
 constexpr std::uint64_t syscallGeteuid = unixSyscallClass | 25U;
+constexpr std::uint64_t syscallGetrlimit = unixSyscallClass | 194U;
+constexpr std::uint32_t guestRlimitPosixFlag = 0x1000U;
+constexpr std::uint32_t guestRlimitCount = 9U;
 constexpr std::uint64_t syscallSigaction = unixSyscallClass | 46U;
 constexpr std::uint64_t syscallAccess = unixSyscallClass | 33U;
 constexpr std::uint64_t syscallDup = unixSyscallClass | 41U;
@@ -1534,6 +1538,34 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
     if (number == syscallGeteuid) {
         // Same one-process model: the host effective user ID is the guest's.
         setSuccess(state, static_cast<std::uint64_t>(::geteuid()));
+        return {};
+    }
+    if (number == syscallGetrlimit) {
+        // The libc wrapper ORs in _RLIMIT_POSIX_FLAG (0x1000); XNU masks it
+        // out and rejects resources past RLIM_NLIMITS. Answer from the host
+        // process limits, which launchd provisions identically for the
+        // translated guest. struct rlimit is two little-endian u64s.
+        const auto resource =
+            static_cast<std::uint32_t>(state.rdi) & ~guestRlimitPosixFlag;
+        if (resource >= guestRlimitCount) {
+            setError(state, EINVAL);
+            return {};
+        }
+        struct rlimit limits{};
+        if (::getrlimit(resource, &limits) != 0) {
+            setError(state, errno);
+            return {};
+        }
+        std::array<std::uint8_t, sizeof(limits)> limitBytes{};
+        static_assert(sizeof(limitBytes) == 16);
+        std::memcpy(limitBytes.data(), &limits, sizeof(limits));
+        try {
+            addressSpace.writeBytes(guest::GuestAddress{state.rsi}, limitBytes);
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        setSuccess(state, 0);
         return {};
     }
     if (number == syscallSigaction) {
