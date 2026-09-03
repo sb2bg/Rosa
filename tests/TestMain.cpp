@@ -28654,6 +28654,53 @@ void testAnd8BitRegisters() {
     expect(rejected, "AND AL, AH was silently treated as a low-byte register form");
 }
 
+void testAnd8BitRegisterWithSibGuestMemory() {
+    // Observed in libobjc under an Objective-C fixture: AND r14b, [rdx+rdi+0xc].
+    constexpr std::array<std::uint8_t, 6> code{0x44, 0x22, 0x74, 0x3A, 0x0C, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802A342C2ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegMem,
+           "AND r8, byte SIB opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "AND r8, byte SIB length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R14 && destination.width == 8,
+           "AND r8, byte SIB destination differs");
+    expect(!memory.ripRelative && memory.hasBase &&
+               memory.base == rosa::x86::Register::Rdx && memory.index &&
+               *memory.index == rosa::x86::Register::Rdi && memory.scale == 1 &&
+               memory.displacement == 0x0C && memory.width == 8,
+           "AND r8, byte SIB memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("and r14b, byte [rdx+rdi+0xc]") !=
+               std::string::npos,
+           "AND r8, byte SIB dump differs");
+
+    constexpr rosa::guest::GuestAddress sourceAddress{0x2000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(sourceAddress, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(sourceAddress, std::array<std::uint8_t, 1>{0x3C});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdx = sourceAddress.value - 0x0C - 0x20;
+    state.rdi = 0x20;
+    state.r14 = 0x1122334455667755ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    // 0x55 & 0x3C == 0x14.
+    expectEqual(state.r14, std::uint64_t{0x1122334455667714ULL},
+                "AND SIB byte memory produced the wrong result");
+    expectEqual(state.rflags & ((1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U)),
+                std::uint64_t{1U << 2U},
+                "AND SIB byte memory flags differ");
+    expectEqual(state.rdx, sourceAddress.value - 0x0C - 0x20,
+                "AND SIB byte memory changed its base register");
+    expectEqual(state.rdi, std::uint64_t{0x20},
+                "AND SIB byte memory changed its index register");
+}
+
 void testAnd8BitRegisterWithRipRelativeGuestMemory() {
     constexpr std::array<std::uint8_t, 8> observed{0x44, 0x22, 0x35, 0xE0, 0x9E, 0x06, 0x00, 0xC3};
     constexpr rosa::guest::GuestAddress observedRip{0x7FF80005C225ULL};
@@ -34633,6 +34680,7 @@ int main() {
         {"AND 8-bit registers", testAnd8BitRegisters},
         {"AND 8-bit register with RIP-relative guest memory",
          testAnd8BitRegisterWithRipRelativeGuestMemory},
+        {"AND 8-bit register with SIB guest memory", testAnd8BitRegisterWithSibGuestMemory},
         {"AND 64-bit register with guest memory", testAnd64BitRegisterWithGuestMemory},
         {"AND 32-bit register with guest memory", testAnd32BitRegisterWithGuestMemory},
         {"AND 32-bit register with RSP SIB memory", testAnd32BitRegisterWithRspSibMemory},

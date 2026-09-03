@@ -8508,12 +8508,42 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto regEncoding =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
-            if (mode == 0x3U || rmEncoding == 0x4U ||
-                (!hasRex && regEncoding >= 0x4U)) {
+            const bool ripRelative =
+                mode == 0 && rmEncoding == 0x5U && !rexB;
+            if (mode == 0x3U || (mode == 0 && rmEncoding == 0x5U && rexB) ||
+                (ripRelative && rexX) || (!hasRex && regEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only AND representable-byte-register, byte [base/RIP+disp8/disp32] is supported");
+                    "only AND representable-byte-register, byte [base+index*scale+disp8/disp32/RIP] is supported");
+            }
+            auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (!ripRelative && rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated byte AND memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding =
+                    static_cast<std::uint8_t>(sib & 0x7U);
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "no-base SIB byte AND is not supported");
+                }
+                base = decodeRegister(baseEncoding, rexB);
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            } else if (!ripRelative && rexX) {
+                throw DecodeError(address, remaining,
+                                  "REX.X requires a byte AND memory SIB");
             }
             std::int64_t displacement = 0;
             if (ripRelative) {
@@ -8546,8 +8576,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 ripRelative
                     ? MemoryOperand{Register::Rax, displacement, 8,
                                     std::nullopt, 1, false, true}
-                    : MemoryOperand{decodeRegister(rmEncoding, rexB),
-                                    displacement, 8});
+                    : MemoryOperand{base, displacement, 8, index, scale});
         } else if (opcode == 0x23U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining,
