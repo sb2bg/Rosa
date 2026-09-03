@@ -134,7 +134,7 @@ constexpr std::string_view guestMasterPasswdDatabase = "/etc/master.passwd";
 constexpr std::string_view guestGroupDatabase = "/etc/group";
 constexpr std::string_view guestFeatureFlagsSharedMemory =
     "com.apple.featureflags.shm";
-constexpr std::string_view guestFeatureFlagsDirectory = "/System/Library/FeatureFlags/";
+constexpr std::string_view guestFeatureFlagsPathComponent = "/FeatureFlags/";
 constexpr std::uint16_t guestModeDirectory = 0040000;
 constexpr std::uint16_t guestModeReadExecute = 0555;
 constexpr std::uint32_t guestFcntlGetPath = 50;
@@ -1894,9 +1894,10 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             return {};
         }
         if ((flags & O_ACCMODE) == O_RDONLY &&
-            std::string_view(*path).starts_with(guestFeatureFlagsDirectory)) {
-            // Rosa provisions no FeatureFlags disclosure domains; the
-            // framework falls back to compiled-in defaults when a domain
+            std::string_view(*path).find(guestFeatureFlagsPathComponent) !=
+                std::string_view::npos) {
+            // Rosa provisions no FeatureFlags disclosure domains anywhere;
+            // the framework falls back to compiled-in defaults when a domain
             // file is absent, so report it absent.
             setError(state, ENOENT);
             return {};

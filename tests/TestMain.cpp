@@ -25409,7 +25409,9 @@ void testDarwinOpenFeatureFlagsDisclosuresAbsent() {
     rosa::x86::X86State state;
 
     for (const char *path : {"/System/Library/FeatureFlags/GlobalDisclosures.plist",
-                             "/System/Library/FeatureFlags/Domain/MadeUp.plist"}) {
+                             "/System/Library/FeatureFlags/Domain/MadeUp.plist",
+                             "/System/AppleInternal/Library/FeatureFlags/"
+                             "GlobalDisclosureOverrides.plist"}) {
         const std::string pathString(path);
         std::vector<std::uint8_t> pathBytes(pathString.begin(), pathString.end());
         pathBytes.push_back(0);
