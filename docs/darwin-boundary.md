@@ -11,6 +11,7 @@ Rosa implements only the x86_64 Darwin operations reached by the controlled fixt
 | `close` | `0x02000006` | guest fd | remove a task-local guest descriptor |
 | `getpid` | `0x02000014` | none | return the single Rosa process identity used by the current one-process model |
 | `getuid` | `0x02000018` | none | return the host user ID as the guest real user ID |
+| `geteuid` | `0x02000019` | none | return the host effective user ID as the guest's |
 | `sigaction` | `0x0200002e` | signal number, new 16-byte action, old-action copyout | record task-local signal dispositions without host delivery; report EINVAL/EFAULT for bad numbers and pointers |
 | `dup` | `0x02000029` | guest fd | allocate a unique guest fd sharing the same guest open-description identity |
 | `munmap` | `0x02000049` | guest address/size | validate BSD alignment/size semantics and deallocate only guest mappings |

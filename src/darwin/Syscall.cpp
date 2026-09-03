@@ -42,6 +42,7 @@ constexpr std::uint64_t syscallOpen = unixSyscallClass | 5U;
 constexpr std::uint64_t syscallClose = unixSyscallClass | 6U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
 constexpr std::uint64_t syscallGetuid = unixSyscallClass | 24U;
+constexpr std::uint64_t syscallGeteuid = unixSyscallClass | 25U;
 constexpr std::uint64_t syscallSigaction = unixSyscallClass | 46U;
 constexpr std::uint64_t syscallAccess = unixSyscallClass | 33U;
 constexpr std::uint64_t syscallDup = unixSyscallClass | 41U;
@@ -1528,6 +1529,11 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         // Same one-process model as getpid: the host user ID is the guest's
         // externally observable real user ID.
         setSuccess(state, static_cast<std::uint64_t>(::getuid()));
+        return {};
+    }
+    if (number == syscallGeteuid) {
+        // Same one-process model: the host effective user ID is the guest's.
+        setSuccess(state, static_cast<std::uint64_t>(::geteuid()));
         return {};
     }
     if (number == syscallSigaction) {
