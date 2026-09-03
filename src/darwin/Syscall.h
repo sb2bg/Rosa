@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 
 namespace rosa::darwin {
@@ -38,6 +39,13 @@ struct GuestPthreadRegistration {
     std::uint32_t workqueueQuantumExpiryOffset{};
 };
 
+// Task-local x86_64 struct sigaction without any host signal delivery.
+struct GuestSignalDisposition {
+    std::uint64_t handlerAddress{};
+    std::uint32_t mask{};
+    std::int32_t flags{};
+};
+
 class SyscallDispatcher {
   public:
     explicit SyscallDispatcher(
@@ -60,6 +68,12 @@ class SyscallDispatcher {
     pthreadRegistration() const noexcept {
         return pthreadRegistration_;
     }
+    [[nodiscard]] GuestSignalDisposition
+    signalDisposition(std::int32_t signum) const noexcept {
+        const auto found = signalDispositions_.find(signum);
+        return found == signalDispositions_.end() ? GuestSignalDisposition{}
+                                                  : found->second;
+    }
 
   private:
     const GuestSharedCache *sharedCache_{};
@@ -68,6 +82,7 @@ class SyscallDispatcher {
     MachDispatcher machDispatcher_;
     std::optional<GuestDyldInfo> dyldInfo_;
     std::optional<GuestPthreadRegistration> pthreadRegistration_;
+    std::map<std::int32_t, GuestSignalDisposition> signalDispositions_;
     bool dyldInfoFinal_{};
 };
 

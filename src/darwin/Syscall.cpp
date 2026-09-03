@@ -41,6 +41,7 @@ constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
 constexpr std::uint64_t syscallOpen = unixSyscallClass | 5U;
 constexpr std::uint64_t syscallClose = unixSyscallClass | 6U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
+constexpr std::uint64_t syscallSigaction = unixSyscallClass | 46U;
 constexpr std::uint64_t syscallAccess = unixSyscallClass | 33U;
 constexpr std::uint64_t syscallDup = unixSyscallClass | 41U;
 constexpr std::uint64_t syscallIoctl = unixSyscallClass | 54U;
@@ -1466,6 +1467,50 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         // Rosa currently has one guest process hosted by one Rosa process, so
         // the host PID is also its externally observable guest process ID.
         setSuccess(state, static_cast<std::uint64_t>(::getpid()));
+        return {};
+    }
+    if (number == syscallSigaction) {
+        // Rosa has no signal delivery: the single guest thread never receives
+        // a host signal. Keep dispositions as task-local guest state so
+        // library initialization can install and query handlers and proceed.
+        // Arguments are the signal number in RDI, the new 16-byte struct
+        // sigaction in RSI (or null to query), and the old-action copyout in
+        // RDX (or null to skip it).
+        if (state.rdi < 1 || state.rdi > 31) {
+            setError(state, EINVAL);
+            return {};
+        }
+        const auto signum = static_cast<std::int32_t>(state.rdi);
+        const auto previous = signalDispositions_.contains(signum)
+                                  ? signalDispositions_.at(signum)
+                                  : GuestSignalDisposition{};
+        if (state.rsi != 0) {
+            GuestSignalDisposition next{};
+            try {
+                const auto bytes =
+                    addressSpace.readBytes(guest::GuestAddress{state.rsi}, 16);
+                std::memcpy(&next.handlerAddress, bytes.data(), 8);
+                std::memcpy(&next.mask, bytes.data() + 8, 4);
+                std::memcpy(&next.flags, bytes.data() + 12, 4);
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            signalDispositions_[signum] = next;
+        }
+        if (state.rdx != 0) {
+            std::array<std::uint8_t, 16> previousBytes{};
+            std::memcpy(previousBytes.data(), &previous.handlerAddress, 8);
+            std::memcpy(previousBytes.data() + 8, &previous.mask, 4);
+            std::memcpy(previousBytes.data() + 12, &previous.flags, 4);
+            try {
+                addressSpace.writeBytes(guest::GuestAddress{state.rdx}, previousBytes);
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+        }
+        setSuccess(state, 0);
         return {};
     }
     if (number == syscallCsops) {

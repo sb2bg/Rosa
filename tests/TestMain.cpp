@@ -19739,6 +19739,76 @@ void testDarwinGetpid() {
                 "getpid changed an ignored argument register");
 }
 
+void testDarwinSigaction() {
+    constexpr auto sigactionNumber = UINT64_C(0x0200002E);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress newActionAddress{0x8100};
+    constexpr rosa::guest::GuestAddress oldActionAddress{0x8200};
+    constexpr auto readWrite = rosa::guest::Permission::Read | rosa::guest::Permission::Write;
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize, readWrite);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+
+    // Install a SIGINT disposition and read back the previous default.
+    std::array<std::uint8_t, 16> newAction{};
+    const std::uint64_t handler = 0x7FF802D07632ULL;
+    const std::uint32_t mask = 0xFF;
+    const std::int32_t flags = 0x40;
+    std::memcpy(newAction.data(), &handler, 8);
+    std::memcpy(newAction.data() + 8, &mask, 4);
+    std::memcpy(newAction.data() + 12, &flags, 4);
+    addressSpace.writeBytes(newActionAddress, newAction);
+    state.rax = sigactionNumber;
+    state.rdi = 2;
+    state.rsi = newActionAddress.value;
+    state.rdx = oldActionAddress.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E34B1CULL}));
+    expectEqual(state.rax, std::uint64_t{0}, "sigaction install did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6}, "sigaction install did not clear BSD carry");
+    expectEqual(addressSpace.readU64(oldActionAddress), std::uint64_t{0},
+                "sigaction did not report the default previous handler");
+    const auto installed = dispatcher.signalDisposition(2);
+    expectEqual(installed.handlerAddress, handler, "sigaction stored the wrong handler");
+    expectEqual(installed.mask, mask, "sigaction stored the wrong mask");
+    expectEqual(installed.flags, flags, "sigaction stored the wrong flags");
+
+    // Query-only round trip returns the installed disposition.
+    state.rax = sigactionNumber;
+    state.rsi = 0;
+    state.rdx = oldActionAddress.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "sigaction query did not succeed");
+    expectEqual(addressSpace.readBytes(oldActionAddress, newAction.size()),
+                std::vector<std::uint8_t>(newAction.begin(), newAction.end()),
+                "sigaction query did not copy out the installed disposition");
+
+    // Invalid signal numbers fail without touching dispositions.
+    state.rax = sigactionNumber;
+    state.rdi = 0;
+    state.rsi = newActionAddress.value;
+    state.rdx = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "sigaction with signal 0 returned the wrong errno");
+    expectEqual(dispatcher.signalDisposition(2).handlerAddress, handler,
+                "rejected sigaction changed the installed disposition");
+
+    // Faulting action pointers report EFAULT.
+    state.rax = sigactionNumber;
+    state.rdi = 2;
+    state.rsi = 0x9000;
+    state.rdx = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "sigaction with an unmapped action returned the wrong errno");
+}
+
 void testDarwinGettimeofday() {
     constexpr auto gettimeofdayNumber = UINT64_C(0x02000074);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -31085,6 +31155,7 @@ int main() {
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin bsdthread_register", testDarwinBsdthreadRegister},
         {"Darwin getpid", testDarwinGetpid},
+        {"Darwin sigaction", testDarwinSigaction},
         {"Darwin gettimeofday", testDarwinGettimeofday},
         {"Darwin issetugid", testDarwinIssetugid},
         {"Darwin ioctl standard descriptor type", testDarwinIoctlStandardDescriptorType},
