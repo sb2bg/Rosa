@@ -137,6 +137,12 @@ const GuestOpenFile *GuestFileSpace::lookup(
     return iterator == files_.end() ? nullptr : &iterator->second;
 }
 
+GuestOpenFile *GuestFileSpace::lookupMutable(
+    GuestFileDescriptor descriptor) noexcept {
+    const auto iterator = files_.find(descriptor);
+    return iterator == files_.end() ? nullptr : &iterator->second;
+}
+
 bool GuestFileSpace::close(GuestFileDescriptor descriptor) noexcept {
     return files_.erase(descriptor) != 0;
 }

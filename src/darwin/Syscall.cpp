@@ -6,6 +6,7 @@
 
 #include <libproc.h>
 #include <mach/mach.h>
+#include <fcntl.h>
 #include <sys/random.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -2306,7 +2307,57 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             setError(state, EBADF);
             return {};
         }
-        if (file->kind != GuestFileKind::RandomDevice || state.rdx > 256U) {
+        if (file->kind != GuestFileKind::RandomDevice &&
+            file->kind != GuestFileKind::HostReadOnlyFile) {
+            std::ostringstream reason;
+            reason << "only reads from the synthetic /dev/urandom and mapped read-only files are implemented; got fd="
+                   << descriptor.value << " count=" << state.rdx;
+            throw unsupported(state, syscallRip, reason.str());
+        }
+        if (file->kind == GuestFileKind::HostReadOnlyFile) {
+            // Guest descriptors stay metadata-only: bridge each read with a
+            // freshly opened host descriptor and the stored file position.
+            auto *mutableFile = fileSpace_.lookupMutable(descriptor);
+            if (mutableFile == nullptr) {
+                setError(state, EBADF);
+                return {};
+            }
+            const auto count = static_cast<std::size_t>(state.rdx);
+            if (count == 0) {
+                setSuccess(state, 0);
+                return {};
+            }
+            try {
+                addressSpace.validateAccess(guest::GuestAddress{state.rsi},
+                                            count,
+                                            guest::Permission::Write);
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            const int hostDescriptor =
+                ::open(mutableFile->guestPath.c_str(), O_RDONLY | O_CLOEXEC);
+            if (hostDescriptor < 0) {
+                setError(state, errno);
+                return {};
+            }
+            std::vector<std::uint8_t> bytes(count);
+            const auto readResult =
+                ::pread(hostDescriptor, bytes.data(), bytes.size(),
+                        static_cast<off_t>(mutableFile->offset));
+            const auto readErrno = errno;
+            ::close(hostDescriptor);
+            if (readResult < 0) {
+                setError(state, readErrno);
+                return {};
+            }
+            bytes.resize(static_cast<std::size_t>(readResult));
+            addressSpace.writeBytes(guest::GuestAddress{state.rsi}, bytes);
+            mutableFile->offset += static_cast<std::uint64_t>(readResult);
+            setSuccess(state, static_cast<std::uint64_t>(readResult));
+            return {};
+        }
+        if (state.rdx > 256U) {
             std::ostringstream reason;
             reason << "only reads of at most 256 bytes from the synthetic /dev/urandom are implemented; got fd="
                    << descriptor.value << " count=" << state.rdx;

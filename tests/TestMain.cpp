@@ -27,6 +27,7 @@
 #include <exception>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -24328,6 +24329,115 @@ void testDarwinOpenRelativeReadOnlyFile() {
                 "escaped read-only guest open allocated a descriptor");
 }
 
+void testDarwinReadHostReadOnlyFile() {
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto readNumber = UINT64_C(0x02000003);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress bufferAddress{0x9000};
+    const auto fixturePath =
+        std::filesystem::canonical(std::filesystem::path{ROSA_TEST_HELLO_MACHO_PATH});
+    std::ifstream fixtureStream(fixturePath, std::ios::binary);
+    std::vector<std::uint8_t> fixtureBytes((std::istreambuf_iterator<char>(fixtureStream)),
+                                           std::istreambuf_iterator<char>());
+    expect(!fixtureBytes.empty(), "read test fixture is empty");
+    const auto fixtureString = fixturePath.string();
+    std::vector<std::uint8_t> pathBytes(fixtureString.begin(), fixtureString.end());
+    pathBytes.push_back(0);
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize * 2,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, pathBytes);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = O_RDONLY;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{3}, "read-test open returned the wrong descriptor");
+
+    constexpr std::uint64_t firstCount = 64;
+    state.rax = readNumber;
+    state.rdi = 3;
+    state.rsi = bufferAddress.value;
+    state.rdx = firstCount;
+    state.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    const auto expectedFirst =
+        std::min<std::size_t>(firstCount, fixtureBytes.size());
+    expectEqual(state.rax, expectedFirst, "read-only file read returned the wrong count");
+    expectEqual(state.rflags, std::uint64_t{0x8D6}, "read-only file read did not clear BSD carry");
+    expect(addressSpace.readBytes(bufferAddress, expectedFirst) ==
+               std::vector<std::uint8_t>(fixtureBytes.begin(),
+                                         fixtureBytes.begin() +
+                                             static_cast<std::ptrdiff_t>(expectedFirst)),
+           "read-only file read returned the wrong bytes");
+
+    // A second read must advance sequentially from the stored file position.
+    state.rax = readNumber;
+    state.rdi = 3;
+    state.rsi = bufferAddress.value;
+    state.rdx = firstCount;
+    state.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    const auto expectedSecond =
+        std::min<std::size_t>(firstCount, fixtureBytes.size() - expectedFirst);
+    expectEqual(state.rax, expectedSecond, "sequential read returned the wrong count");
+    expect(addressSpace.readBytes(bufferAddress, expectedSecond) ==
+               std::vector<std::uint8_t>(fixtureBytes.begin() +
+                                             static_cast<std::ptrdiff_t>(expectedFirst),
+                                         fixtureBytes.begin() +
+                                             static_cast<std::ptrdiff_t>(expectedFirst +
+                                                                         expectedSecond)),
+           "sequential read did not advance the file position");
+
+    // Drain the remainder in bounded chunks, then verify end-of-file is sticky.
+    std::size_t drained = expectedFirst + expectedSecond;
+    while (drained < fixtureBytes.size()) {
+        state.rax = readNumber;
+        state.rdi = 3;
+        state.rsi = bufferAddress.value;
+        state.rdx = 1024;
+        state.rflags = 0x8D7;
+        static_cast<void>(
+            dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+        expect(state.rax > 0 && state.rax <= 1024, "draining read returned no progress");
+        const auto chunk = static_cast<std::size_t>(state.rax);
+        expect(addressSpace.readBytes(bufferAddress, chunk) ==
+                   std::vector<std::uint8_t>(fixtureBytes.begin() +
+                                                 static_cast<std::ptrdiff_t>(drained),
+                                             fixtureBytes.begin() +
+                                                 static_cast<std::ptrdiff_t>(drained + chunk)),
+               "draining read returned the wrong bytes");
+        drained += chunk;
+    }
+    expectEqual(drained, fixtureBytes.size(), "draining reads did not reach end-of-file");
+    state.rax = readNumber;
+    state.rdi = 3;
+    state.rsi = bufferAddress.value;
+    state.rdx = 16;
+    state.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "read at end-of-file did not return zero");
+
+    state.rax = readNumber;
+    state.rdi = 3;
+    state.rsi = 0x700000000000ULL;
+    state.rdx = 16;
+    state.rflags = 0x2;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
+                "read into unmapped memory returned the wrong errno");
+}
+
 void testDarwinOpenSystemDatabasesAbsent() {
     constexpr auto openNoCancelNumber = UINT64_C(0x0200018E);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -34195,6 +34305,7 @@ int main() {
         {"Darwin fstatat64 synthetic directory", testDarwinFstatat64SyntheticDirectory},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
         {"Darwin open relative read-only file", testDarwinOpenRelativeReadOnlyFile},
+        {"Darwin read host read-only file", testDarwinReadHostReadOnlyFile},
         {"Darwin open absent system databases", testDarwinOpenSystemDatabasesAbsent},
         {"Darwin mmap read-only user file", testDarwinMmapReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},

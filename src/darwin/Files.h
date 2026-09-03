@@ -29,6 +29,9 @@ struct GuestOpenFile {
     GuestFileKind kind{};
     std::filesystem::path guestPath;
     std::uint32_t flags{};
+    // File position for HostReadOnlyFile reads. Guest descriptors stay
+    // metadata-only; the host file is opened per operation.
+    std::uint64_t offset{0};
 };
 
 // Task-local guest descriptors are metadata owned by Rosa. They are never
@@ -51,6 +54,8 @@ class GuestFileSpace {
         GuestFileDescriptor descriptor);
     [[nodiscard]] const GuestOpenFile *lookup(
         GuestFileDescriptor descriptor) const noexcept;
+    [[nodiscard]] GuestOpenFile *lookupMutable(
+        GuestFileDescriptor descriptor) noexcept;
     [[nodiscard]] bool close(GuestFileDescriptor descriptor) noexcept;
 
     [[nodiscard]] const std::filesystem::path &currentDirectory() const noexcept {
