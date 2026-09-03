@@ -7761,12 +7761,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto regEncoding = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
             const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
-            if (rexW || mode > 0x2U ||
-                (!hasRex && regEncoding >= 0x4U)) {
+            if (rexW || mode > 0x3U ||
+                (!hasRex && regEncoding >= 0x4U) ||
+                (!hasRex && mode == 0x3U && rmEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
                     "only MOV byte [base+index*scale+disp8/disp32], low-byte-register is supported");
             }
+            if (mode == 0x3U) {
+                instruction.opcode = Opcode::MovRegReg;
+                instruction.operands.push_back(
+                    RegisterOperand{decodeRegister(rmEncoding, rexB), 8});
+                instruction.operands.push_back(
+                    RegisterOperand{decodeRegister(regEncoding, rexR), 8});
+            } else {
             auto base = decodeRegister(rmEncoding, rexB);
             std::optional<Register> index;
             std::uint8_t scale = 1;
@@ -7823,6 +7831,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     : MemoryOperand{base, displacement, 8, index, scale});
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(regEncoding, rexR), 8});
+            }
         } else if (opcode == 0x8AU) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated mov byte register, [memory]");

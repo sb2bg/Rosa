@@ -20526,6 +20526,34 @@ void testLegacyRegisterMove32Execution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "legacy MOV r32 changed flags");
 }
 
+void testByteRegisterMoveExecution() {
+    // Observed in libsqlite3: MOV DL, R8B with REX.R (opcode 88, register-direct).
+    constexpr std::array<std::uint8_t, 4> code{0x44, 0x88, 0xC2, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000480B3ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovRegReg, "MOV r8, r8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "MOV r8, r8 length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx && destination.width == 8 &&
+               source.reg == rosa::x86::Register::R8 && source.width == 8,
+           "MOV DL, R8B operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("mov dl, r8b") != std::string::npos,
+           "MOV DL, R8B dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000480B3ULL});
+    rosa::x86::X86State state;
+    state.rdx = 0xAABBCCDD12345600ULL;
+    state.r8 = 0x11223344556677FFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rdx, std::uint64_t{0xAABBCCDD123456FFULL},
+                "MOV DL, R8B result differs");
+    expectEqual(state.r8, std::uint64_t{0x11223344556677FFULL}, "MOV DL, R8B changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOV r8, r8 changed flags");
+}
+
 void testDecoderRejectsUnsupportedInstruction() {
     constexpr std::array<std::uint8_t, 2> code{0x0F, 0x0B};
     const rosa::x86::Decoder decoder;
@@ -32792,6 +32820,7 @@ int main() {
         {"LEA base index execution", testLeaBaseIndexExecution},
         {"LEA no-base scaled index execution", testLeaNoBaseScaledIndexExecution},
         {"legacy 32-bit register move execution", testLegacyRegisterMove32Execution},
+        {"byte register move execution", testByteRegisterMoveExecution},
         {"unsupported decoder diagnostic", testDecoderRejectsUnsupportedInstruction},
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin bsdthread_register", testDarwinBsdthreadRegister},
