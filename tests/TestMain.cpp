@@ -28458,6 +28458,50 @@ void testAnd32BitRegisterIntoIndexedGuestMemory() {
                 "faulted memory-destination AND changed flags");
 }
 
+void testAnd16BitRegisterIntoGuestMemory() {
+    // Observed in libsqlite3: AND word [r15+0x28], cx with REX.B (66 41 21).
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x41, 0x21, 0x4F, 0x28, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x100084745ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndMemReg,
+           "word memory-destination AND opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "word memory-destination AND length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R15 && memory.displacement == 0x28 &&
+               memory.width == 16 && source.reg == rosa::x86::Register::Rcx &&
+               source.width == 16,
+           "and word [r15+0x28], cx operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("and word [r15+0x28], cx") != std::string::npos,
+           "word memory-destination AND dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8028};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 2>{0xFF, 0xFF});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x100084745ULL});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find("and_guest_memory.i16") !=
+               std::string::npos,
+           "word memory-destination AND did not lower through guest-memory IR");
+    rosa::x86::X86State state;
+    state.r15 = page.value;
+    state.rcx = 0xAABBCCDD0000FF0FULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expect(addressSpace.readBytes(target, 2) == std::vector<std::uint8_t>({0x0F, 0xFF}),
+           "word memory-destination AND result differs");
+    expectEqual(state.r15, page.value, "word memory-destination AND changed its base");
+    expectEqual(state.rcx, std::uint64_t{0xAABBCCDD0000FF0FULL},
+                "word memory-destination AND changed its source");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "word memory-destination AND defined flags differ");
+}
+
 void testAndImmediateIntoGuestWord() {
     constexpr std::array<std::uint8_t, 8> code{0x66, 0x41, 0x81, 0x67, 0x2E, 0x7F, 0xFE, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -33898,6 +33942,7 @@ int main() {
         {"AND 32-bit register with indexed SIB memory", testAnd32BitRegisterWithIndexedSibMemory},
         {"AND 32-bit register into indexed guest memory",
          testAnd32BitRegisterIntoIndexedGuestMemory},
+        {"AND 16-bit register into guest memory", testAnd16BitRegisterIntoGuestMemory},
         {"AND immediate into guest word", testAndImmediateIntoGuestWord},
         {"AND immediate into guest byte", testAndImmediateIntoGuestByte},
         {"BT 32-bit register with immediate", testBitTestRegisterImmediate32},

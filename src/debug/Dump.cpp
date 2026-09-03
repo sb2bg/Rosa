@@ -1271,7 +1271,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::AndMemReg: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << (memory.width == 32 ? "and dword [" : "and qword [");
+            stream << (memory.width == 16    ? "and word ["
+                       : memory.width == 32 ? "and dword ["
+                                            : "and qword [");
             if (memory.ripRelative) {
                 stream << "rip";
             } else if (memory.hasBase) {

@@ -5807,7 +5807,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         const auto opcode = code[cursor++];
         if (hasOperandSizeOverride && opcode != 0x01U && opcode != 0x03U && opcode != 0x0BU && opcode != 0x39U &&
             opcode != 0x3BU && opcode != 0x89U && opcode != 0x8BU && opcode != 0xF7U &&
-            opcode != 0xFFU) {
+            opcode != 0xFFU && opcode != 0x21U) {
             throw DecodeError(
                 address, remaining,
                 "operand-size override is only supported for 16-bit ADD, OR, CMP, MOV, and memory INC in the general decoder");
@@ -7049,7 +7049,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+            const auto width = static_cast<std::uint8_t>(
+                rexW ? 64U : (hasOperandSizeOverride ? 16U : 32U));
             const auto source =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);

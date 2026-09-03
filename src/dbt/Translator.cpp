@@ -5683,6 +5683,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
             const auto width = destination.width == 8    ? ir::Width::I8
+                               : destination.width == 16 ? ir::Width::I16
                                : destination.width == 32 ? ir::Width::I32
                                                          : ir::Width::I64;
             const auto lhs = builder.readGuestRegister(destination.reg, width, instruction.address);
@@ -5743,11 +5744,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
-            if (memory.width != source.width || (memory.width != 32 && memory.width != 64)) {
+            if (memory.width != source.width ||
+                (memory.width != 16 && memory.width != 32 && memory.width != 64)) {
                 throw std::runtime_error(
-                    "only matching 32- and 64-bit memory-destination AND is implemented");
+                    "only matching 16-, 32- and 64-bit memory-destination AND is implemented");
             }
-            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto width = memory.width == 16    ? ir::Width::I16
+                               : memory.width == 32 ? ir::Width::I32
+                                                    : ir::Width::I64;
             auto address =
                 memory.ripRelative
                     ? builder.constant(instruction.address.value + instruction.length,
