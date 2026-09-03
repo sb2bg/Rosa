@@ -41,6 +41,7 @@ constexpr std::uint64_t syscallWrite = unixSyscallClass | 4U;
 constexpr std::uint64_t syscallOpen = unixSyscallClass | 5U;
 constexpr std::uint64_t syscallClose = unixSyscallClass | 6U;
 constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
+constexpr std::uint64_t syscallGetuid = unixSyscallClass | 24U;
 constexpr std::uint64_t syscallSigaction = unixSyscallClass | 46U;
 constexpr std::uint64_t syscallAccess = unixSyscallClass | 33U;
 constexpr std::uint64_t syscallDup = unixSyscallClass | 41U;
@@ -1521,6 +1522,12 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         // Rosa currently has one guest process hosted by one Rosa process, so
         // the host PID is also its externally observable guest process ID.
         setSuccess(state, static_cast<std::uint64_t>(::getpid()));
+        return {};
+    }
+    if (number == syscallGetuid) {
+        // Same one-process model as getpid: the host user ID is the guest's
+        // externally observable real user ID.
+        setSuccess(state, static_cast<std::uint64_t>(::getuid()));
         return {};
     }
     if (number == syscallSigaction) {

@@ -19979,6 +19979,27 @@ void testDarwinGetpid() {
                 "getpid changed an ignored argument register");
 }
 
+void testDarwinGetuid() {
+    constexpr auto getuidNumber = UINT64_C(0x02000018);
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = getuidNumber;
+    state.rdi = 0x0123456789ABCDEFULL;
+    state.rsi = 0x803;
+    state.rflags = 0x8D7;
+
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E31180ULL});
+    expect(!outcome.exited, "getuid terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(::getuid()),
+                "getuid returned the wrong user identity");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "getuid did not apply successful BSD carry semantics");
+    expectEqual(state.rdi, std::uint64_t{0x0123456789ABCDEFULL},
+                "getuid changed an ignored argument register");
+}
+
 void testDarwinSigaction() {
     constexpr auto sigactionNumber = UINT64_C(0x0200002E);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -31540,6 +31561,7 @@ int main() {
         {"RIP-relative LEA and syscall decoder", testDecoderRipRelativeLeaAndSyscall},
         {"Darwin bsdthread_register", testDarwinBsdthreadRegister},
         {"Darwin getpid", testDarwinGetpid},
+        {"Darwin getuid", testDarwinGetuid},
         {"Darwin sigaction", testDarwinSigaction},
         {"Darwin gettimeofday", testDarwinGettimeofday},
         {"Darwin issetugid", testDarwinIssetugid},
