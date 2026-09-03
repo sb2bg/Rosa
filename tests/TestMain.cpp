@@ -24142,6 +24142,55 @@ void testMachSpecialReplyPortTrap() {
     expect(fresh != first, "mach_reply_port reused the special reply port name");
 }
 
+void testMachHostCreateVoucherTrap() {
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress recipesAddress{0x8100};
+    constexpr rosa::guest::GuestAddress voucherAddress{0x8200};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::hostSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    const auto hostName = static_cast<std::uint32_t>(state.rax);
+
+    // The observed libdispatch recipe: key 3, command 0x262, zero params.
+    constexpr std::array<std::uint8_t, 16> recipes{3, 0, 0, 0, 0x62, 2, 0, 0,
+                                                  0, 0, 0, 0, 0, 0, 0, 0};
+    addressSpace.writeBytes(recipesAddress, recipes);
+    state.rax = rosa::darwin::MachDispatcher::hostCreateMachVoucherTrapNumber;
+    state.rdi = hostName;
+    state.rsi = recipesAddress.value;
+    state.rdx = recipes.size();
+    state.r10 = voucherAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E309F3ULL});
+    expectEqual(state.rax, std::uint64_t{0}, "voucher creation did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "voucher creation changed flags");
+    const auto first = addressSpace.readU64(voucherAddress);
+    expect(first != 0, "voucher creation returned a null token");
+
+    state.rax = rosa::darwin::MachDispatcher::hostCreateMachVoucherTrapNumber;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{0}, "second voucher creation did not succeed");
+    const auto second = addressSpace.readU64(voucherAddress);
+    expect(second != 0 && second != first, "voucher creation reused a token");
+
+    state.rax = rosa::darwin::MachDispatcher::hostCreateMachVoucherTrapNumber;
+    state.rdi = 0xDEAD;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{4},
+                "voucher creation on a bad host port returned the wrong result");
+
+    state.rax = rosa::darwin::MachDispatcher::hostCreateMachVoucherTrapNumber;
+    state.rdi = hostName;
+    state.rsi = 0x9000;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{1},
+                "voucher creation with unreadable recipes returned the wrong result");
+}
+
 void testMachPortConstructTrap() {
     constexpr rosa::guest::GuestAddress optionsAddress{0x8100};
     constexpr rosa::guest::GuestAddress outputAddress{0x8200};
@@ -31887,6 +31936,7 @@ int main() {
         {"Mach port deallocate trap", testMachPortDeallocateTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
         {"Mach special reply-port trap", testMachSpecialReplyPortTrap},
+        {"Mach host create voucher trap", testMachHostCreateVoucherTrap},
         {"Mach port construct trap", testMachPortConstructTrap},
         {"Mach VM allocate trap", testMachVmAllocateTrap},
         {"Mach VM deallocate trap", testMachVmDeallocateTrap},

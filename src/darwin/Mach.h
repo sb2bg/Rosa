@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 
 namespace rosa::darwin {
@@ -40,6 +41,7 @@ class MachDispatcher {
     static constexpr std::uint64_t hostSelfTrapNumber = syscallClass | 29U;
     static constexpr std::uint64_t machMessage2TrapNumber = syscallClass | 47U;
     static constexpr std::uint64_t specialReplyPortTrapNumber = syscallClass | 50U;
+    static constexpr std::uint64_t hostCreateMachVoucherTrapNumber = syscallClass | 70U;
 
     [[nodiscard]] static constexpr bool isMachTrap(std::uint64_t number) {
         return (number & syscallClassMask) == syscallClass;
@@ -77,6 +79,8 @@ class MachDispatcher {
     std::optional<GuestPortConstructObservation> lastPortConstruct_;
     std::optional<GuestMachPortName> taskDebugControlPort_;
     std::optional<GuestMachPortName> specialReplyPort_;
+    std::set<std::uint64_t> vouchers_;
+    std::uint64_t nextVoucher_{1};
 };
 
 } // namespace rosa::darwin

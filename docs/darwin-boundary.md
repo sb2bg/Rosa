@@ -48,6 +48,7 @@ The Mach trap class currently implements these narrow semantic forms:
 | 29 | copy out a synthetic guest host send right |
 | 47 | decode only the observed `mach_msg2` host-basic-info, host special-port demotion, and task `mach_vm_map` MIG exchanges |
 | 50 | return the single guest thread's stable special reply port, allocating one synthetic receive right on first use |
+| 70 | mint a synthetic process voucher token per successful creation; no banks or attributes are modeled |
 
 Mach traps return Mach result values in guest `RAX`; they do not use the BSD carry-flag convention. These are guest-namespace ports and mappings, not host task/port identity passthrough.
 

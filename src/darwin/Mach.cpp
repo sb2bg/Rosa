@@ -1969,6 +1969,46 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = specialReplyPort_->value;
         return;
     }
+    case 70U: {
+        // host_create_mach_voucher_trap takes the host port, a recipe
+        // buffer and size, and a voucher copyout. Rosa has no voucher
+        // banks or attributes, so each successful call mints a new
+        // synthetic voucher token for the process. Vouchers are inert
+        // guest metadata here: no message path consumes them yet.
+        constexpr std::uint64_t maximumRecipeSize = 1024U * 1024U;
+        const auto *hostPort = portSpace_.lookup(
+            GuestMachPortName{static_cast<std::uint32_t>(state.rdi)});
+        if (hostPort == nullptr || hostPort->type != GuestPortType::Host ||
+            hostPort->sendUrefs == 0 || state.r10 == 0 ||
+            state.rdx > maximumRecipeSize) {
+            state.rax = kernInvalidArgument;
+            return;
+        }
+        try {
+            // Validate the recipe buffer and the voucher copyout without
+            // interpreting recipe contents.
+            static_cast<void>(addressSpace.readBytes(
+                guest::GuestAddress{state.rsi},
+                static_cast<std::size_t>(state.rdx)));
+            addressSpace.validateAccess(guest::GuestAddress{state.r10},
+                                        sizeof(std::uint64_t),
+                                        guest::Permission::Write);
+        } catch (const std::runtime_error &) {
+            state.rax = kernInvalidAddress;
+            return;
+        }
+        const auto voucher = nextVoucher_++;
+        vouchers_.insert(voucher);
+        try {
+            addressSpace.writeU64(guest::GuestAddress{state.r10}, voucher);
+        } catch (const std::runtime_error &) {
+            vouchers_.erase(voucher);
+            state.rax = kernInvalidAddress;
+            return;
+        }
+        state.rax = kernSuccess;
+        return;
+    }
     default:
         throw unsupported(state, syscallRip);
     }
