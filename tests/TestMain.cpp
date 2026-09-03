@@ -32090,6 +32090,51 @@ void testConditionalMoveEqual64() {
     expectEqual(notTaken.rflags, std::uint64_t{0x8D7 & ~zeroFlag}, "untaken CMOVE changed flags");
 }
 
+void testConditionalMoveEqual64FromGuestMemory() {
+    // Observed in libsqlite3: CMOVE R14, qword [RBP-0x68] with REX.WR.
+    constexpr std::array<std::uint8_t, 6> code{0x4C, 0x0F, 0x44, 0x75, 0x98, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10007DC64ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccRegMem, "CMOVE memory opcode differs");
+    expect(decoded[0].condition == rosa::x86::Condition::Equal, "CMOVE memory condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "CMOVE memory length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R14 && destination.width == 64,
+           "CMOVE memory destination differs");
+    expect(memory.base == rosa::x86::Register::Rbp && memory.displacement == -0x68 &&
+               memory.width == 64,
+           "CMOVE memory source differs");
+    expect(rosa::debug::dumpX86(decoded).find("cmove r14, qword [rbp-0x68]") != std::string::npos,
+           "CMOVE memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0x1122334455667788ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10007DC64ULL});
+    rosa::x86::X86State taken;
+    taken.rbp = target.value + 0x68;
+    taken.r14 = UINT64_MAX;
+    taken.rflags = 0x8D7 | zeroFlag;
+    static_cast<void>(block.execute(taken, &addressSpace));
+    expectEqual(taken.r14, std::uint64_t{0x1122334455667788ULL}, "taken CMOVE memory differs");
+    expectEqual(taken.rflags, std::uint64_t{0x8D7 | zeroFlag}, "taken CMOVE memory changed flags");
+
+    rosa::x86::X86State notTaken;
+    notTaken.rbp = target.value + 0x68;
+    notTaken.r14 = 0xAABBCCDDEEFF0011ULL;
+    notTaken.rflags = 0x8D7 & ~zeroFlag;
+    static_cast<void>(block.execute(notTaken, &addressSpace));
+    expectEqual(notTaken.r14, std::uint64_t{0xAABBCCDDEEFF0011ULL},
+                "untaken CMOVE memory changed destination");
+    expectEqual(notTaken.rflags, std::uint64_t{0x8D7 & ~zeroFlag},
+                "untaken CMOVE memory changed flags");
+}
+
 void testConditionalMoveNotEqual64Extended() {
     constexpr std::array<std::uint8_t, 5> code{0x4C, 0x0F, 0x45, 0xE1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -33669,6 +33714,8 @@ int main() {
         {"conditional move above 64-bit", testConditionalMoveAbove64},
         {"conditional move below-or-equal 32-bit", testConditionalMoveBelowOrEqual32},
         {"conditional move equal 64-bit", testConditionalMoveEqual64},
+        {"conditional move equal 64-bit from guest memory",
+         testConditionalMoveEqual64FromGuestMemory},
         {"conditional move not-equal extended 64-bit", testConditionalMoveNotEqual64Extended},
         {"conditional move not-equal legacy 32-bit", testConditionalMoveNotEqual32Legacy},
         {"conditional move sign 64-bit", testConditionalMoveSign64},

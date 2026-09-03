@@ -6148,7 +6148,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const bool isMovsxMemory =
                 secondOpcode == 0xBEU && mode != 0x3U &&
                 !(mode == 0 && rmEncoding == 0x5U);
-            if ((!isImulRipMemory && !isMovsxMemory && mode != 0x3U) ||
+            const bool isCmovMemory =
+                isConditionalMove && mode != 0x3U;
+            if ((!isImulRipMemory && !isMovsxMemory && !isCmovMemory && mode != 0x3U) ||
                 (rexX && secondOpcode != 0xBAU && !isMovsxMemory)) {
                 throw DecodeError(
                     address, remaining,
@@ -6259,7 +6261,6 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         RegisterOperand{encodedRm, 8});
                 }
             } else if (isConditionalMove) {
-                instruction.opcode = Opcode::CmovccReg;
                 instruction.condition = secondOpcode == 0x42U
                                             ? Condition::Below
                                         : secondOpcode == 0x43U
@@ -6289,8 +6290,36 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     static_cast<std::uint8_t>(rexW ? 64U : 32U);
                 instruction.operands.push_back(
                     RegisterOperand{encodedReg, width});
-                instruction.operands.push_back(
-                    RegisterOperand{encodedRm, width});
+                if (isCmovMemory) {
+                    if (rmEncoding == 0x4U ||
+                        (mode == 0 && rmEncoding == 0x5U)) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only CMOV register, [base+disp8/disp32] memory operands are supported");
+                    }
+                    std::int64_t displacement = 0;
+                    if (mode == 0x1U) {
+                        if (cursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated CMOV memory disp8");
+                        }
+                        displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                    } else if (mode == 0x2U) {
+                        if (code.size() - cursor < 4) {
+                            throw DecodeError(address, remaining,
+                                              "truncated CMOV memory disp32");
+                        }
+                        displacement = readI32(code.subspan(cursor, 4));
+                        cursor += 4;
+                    }
+                    instruction.opcode = Opcode::CmovccRegMem;
+                    instruction.operands.push_back(MemoryOperand{
+                        decodeRegister(rmEncoding, rexB), displacement, width});
+                } else {
+                    instruction.opcode = Opcode::CmovccReg;
+                    instruction.operands.push_back(
+                        RegisterOperand{encodedRm, width});
+                }
             } else if (secondOpcode == 0xBCU) {
                 instruction.opcode = Opcode::BitScanForwardRegReg;
                 const auto width =
