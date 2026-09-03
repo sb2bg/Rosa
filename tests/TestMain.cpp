@@ -13452,6 +13452,32 @@ void testShiftRightArithmetic32ImmediateGeneratedExecution() {
     constexpr std::uint64_t definedOneFlags = definedManyFlags | (std::uint64_t{1} << 11U);
     expectEqual(oneState.rflags & definedOneFlags, std::uint64_t{(1U << 2U) | (1U << 7U)},
                 "SAR ecx, 1 defined flags differ");
+
+    // Observed in libsqlite3: SAR EBX, 1 with an implicit count (D1 /7).
+    constexpr std::array<std::uint8_t, 3> implicitCode{0xD1, 0xFB, 0xC3};
+    const auto implicitDecoded =
+        decoder.decodeBlock(implicitCode, rosa::guest::GuestAddress{0x1000247B9ULL});
+    expect(implicitDecoded[0].opcode == rosa::x86::Opcode::SarRegImm,
+           "SAR r32, 1 opcode differs");
+    expectEqual(implicitDecoded[0].length, std::uint8_t{2}, "SAR r32, 1 length differs");
+    const auto implicitDestination =
+        std::get<rosa::x86::RegisterOperand>(implicitDecoded[0].operands[0]);
+    const auto implicitCount =
+        std::get<rosa::x86::ImmediateOperand>(implicitDecoded[0].operands[1]);
+    expect(implicitDestination.reg == rosa::x86::Register::Rbx &&
+               implicitDestination.width == 32 && implicitCount.value == 1,
+           "SAR ebx, 1 operands differ");
+    expect(rosa::debug::dumpX86(implicitDecoded).find("sar ebx, 0x1") != std::string::npos,
+           "SAR ebx, 1 dump differs");
+    const auto implicitBlock =
+        translator.translate(implicitCode, rosa::guest::GuestAddress{0x1000247B9ULL});
+    rosa::x86::X86State implicitState;
+    implicitState.rbx = 0xAABBCCDD80000000ULL;
+    implicitState.rflags = 0x8D7;
+    static_cast<void>(implicitBlock.execute(implicitState));
+    expectEqual(implicitState.rbx, std::uint64_t{0xC0000000ULL}, "SAR ebx, 1 result differs");
+    expectEqual(implicitState.rflags & definedOneFlags, std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "SAR ebx, 1 defined flags differ");
 }
 
 void testRotateLeft16ImmediateGeneratedExecution() {

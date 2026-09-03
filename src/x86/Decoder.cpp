@@ -8624,12 +8624,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            if (rexR || rexX || mode != 0x3U || extension != 0x5U) {
+            if (rexR || rexX || mode != 0x3U ||
+                (extension != 0x5U && extension != 0x7U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct SHR r32/r64, 1 from opcode D1 /5 is supported");
+                    "only register-direct SHR r32/r64, 1 and SAR r32/r64, 1 from opcode D1 /5 and /7 are supported");
             }
-            instruction.opcode = Opcode::ShrRegImm;
+            instruction.opcode =
+                extension == 0x5U ? Opcode::ShrRegImm : Opcode::SarRegImm;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
                 static_cast<std::uint8_t>(rexW ? 64U : 32U)});
