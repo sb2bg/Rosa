@@ -54,6 +54,17 @@ LoadedImage Loader::mapImage(const MachOFile &file, guest::AddressSpace &address
         if (segment.virtualSize > std::numeric_limits<std::size_t>::max()) {
             throw std::runtime_error("Mach-O segment is too large for this host");
         }
+        // Real loaders map at page granularity: vmsize is rounded up and the
+        // tail beyond filesize is zero-filled. sqlite's __LINKEDIT, for
+        // example, is 0x5888 bytes and would otherwise fail the 4 KiB
+        // guest-page contract. mapSegments zero-fills backing past
+        // initialBytes, so rounding the request size is sufficient.
+        constexpr std::size_t page = guest::guestPageSize;
+        const auto rawSize = static_cast<std::size_t>(segment.virtualSize);
+        if (rawSize > std::numeric_limits<std::size_t>::max() - (page - 1U)) {
+            throw std::runtime_error("Mach-O segment size overflows page rounding");
+        }
+        const auto roundedSize = (rawSize + (page - 1U)) & ~(page - 1U);
         const auto mappedAddress = slidAddress(segment.virtualAddress, slide);
         const auto begin = static_cast<std::size_t>(segment.fileOffset);
         const auto size = static_cast<std::size_t>(segment.fileSize);
@@ -62,7 +73,7 @@ LoadedImage Loader::mapImage(const MachOFile &file, guest::AddressSpace &address
                                 : std::string(imageName) + ":" + segment.name;
         mappings.push_back(guest::SegmentMapping{
             .base = mappedAddress,
-            .size = static_cast<std::size_t>(segment.virtualSize),
+            .size = roundedSize,
             .permissions = translatePermissions(segment.initialProtection),
             .maximumPermissions =
                 translatePermissions(segment.maximumProtection),
