@@ -1036,8 +1036,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               instruction.operands[0]))
                    << ", "
                    << (memory.width == 8    ? "byte"
-                       : memory.width == 16 ? "word"
-                                            : "dword")
+                        : memory.width == 16 ? "word"
+                        : memory.width == 32 ? "dword"
+                                             : "qword")
                    << " ["
                    << (memory.ripRelative ? "rip"
                                           : x86::registerName(memory.base));

@@ -6442,20 +6442,32 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 displacement, 8, index, scale, !ripRelative,
                 ripRelative});
         } else if (opcode == 0x0BU) {
-            if (rexW || code.size() - cursor < 1) {
-                throw DecodeError(
-                    address, remaining,
-                    "only OR r16/r32, word/dword [memory] is supported from opcode 0B");
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining,
+                                  "truncated OR r16/r32/r64, word/dword/qword [memory]");
             }
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto regEncoding =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode > 0x2U) {
-                throw DecodeError(
-                    address, remaining,
-                    "only OR r32, dword [base/RIP+index*scale+disp8/disp32] is supported");
+            const auto width = static_cast<std::uint8_t>(
+                rexW ? 64U : (hasOperandSizeOverride ? 16U : 32U));
+            if (mode == 0x3U) {
+                instruction.opcode = Opcode::OrRegReg;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(rmEncoding, rexB), width});
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(regEncoding, rexR), width});
+                const auto length = cursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
             }
             const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             auto baseEncoding = rmEncoding;
@@ -6513,8 +6525,6 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     address, cursor - instructionStart, displacement));
             }
             instruction.opcode = Opcode::OrRegMem;
-            const auto width = static_cast<std::uint8_t>(
-                hasOperandSizeOverride ? 16U : 32U);
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(regEncoding, rexR), width});
             instruction.operands.push_back(

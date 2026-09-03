@@ -14553,6 +14553,55 @@ void testOr32BitRegisterFromGuestMemory() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted OR r32 load changed flags");
 }
 
+void testOr64BitRegisterFromGuestMemory() {
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0x0B, 0x45, 0x10, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x7FF802A91850ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrRegMem,
+           "OR r64, qword [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "OR r64, qword [memory] length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 64 &&
+               memory.base == rosa::x86::Register::Rbp && memory.width == 64 &&
+               memory.displacement == 0x10 && !memory.index,
+           "OR rax, qword [rbp+0x10] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("or rax, qword [rbp+0x10]") != std::string::npos,
+           "OR rax, qword [rbp+0x10] dump differs");
+
+    constexpr std::array<std::uint8_t, 4> regCode{0x48, 0x0B, 0xC0, 0xC3};
+    const auto regDecoded = decoder.decodeBlock(regCode, rosa::guest::GuestAddress{0x1000});
+    expect(regDecoded[0].opcode == rosa::x86::Opcode::OrRegReg, "OR r64, r64 opcode differs");
+    expectEqual(regDecoded[0].length, std::uint8_t{3}, "OR r64, r64 length differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress base{0x8100};
+    constexpr rosa::guest::GuestAddress target{0x8110};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::uint64_t originalMemory = 0x0F0F0F0F00FF00FFULL;
+    addressSpace.writeU64(target, originalMemory);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x7FF802A91850ULL}, 1);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find("load_guest.i64") !=
+               std::string::npos,
+           "OR qword load did not lower through guest-memory IR");
+    rosa::x86::X86State state;
+    state.rax = 0xF0F0F0F0FF00FF00ULL;
+    state.rbp = base.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0xFFFFFFFFFFFFFFFFULL},
+                "OR r64 memory result differs");
+    expectEqual(state.rbp, base.value, "OR r64 memory changed its base");
+    expectEqual(addressSpace.readU64(target), originalMemory, "OR r64 memory changed guest memory");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0x84},
+                "OR r64 memory defined flags differ");
+}
+
 void testOr16BitRegisterFromGuestMemory() {
     constexpr std::array<std::uint8_t, 6> code{0x66, 0x44, 0x0B, 0x7B, 0x10, 0xC3};
     constexpr rosa::guest::GuestAddress rip{0x7FF802D1A234ULL};
@@ -30694,6 +30743,7 @@ int main() {
         {"OR 8-bit registers generated execution", testOr8BitRegistersGeneratedExecution},
         {"OR 8-bit register from guest memory", testOr8BitRegisterFromGuestMemory},
         {"OR 32-bit register from guest memory", testOr32BitRegisterFromGuestMemory},
+        {"OR 64-bit register from guest memory", testOr64BitRegisterFromGuestMemory},
         {"OR 16-bit register from guest memory", testOr16BitRegisterFromGuestMemory},
         {"OR 8-bit register into indexed guest memory", testOr8BitRegisterIntoIndexedGuestMemory},
         {"OR 32-bit register into indexed guest memory", testOr32BitRegisterIntoIndexedGuestMemory},
