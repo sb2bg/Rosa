@@ -29852,6 +29852,110 @@ void testConditionalMoveLessOrEqual64() {
     expectNoMove(0x2 | sign | overflow, "CMOVLE moved when SF and OF were both set");
 }
 
+void testConditionalMoveGreaterOrEqual32() {
+    // Observed in libsystem_c: cmovge eax, ecx without a REX prefix.
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x4D, 0xC1, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802D27CFEULL};
+    constexpr std::uint64_t sign = std::uint64_t{1} << 7U;
+    constexpr std::uint64_t overflow = std::uint64_t{1} << 11U;
+
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               decoded[0].condition == rosa::x86::Condition::GreaterOrEqual,
+           "CMOVGE opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "CMOVGE length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 32 &&
+               source.reg == rosa::x86::Register::Rcx && source.width == 32,
+           "CMOVGE eax, ecx operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmovge eax, ecx") != std::string::npos,
+           "CMOVGE eax, ecx dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    const auto execute = [&block](std::uint64_t flags) {
+        rosa::x86::X86State state;
+        state.rax = 0xAABBCCDD11223344ULL;
+        state.rcx = 0x88776655DEADBEEFULL;
+        state.rflags = flags;
+        static_cast<void>(block.execute(state));
+        return state;
+    };
+    const auto taken = execute(0x2);
+    expectEqual(taken.rax, std::uint64_t{0xDEADBEEFULL},
+                "CMOVGE did not take when SF=OF=0");
+    expectEqual(taken.rflags, std::uint64_t{0x2}, "taken CMOVGE changed flags");
+    const auto alsoTaken = execute(0x2 | sign | overflow);
+    expectEqual(alsoTaken.rax, std::uint64_t{0xDEADBEEFULL},
+                "CMOVGE did not take when SF and OF were both set");
+    const auto notTaken = execute(0x2 | sign);
+    expectEqual(notTaken.rax, std::uint64_t{0x11223344},
+                "CMOVGE moved when SF differed from OF");
+    const auto overflowOnly = execute(0x2 | overflow);
+    expectEqual(overflowOnly.rax, std::uint64_t{0x11223344},
+                "CMOVGE moved when OF differed from SF");
+}
+
+void testConditionalMoveLessAndOverflow64() {
+    constexpr std::array<std::uint8_t, 5> lessCode{0x48, 0x0F, 0x4C, 0xC1, 0xC3};
+    constexpr std::array<std::uint8_t, 5> overflowCode{0x48, 0x0F, 0x40, 0xC1, 0xC3};
+    constexpr std::uint64_t sign = std::uint64_t{1} << 7U;
+    constexpr std::uint64_t overflow = std::uint64_t{1} << 11U;
+
+    const rosa::x86::Decoder decoder;
+    const auto lessDecoded =
+        decoder.decodeBlock(lessCode, rosa::guest::GuestAddress{0x1000});
+    expect(lessDecoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               lessDecoded[0].condition == rosa::x86::Condition::Less,
+           "CMOVL opcode or condition differs");
+    expect(rosa::debug::dumpX86(lessDecoded).find("cmovl rax, rcx") != std::string::npos,
+           "CMOVL rax, rcx dump differs");
+    const auto overflowDecoded =
+        decoder.decodeBlock(overflowCode, rosa::guest::GuestAddress{0x2000});
+    expect(overflowDecoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               overflowDecoded[0].condition == rosa::x86::Condition::Overflow,
+           "CMOVO opcode or condition differs");
+    expect(rosa::debug::dumpX86(overflowDecoded).find("cmovo rax, rcx") != std::string::npos,
+           "CMOVO rax, rcx dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto lessBlock =
+        translator.translate(lessCode, rosa::guest::GuestAddress{0x1000});
+    const auto executeLess = [&lessBlock](std::uint64_t flags) {
+        rosa::x86::X86State state;
+        state.rax = 0x1111;
+        state.rcx = UINT64_C(0xAABBCCDDEEFF0011);
+        state.rflags = flags;
+        static_cast<void>(lessBlock.execute(state));
+        return state;
+    };
+    expectEqual(executeLess(0x2 | sign).rax, UINT64_C(0xAABBCCDDEEFF0011),
+                "CMOVL did not take when SF differed from OF");
+    expectEqual(executeLess(0x2 | overflow).rax, UINT64_C(0xAABBCCDDEEFF0011),
+                "CMOVL did not take when OF differed from SF");
+    expectEqual(executeLess(0x2).rax, std::uint64_t{0x1111},
+                "CMOVL moved when SF equaled OF");
+    expectEqual(executeLess(0x2 | sign | overflow).rax, std::uint64_t{0x1111},
+                "CMOVL moved when SF and OF were both set");
+
+    const auto overflowBlock =
+        translator.translate(overflowCode, rosa::guest::GuestAddress{0x2000});
+    const auto executeOverflow = [&overflowBlock](std::uint64_t flags) {
+        rosa::x86::X86State state;
+        state.rax = 0x1111;
+        state.rcx = UINT64_C(0xAABBCCDDEEFF0011);
+        state.rflags = flags;
+        static_cast<void>(overflowBlock.execute(state));
+        return state;
+    };
+    expectEqual(executeOverflow(0x2 | overflow).rax, UINT64_C(0xAABBCCDDEEFF0011),
+                "CMOVO did not take when OF was set");
+    expectEqual(executeOverflow(0x2).rax, std::uint64_t{0x1111},
+                "CMOVO moved when OF was clear");
+}
+
 void testConditionalMoveGreater64() {
     constexpr std::array<std::uint8_t, 5> code{0x49, 0x0F, 0x4F, 0xCE, 0xC3};
     constexpr rosa::guest::GuestAddress rip{0x7FF802D07632ULL};
@@ -31004,6 +31108,8 @@ int main() {
         {"conditional move not-equal legacy 32-bit", testConditionalMoveNotEqual32Legacy},
         {"conditional move sign 64-bit", testConditionalMoveSign64},
         {"conditional move less-or-equal 64-bit", testConditionalMoveLessOrEqual64},
+        {"conditional move greater-or-equal 32-bit", testConditionalMoveGreaterOrEqual32},
+        {"conditional move less and overflow 64-bit", testConditionalMoveLessAndOverflow64},
         {"conditional move greater 64-bit", testConditionalMoveGreater64},
         {"conditional move equal extended 32-bit", testConditionalMoveEqual32Extended},
         {"unsigned-above conditional", testUnsignedAboveConditional},

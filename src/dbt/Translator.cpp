@@ -8178,13 +8178,16 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                  *operation.condition != x86::Condition::Above &&
                  *operation.condition != x86::Condition::Equal &&
                  *operation.condition != x86::Condition::NotEqual &&
+                 *operation.condition != x86::Condition::Overflow &&
                  *operation.condition != x86::Condition::Sign &&
                  *operation.condition != x86::Condition::NotSign &&
+                 *operation.condition != x86::Condition::Less &&
+                 *operation.condition != x86::Condition::GreaterOrEqual &&
                  *operation.condition != x86::Condition::LessOrEqual &&
                  *operation.condition != x86::Condition::Greater)) {
                 throw std::runtime_error(
                     "ARM64 backend only implements 32- and 64-bit register "
-                    "CMOVB/CMOVBE/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVLE/CMOVG");
+                    "CMOVO/CMOVB/CMOVBE/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVL/CMOVGE/CMOVLE/CMOVG");
             }
             constexpr std::uint8_t carryFlagBit = 0;
             constexpr std::uint8_t zeroFlagBit = 6;
@@ -8286,6 +8289,19 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                     assembler.tbz(arm64::x16, signFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::NotSign) {
                     assembler.tbnz(arm64::x16, signFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::Overflow) {
+                    constexpr std::uint8_t overflowFlagBit = 11;
+                    assembler.tbz(arm64::x16, overflowFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::Less) {
+                    constexpr std::uint8_t overflowFlagBit = 11;
+                    assembler.lsrImmediate(arm64::x17, arm64::x16, overflowFlagBit - signFlagBit);
+                    assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
+                    assembler.tbz(arm64::x17, signFlagBit, notTaken);
+                } else if (*operation.condition == x86::Condition::GreaterOrEqual) {
+                    constexpr std::uint8_t overflowFlagBit = 11;
+                    assembler.lsrImmediate(arm64::x17, arm64::x16, overflowFlagBit - signFlagBit);
+                    assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
+                    assembler.tbnz(arm64::x17, signFlagBit, notTaken);
                 } else if (*operation.condition == x86::Condition::LessOrEqual) {
                     constexpr std::uint8_t overflowFlagBit = 11;
                     const auto taken = assembler.makeLabel();
