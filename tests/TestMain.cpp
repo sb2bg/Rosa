@@ -7509,6 +7509,37 @@ void testExchangeGuestByteWithRegister() {
     expectEqual(faultState.rax, std::uint64_t{0xA5A5A5A5A5A5A5A5ULL},
                 "faulted XCHG byte changed RAX");
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted XCHG byte changed flags");
+
+    // Observed in Foundation under an Objective-C fixture: XCHG byte [rax+0x37], cl.
+    constexpr std::array<std::uint8_t, 4> plainCode{0x86, 0x48, 0x37, 0xC3};
+    constexpr rosa::guest::GuestAddress plainRip{0x7FF804C60C7DULL};
+    const auto plainDecoded = decoder.decodeBlock(plainCode, plainRip);
+    expect(plainDecoded[0].opcode == rosa::x86::Opcode::XchgMemReg,
+           "plain XCHG byte opcode differs");
+    expectEqual(plainDecoded[0].length, std::uint8_t{3}, "plain XCHG byte length differs");
+    const auto plainMemory = std::get<rosa::x86::MemoryOperand>(plainDecoded[0].operands[0]);
+    const auto plainSource = std::get<rosa::x86::RegisterOperand>(plainDecoded[0].operands[1]);
+    expect(!plainMemory.ripRelative && plainMemory.hasBase &&
+               plainMemory.base == rosa::x86::Register::Rax && !plainMemory.index &&
+               plainMemory.displacement == 0x37 && plainMemory.width == 8,
+           "plain XCHG byte memory operand differs");
+    expect(plainSource.reg == rosa::x86::Register::Rcx && plainSource.width == 8,
+           "plain XCHG byte source differs");
+    expect(rosa::debug::dumpX86(plainDecoded).find("xchg byte [rax+0x37], cl") !=
+               std::string::npos,
+           "plain XCHG byte dump differs");
+    const auto plainBlock = translator.translate(plainCode, plainRip);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 1>{0x3C});
+    rosa::x86::X86State plainState;
+    plainState.rax = target.value - 0x37;
+    plainState.rcx = 0x11223344556677C3ULL;
+    plainState.rflags = 0x8D7;
+    static_cast<void>(plainBlock.execute(plainState, &addressSpace));
+    expectEqual(addressSpace.readBytes(target, 1).front(), std::uint8_t{0xC3},
+                "plain XCHG byte stored the wrong value");
+    expectEqual(plainState.rcx, std::uint64_t{0x112233445566773CULL},
+                "plain XCHG byte returned the wrong old memory value");
+    expectEqual(plainState.rflags, std::uint64_t{0x8D7}, "plain XCHG byte changed flags");
 }
 
 void testLockedAddGuestQwordRegister() {

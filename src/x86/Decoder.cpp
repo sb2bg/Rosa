@@ -6347,6 +6347,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x0BU &&
             code[cursor] != 0x2DU &&
             code[cursor] != 0x69U &&
+            code[cursor] != 0x86U &&
             code[cursor] != 0x87U &&
             code[cursor] != 0x28U && code[cursor] != 0x29U &&
             code[cursor] != 0x2BU &&
