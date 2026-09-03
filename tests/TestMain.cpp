@@ -29960,6 +29960,36 @@ void testAndImmediateIntoGuestWord() {
                 "AND dword immediate stored the wrong result");
     expectEqual(dwordState.rsi, std::uint64_t{0x8200}, "AND dword immediate changed its base");
     expectEqual(dwordState.rflags, std::uint64_t{0x82}, "AND dword immediate flags differ");
+
+    // Observed in libblocks: AND dword [rbx+0x8], 0xffff0000 (opcode 81 /4).
+    constexpr std::array<std::uint8_t, 8> fullCode{0x81, 0x63, 0x08, 0x00,
+                                                   0x00, 0xFF, 0xFF, 0xC3};
+    const auto fullDecoded =
+        decoder.decodeBlock(fullCode, rosa::guest::GuestAddress{0x7FF802B28D07ULL});
+    expect(fullDecoded[0].opcode == rosa::x86::Opcode::AndMemImm &&
+               fullDecoded[0].length == 7,
+           "AND dword [memory], imm32 opcode or length differs");
+    const auto fullMemory = std::get<rosa::x86::MemoryOperand>(fullDecoded[0].operands[0]);
+    const auto fullImmediate = std::get<rosa::x86::ImmediateOperand>(fullDecoded[0].operands[1]);
+    expect(fullMemory.base == rosa::x86::Register::Rbx && fullMemory.displacement == 0x08 &&
+               fullMemory.width == 32 && fullImmediate.value == 0xFFFF0000 &&
+               fullImmediate.width == 32,
+           "AND dword [rbx+0x8], 0xffff0000 operands differ");
+    expect(rosa::debug::dumpX86(fullDecoded).find("and dword [rbx+0x8], 0xffff0000") !=
+               std::string::npos,
+           "AND dword [memory], imm32 dump differs");
+
+    constexpr rosa::guest::GuestAddress fullTarget{0x8208};
+    addressSpace.writeU32(fullTarget, 0x12345678);
+    const auto fullBlock =
+        translator.translate(fullCode, rosa::guest::GuestAddress{0x7FF802B28D07ULL});
+    rosa::x86::X86State fullState;
+    fullState.rbx = 0x8200;
+    fullState.rflags = 0x8D7;
+    static_cast<void>(fullBlock.execute(fullState, &addressSpace));
+    expectEqual(addressSpace.readU32(fullTarget), std::uint32_t{0x12340000U},
+                "AND dword imm32 stored the wrong result");
+    expectEqual(fullState.rflags, std::uint64_t{0x6}, "AND dword imm32 flags differ");
 }
 
 void testAndImmediateIntoGuestByte() {
