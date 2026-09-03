@@ -6445,6 +6445,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto lhsRegister = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
             const auto width = lhsRegister.width == 8    ? ir::Width::I8
+                               : lhsRegister.width == 16 ? ir::Width::I16
                                : lhsRegister.width == 32 ? ir::Width::I32
                                                          : ir::Width::I64;
             auto address =

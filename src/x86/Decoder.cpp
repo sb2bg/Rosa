@@ -5730,7 +5730,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         const auto opcode = code[cursor++];
         if (hasOperandSizeOverride && opcode != 0x03U && opcode != 0x0BU && opcode != 0x39U &&
-            opcode != 0x89U && opcode != 0x8BU && opcode != 0xF7U &&
+            opcode != 0x3BU && opcode != 0x89U && opcode != 0x8BU && opcode != 0xF7U &&
             opcode != 0xFFU) {
             throw DecodeError(
                 address, remaining,
