@@ -22046,6 +22046,51 @@ void testDarwinStat64SystemDatabasesAbsent() {
                 "absent system database stat64 touched its output buffer");
 }
 
+void testDarwinStat64RelativePath() {
+    constexpr auto stat64Number = UINT64_C(0x02000152);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress statAddress{0x8300};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+
+    // A missing relative path reports its errno like the absolute probes.
+    const std::string missing = ":memory:";
+    std::vector<std::uint8_t> missingBytes(missing.begin(), missing.end());
+    missingBytes.push_back(0);
+    addressSpace.writeBytes(pathAddress, missingBytes);
+    state.rax = stat64Number;
+    state.rdi = pathAddress.value;
+    state.rsi = statAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                "relative missing-path stat64 returned the wrong errno");
+
+    // A present relative path resolves against the guest working directory.
+    std::string presentName;
+    if (std::filesystem::is_regular_file(dispatcher.fileSpace().currentDirectory() /
+                                         "CMakeLists.txt")) {
+        presentName = "CMakeLists.txt";
+    } else if (std::filesystem::is_regular_file(dispatcher.fileSpace().currentDirectory() /
+                                                "build/debug/rosa")) {
+        presentName = "build/debug/rosa";
+    }
+    expect(!presentName.empty(), "relative stat64 fixture is missing");
+    std::vector<std::uint8_t> presentBytes(presentName.begin(), presentName.end());
+    presentBytes.push_back(0);
+    addressSpace.writeBytes(pathAddress, presentBytes);
+    state.rax = stat64Number;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "relative present-path stat64 did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "relative present-path stat64 did not clear BSD carry");
+}
+
 void testDarwinStat64MappedFile() {
     constexpr auto stat64Number = UINT64_C(0x02000152);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -32239,6 +32284,7 @@ int main() {
         {"Darwin duplicate guest descriptor", testDarwinDuplicateGuestDescriptor},
         {"Darwin stat64 mapped file", testDarwinStat64MappedFile},
         {"Darwin stat64 absent system databases", testDarwinStat64SystemDatabasesAbsent},
+        {"Darwin stat64 relative path", testDarwinStat64RelativePath},
         {"Darwin fstat64 standard descriptor", testDarwinFstat64StandardDescriptor},
         {"Darwin write_nocancel", testDarwinWriteNoCancel},
         {"Darwin getfsstat64 synthetic root", testDarwinGetfsstat64SyntheticRoot},

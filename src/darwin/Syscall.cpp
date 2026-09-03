@@ -1895,12 +1895,14 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             setError(state, ENOENT);
             return {};
         }
-        if (!std::filesystem::path{*path}.is_absolute()) {
-            throw unsupported(state, syscallRip,
-                              "only absolute mapped user-file stat64 is implemented");
-        }
+        // Resolve relative guest paths against the task's current directory,
+        // mirroring the read-only open and access policy.
+        const auto directPath = std::filesystem::path{*path};
+        const auto queryPath = directPath.is_absolute()
+                                   ? directPath
+                                   : fileSpace_.currentDirectory() / directPath;
         std::error_code error;
-        const auto canonicalPath = std::filesystem::canonical(*path, error);
+        const auto canonicalPath = std::filesystem::canonical(queryPath, error);
         if (error) {
             setError(state, error.value());
             return {};
