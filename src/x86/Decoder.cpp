@@ -6931,18 +6931,80 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto destinationEncoding =
                 static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode != 0x3U ||
-                (!hasRex &&
-                 (sourceEncoding >= 0x4U || destinationEncoding >= 0x4U))) {
-                throw DecodeError(
-                    address, remaining,
-                    "only register-direct representable low-byte SUB from opcode 28 is supported");
+            if (mode == 0x3U) {
+                if (!hasRex && (sourceEncoding >= 0x4U || destinationEncoding >= 0x4U)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only register-direct representable low-byte SUB from opcode 28 is supported");
+                }
+                instruction.opcode = Opcode::SubRegReg;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(destinationEncoding, rexB), 8});
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(sourceEncoding, rexR), 8});
+            } else {
+                const bool ripRelative = mode == 0 && destinationEncoding == 0x5U;
+                if (mode > 0x2U || (!hasRex && sourceEncoding >= 0x4U) ||
+                    (rexX && destinationEncoding != 0x4U)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only SUB byte [base/RIP+index*scale+disp8/disp32], low-byte-register is supported");
+                }
+                auto baseEncoding = destinationEncoding;
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
+                bool hasBase = !ripRelative;
+                auto base = decodeRegister(baseEncoding, rexB);
+                if (!ripRelative && destinationEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated byte SUB SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    hasBase = !(mode == 0 && baseEncoding == 0x5U);
+                    if (scaleBits != 0 || indexEncoding != 0x4U || rexX || !hasBase) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only no-index SIB addressing is supported for byte SUB");
+                    }
+                    base = decodeRegister(baseEncoding, rexB);
+                }
+                std::int64_t displacement = 0;
+                if (ripRelative || (!hasBase && mode == 0) || mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated byte SUB disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                } else if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated byte SUB disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[cursor++]);
+                }
+                if (ripRelative) {
+                    static_cast<void>(relativeTarget(
+                        address, cursor - instructionStart, displacement));
+                }
+                instruction.opcode = Opcode::SubMemReg;
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement, 8,
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{decodeRegister(baseEncoding, rexB),
+                                        displacement, 8, index, scale,
+                                        hasBase, false});
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(sourceEncoding, rexR), 8});
             }
-            instruction.opcode = Opcode::SubRegReg;
-            instruction.operands.push_back(RegisterOperand{
-                decodeRegister(destinationEncoding, rexB), 8});
-            instruction.operands.push_back(RegisterOperand{
-                decodeRegister(sourceEncoding, rexR), 8});
         } else if (opcode == 0x29U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated sub register, register");

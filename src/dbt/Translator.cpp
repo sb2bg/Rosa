@@ -169,6 +169,8 @@ extern "C" x86::X86State *updateLogicFlags8(x86::X86State *state, std::uint64_t 
 extern "C" x86::X86State *updateLogicFlags16(x86::X86State *state, std::uint64_t result);
 extern "C" x86::X86State *updateLogicFlags32(x86::X86State *state, std::uint64_t result);
 extern "C" x86::X86State *updateLogicFlags64(x86::X86State *state, std::uint64_t result);
+extern "C" x86::X86State *updateSubFlags8(x86::X86State *state, std::uint64_t lhsValue,
+                                          std::uint64_t rhsValue, std::uint64_t resultValue);
 
 extern "C" __attribute__((noinline)) x86::X86State *commitPush64(GuestExecutionContext *context,
                                                                  x86::X86State *state,
@@ -1682,6 +1684,32 @@ extern "C" __attribute__((noinline)) x86::X86State *subGuest32(GuestExecutionCon
             context->fault = std::current_exception();
             context->faultAddress = guest::GuestAddress{address};
             context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *subGuest8(GuestExecutionContext *context,
+                                                             x86::X86State *state,
+                                                             std::uint64_t address,
+                                                             std::uint64_t sourceValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated 8-bit guest subtract has no address space");
+        }
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, 1,
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU8(guest::GuestAddress{address});
+        const auto result =
+            static_cast<std::uint8_t>(original - static_cast<std::uint8_t>(sourceValue));
+        const std::array bytes{result};
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+        return updateSubFlags8(state, original, static_cast<std::uint8_t>(sourceValue), result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = 1;
         }
         return nullptr;
     }
@@ -4492,11 +4520,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
-            if (memory.width != source.width || (memory.width != 32 && memory.width != 64)) {
+            if (memory.width != source.width ||
+                (memory.width != 8 && memory.width != 32 && memory.width != 64)) {
                 throw std::runtime_error(
-                    "only matching 32- and 64-bit memory-destination SUB is implemented");
+                    "only matching 8-, 32-, and 64-bit memory-destination SUB is implemented");
             }
-            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto width = memory.width == 8    ? ir::Width::I8
+                               : memory.width == 32 ? ir::Width::I32
+                                                    : ir::Width::I64;
             auto address =
                 memory.ripRelative
                     ? builder.constant(instruction.address.value + instruction.length,
@@ -8921,9 +8952,10 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             break;
         }
         case ir::Opcode::SubGuestMemory: {
-            if (operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
+            if (operation.width != ir::Width::I8 && operation.width != ir::Width::I32 &&
+                operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 32- or 64-bit guest memory subtract");
+                    "ARM64 backend only implements 8-, 32-, or 64-bit guest memory subtract");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -8932,9 +8964,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x2, hostRegister(*operation.lhs));
             assembler.mov(arm64::x3, hostRegister(*operation.rhs));
             assembler.mov(arm64::x0, arm64::x19);
-            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
-                                                   ? pointerBits(&subGuest32)
-                                                   : pointerBits(&subGuest64));
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I8    ? pointerBits(&subGuest8)
+                                            : operation.width == ir::Width::I32 ? pointerBits(&subGuest32)
+                                                                                : pointerBits(&subGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

@@ -4525,6 +4525,52 @@ void testSubtractRegisterFromGuestMemoryDestination() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted SUB qword changed flags");
 }
 
+void testSubtractByteRegisterFromGuestMemory() {
+    // Observed in sqlite: SUB byte [RIP+disp32], R14B with REX.R.
+    constexpr std::array<std::uint8_t, 8> code{0x44, 0x28, 0x35, 0x29, 0x9A,
+                                              0x1A, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10004BA88ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SubMemReg,
+           "SUB byte [memory], r8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7}, "SUB byte [memory], r8 length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 8 &&
+               memory.displacement == 0x1A9A29 && source.reg == rosa::x86::Register::R14 &&
+               source.width == 8,
+           "SUB byte [RIP+disp32], R14B operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("sub byte [rip+0x1a9a29], r14b") !=
+               std::string::npos,
+           "SUB byte [RIP+disp32], R14B dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    constexpr rosa::guest::GuestAddress syntheticRip{0x7F00};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> initial{0x30};
+    addressSpace.writeBytes(target, initial);
+    const rosa::dbt::Translator translator;
+    // Execute at a synthetic RIP whose computed target stays in the page.
+    constexpr std::array<std::uint8_t, 8> executableCode{0x44, 0x28, 0x35, 0xF9,
+                                                         0x01, 0x00, 0x00, 0xC3};
+    const auto block = translator.translate(executableCode, syntheticRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find("sub_guest_memory.i8") !=
+               std::string::npos,
+           "SUB byte memory did not lower through 8-bit guest-memory IR");
+    rosa::x86::X86State state;
+    state.r14 = 0xAABBCCDD00000009ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readBytes(target, 1).front(), std::uint8_t{0x27},
+                "SUB byte memory result differs");
+    expectEqual(state.r14, std::uint64_t{0xAABBCCDD00000009ULL},
+                "SUB byte memory changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x16}, "SUB byte memory flags differ");
+}
+
 void testAddRegisterFromGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x03, 0x46, 0x10, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -32089,6 +32135,7 @@ int main() {
          testSub64BitRegisterFromIndexedGuestMemory},
         {"SUB register from guest memory destination",
          testSubtractRegisterFromGuestMemoryDestination},
+        {"SUB byte register from guest memory", testSubtractByteRegisterFromGuestMemory},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register from indexed guest memory", testAddRegisterFromIndexedGuestMemory},
         {"ADD register to guest memory", testAddRegisterToGuestMemory},
