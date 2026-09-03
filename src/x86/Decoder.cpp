@@ -4105,16 +4105,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 continue;
             }
-            if (mode > 0x2U || (mode == 0 && rmEncoding == 0x5U)) {
+            if (mode > 0x2U) {
                 throw DecodeError(
                     address, remaining,
-                    "only MOVDQA xmm, [base+index*scale+disp] memory operands are supported");
+                    "only MOVDQA xmm, [base/RIP+index*scale+disp] memory operands are supported");
             }
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             cursor += 4;
             auto baseEncoding = rmEncoding;
             std::optional<Register> index;
             std::uint8_t scale = 1;
-            if (rmEncoding == 0x4U) {
+            if (!ripRelative && rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated MOVDQA SIB byte");
                 }
@@ -4134,24 +4135,29 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
             }
             std::int64_t displacement = 0;
-            if (mode == 0x1U) {
+            if (ripRelative || mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOVDQA memory disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+            } else if (mode == 0x1U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated MOVDQA memory disp8");
                 }
                 displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-            } else if (mode == 0x2U) {
-                if (code.size() - cursor < 4) {
-                    throw DecodeError(address, remaining, "truncated MOVDQA memory disp32");
-                }
-                displacement = readI32(code.subspan(cursor, 4));
-                cursor += 4;
+            }
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
             }
             instruction.opcode = Opcode::MovdqaRegMem;
             instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U))});
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(baseEncoding, false), displacement, 128, index,
-                scale});
+                ripRelative ? Register::Rax : decodeRegister(baseEncoding, false),
+                displacement, 128, index, scale, !ripRelative, ripRelative});
 
             const auto length = cursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);

@@ -17622,6 +17622,52 @@ void testMovdqaGuestMemoryToRegister() {
     expectEqual(indexedFaultState.rflags, std::uint64_t{0x8D7},
                 "failed indexed MOVDQA changed flags");
 
+    // Observed in sqlite: movdqa xmm7, [rip+disp32].
+    constexpr std::array<std::uint8_t, 9> ripRelativeCode{
+        0x66, 0x0F, 0x6F, 0x3D, 0x10, 0xA0, 0x17, 0x00, 0xC3,
+    };
+    const auto ripRelativeDecoded = decoder.decodeBlock(
+        ripRelativeCode, rosa::guest::GuestAddress{0x100046E08ULL});
+    expect(ripRelativeDecoded[0].opcode == rosa::x86::Opcode::MovdqaRegMem,
+           "RIP-relative MOVDQA opcode differs");
+    expectEqual(ripRelativeDecoded[0].length, std::uint8_t{8},
+                "RIP-relative MOVDQA length differs");
+    const auto ripRelativeMemory =
+        std::get<rosa::x86::MemoryOperand>(ripRelativeDecoded[0].operands[1]);
+    const auto ripRelativeDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(ripRelativeDecoded[0].operands[0]);
+    expect(ripRelativeDestination.reg == rosa::x86::XmmRegister::Xmm7,
+           "RIP-relative MOVDQA destination differs");
+    expect(ripRelativeMemory.ripRelative && !ripRelativeMemory.hasBase,
+           "RIP-relative MOVDQA addressing differs");
+    expectEqual(ripRelativeMemory.displacement, std::int64_t{0x17A010},
+                "RIP-relative MOVDQA displacement differs");
+    expect(rosa::debug::dumpX86(ripRelativeDecoded).find("movdqa xmm7, [rip+0x17a010]") !=
+               std::string::npos,
+           "RIP-relative MOVDQA dump differs");
+
+    // Execute the same bytes at a synthetic RIP whose target is aligned.
+    constexpr rosa::guest::GuestAddress alignedRip{0x10008};
+    constexpr rosa::guest::GuestAddress alignedPage{0x18A000ULL};
+    constexpr rosa::guest::GuestAddress alignedTarget{0x18A020ULL};
+    rosa::guest::AddressSpace ripRelativeAddressSpace;
+    ripRelativeAddressSpace.mapAnonymous(alignedPage, rosa::guest::guestPageSize,
+                                         rosa::guest::Permission::Read |
+                                             rosa::guest::Permission::Write);
+    ripRelativeAddressSpace.writeU64(alignedTarget, 0x0123456789ABCDEFULL);
+    ripRelativeAddressSpace.writeU64(
+        rosa::guest::GuestAddress{alignedTarget.value + 8}, 0xFEDCBA9876543210ULL);
+    const auto ripRelativeBlock = translator.translate(ripRelativeCode, alignedRip);
+    rosa::x86::X86State ripRelativeState;
+    ripRelativeState.xmm[7] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    ripRelativeState.rflags = 0x8D7;
+    static_cast<void>(ripRelativeBlock.execute(ripRelativeState, &ripRelativeAddressSpace));
+    expectEqual(ripRelativeState.xmm[7].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "RIP-relative MOVDQA loaded the wrong low lane");
+    expectEqual(ripRelativeState.xmm[7].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "RIP-relative MOVDQA loaded the wrong high lane");
+    expectEqual(ripRelativeState.rflags, std::uint64_t{0x8D7}, "RIP-relative MOVDQA changed flags");
+
     constexpr std::array<std::uint8_t, 5> registerCode{0x66, 0x0F, 0x6F, 0xE8, 0xC3};
     const auto registerDecoded =
         decoder.decodeBlock(registerCode, rosa::guest::GuestAddress{0x3000});

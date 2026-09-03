@@ -2323,7 +2323,7 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "movdqa "
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg)
-                   << ", [" << x86::registerName(memory.base);
+                   << ", [" << (memory.ripRelative ? "rip" : x86::registerName(memory.base));
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
@@ -2334,6 +2334,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 stream << "+0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                const auto target = instruction.address.value + instruction.length +
+                                    static_cast<std::uint64_t>(memory.displacement);
+                stream << " ; 0x" << target;
+            }
             break;
         }
         case x86::Opcode::MovapsRegMem:
