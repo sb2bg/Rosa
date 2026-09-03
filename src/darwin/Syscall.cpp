@@ -123,6 +123,9 @@ constexpr std::string_view guestDyldDirectory =
 constexpr std::string_view guestChrootMarker =
     "/AppleInternal/XBS/.isChrooted";
 constexpr std::string_view guestRandomDevice = "/dev/urandom";
+constexpr std::string_view guestPasswdDatabase = "/etc/passwd";
+constexpr std::string_view guestMasterPasswdDatabase = "/etc/master.passwd";
+constexpr std::string_view guestGroupDatabase = "/etc/group";
 constexpr std::string_view guestFeatureFlagsSharedMemory =
     "com.apple.featureflags.shm";
 constexpr std::uint16_t guestModeDirectory = 0040000;
@@ -1778,6 +1781,15 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         if (*path == guestRandomDevice && flags == 0 && mode == 0) {
             const auto descriptor = fileSpace_.openRandomDevice(flags);
             setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
+            return {};
+        }
+        if (flags == 0 && mode == 0 &&
+            (*path == guestPasswdDatabase || *path == guestMasterPasswdDatabase ||
+             *path == guestGroupDatabase)) {
+            // Rosa provisions no system user/group databases; DirectoryService
+            // backs real users on hardware. libsystem_info's file backend
+            // already handles a missing database, so report it absent.
+            setError(state, ENOENT);
             return {};
         }
         if (*path == "." && flags == guestOpenDirectory && mode == 0) {

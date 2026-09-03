@@ -22658,6 +22658,36 @@ void testDarwinOpenReadOnlyUserFile() {
                 "failed read-only guest open allocated a descriptor");
 }
 
+void testDarwinOpenSystemDatabasesAbsent() {
+    constexpr auto openNoCancelNumber = UINT64_C(0x0200018E);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+
+    for (const char *path : {"/etc/passwd", "/etc/master.passwd", "/etc/group"}) {
+        const std::string pathString(path);
+        std::vector<std::uint8_t> pathBytes(pathString.begin(), pathString.end());
+        pathBytes.push_back(0);
+        addressSpace.writeBytes(pathAddress, pathBytes);
+        state.rax = openNoCancelNumber;
+        state.rdi = pathAddress.value;
+        state.rsi = 0;
+        state.rdx = 0;
+        state.rflags = 0x2;
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x7FF802E305E0ULL}));
+        expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                    "system database open did not report absence");
+        expect((state.rflags & 1U) != 0, "system database open did not set BSD carry");
+    }
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+                "absent system database open allocated a descriptor");
+}
+
 void testDarwinMmapReadOnlyUserFile() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr auto mmapNumber = UINT64_C(0x020000C5);
@@ -32140,6 +32170,7 @@ int main() {
         {"Darwin getattrlist mapped-file full path", testDarwinGetattrlistMappedFileFullPath},
         {"Darwin fstatat64 synthetic directory", testDarwinFstatat64SyntheticDirectory},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
+        {"Darwin open absent system databases", testDarwinOpenSystemDatabasesAbsent},
         {"Darwin mmap read-only user file", testDarwinMmapReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
         {"Darwin simple-ASL socket flow", testDarwinSimpleAslSocketFlow},
