@@ -2222,16 +2222,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
             auto operandCursor = wordImmediateOpcodeOffset + 2;
-            if (rexW || rexR || mode > 0x2U || extension != 0 ||
-                (mode == 0 && rmEncoding == 0x5U)) {
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
+            if (rexW || rexR || mode > 0x2U || extension != 0) {
                 throw DecodeError(
                     address, remaining,
-                    "only MOV word [base+index*scale+disp8/disp32], imm16 is supported");
+                    "only MOV word [base/RIP+index*scale+disp8/disp32], imm16 is supported");
             }
             auto base = decodeRegister(rmEncoding, rexB);
             std::optional<Register> index;
             std::uint8_t scale = 1;
-            if (rmEncoding == 0x4U) {
+            bool hasBase = !ripRelative;
+            if (!ripRelative && rmEncoding == 0x4U) {
                 if (operandCursor >= code.size()) {
                     throw DecodeError(address, remaining,
                                       "truncated MOV word immediate SIB");
@@ -2259,19 +2260,19 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     "REX.X requires a MOV word immediate SIB operand");
             }
             std::int64_t displacement = 0;
-            if (mode == 0x1U) {
-                if (operandCursor >= code.size()) {
-                    throw DecodeError(address, remaining,
-                                      "truncated MOV word memory disp8");
-                }
-                displacement = std::bit_cast<std::int8_t>(code[operandCursor++]);
-            } else if (mode == 0x2U) {
+            if (ripRelative || mode == 0x2U) {
                 if (code.size() - operandCursor < 4) {
                     throw DecodeError(address, remaining,
                                       "truncated MOV word memory disp32");
                 }
                 displacement = readI32(code.subspan(operandCursor, 4));
                 operandCursor += 4;
+            } else if (mode == 0x1U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOV word memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[operandCursor++]);
             }
             if (code.size() - operandCursor < 2) {
                 throw DecodeError(address, remaining, "truncated MOV word imm16");
@@ -2280,9 +2281,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<std::uint16_t>(code[operandCursor]) |
                 (static_cast<std::uint16_t>(code[operandCursor + 1]) << 8U));
             operandCursor += 2;
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, operandCursor - instructionStart, displacement));
+            }
             instruction.opcode = Opcode::MovMemImm;
             instruction.operands.push_back(MemoryOperand{
-                base, displacement, 16, index, scale});
+                ripRelative ? Register::Rax : base, displacement, 16, index, scale,
+                hasBase, ripRelative});
             instruction.operands.push_back(ImmediateOperand{immediate, 16});
             const auto length = operandCursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);

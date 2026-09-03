@@ -9478,6 +9478,43 @@ void testMovImmediateToRipRelativeGuestMemory() {
                 "failed RIP-relative MOV qword immediate changed flags");
 }
 
+void testMovWordImmediateToRipRelativeGuestMemory() {
+    // Observed in sqlite: mov word [rip+disp32], imm16.
+    constexpr rosa::guest::GuestAddress instructionAddress{0x10005DB8AULL};
+    constexpr rosa::guest::GuestAddress target{0x1001F0804ULL};
+    constexpr rosa::guest::GuestAddress targetPage{0x1001F0000ULL};
+    constexpr std::array<std::uint8_t, 10> code{0x66, 0xC7, 0x05, 0x71, 0x2C,
+                                               0x19, 0x00, 0x01, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, instructionAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemImm,
+           "RIP-relative MOV word immediate opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9},
+                "RIP-relative MOV word immediate length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 16,
+           "RIP-relative MOV word immediate addressing differs");
+    expectEqual(immediate.value, std::uint64_t{1}, "RIP-relative MOV word immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("mov word [rip+0x192c71], 0x1") !=
+               std::string::npos,
+           "RIP-relative MOV word immediate dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(targetPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0xA5A5A5A5A5A5A5A5ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, instructionAddress);
+    rosa::x86::X86State state;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0xA5A5A5A5A5A50001ULL},
+                "RIP-relative MOV word immediate stored the wrong value");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "RIP-relative MOV word immediate changed flags");
+}
+
 void testMov32BitImmediateToGuestMemory() {
     constexpr std::array<std::uint8_t, 8> code{0xC7, 0x45, 0x9F, 0x00, 0x00, 0x00, 0x00, 0xC3};
     constexpr rosa::guest::GuestAddress observedRip{0x7FF80005899DULL};
@@ -30964,6 +31001,8 @@ int main() {
         {"MOV 32-bit immediate to indexed guest memory", testMov32BitImmediateToIndexedGuestMemory},
         {"MOV immediate to guest stack", testMovImmediateToGuestStack},
         {"MOV immediate to RIP-relative guest memory", testMovImmediateToRipRelativeGuestMemory},
+        {"MOV word immediate to RIP-relative guest memory",
+         testMovWordImmediateToRipRelativeGuestMemory},
         {"MOV 32-bit immediate to guest memory", testMov32BitImmediateToGuestMemory},
         {"MOV byte immediate to guest memory", testMovByteImmediateToGuestMemory},
         {"MOV byte immediate to scaled guest memory", testMovByteImmediateToScaledGuestMemory},
