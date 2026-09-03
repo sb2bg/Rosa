@@ -13794,6 +13794,42 @@ void testSignedMultiplyMemoryGeneratedExecution() {
                 "IMUL memory overflow defined flags differ");
 }
 
+void testSignedMultiplyRegisterGeneratedExecution() {
+    // Observed in libsqlite3: IMUL rdx with REX.W (single-operand F7 /5).
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0xF7, 0xEA, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000BE2F5ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ImulReg, "IMUL register opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "IMUL register length differs");
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(source.reg == rosa::x86::Register::Rdx && source.width == 64,
+           "IMUL rdx operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("imul rdx") != std::string::npos,
+           "IMUL rdx dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000BE2F5ULL});
+    rosa::x86::X86State state;
+    state.rax = static_cast<std::uint64_t>(-3);
+    state.rdx = 5;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, static_cast<std::uint64_t>(-15), "IMUL register low result differs");
+    expectEqual(state.rdx, UINT64_MAX, "IMUL register sign-extended high differs");
+    expectEqual(state.rflags, std::uint64_t{0xD6}, "IMUL register no-overflow flags differ");
+
+    rosa::x86::X86State wideState;
+    wideState.rax = 0x4000000000000000ULL;
+    wideState.rdx = 3;
+    wideState.rflags = 0x2;
+    static_cast<void>(block.execute(wideState));
+    expectEqual(wideState.rax, std::uint64_t{0xC000000000000000ULL},
+                "IMUL register wide low differs");
+    expectEqual(wideState.rdx, std::uint64_t{0}, "IMUL register wide high differs");
+    expectEqual(wideState.rflags, std::uint64_t{0x803},
+                "IMUL register overflow defined flags differ");
+}
+
 void testUnsignedDivideByteGeneratedExecution() {
     constexpr std::array<std::uint8_t, 3> observedCode{0xF6, 0xF2, 0xC3}; // div dl
     constexpr rosa::guest::GuestAddress observedRip{0x7FF802C75758ULL};
@@ -32461,6 +32497,7 @@ int main() {
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"unsigned MUL memory generated execution", testUnsignedMultiplyMemoryGeneratedExecution},
         {"signed IMUL memory generated execution", testSignedMultiplyMemoryGeneratedExecution},
+        {"signed IMUL register generated execution", testSignedMultiplyRegisterGeneratedExecution},
         {"unsigned byte DIV generated execution", testUnsignedDivideByteGeneratedExecution},
         {"unsigned qword register DIV generated execution",
          testUnsignedDivideQwordRegisterGeneratedExecution},

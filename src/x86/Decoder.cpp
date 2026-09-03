@@ -8634,15 +8634,16 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (mode != 0x3U ||
                 (extension != 0x0U && extension != 0x2U &&
                  extension != 0x3U &&
-                 extension != 0x4U) ||
+                 extension != 0x4U && extension != 0x5U) ||
                 (extension != 0x0U && (rexR || rexX))) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct TEST /0, NOT /2, NEG /3, MUL /4, DIV /6, IDIV r32 /7, and memory MUL /4 and IMUL /5 from opcode F7 are supported");
+                                  "only register-direct TEST /0, NOT /2, NEG /3, MUL /4, IMUL /5, DIV /6, IDIV r32 /7, and memory MUL /4 and IMUL /5 from opcode F7 are supported");
             }
             instruction.opcode = extension == 0x0U   ? Opcode::TestRegImm
                                  : extension == 0x2U ? Opcode::NotReg
                                  : extension == 0x3U ? Opcode::NegReg
-                                                     : Opcode::MulReg;
+                                 : extension == 0x4U ? Opcode::MulReg
+                                                     : Opcode::ImulReg;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
                 static_cast<std::uint8_t>(

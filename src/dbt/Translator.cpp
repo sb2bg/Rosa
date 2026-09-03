@@ -4859,6 +4859,28 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             break;
         }
+        case x86::Opcode::ImulReg: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: imul operand count");
+            }
+            const auto source = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            if (source.width != 64) {
+                throw std::runtime_error("only qword register IMUL is implemented");
+            }
+            const auto lhs =
+                builder.readGuestRegister(x86::Register::Rax, ir::Width::I64, instruction.address);
+            const auto rhs =
+                builder.readGuestRegister(source.reg, ir::Width::I64, instruction.address);
+            const auto low = builder.multiplyLow(lhs, rhs, ir::Width::I64, instruction.address);
+            const auto high =
+                builder.multiplyHighSigned(lhs, rhs, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(x86::Register::Rax, low, ir::Width::I64,
+                                       instruction.address);
+            builder.writeGuestRegister(x86::Register::Rdx, high, ir::Width::I64,
+                                       instruction.address);
+            builder.updateSignedMultiplyFlags(lhs, rhs, ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::MulMem: {
             if (instruction.operands.size() != 1 ||
                 !std::holds_alternative<x86::MemoryOperand>(instruction.operands[0])) {
