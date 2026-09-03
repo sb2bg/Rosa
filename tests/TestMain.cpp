@@ -24269,6 +24269,65 @@ void testDarwinOpenReadOnlyUserFile() {
                 "failed read-only guest open allocated a descriptor");
 }
 
+void testDarwinOpenRelativeReadOnlyFile() {
+    // Observed under grep: open(".git/HEAD", O_RDONLY) with a relative path.
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    const auto fixturePath =
+        std::filesystem::canonical(std::filesystem::path{ROSA_TEST_HELLO_MACHO_PATH});
+    const auto relativePath =
+        std::filesystem::relative(fixturePath, std::filesystem::current_path());
+    const auto relativeString = relativePath.string();
+    expect(!relativePath.empty() && !std::filesystem::path{relativeString}.is_absolute(),
+           "relative open fixture did not produce a relative path");
+    std::vector<std::uint8_t> relativeBytes(relativeString.begin(), relativeString.end());
+    relativeBytes.push_back(0);
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, relativeBytes);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = O_RDONLY;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30330ULL}));
+    expectEqual(state.rax, std::uint64_t{3},
+                "relative read-only guest open returned the wrong descriptor");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "relative read-only guest open did not clear BSD carry");
+    const auto *opened = dispatcher.fileSpace().lookup(rosa::darwin::GuestFileDescriptor{3});
+    expect(opened != nullptr && opened->kind == rosa::darwin::GuestFileKind::HostReadOnlyFile &&
+               opened->guestPath == fixturePath && opened->flags == O_RDONLY,
+           "relative read-only guest open stored the wrong metadata");
+
+    // A relative path escaping the current directory must stay loud.
+    // ".." always resolves to the existing parent, which is outside the sandbox.
+    constexpr std::array<std::uint8_t, 3> escapePath{'.', '.', 0};
+    addressSpace.writeBytes(pathAddress, escapePath);
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = O_RDONLY;
+    state.rdx = 0;
+    state.rflags = 0x2;
+    bool escaped = false;
+    try {
+        static_cast<void>(
+            dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        escaped = std::string_view(error.what()).find("no mapping for read-only path") !=
+                  std::string_view::npos;
+    }
+    expect(escaped, "read-only guest open outside the sandbox did not fail loudly");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+                "escaped read-only guest open allocated a descriptor");
+}
+
 void testDarwinOpenSystemDatabasesAbsent() {
     constexpr auto openNoCancelNumber = UINT64_C(0x0200018E);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -34135,6 +34194,7 @@ int main() {
         {"Darwin getattrlist mapped-file full path", testDarwinGetattrlistMappedFileFullPath},
         {"Darwin fstatat64 synthetic directory", testDarwinFstatat64SyntheticDirectory},
         {"Darwin open read-only user file", testDarwinOpenReadOnlyUserFile},
+        {"Darwin open relative read-only file", testDarwinOpenRelativeReadOnlyFile},
         {"Darwin open absent system databases", testDarwinOpenSystemDatabasesAbsent},
         {"Darwin mmap read-only user file", testDarwinMmapReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},

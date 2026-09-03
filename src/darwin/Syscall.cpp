@@ -1827,10 +1827,16 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
             return {};
         }
-        if (flags == 0 && mode == 0 &&
-            std::filesystem::path(*path).is_absolute()) {
+        if (flags == 0 && mode == 0) {
+            // Resolve relative guest paths against the task's current
+            // directory, mirroring the stat64 policy below. The sandbox
+            // check still confines the result to the current directory.
+            const auto directPath = std::filesystem::path{*path};
+            const auto queryPath = directPath.is_absolute()
+                                       ? directPath
+                                       : fileSpace_.currentDirectory() / directPath;
             std::error_code error;
-            const auto canonicalPath = std::filesystem::canonical(*path, error);
+            const auto canonicalPath = std::filesystem::canonical(queryPath, error);
             if (error) {
                 setError(state, error.value());
                 return {};
