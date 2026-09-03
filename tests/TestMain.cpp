@@ -10968,6 +10968,44 @@ void testMovsxLowByteRegisterTo32BitRegister() {
     expectEqual(wideState.rflags, std::uint64_t{0x46}, "MOVSX RAX, AL changed flags");
 }
 
+void testMovsxSibByteTo32BitRegister() {
+    // Observed in sqlite: MOVSX EDX, byte [R12-8] with REX.B and a no-index SIB.
+    constexpr std::array<std::uint8_t, 7> code{0x41, 0x0F, 0xBE, 0x54, 0x24, 0xF8, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10014EE4AULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovsxRegMem,
+           "SIB MOVSX opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6}, "SIB MOVSX length differs");
+    const auto destination =
+        std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx && destination.width == 32,
+           "MOVSX EDX destination differs");
+    expect(memory.base == rosa::x86::Register::R12 && !memory.index &&
+               memory.displacement == -8 && memory.width == 8,
+           "MOVSX byte [R12-8] source differs");
+    expect(rosa::debug::dumpX86(decoded).find("movsx edx, byte [r12-0x8]") != std::string::npos,
+           "MOVSX EDX, byte [R12-8] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress source{0x80F8};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> negative{0x80};
+    addressSpace.writeBytes(source, negative);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10014EE4AULL});
+    rosa::x86::X86State state;
+    state.r12 = 0x8100;
+    state.rdx = UINT64_MAX;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rdx, std::uint64_t{0xFFFFFF80}, "SIB MOVSX result differs");
+    expectEqual(state.r12, std::uint64_t{0x8100}, "SIB MOVSX changed its base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "SIB MOVSX changed flags");
+}
+
 void testMovsxGuestByteTo32BitRegister() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0xBE, 0x17, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -32292,6 +32330,7 @@ int main() {
          testMovGuestMemoryToByteRegisterWithScaledIndex},
         {"MOVZX low-byte register to 32-bit register", testMovzxLowByteRegisterTo32BitRegister},
         {"MOVSX low-byte register to 32-bit register", testMovsxLowByteRegisterTo32BitRegister},
+        {"MOVSX SIB byte to 32-bit register", testMovsxSibByteTo32BitRegister},
         {"MOVSX guest byte to 32-bit register", testMovsxGuestByteTo32BitRegister},
         {"MOVSX guest word with scaled index to 32-bit register",
          testMovsxGuestWordWithScaledIndexTo32BitRegister},
