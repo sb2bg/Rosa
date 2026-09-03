@@ -800,6 +800,32 @@ testXmmBits128(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+convertInt32ToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
+                        std::uint64_t intValue) noexcept {
+    if (destinationIndex >= state->xmm.size()) {
+        return state;
+    }
+    // int32 is always exactly representable; the host conversion matches the
+    // guest default MXCSR rounding mode (round to nearest).
+    const auto bits = std::bit_cast<std::uint64_t>(
+        static_cast<double>(static_cast<std::int32_t>(intValue)));
+    state->xmm[destinationIndex] = {.low = bits, .high = 0};
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+convertInt64ToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
+                        std::uint64_t intValue) noexcept {
+    if (destinationIndex >= state->xmm.size()) {
+        return state;
+    }
+    const auto bits = std::bit_cast<std::uint64_t>(
+        static_cast<double>(static_cast<std::int64_t>(intValue)));
+    state->xmm[destinationIndex] = {.low = bits, .high = 0};
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 compareEqualXmmBytes128(x86::X86State *state, std::uint64_t destinationIndex,
                         std::uint64_t sourceIndex) noexcept {
     if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
@@ -4077,6 +4103,60 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 const auto value = builder.readGuestXmmLane(xmm, false, instruction.address);
                 builder.storeGuest(address, value, ir::Width::I64, instruction.address);
             }
+            break;
+        }
+        case x86::Opcode::Cvtsi2sdXmmReg:
+        case x86::Opcode::Cvtsi2sdXmmMem: {
+            const bool fromMemory = instruction.opcode == x86::Opcode::Cvtsi2sdXmmMem;
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: CVTSI2SD operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            ir::Width width = ir::Width::I32;
+            ir::ValueId integer{};
+            if (!fromMemory) {
+                const auto source =
+                    std::get<x86::RegisterOperand>(instruction.operands[1]);
+                if ((source.width != 32 && source.width != 64) ||
+                    source.byteOffset != 0) {
+                    throw std::runtime_error(
+                        "only 32-bit and 64-bit register CVTSI2SD is implemented");
+                }
+                width = source.width == 32 ? ir::Width::I32 : ir::Width::I64;
+                integer = builder.readGuestRegister(source.reg, width,
+                                                    instruction.address);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                if ((memory.width != 32 && memory.width != 64) ||
+                    (memory.ripRelative
+                         ? memory.hasBase || memory.index.has_value()
+                         : !memory.hasBase) ||
+                    memory.segment != x86::Segment::None) {
+                    throw std::runtime_error("unsupported CVTSI2SD memory addressing");
+                }
+                width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+                auto address =
+                    memory.ripRelative
+                        ? builder.constant(instruction.address.value + instruction.length,
+                                           ir::Width::I64, instruction.address)
+                        : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                    instruction.address);
+                if (memory.displacement != 0) {
+                    const auto displacement = builder.constant(
+                        static_cast<std::uint64_t>(memory.displacement),
+                        ir::Width::I64, instruction.address);
+                    address = builder.add(address, displacement, ir::Width::I64,
+                                          instruction.address);
+                }
+                integer = builder.loadGuest(address, width, instruction.address);
+            }
+            // The conversion helper is pure: the integer is consumed here, so
+            // no IR value stays live across its call.
+            builder.convertIntToDoubleXmm(integer, destination, width,
+                                          instruction.address);
             break;
         }
         case x86::Opcode::MovlpsRegMem:
@@ -8793,6 +8873,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
             operation.opcode == ir::Opcode::CompareEqualXmmDwords ||
             operation.opcode == ir::Opcode::ShiftLeftXmmDwords ||
+            operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
             operation.opcode == ir::Opcode::AddXmmDwords ||
             operation.opcode == ir::Opcode::HorizontalAddXmmDwords ||
             operation.opcode == ir::Opcode::AndNotXmm ||
@@ -10539,6 +10620,21 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.movImmediate(arm64::x16, pointerBits(&shiftLeftXmmDwords128));
             assembler.blr(arm64::x16);
             break;
+        case ir::Opcode::ConvertIntToDoubleXmm: {
+            if (operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 32- and 64-bit integer to double conversion");
+            }
+            assembler.movImmediate(arm64::x1,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x16,
+                                   operation.width == ir::Width::I32
+                                       ? pointerBits(&convertInt32ToDoubleXmm)
+                                       : pointerBits(&convertInt64ToDoubleXmm));
+            assembler.blr(arm64::x16);
+            break;
+        }
         case ir::Opcode::AddXmmDwords:
             assembler.movImmediate(arm64::x1,
                                    static_cast<std::uint64_t>(*operation.guestXmmRegister));

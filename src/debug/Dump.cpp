@@ -2671,6 +2671,37 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
         }
+        case x86::Opcode::Cvtsi2sdXmmReg:
+        case x86::Opcode::Cvtsi2sdXmmMem: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::Cvtsi2sdXmmMem;
+            stream << "cvtsi2sd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", ";
+            if (!fromMemory) {
+                stream << registerOperandName(
+                    std::get<x86::RegisterOperand>(instruction.operands[1]));
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                stream << (memory.width == 32 ? "dword [" : "qword [");
+                if (memory.ripRelative) {
+                    stream << "rip";
+                } else {
+                    stream << x86::registerName(memory.base);
+                }
+                if (memory.displacement < 0) {
+                    stream << "-0x" << -memory.displacement;
+                } else if (memory.displacement > 0) {
+                    stream << "+0x" << memory.displacement;
+                }
+                stream << ']';
+            }
+            break;
+        }
         case x86::Opcode::MovsdRegMem:
         case x86::Opcode::MovlpsRegMem: {
             const auto memory =
@@ -3223,6 +3254,11 @@ std::string dumpIr(const ir::Block &block) {
             stream << "shift_left_xmm_dwords.i32 "
                    << x86::xmmRegisterName(*operation.guestXmmRegister)
                    << ", " << operation.immediate;
+            break;
+        case ir::Opcode::ConvertIntToDoubleXmm:
+            stream << "convert_int_to_double_xmm."
+                   << widthName(operation.width) << ' ' << valueName(*operation.lhs)
+                   << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;
         case ir::Opcode::AddXmmDwords:
             stream << "add_xmm_dwords.i32 "

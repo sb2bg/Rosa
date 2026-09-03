@@ -66,6 +66,7 @@ enum class Opcode {
     CompareEqualXmmBytes,
     CompareEqualXmmDwords,
     ShiftLeftXmmDwords,
+    ConvertIntToDoubleXmm,
     AddXmmDwords,
     HorizontalAddXmmDwords,
     AndNotXmm,
@@ -243,6 +244,8 @@ class Builder {
     void shiftLeftXmmDwords(x86::XmmRegister destination,
                             std::uint8_t count,
                             guest::GuestAddress rip);
+    void convertIntToDoubleXmm(ValueId value, x86::XmmRegister destination,
+                               Width width, guest::GuestAddress rip);
     void addXmmDwords(x86::XmmRegister destination,
                       x86::XmmRegister source,
                       guest::GuestAddress rip);

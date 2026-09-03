@@ -3698,6 +3698,84 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0xF2U && code.size() - cursor >= 4) {
+            auto cvtCursor = cursor + 1;
+            std::uint8_t cvtRex = 0;
+            if (code[cvtCursor] >= 0x40U && code[cvtCursor] <= 0x4FU &&
+                code.size() - cvtCursor >= 4) {
+                cvtRex = code[cvtCursor++];
+            }
+            if (code.size() - cvtCursor >= 3 && code[cvtCursor] == 0x0FU &&
+                code[cvtCursor + 1] == 0x2AU) {
+                const auto modrm = code[cvtCursor + 2];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto regEncoding =
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+                const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+                const auto destination = XmmRegisterOperand{static_cast<XmmRegister>(
+                    static_cast<std::uint8_t>(regEncoding |
+                                              ((cvtRex & 0x4U) != 0 ? 8U : 0U)))};
+                const auto intWidth =
+                    static_cast<std::uint8_t>((cvtRex & 0x8U) != 0 ? 64U : 32U);
+                auto operandCursor = cvtCursor + 3;
+                if (mode == 0x3U) {
+                    instruction.opcode = Opcode::Cvtsi2sdXmmReg;
+                    instruction.operands.push_back(destination);
+                    instruction.operands.push_back(RegisterOperand{
+                        decodeRegister(rmEncoding, (cvtRex & 0x1U) != 0), intWidth});
+                } else {
+                    const bool ripRelative =
+                        mode == 0 && rmEncoding == 0x5U && (cvtRex & 0x1U) == 0;
+                    if (rmEncoding == 0x4U ||
+                        (mode == 0 && rmEncoding == 0x5U && (cvtRex & 0x1U) != 0)) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only RIP-relative or based CVTSI2SD xmm, r/m32/r/m64 is supported");
+                    }
+                    std::int64_t displacement = 0;
+                    if (mode == 0x1U) {
+                        if (operandCursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated CVTSI2SD disp8");
+                        }
+                        displacement =
+                            std::bit_cast<std::int8_t>(code[operandCursor++]);
+                    } else if (mode == 0x2U || ripRelative) {
+                        if (code.size() - operandCursor < 4) {
+                            throw DecodeError(address, remaining,
+                                              "truncated CVTSI2SD disp32");
+                        }
+                        displacement = readI32(code.subspan(operandCursor, 4));
+                        operandCursor += 4;
+                    }
+                    if (ripRelative) {
+                        static_cast<void>(relativeTarget(
+                            address, operandCursor - instructionStart,
+                            displacement));
+                    }
+                    instruction.opcode = Opcode::Cvtsi2sdXmmMem;
+                    instruction.operands.push_back(destination);
+                    instruction.operands.push_back(
+                        ripRelative
+                            ? MemoryOperand{Register::Rax, displacement, intWidth,
+                                            std::nullopt, 1, false, true}
+                            : MemoryOperand{
+                                  decodeRegister(rmEncoding, (cvtRex & 0x1U) != 0),
+                                  displacement, intWidth});
+                }
+                const auto length = operandCursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = operandCursor;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
         if (code[cursor] == 0xF3U && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x11U) {
             if (code.size() - cursor < 4) {
