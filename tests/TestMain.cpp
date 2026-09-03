@@ -11962,8 +11962,33 @@ void testLfenceGeneratedExecution() {
                block.program().listing.end(),
            "LFENCE did not emit an ARM64 memory barrier");
     expect(std::find(block.program().listing.begin(), block.program().listing.end(), "isb") !=
+                block.program().listing.end(),
+            "LFENCE did not emit an ARM64 instruction barrier");
+}
+
+void testMfenceGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0xAE, 0xF0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000458C9ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::Mfence, "MFENCE opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "MFENCE length differs");
+    expect(rosa::debug::dumpX86(decoded).find("mfence") != std::string::npos,
+           "MFENCE dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000458C9ULL});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find("store_fence") !=
+               std::string::npos,
+           "MFENCE did not lower through the store-fence IR");
+    rosa::x86::X86State state;
+    state.rax = 0x0123456789ABCDEFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x0123456789ABCDEFULL}, "MFENCE changed a guest register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MFENCE changed guest flags");
+    expect(std::find(block.program().listing.begin(), block.program().listing.end(), "dmb ish") !=
                block.program().listing.end(),
-           "LFENCE did not emit an ARM64 instruction barrier");
+           "MFENCE did not emit an ARM64 memory barrier");
 }
 
 void testSidtGeneratedExecution() {
@@ -31166,6 +31191,7 @@ int main() {
         {"TEST guest byte immediate generated execution",
          testTestGuestByteImmediateGeneratedExecution},
         {"LFENCE generated execution", testLfenceGeneratedExecution},
+        {"MFENCE generated execution", testMfenceGeneratedExecution},
         {"SIDT generated execution", testSidtGeneratedExecution},
         {"multi-byte NOP generated execution", testMultiByteNopGeneratedExecution},
         {"RDTSC generated execution", testRdtscGeneratedExecution},

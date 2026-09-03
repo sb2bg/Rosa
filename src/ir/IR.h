@@ -98,6 +98,7 @@ enum class Opcode {
     LockedOrGuestMemory,
     StoreGuestIdtr,
     LoadFence,
+    StoreFence,
     ReadTimestampCounter,
     UpdateAddFlags,
     UpdateAdcFlags,
@@ -302,6 +303,7 @@ class Builder {
                              Width width, guest::GuestAddress rip);
     void storeGuestIdtr(ValueId address, guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
+    void storeFence(guest::GuestAddress rip);
     void readTimestampCounter(guest::GuestAddress rip);
     void updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                         guest::GuestAddress rip);

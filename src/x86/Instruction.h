@@ -173,6 +173,7 @@ enum class Opcode {
     Leave,
     Nop,
     Lfence,
+    Mfence,
     Rdtsc,
     SidtMem,
     JmpRelative,

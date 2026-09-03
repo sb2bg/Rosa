@@ -2540,6 +2540,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::Lfence:
             stream << "lfence";
             break;
+        case x86::Opcode::Mfence:
+            stream << "mfence";
+            break;
         case x86::Opcode::SidtMem: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
@@ -3023,6 +3026,9 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::LoadFence:
             stream << "load_fence";
+            break;
+        case ir::Opcode::StoreFence:
+            stream << "store_fence";
             break;
         case ir::Opcode::ReadTimestampCounter:
             stream << "read_timestamp_counter";

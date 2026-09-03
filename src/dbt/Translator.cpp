@@ -6453,6 +6453,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
         case x86::Opcode::Lfence:
             builder.loadFence(instruction.address);
             break;
+        case x86::Opcode::Mfence:
+            builder.storeFence(instruction.address);
+            break;
         case x86::Opcode::SidtMem: {
             if (instruction.operands.size() != 1 ||
                 !std::holds_alternative<x86::MemoryOperand>(instruction.operands[0])) {
@@ -9604,6 +9607,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
         case ir::Opcode::LoadFence:
             assembler.dmbIsh();
             assembler.isb();
+            break;
+        case ir::Opcode::StoreFence:
+            assembler.dmbIsh();
             break;
         case ir::Opcode::ReadTimestampCounter: {
             const auto fault = assembler.makeLabel();

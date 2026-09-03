@@ -931,6 +931,14 @@ void Builder::loadFence(guest::GuestAddress rip) {
     });
 }
 
+void Builder::storeFence(guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::StoreFence,
+        .width = Width::I64,
+        .guestRip = rip,
+    });
+}
+
 void Builder::readTimestampCounter(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::ReadTimestampCounter,
@@ -1678,6 +1686,7 @@ std::vector<std::string> verify(const Block &block) {
             checkUse(operation.lhs, "guest address");
             break;
         case Opcode::LoadFence:
+        case Opcode::StoreFence:
         case Opcode::ReadTimestampCounter:
             break;
         case Opcode::UpdateAddFlags:
