@@ -2020,12 +2020,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding =
                 static_cast<std::uint8_t>(modrm & 0x7U);
-            if ((extension != 0x4U && extension != 0x7U) ||
+            if ((extension != 0x4U && extension != 0x7U && extension != 0x1U) ||
                 mode > 0x2U || rmEncoding == 0x4U ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only AND /4 and CMP /7 word [base+disp8/disp32], imm16 are supported");
+                    "only OR /1, AND /4 and CMP /7 word [base+disp8/disp32], imm16 are supported");
             }
             auto operandCursor = wordLogicImmediateOpcodeOffset + 2;
             std::int64_t displacement = 0;
@@ -2052,8 +2052,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<std::uint16_t>(code[operandCursor]) |
                 (static_cast<std::uint16_t>(code[operandCursor + 1]) << 8U));
             operandCursor += 2;
-            instruction.opcode = extension == 0x4U ? Opcode::AndMemImm
-                                                    : Opcode::CmpMemImm;
+            instruction.opcode = extension == 0x4U   ? Opcode::AndMemImm
+                                 : extension == 0x1U ? Opcode::OrMemImm
+                                                     : Opcode::CmpMemImm;
             instruction.operands.push_back(MemoryOperand{
                 decodeRegister(rmEncoding, rexB), displacement, 16});
             instruction.operands.push_back(ImmediateOperand{immediate, 16});
