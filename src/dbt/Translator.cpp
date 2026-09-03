@@ -2787,6 +2787,61 @@ shiftLeftGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint
     }
 }
 
+extern "C" x86::X86State *updateShiftRightFlags32(x86::X86State *state, std::uint64_t lhsValue,
+                                                   std::uint64_t resultValue,
+                                                   std::uint64_t unmaskedCount);
+extern "C" x86::X86State *updateShiftRightFlags64(x86::X86State *state, std::uint64_t lhs,
+                                                   std::uint64_t result,
+                                                   std::uint64_t unmaskedCount);
+
+extern "C" __attribute__((noinline)) x86::X86State *
+shiftRightGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                  std::uint64_t countValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated 32-bit guest memory shift has no address space");
+        }
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, sizeof(std::uint32_t),
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU32(guest::GuestAddress{address});
+        const auto count = static_cast<std::uint8_t>(countValue & 0x1FU);
+        const auto result = count == 0 ? original : original >> count;
+        context->addressSpace->writeU32(guest::GuestAddress{address}, result);
+        return updateShiftRightFlags32(state, original, result, count);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+shiftRightGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                  std::uint64_t countValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated 64-bit guest memory shift has no address space");
+        }
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, sizeof(std::uint64_t),
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU64(guest::GuestAddress{address});
+        const auto count = static_cast<std::uint8_t>(countValue & 0x3FU);
+        const auto result = count == 0 ? original : original >> count;
+        context->addressSpace->writeU64(guest::GuestAddress{address}, result);
+        return updateShiftRightFlags64(state, original, result, count);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint64_t);
+        }
+        return nullptr;
+    }
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *
 updateShiftLeftFlags32(x86::X86State *state, std::uint64_t lhsValue, std::uint64_t resultValue,
                        std::uint64_t unmaskedCount) {
@@ -4634,6 +4689,28 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 builder.add(base, displacement, ir::Width::I64, instruction.address);
             const auto count = static_cast<std::uint8_t>(immediate.value & 0x3FU);
             builder.shiftLeftGuestMemory(address, count, ir::Width::I64, instruction.address);
+            break;
+        }
+        case x86::Opcode::ShrMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: shr memory operand count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (memory.width != 32 && memory.width != 64) {
+                throw std::runtime_error("internal decoder error: SHR memory width");
+            }
+            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto base =
+                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            const auto displacement =
+                builder.constant(static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
+                                 instruction.address);
+            const auto address =
+                builder.add(base, displacement, ir::Width::I64, instruction.address);
+            const auto count =
+                static_cast<std::uint8_t>(immediate.value & (memory.width == 64 ? 0x3FU : 0x1FU));
+            builder.shiftRightLogicalGuestMemory(address, count, width, instruction.address);
             break;
         }
         case x86::Opcode::ShlRegCl: {
@@ -8090,6 +8167,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::OrGuestMemory ||
             operation.opcode == ir::Opcode::AndGuestMemory ||
             operation.opcode == ir::Opcode::ShiftLeftGuestMemory ||
+            operation.opcode == ir::Opcode::ShiftRightGuestMemory ||
             operation.opcode == ir::Opcode::IncrementGuestMemory ||
             operation.opcode == ir::Opcode::DecrementGuestMemory ||
             operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
@@ -8144,6 +8222,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::OrGuestMemory ||
             operation.opcode == ir::Opcode::AndGuestMemory ||
             operation.opcode == ir::Opcode::ShiftLeftGuestMemory ||
+            operation.opcode == ir::Opcode::ShiftRightGuestMemory ||
             operation.opcode == ir::Opcode::IncrementGuestMemory ||
             operation.opcode == ir::Opcode::DecrementGuestMemory ||
             operation.opcode == ir::Opcode::CompareExchangeGuestMemory ||
@@ -9173,6 +9252,31 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.movImmediate(arm64::x3, operation.immediate);
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(arm64::x16, pointerBits(&shiftLeftGuest64));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0, static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::ShiftRightGuestMemory: {
+            if (operation.width != ir::Width::I32 &&
+                operation.width != ir::Width::I64) {
+                throw std::runtime_error("ARM64 backend only implements 32- and 64-bit "
+                                         "guest memory shift right");
+            }
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x3, operation.immediate);
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
+                                                   ? pointerBits(&shiftRightGuest32)
+                                                   : pointerBits(&shiftRightGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

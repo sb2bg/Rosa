@@ -8406,7 +8406,41 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 rexW && !rexR && !rexX && extension == 0x1U;
             const bool observedRol =
                 !rexR && !rexX && extension == 0x0U;
-            if (mode != 0x3U && rexW && extension == 0x4U) {
+            if (mode != 0x3U && extension == 0x5U && !rexR && !rexX) {
+                const auto rmEncoding =
+                    static_cast<std::uint8_t>(modrm & 0x7U);
+                if (rexX || rmEncoding == 0x4U ||
+                    (mode == 0 && rmEncoding == 0x5U)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only SHR dword/qword [base+disp8/disp32], imm8 is supported for memory opcode C1 /5");
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated SHR memory disp8");
+                    }
+                    displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated SHR memory disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated SHR memory immediate");
+                }
+                instruction.opcode = Opcode::ShrMemImm;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, rexB), displacement,
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                instruction.operands.push_back(
+                    ImmediateOperand{code[cursor++], 8});
+            } else if (mode != 0x3U && rexW && extension == 0x4U) {
                 const auto rmEncoding =
                     static_cast<std::uint8_t>(modrm & 0x7U);
                 if (rexX || rmEncoding == 0x4U ||
@@ -8446,7 +8480,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                       (extension != 0x4U && extension != 0x5U)))) {
                     throw DecodeError(
                         address, remaining,
-                        "only ROL r32/r64, ROR r64, SHL/SHR r32/r64, and SAR r32/r64 register forms from opcode C1 are supported");
+                        "only ROL r32/r64, ROR r64, SHL/SHR r32/r64, and SAR r32/r64 register forms and SHR dword/qword memory from opcode C1 are supported");
                 }
                 instruction.opcode = extension == 0x0U   ? Opcode::RolRegImm
                                      : extension == 0x1U ? Opcode::RorRegImm

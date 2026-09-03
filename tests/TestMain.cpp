@@ -12862,6 +12862,63 @@ void testShiftLeft64GuestMemoryImmediate() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "failed SHL guest store changed flags");
 }
 
+void testShiftRight32GuestMemoryImmediate() {
+    // Observed in libsqlite3: SHR dword [rbp-0x98], 3 (opcode C1 /5).
+    constexpr std::array<std::uint8_t, 8> code{0xC1, 0xAD, 0x68, 0xFF,
+                                               0xFF, 0xFF, 0x03, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000C900EULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShrMemImm, "SHR dword memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7}, "SHR dword memory length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto count = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbp && memory.displacement == -152 &&
+               memory.width == 32 && count.value == 3,
+           "SHR dword [rbp-0x98], 3 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("shr dword [rbp-0x98], 0x3") != std::string::npos,
+           "SHR dword memory dump differs");
+
+    constexpr rosa::guest::GuestAddress mappingBase{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(mappingBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 0x80000001U);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000C900EULL});
+    rosa::x86::X86State state;
+    state.rbp = target.value + 152;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0x10000000U},
+                "SHR dword memory result differs");
+    constexpr std::uint64_t definedFlags = (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U);
+    expectEqual(state.rflags & definedFlags, std::uint64_t{1U << 2U},
+                "SHR dword memory defined flags differ");
+    expectEqual(state.rbp, target.value + 152, "SHR dword memory changed its base register");
+
+    addressSpace.writeU32(target, 0xFFFFFFFFU);
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0x1FFFFFFFU},
+                "SHR dword memory carry result differs");
+    expectEqual(state.rflags & definedFlags, std::uint64_t{(1U << 0U) | (1U << 2U)},
+                "SHR dword memory carry flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rbp = target.value + 152;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") != std::string_view::npos;
+    }
+    expect(rejected, "SHR from unmapped guest memory did not fault");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "failed SHR guest load changed flags");
+}
+
 void testShiftLeftClGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0xD3, 0xE0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -32796,6 +32853,7 @@ int main() {
         {"RDTSC generated execution", testRdtscGeneratedExecution},
         {"SHL immediate generated execution", testShiftLeftImmediateGeneratedExecution},
         {"SHL qword guest memory immediate", testShiftLeft64GuestMemoryImmediate},
+        {"SHR dword guest memory immediate", testShiftRight32GuestMemoryImmediate},
         {"SHL CL generated execution", testShiftLeftClGeneratedExecution},
         {"SHL 32-bit CL generated execution", testShiftLeft32ClGeneratedExecution},
         {"SHL 8-bit CL generated execution", testShiftLeft8ClGeneratedExecution},

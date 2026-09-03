@@ -87,6 +87,7 @@ enum class Opcode {
     OrGuestMemory,
     AndGuestMemory,
     ShiftLeftGuestMemory,
+    ShiftRightGuestMemory,
     IncrementGuestMemory,
     DecrementGuestMemory,
     CompareExchangeGuestMemory,
@@ -283,6 +284,8 @@ class Builder {
                         guest::GuestAddress rip);
     void shiftLeftGuestMemory(ValueId address, std::uint8_t count, Width width,
                               guest::GuestAddress rip);
+    void shiftRightLogicalGuestMemory(ValueId address, std::uint8_t count, Width width,
+                                      guest::GuestAddress rip);
     void incrementGuestMemory(ValueId address, Width width,
                               guest::GuestAddress rip);
     void decrementGuestMemory(ValueId address, Width width,

@@ -893,6 +893,20 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
         }
+        case x86::Opcode::ShrMemImm: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << (memory.width == 32 ? "shr dword [" : "shr qword [")
+                   << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], 0x"
+                   << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
+            break;
+        }
         case x86::Opcode::ShlRegCl:
             stream << "shl "
                    << registerOperandName(
@@ -2918,6 +2932,11 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::ShiftLeftGuestMemory:
             stream << "shift_left_guest_memory." << widthName(operation.width)
+                   << ' ' << valueName(*operation.lhs) << ", " << std::dec
+                   << operation.immediate;
+            break;
+        case ir::Opcode::ShiftRightGuestMemory:
+            stream << "shift_right_guest_memory." << widthName(operation.width)
                    << ' ' << valueName(*operation.lhs) << ", " << std::dec
                    << operation.immediate;
             break;
