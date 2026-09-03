@@ -7269,15 +7269,16 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
                     const auto baseEncoding =
                         static_cast<std::uint8_t>(sib & 0x7U);
-                    if ((indexEncoding == 0x4U && !rexX) ||
-                        (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                    if (mode == 0 && baseEncoding == 0x5U && !rexB) {
                         throw DecodeError(
                             address, remaining,
-                            "MOVSXD SIB requires register base and index");
+                            "no-base MOVSXD SIB is not supported");
                     }
                     base = decodeRegister(baseEncoding, rexB);
-                    index = decodeRegister(indexEncoding, rexX);
-                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    if (indexEncoding != 0x4U || rexX) {
+                        index = decodeRegister(indexEncoding, rexX);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
                 } else if (rexX) {
                     throw DecodeError(address, remaining,
                                       "REX.X requires a SIB operand for MOVSXD");

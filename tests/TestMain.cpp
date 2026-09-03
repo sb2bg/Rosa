@@ -11664,6 +11664,39 @@ void testMovsxdScaledGuestDword() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVSXD changed flags");
 }
 
+void testMovsxdNoIndexSibGuestDword() {
+    // Observed in libsqlite3: MOVSXD RAX, dword [R12] with a no-index SIB.
+    constexpr std::array<std::uint8_t, 5> code{0x49, 0x63, 0x04, 0x24, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000CDC4EULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovsxdRegMem,
+           "MOVSXD no-index SIB opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "MOVSXD no-index SIB length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 64,
+           "MOVSXD no-index SIB destination differs");
+    expect(memory.base == rosa::x86::Register::R12 && !memory.index && memory.scale == 1 &&
+               memory.displacement == 0 && memory.width == 32,
+           "MOVSXD no-index SIB memory operand differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(rosa::guest::GuestAddress{0x8100}, 0xFFFFFFFFU);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000CDC4EULL});
+    rosa::x86::X86State state;
+    state.rax = 0x0123456789ABCDEFULL;
+    state.r12 = 0x8100;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0xFFFFFFFFFFFFFFFFULL},
+                "MOVSXD no-index SIB result differs");
+    expectEqual(state.r12, std::uint64_t{0x8100}, "MOVSXD no-index SIB changed base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVSXD no-index SIB changed flags");
+}
+
 void testMovsxdRipRelativeGuestDword() {
     constexpr std::array<std::uint8_t, 8> observedCode{0x4C, 0x63, 0x3D, 0x98,
                                                        0x38, 0xA4, 0x40, 0xC3};
@@ -32658,6 +32691,7 @@ int main() {
         {"MOVZX guest word to 32-bit register", testMovzxGuestWordTo32BitRegister},
         {"MOVZX guest word with scaled index", testMovzxGuestWordWithScaledIndex},
         {"MOVSXD scaled guest dword", testMovsxdScaledGuestDword},
+        {"MOVSXD no-index SIB guest dword", testMovsxdNoIndexSibGuestDword},
         {"MOVSXD RIP-relative guest dword", testMovsxdRipRelativeGuestDword},
         {"MOVSXD register", testMovsxdRegister},
         {"CDQE generated execution", testCdqeGeneratedExecution},
