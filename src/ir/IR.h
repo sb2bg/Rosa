@@ -99,6 +99,7 @@ enum class Opcode {
     LockedIncrementGuestMemory,
     LockedDecrementGuestMemory,
     LockedOrGuestMemory,
+    LockedAndGuestMemory,
     StoreGuestIdtr,
     LoadFence,
     StoreFence,
@@ -312,6 +313,8 @@ class Builder {
                                     guest::GuestAddress rip);
     void lockedOrGuestMemory(ValueId address, ValueId immediate,
                              Width width, guest::GuestAddress rip);
+    void lockedAndGuestMemory(ValueId address, ValueId immediate,
+                              Width width, guest::GuestAddress rip);
     void storeGuestIdtr(ValueId address, guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
     void storeFence(guest::GuestAddress rip);

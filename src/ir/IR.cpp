@@ -966,6 +966,17 @@ void Builder::lockedOrGuestMemory(ValueId address, ValueId immediate,
     });
 }
 
+void Builder::lockedAndGuestMemory(ValueId address, ValueId immediate,
+                                   Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LockedAndGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+        .rhs = immediate,
+    });
+}
+
 void Builder::storeGuestIdtr(ValueId address, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::StoreGuestIdtr,
@@ -1560,6 +1571,14 @@ std::vector<std::string> verify(const Block &block) {
                 operation.width != Width::I32) {
                 errors.emplace_back(
                     "locked_or_guest_memory currently requires i16 or i32");
+            }
+            break;
+        case Opcode::LockedAndGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            checkUse(operation.rhs, "immediate");
+            if (operation.width != Width::I16) {
+                errors.emplace_back(
+                    "locked_and_guest_memory currently requires i16");
             }
             break;
         case Opcode::StoreGuestIdtr:

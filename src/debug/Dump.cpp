@@ -446,13 +446,15 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             }
             break;
         }
-        case x86::Opcode::LockOrMemImm: {
+        case x86::Opcode::LockOrMemImm:
+        case x86::Opcode::LockAndMemImm: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto immediate =
                 std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            stream << (memory.width == 16 ? "lock or word ["
-                                          : "lock or dword [")
+            stream << (instruction.opcode == x86::Opcode::LockAndMemImm ? "lock and "
+                                                                       : "lock or ")
+                   << (memory.width == 16 ? "word [" : "dword [")
                    << x86::registerName(memory.base);
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
@@ -3120,6 +3122,11 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::LockedOrGuestMemory:
             stream << "locked_or_guest_memory." << widthName(operation.width)
+                   << ' ' << valueName(*operation.lhs) << ", "
+                   << valueName(*operation.rhs);
+            break;
+        case ir::Opcode::LockedAndGuestMemory:
+            stream << "locked_and_guest_memory." << widthName(operation.width)
                    << ' ' << valueName(*operation.lhs) << ", "
                    << valueName(*operation.rhs);
             break;

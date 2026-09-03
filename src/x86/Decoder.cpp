@@ -5150,11 +5150,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode == 0x3U || extension != 0x1U ||
+            if (mode == 0x3U || (extension != 0x1U && extension != 0x4U) ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only word LOCK OR [base+disp8/disp32], imm8 is supported");
+                    "only word LOCK OR/AND [base+disp8/disp32], imm8/imm16 is supported");
             }
             auto base = decodeRegister(rmEncoding, (rex & 0x1U) != 0);
             if (rmEncoding == 0x4U) {
@@ -5170,7 +5170,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     (mode == 0 && baseEncoding == 0x5U)) {
                     throw DecodeError(
                         address, remaining,
-                        "only no-index, based SIB is supported for word LOCK OR");
+                        "only no-index, based SIB is supported for word LOCK OR/AND");
                 }
                 base = decodeRegister(baseEncoding, (rex & 0x1U) != 0);
             }
@@ -5203,7 +5203,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             } else {
                 if (code.size() - cursor < 2) {
                     throw DecodeError(address, remaining,
-                                      "truncated word LOCK OR imm16");
+                                      "truncated word LOCK OR/AND imm16");
                 }
                 immediate = static_cast<std::uint16_t>(
                     static_cast<std::uint16_t>(code[cursor]) |
@@ -5211,7 +5211,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 cursor += 2;
                 immediateWidth = 16;
             }
-            instruction.opcode = Opcode::LockOrMemImm;
+            instruction.opcode = extension == 0x1U ? Opcode::LockOrMemImm
+                                                   : Opcode::LockAndMemImm;
             instruction.operands.push_back(
                 MemoryOperand{base, displacement, 16});
             instruction.operands.push_back(

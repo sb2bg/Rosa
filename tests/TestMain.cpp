@@ -7959,6 +7959,66 @@ void testLockedOrGuestWordImmediate() {
     expectEqual(faultState.rflags, std::uint64_t{0x8D7}, "faulted word LOCK OR changed flags");
 }
 
+void testLockedAndGuestWordImmediate() {
+    // Observed in libobjc under an Objective-C fixture: LOCK AND word [rbx+0x1e], 0xbfff.
+    constexpr std::array<std::uint8_t, 8> code{0x66, 0xF0, 0x81, 0x63,
+                                               0x1E, 0xFF, 0xBF, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF802A3E69AULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockAndMemImm,
+           "word LOCK AND opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7}, "word LOCK AND length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbx && memory.width == 16 &&
+               memory.displacement == 0x1E && immediate.width == 16 &&
+               immediate.value == 0xBFFF,
+           "lock and word [rbx+0x1e], 0xbfff operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("lock and word [rbx+0x1e], 0xbfff") !=
+               std::string::npos,
+           "word LOCK AND dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x811E};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 2>{0xFF, 0xFF});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("locked_and_guest_memory.i16") != std::string::npos,
+           "word LOCK AND did not lower through atomic guest-memory IR");
+    rosa::x86::X86State state;
+    state.rbx = 0x8100;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    // 0xFFFF & 0xBFFF == 0xBFFF.
+    expect(addressSpace.readBytes(target, 2) == std::vector<std::uint8_t>({0xFF, 0xBF}),
+           "word LOCK AND result differs");
+    expectEqual(state.rbx, std::uint64_t{0x8100}, "word LOCK AND changed its base");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    // 0xBFFF: sign set, parity even (low byte 0xFF has 8 bits set).
+    expectEqual(state.rflags & definedLogicFlags,
+                std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "word LOCK AND defined flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rbx = 0x8100;
+    faultState.rflags = 0x8D7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") != std::string_view::npos;
+    }
+    expect(rejected, "word LOCK AND to unmapped guest memory did not fault");
+    expectEqual(faultState.rflags, std::uint64_t{0x8D7}, "faulted word LOCK AND changed flags");
+}
+
 void testLockedIncrementGuestDword() {
     constexpr std::array<std::uint8_t, 4> code{0xF0, 0xFF, 0x00, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -34660,6 +34720,7 @@ int main() {
         {"XCHG guest qword with register", testExchangeGuestQwordWithRegister},
         {"LOCK OR guest dword immediate", testLockedOrGuestDwordImmediate},
         {"LOCK OR guest word immediate", testLockedOrGuestWordImmediate},
+        {"LOCK AND guest word immediate", testLockedAndGuestWordImmediate},
         {"LOCK ADD guest qword register", testLockedAddGuestQwordRegister},
         {"LOCK XADD guest dword register", testLockedExchangeAddGuestDwordRegister},
         {"LOCK XADD guest qword register", testLockedExchangeAddGuestQwordRegister},

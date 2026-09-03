@@ -2788,6 +2788,36 @@ lockedOrGuest16(GuestExecutionContext *context, x86::X86State *state, std::uint6
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+lockedAndGuest16(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                 std::uint64_t immediateValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated word LOCK AND has no guest address space");
+        }
+        constexpr auto width = sizeof(std::uint16_t);
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, width,
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU16(guest::GuestAddress{address});
+        const auto result =
+            static_cast<std::uint16_t>(original & static_cast<std::uint16_t>(immediateValue));
+        const std::array resultBytes{
+            static_cast<std::uint8_t>(result),
+            static_cast<std::uint8_t>(result >> 8U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, resultBytes);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return updateLogicFlags16(state, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint16_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 lockedAddGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
                  std::uint64_t source) noexcept {
     try {
@@ -4758,7 +4788,8 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 memory.width == 32 ? ir::Width::I32 : ir::Width::I64, instruction.address);
             break;
         }
-        case x86::Opcode::LockOrMemImm: {
+        case x86::Opcode::LockOrMemImm:
+        case x86::Opcode::LockAndMemImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: LOCK OR operand count");
             }
@@ -4767,10 +4798,11 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const bool wordForm =
                 memory.width == 16 && (immediate.width == 8 || immediate.width == 16);
             const bool dwordForm =
-                memory.width == 32 && (immediate.width == 8 || immediate.width == 32);
+                instruction.opcode == x86::Opcode::LockOrMemImm && memory.width == 32 &&
+                (immediate.width == 8 || immediate.width == 32);
             if (!wordForm && !dwordForm) {
-                throw std::runtime_error("only LOCK OR word [base+disp], imm8/imm16 and dword "
-                                         "[base+disp], imm8/imm32 are implemented");
+                throw std::runtime_error("only LOCK OR/AND word [base+disp], imm8/imm16 and LOCK OR "
+                                         "dword [base+disp], imm8/imm32 are implemented");
             }
             const auto base =
                 builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
@@ -4783,7 +4815,11 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto width = memory.width == 16 ? ir::Width::I16 : ir::Width::I32;
             const auto value = builder.constant(immediate.value, width, instruction.address);
-            builder.lockedOrGuestMemory(address, value, width, instruction.address);
+            if (instruction.opcode == x86::Opcode::LockOrMemImm) {
+                builder.lockedOrGuestMemory(address, value, width, instruction.address);
+            } else {
+                builder.lockedAndGuestMemory(address, value, width, instruction.address);
+            }
             break;
         }
         case x86::Opcode::LockIncMem:
@@ -8695,6 +8731,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::LockedIncrementGuestMemory ||
             operation.opcode == ir::Opcode::LockedDecrementGuestMemory ||
             operation.opcode == ir::Opcode::LockedOrGuestMemory ||
+            operation.opcode == ir::Opcode::LockedAndGuestMemory ||
             operation.opcode == ir::Opcode::StoreGuestIdtr ||
             operation.opcode == ir::Opcode::StoreGuest ||
             operation.opcode == ir::Opcode::StoreGuestXmm ||
@@ -8751,6 +8788,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::LockedIncrementGuestMemory ||
             operation.opcode == ir::Opcode::LockedDecrementGuestMemory ||
             operation.opcode == ir::Opcode::LockedOrGuestMemory ||
+            operation.opcode == ir::Opcode::LockedAndGuestMemory ||
             operation.opcode == ir::Opcode::StoreGuestIdtr ||
             operation.opcode == ir::Opcode::StoreGuest ||
             operation.opcode == ir::Opcode::StoreGuestXmm ||
@@ -10046,6 +10084,29 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.movImmediate(arm64::x16, operation.width == ir::Width::I16
                                                    ? pointerBits(&lockedOrGuest16)
                                                    : pointerBits(&lockedOrGuest32));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0, static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::LockedAndGuestMemory: {
+            if (operation.width != ir::Width::I16) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 16-bit guest-memory LOCK AND");
+            }
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x4, arm64::x0);
+            assembler.mov(arm64::x1, arm64::x4);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x3, hostRegister(*operation.rhs));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&lockedAndGuest16));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);
