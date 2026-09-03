@@ -4856,6 +4856,26 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateShiftRightFlags(lhs, result, maskedCount, width, instruction.address);
             break;
         }
+        case x86::Opcode::SarRegCl: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: sar cl operand count");
+            }
+            const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto width = reg.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto lhs = builder.readGuestRegister(reg.reg, width, instruction.address);
+            const auto count =
+                builder.readGuestRegister(x86::Register::Rcx, ir::Width::I64, instruction.address);
+            const auto countMask = builder.constant(reg.width == 32 ? 0x1F : 0x3F, ir::Width::I64,
+                                                    instruction.address);
+            const auto maskedCount =
+                builder.bitAnd(count, countMask, ir::Width::I64, instruction.address);
+            const auto result =
+                builder.shiftRightArithmetic(lhs, maskedCount, width, instruction.address);
+            builder.writeGuestRegister(reg.reg, result, width, instruction.address);
+            builder.updateShiftRightArithmeticFlags(lhs, result, maskedCount, width,
+                                                    instruction.address);
+            break;
+        }
         case x86::Opcode::SarRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: sar operands");
@@ -8987,7 +9007,17 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             }
             break;
         case ir::Opcode::ShiftRightArithmetic:
-            if (operation.width == ir::Width::I32) {
+            if (operation.rhs) {
+                if (operation.width == ir::Width::I32) {
+                    assembler.asrVariable32(hostRegister(*operation.result),
+                                            hostRegister(*operation.lhs),
+                                            hostRegister(*operation.rhs));
+                } else {
+                    assembler.asrVariable(hostRegister(*operation.result),
+                                          hostRegister(*operation.lhs),
+                                          hostRegister(*operation.rhs));
+                }
+            } else if (operation.width == ir::Width::I32) {
                 assembler.asrImmediate32(hostRegister(*operation.result),
                                          hostRegister(*operation.lhs),
                                          static_cast<std::uint8_t>(operation.immediate));
@@ -10501,7 +10531,11 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
         case ir::Opcode::UpdateShiftRightArithmeticFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
-            assembler.movImmediate(arm64::x3, operation.immediate);
+            if (operation.third) {
+                assembler.mov(arm64::x3, hostRegister(*operation.third));
+            } else {
+                assembler.movImmediate(arm64::x3, operation.immediate);
+            }
             assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
                                                    ? pointerBits(&updateShiftRightArithmeticFlags32)
                                                    : pointerBits(&updateShiftRightArithmeticFlags64));

@@ -107,6 +107,8 @@ class Assembler {
     void signExtend32(XRegister destination, XRegister source);
     void lslVariable(XRegister destination, XRegister source, XRegister shift);
     void lsrVariable(XRegister destination, XRegister source, XRegister shift);
+    void asrVariable(XRegister destination, XRegister source, XRegister shift);
+    void asrVariable32(XRegister destination, XRegister source, XRegister shift);
     void multiplyLow(XRegister destination, XRegister lhs, XRegister rhs);
     void multiplyHighUnsigned(XRegister destination, XRegister lhs, XRegister rhs);
     void multiplyHighSigned(XRegister destination, XRegister lhs, XRegister rhs);

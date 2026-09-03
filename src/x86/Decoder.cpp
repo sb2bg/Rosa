@@ -8699,14 +8699,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             if (mode != 0x3U ||
                 (extension != 0x0U && extension != 0x4U &&
-                 extension != 0x5U) ||
+                 extension != 0x5U && extension != 0x7U) ||
                 (extension == 0x0U && rexW) || rexR || rexX) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct ROL r32 /0 and SHL/SHR r32/r64 /4,/5 from opcode D3 are supported");
+                                  "only register-direct ROL r32 /0 and SHL/SHR/SAR r32/r64 /4,/5,/7 from opcode D3 are supported");
             }
             instruction.opcode = extension == 0x0U   ? Opcode::RolRegCl
                                  : extension == 0x4U ? Opcode::ShlRegCl
-                                                     : Opcode::ShrRegCl;
+                                 : extension == 0x5U ? Opcode::ShrRegCl
+                                                     : Opcode::SarRegCl;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
                 static_cast<std::uint8_t>(rexW ? 64U : 32U)});

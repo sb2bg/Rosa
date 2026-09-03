@@ -3024,6 +3024,8 @@ void testAssemblerEncodings() {
     assembler.asrImmediate32(rosa::arm64::x10, rosa::arm64::x9, 3);
     assembler.lslVariable(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.lsrVariable(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
+    assembler.asrVariable(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
+    assembler.asrVariable32(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.multiplyLow(rosa::arm64::x11, rosa::arm64::x9, rosa::arm64::x10);
     assembler.multiplyHighUnsigned(rosa::arm64::x12, rosa::arm64::x9, rosa::arm64::x10);
     assembler.extract(rosa::arm64::x11, rosa::arm64::x10, rosa::arm64::x9, 32);
@@ -3043,8 +3045,9 @@ void testAssemblerEncodings() {
     assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 26> expected{
+    const std::array<std::uint32_t, 28> expected{
         0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0xD35FFD2AU, 0x9343FD2AU, 0x13037D2AU, 0x9ACB212AU, 0x9ACB252AU,
+        0x9ACB292AU, 0x1ACB292AU,
         0x9B0A7D2BU, 0x9BCA7D2CU, 0x93C9814BU, 0x8A0B012AU, 0xAA0B012AU, 0xCA0B012AU, 0x5AC0092AU,
         0xDAC00D2AU, 0x93407D2AU, 0xF9400009U, 0xB9400009U, 0xF9000009U, 0xD63F0200U, 0xA9BF7BFDU,
         0xA8C17BFDU, 0xD5033BBFU, 0xD5033FDFU, 0xD65F03C0U,
@@ -13794,6 +13797,45 @@ void testShiftRightClGeneratedExecution() {
     expectEqual(zeroState.rcx, std::uint64_t{0xABCDEF0000000040ULL},
                 "SHR r12, CL masked-zero changed RCX");
     expectEqual(zeroState.rflags, std::uint64_t{0xAD7}, "SHR r12, CL masked-zero changed flags");
+}
+
+void testShiftRightArithmeticClGeneratedExecution() {
+    // Observed in libsqlite3: SAR R13D, CL with REX.B (D3 /7).
+    constexpr std::array<std::uint8_t, 4> code{0x41, 0xD3, 0xFD, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10009E9D4ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SarRegCl, "SAR r32, CL opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "SAR r32, CL length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::R13 && destination.width == 32,
+           "SAR r13d, CL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("sar r13d, cl") != std::string::npos,
+           "SAR r13d, CL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10009E9D4ULL});
+    constexpr std::uint64_t countOneFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    rosa::x86::X86State oneState;
+    oneState.r13 = 0xAABBCCDD80000000ULL;
+    oneState.rcx = 1;
+    oneState.rflags = 0x10;
+    static_cast<void>(block.execute(oneState));
+    expectEqual(oneState.r13, std::uint64_t{0xC0000000ULL},
+                "SAR r13d, CL count-one result differs");
+    expectEqual(oneState.rcx, std::uint64_t{1}, "SAR r13d, CL changed RCX");
+    expectEqual(oneState.rflags & countOneFlags, std::uint64_t{0x84},
+                "SAR r13d, CL count-one defined flags differ");
+
+    rosa::x86::X86State maskedState;
+    maskedState.r13 = 0xAABBCCDD80000001ULL;
+    maskedState.rcx = 33;
+    maskedState.rflags = 0x10;
+    static_cast<void>(block.execute(maskedState));
+    expectEqual(maskedState.r13, std::uint64_t{0xC0000000ULL},
+                "SAR r13d, CL masked-count result differs");
+    expectEqual(maskedState.rflags & countOneFlags, std::uint64_t{0x85},
+                "SAR r13d, CL masked-count defined flags differ");
 }
 
 void testNot32GeneratedExecution() {
@@ -33463,6 +33505,7 @@ int main() {
         {"ROL 32-bit CL generated execution", testRotateLeft32ClGeneratedExecution},
         {"ROR 64-bit immediate generated execution", testRotateRight64ImmediateGeneratedExecution},
         {"SHR CL generated execution", testShiftRightClGeneratedExecution},
+        {"SAR CL generated execution", testShiftRightArithmeticClGeneratedExecution},
         {"NOT 32-bit generated execution", testNot32GeneratedExecution},
         {"NEG 64-bit generated execution", testNeg64GeneratedExecution},
         {"REP MOVSB generated execution", testRepMovsbGeneratedExecution},

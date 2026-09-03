@@ -50,6 +50,7 @@ enum class Opcode {
     ShrMemImm,
     ShrRegCl,
     SarRegImm,
+    SarRegCl,
     RolRegImm,
     RolRegCl,
     RorRegImm,

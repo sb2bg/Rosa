@@ -254,6 +254,21 @@ ValueId Builder::shiftRightArithmetic(ValueId value, std::uint8_t count,
     return result;
 }
 
+ValueId Builder::shiftRightArithmetic(ValueId value, ValueId count,
+                                      Width width,
+                                      guest::GuestAddress rip) {
+    const auto result = nextValue();
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ShiftRightArithmetic,
+        .width = width,
+        .guestRip = rip,
+        .result = result,
+        .lhs = value,
+        .rhs = count,
+    });
+    return result;
+}
+
 ValueId Builder::multiplyLow(ValueId lhs, ValueId rhs, Width width,
                              guest::GuestAddress rip) {
     const auto result = nextValue();
@@ -1109,6 +1124,18 @@ void Builder::updateShiftRightArithmeticFlags(ValueId lhs, ValueId result,
         .lhs = lhs,
         .rhs = result,
         .immediate = count,
+    });
+}
+
+void Builder::updateShiftRightArithmeticFlags(ValueId lhs, ValueId result, ValueId count,
+                                              Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateShiftRightArithmeticFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = lhs,
+        .rhs = result,
+        .third = count,
     });
 }
 
