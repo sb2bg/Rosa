@@ -18279,6 +18279,35 @@ void testMovupsGuestMemoryToRegister() {
                 "failed indexed MOVUPS changed the high lane");
     expectEqual(indexedFaultState.rflags, std::uint64_t{0xAD7},
                 "failed indexed MOVUPS changed flags");
+
+    // Observed in libsqlite3: MOVUPD XMM0, [RBX+0x70] (66 0F 10 loads like MOVUPS).
+    constexpr std::array<std::uint8_t, 6> unalignedDoubleCode{0x66, 0x0F, 0x10, 0x43, 0x70, 0xC3};
+    const auto unalignedDoubleDecoded =
+        decoder.decodeBlock(unalignedDoubleCode, rosa::guest::GuestAddress{0x100002993ULL});
+    expect(unalignedDoubleDecoded[0].opcode == rosa::x86::Opcode::MovupsRegMem,
+           "MOVUPD xmm, [mem] opcode differs");
+    expectEqual(unalignedDoubleDecoded[0].length, std::uint8_t{5},
+                "MOVUPD xmm, [mem] length differs");
+    const auto unalignedDoubleMemory =
+        std::get<rosa::x86::MemoryOperand>(unalignedDoubleDecoded[0].operands[1]);
+    expect(unalignedDoubleMemory.base == rosa::x86::Register::Rbx &&
+               unalignedDoubleMemory.displacement == 0x70,
+           "MOVUPD [rbx+0x70] memory operand differs");
+    const auto unalignedDoubleBlock =
+        translator.translate(unalignedDoubleCode, rosa::guest::GuestAddress{0x100002993ULL});
+    // Deliberately unaligned: MOVUPD must not fault on alignment.
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8071}, 0xAAAAAAAAAAAAAAAAULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8079}, 0x5555555555555555ULL);
+    rosa::x86::X86State unalignedDoubleState;
+    unalignedDoubleState.rbx = 0x8001;
+    unalignedDoubleState.xmm[0] = {.low = 1, .high = 2};
+    unalignedDoubleState.rflags = 0x8D7;
+    static_cast<void>(unalignedDoubleBlock.execute(unalignedDoubleState, &addressSpace));
+    expectEqual(unalignedDoubleState.xmm[0].low, std::uint64_t{0xAAAAAAAAAAAAAAAAULL},
+                "MOVUPD loaded the wrong low lane");
+    expectEqual(unalignedDoubleState.xmm[0].high, std::uint64_t{0x5555555555555555ULL},
+                "MOVUPD loaded the wrong high lane");
+    expectEqual(unalignedDoubleState.rflags, std::uint64_t{0x8D7}, "MOVUPD changed flags");
 }
 
 void testVexXmmShortCopyInstructions() {

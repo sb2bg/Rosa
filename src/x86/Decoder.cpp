@@ -3787,7 +3787,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
               (code[movupsLoadOpcodeOffset + 1] == 0x10U ||
                code[movupsLoadOpcodeOffset + 1] == 0x28U)) ||
              (movapdLoad &&
-              code[movupsLoadOpcodeOffset + 1] == 0x28U))) {
+              // 66 0F 10 is MOVUPD, which loads exactly like MOVUPS.
+              (code[movupsLoadOpcodeOffset + 1] == 0x28U ||
+               code[movupsLoadOpcodeOffset + 1] == 0x10U)))) {
             const bool aligned = code[movupsLoadOpcodeOffset + 1] == 0x28U;
             if (code.size() - movupsLoadOpcodeOffset < 3) {
                 throw DecodeError(address, remaining,
@@ -3881,9 +3883,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<void>(relativeTarget(
                     address, operandCursor - instructionStart, displacement));
             }
-            instruction.opcode = movapdLoad ? Opcode::MovapdRegMem
-                                 : aligned   ? Opcode::MovapsRegMem
-                                             : Opcode::MovupsRegMem;
+            instruction.opcode = movapdLoad && code[movupsLoadOpcodeOffset + 1] != 0x10U
+                                     ? Opcode::MovapdRegMem
+                                 : aligned ? Opcode::MovapsRegMem
+                                           : Opcode::MovupsRegMem;
             instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
                 static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) |
                                           (rexR ? 0x8U : 0U)))});
