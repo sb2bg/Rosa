@@ -2232,11 +2232,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 continue;
             }
-            if (extension != 0 || mode > 0x2U || rmEncoding == 0x4U ||
+            if ((extension != 0 && extension != 1) || mode > 0x2U || rmEncoding == 0x4U ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only INC/DEC word register and INC word [base+disp8/disp32] are supported");
+                    "only INC/DEC word register and INC/DEC word [base+disp8/disp32] are supported");
             }
             auto operandCursor = cursor + 3;
             std::int64_t displacement = 0;
@@ -2254,7 +2254,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 displacement = readI32(code.subspan(operandCursor, 4));
                 operandCursor += 4;
             }
-            instruction.opcode = Opcode::IncMem;
+            instruction.opcode = extension == 0 ? Opcode::IncMem : Opcode::DecMem;
             instruction.operands.push_back(MemoryOperand{
                 decodeRegister(rmEncoding, false), displacement, 16});
             const auto length = operandCursor - instructionStart;

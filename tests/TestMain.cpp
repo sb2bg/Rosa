@@ -5619,6 +5619,38 @@ void testIncrement16BitGuestMemory() {
     expectEqual(sibFaultState.rflags, std::uint64_t{0xBD7}, "faulted SIB INC word changed flags");
 }
 
+void testDecrement16BitGuestMemory() {
+    // Observed in libsqlite3: DEC word [rsi+0x16] with an operand-size override.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0xFF, 0x4E, 0x16, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x100119592ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::DecMem, "DEC word [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "DEC word [memory] length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rsi && memory.displacement == 0x16 &&
+               memory.width == 16,
+           "DEC word [rsi+0x16] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("dec word [rsi+0x16]") != std::string::npos,
+           "DEC word [memory] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8116};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 2>{0x00, 0x00});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x100119592ULL});
+    rosa::x86::X86State state;
+    state.rsi = 0x8100;
+    state.rflags = 0x2;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expect(addressSpace.readBytes(target, 2) == std::vector<std::uint8_t>({0xFF, 0xFF}),
+           "DEC word wrap result differs");
+    expectEqual(state.rsi, std::uint64_t{0x8100}, "DEC word changed its base");
+    expectEqual(state.rflags, std::uint64_t{0x96}, "DEC word wrap flags differ or CF changed");
+}
+
 void testIncrement32BitGuestMemory() {
     constexpr std::array<std::uint8_t, 8> code{0x41, 0xFF, 0x86, 0xD0, 0x00, 0x00, 0x00, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -33417,6 +33449,7 @@ int main() {
         {"DEC low-byte register", testDecrementLowByteRegister},
         {"INC 8-bit guest memory", testIncrement8BitGuestMemory},
         {"INC 16-bit guest memory", testIncrement16BitGuestMemory},
+        {"DEC 16-bit guest memory", testDecrement16BitGuestMemory},
         {"INC 32-bit guest memory", testIncrement32BitGuestMemory},
         {"INC 32-bit SIB guest memory", testIncrement32BitSibGuestMemory},
         {"INC 64-bit guest memory", testIncrement64BitGuestMemory},
