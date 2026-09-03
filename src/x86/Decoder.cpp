@@ -5965,14 +5965,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                             static_cast<std::uint8_t>(rexW ? 64U : 32U)});
                     instruction.operands.push_back(MemoryOperand{
                         encodedRm, displacement, 8});
-                } else if (rexW || rexX) {
+                } else if (rexX) {
                     throw DecodeError(
                         address, remaining,
-                        "only register-direct MOVSX r32, r8 is supported from REX 0F BE");
+                        "only register-direct MOVSX r32/r64, r8 is supported from REX 0F BE");
                 } else {
                     instruction.opcode = Opcode::MovsxRegReg;
                     instruction.operands.push_back(
-                        RegisterOperand{encodedReg, 32});
+                        RegisterOperand{encodedReg,
+                                        static_cast<std::uint8_t>(rexW ? 64U : 32U)});
                     instruction.operands.push_back(
                         RegisterOperand{encodedRm, 8});
                 }

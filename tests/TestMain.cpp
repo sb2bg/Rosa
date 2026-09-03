@@ -10814,9 +10814,30 @@ void testMovsxLowByteRegisterTo32BitRegister() {
         expect(rejected, message);
     };
     constexpr std::array<std::uint8_t, 4> noRex{0x0F, 0xBE, 0xCE, 0xC3};
-    constexpr std::array<std::uint8_t, 4> rexW{0x48, 0x0F, 0xBE, 0xCE};
     expectRejected(noRex, "legacy high-byte MOVSX source was accepted");
-    expectRejected(rexW, "MOVSX r64, r8 was accepted");
+
+    // Observed in libxpc: MOVSX RAX, AL with REX.W.
+    constexpr std::array<std::uint8_t, 5> wideCode{0x48, 0x0F, 0xBE, 0xC0, 0xC3};
+    const auto wideDecoded =
+        decoder.decodeBlock(wideCode, rosa::guest::GuestAddress{0x7FF802B2DEB6ULL});
+    expect(wideDecoded[0].opcode == rosa::x86::Opcode::MovsxRegReg,
+           "MOVSX r64, r8 opcode differs");
+    const auto wideDestination =
+        std::get<rosa::x86::RegisterOperand>(wideDecoded[0].operands[0]);
+    const auto wideSource = std::get<rosa::x86::RegisterOperand>(wideDecoded[0].operands[1]);
+    expect(wideDestination.reg == rosa::x86::Register::Rax && wideDestination.width == 64 &&
+               wideSource.reg == rosa::x86::Register::Rax && wideSource.width == 8,
+           "MOVSX RAX, AL operands differ");
+    expect(rosa::debug::dumpX86(wideDecoded).find("movsx rax, al") != std::string::npos,
+           "MOVSX RAX, AL dump differs");
+    const auto wideBlock =
+        translator.translate(wideCode, rosa::guest::GuestAddress{0x7FF802B2DEB6ULL});
+    rosa::x86::X86State wideState;
+    wideState.rax = 0x1122334455667780ULL;
+    wideState.rflags = 0x46;
+    static_cast<void>(wideBlock.execute(wideState));
+    expectEqual(wideState.rax, UINT64_C(0xFFFFFFFFFFFFFF80), "MOVSX RAX, AL result differs");
+    expectEqual(wideState.rflags, std::uint64_t{0x46}, "MOVSX RAX, AL changed flags");
 }
 
 void testMovsxGuestByteTo32BitRegister() {
