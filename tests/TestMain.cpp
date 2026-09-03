@@ -21366,6 +21366,25 @@ void testDarwinCsopsUnsignedStatus() {
             std::string_view(error.what()).find("CS_OPS_STATUS") != std::string_view::npos;
     }
     expect(unsupportedOperation, "unobserved guest csops operation did not fail loudly");
+
+    // Unsigned guests have no DER entitlements blob: EINVAL, buffer untouched.
+    constexpr std::array<std::uint8_t, 8> blobSentinel{0xA5, 0xA5, 0xA5, 0xA5,
+                                                      0xA5, 0xA5, 0xA5, 0xA5};
+    addressSpace.writeBytes(statusAddress, blobSentinel);
+    state.rax = csopsNumber;
+    state.rdi = static_cast<std::uint32_t>(::getpid());
+    state.rsi = 16;
+    state.rdx = statusAddress.value;
+    state.r10 = 0x408;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "unsigned csops DER entitlements returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "unsigned csops DER entitlements did not set BSD carry");
+    expectEqual(addressSpace.readBytes(statusAddress, blobSentinel.size()),
+                std::vector<std::uint8_t>(blobSentinel.begin(), blobSentinel.end()),
+                "unsigned csops DER entitlements touched its output buffer");
 }
 
 void testDarwinCsopsAuditTokenUnsignedDerEntitlements() {

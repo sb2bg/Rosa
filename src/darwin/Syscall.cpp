@@ -1577,10 +1577,18 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
     if (number == syscallCsops) {
         const auto pid = static_cast<std::uint32_t>(state.rdi);
         const auto operation = static_cast<std::uint32_t>(state.rsi);
+        if (pid == static_cast<std::uint32_t>(::getpid()) &&
+            operation == guestCsOpsDerEntitlementsBlob) {
+            // Same unsigned-guest reasoning as the audit-token DER
+            // entitlements path below: no code signing blob exists, so the
+            // query fails with EINVAL without touching the output buffer.
+            setError(state, EINVAL);
+            return {};
+        }
         if (pid != static_cast<std::uint32_t>(::getpid()) ||
             operation != guestCsOpsStatus || state.r10 != sizeof(std::uint32_t)) {
             std::ostringstream reason;
-            reason << "only CS_OPS_STATUS for the current unsigned guest process is implemented; got pid="
+            reason << "only CS_OPS_STATUS and unsigned CS_OPS_DER_ENTITLEMENTS_BLOB for the current guest process are implemented; got pid="
                    << std::dec << pid << " operation=" << operation
                    << " size=" << state.r10;
             throw unsupported(state, syscallRip, reason.str());
