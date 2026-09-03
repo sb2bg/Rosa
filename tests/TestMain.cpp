@@ -25367,6 +25367,88 @@ void testMachMessage2HostGetSpecialPortRequest() {
            "host special-port demotion did not add a host send right");
 }
 
+void testMachMessage2BootstrapSendFailsFast() {
+    constexpr rosa::guest::GuestAddress messageAddress{0x8000};
+    constexpr rosa::guest::GuestAddress stackAddress{0x9000};
+    constexpr std::uint32_t requestSize = 40;
+    constexpr std::uint32_t receiveSize = 48;
+    constexpr std::uint32_t messageBits = 0x80131513;
+
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::guest::AddressSpace addressSpace;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::taskSelfTrapNumber;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    const auto taskName = static_cast<std::uint32_t>(state.rax);
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    const auto replyName = static_cast<std::uint32_t>(state.rax);
+
+    // Fetch the synthetic bootstrap port through task_get_special_port.
+    std::array<std::uint8_t, 36> bootstrapRequest{};
+    const auto encodeBootstrap32 = [&bootstrapRequest](std::size_t offset, std::uint32_t value) {
+        std::memcpy(bootstrapRequest.data() + offset, &value, sizeof(value));
+    };
+    encodeBootstrap32(0, 0x1513);
+    encodeBootstrap32(4, 36);
+    encodeBootstrap32(8, taskName);
+    encodeBootstrap32(12, replyName);
+    encodeBootstrap32(20, 3409);
+    bootstrapRequest[28] = 1;
+    encodeBootstrap32(32, 4);
+    addressSpace.mapAnonymous(messageAddress, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+                              "bootstrap fetch message");
+    addressSpace.writeBytes(messageAddress, bootstrapRequest);
+    addressSpace.mapAnonymous(stackAddress, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write,
+                              "bootstrap fetch stack arguments");
+    addressSpace.writeU64(stackAddress, 0xDEADBEEF);
+    addressSpace.writeU64(rosa::guest::GuestAddress{stackAddress.value + 8U}, receiveSize);
+    addressSpace.writeU64(rosa::guest::GuestAddress{stackAddress.value + 16U}, 0);
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(36) << 32U) | 0x1513;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) | taskName;
+    state.r8 = std::uint64_t{3409} << 32U;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{0}, "bootstrap fetch did not succeed");
+    const auto bootstrapName =
+        addressSpace.readU32(rosa::guest::GuestAddress{messageAddress.value + 28});
+    expect(bootstrapName != 0, "bootstrap fetch returned a null port");
+
+    // Sends to the serverless bootstrap port fail instead of blocking.
+    std::array<std::uint8_t, requestSize> request{};
+    const auto encode32 = [&request](std::size_t offset, std::uint32_t value) {
+        std::memcpy(request.data() + offset, &value, sizeof(value));
+    };
+    encode32(0, messageBits);
+    encode32(4, requestSize);
+    encode32(8, bootstrapName);
+    encode32(12, replyName);
+    encode32(20, 0x400000CF);
+    addressSpace.writeBytes(messageAddress, request);
+    state = {};
+    state.rax = rosa::darwin::MachDispatcher::machMessage2TrapNumber;
+    state.rdi = messageAddress.value;
+    state.rsi = 0x0000000200000003ULL;
+    state.rdx = (static_cast<std::uint64_t>(requestSize) << 32U) | messageBits;
+    state.r10 = (static_cast<std::uint64_t>(replyName) << 32U) | bootstrapName;
+    state.r8 = (std::uint64_t{0x400000CF} << 32U) | 1U;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = stackAddress.value;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    expectEqual(state.rax, std::uint64_t{0x10000003},
+                "bootstrap send did not fail fast with invalid destination");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "failed bootstrap send changed flags");
+}
+
 void testMachMessage2TaskGetBootstrapPortRequest() {
     constexpr rosa::guest::GuestAddress messageAddress{0x8000};
     constexpr rosa::guest::GuestAddress stackAddress{0x9000};
@@ -31951,6 +32033,7 @@ int main() {
         {"Mach message2 host clock-service request", testMachMessage2HostClockServiceRequest},
         {"Mach message2 host special-port request", testMachMessage2HostGetSpecialPortRequest},
         {"Mach message2 task bootstrap-port request", testMachMessage2TaskGetBootstrapPortRequest},
+        {"Mach message2 bootstrap send fails fast", testMachMessage2BootstrapSendFailsFast},
         {"Mach message2 task audit-token request", testMachMessage2TaskAuditTokenRequest},
         {"Mach message2 task debug-control-port request",
          testMachMessage2TaskSetDebugControlPortRequest},

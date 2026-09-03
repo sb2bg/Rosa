@@ -1685,6 +1685,18 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
                                                  syscallRip);
         }
 
+        // Rosa runs no launchd/bootstrap server. The first observed use is
+        // a best-effort notification-center XPC lookup during library init;
+        // fail the send so the guest proceeds degraded instead of blocking
+        // forever on a reply that can never arrive.
+        if (const auto *remotePort = portSpace_.lookup(GuestMachPortName{
+                static_cast<std::uint32_t>(state.r10)});
+            remotePort != nullptr &&
+            remotePort->type == GuestPortType::Bootstrap) {
+            state.rax = machSendInvalidDestination;
+            return;
+        }
+
         if (const auto receiveName = decodeObservedHostInfoRequest(
                 message, state, receiveSizeAndPriority, timeout, portSpace_,
                 hostBasicInfoFlavor, hostBasicInfoCount)) {

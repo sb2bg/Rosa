@@ -46,7 +46,7 @@ The Mach trap class currently implements these narrow semantic forms:
 | 26 | allocate a synthetic guest reply-port receive right |
 | 28 | return the synthetic guest task-self port name |
 | 29 | copy out a synthetic guest host send right |
-| 47 | decode only the observed `mach_msg2` host-basic-info, host special-port demotion, and task `mach_vm_map` MIG exchanges |
+| 47 | decode only the observed `mach_msg2` host-basic-info, host special-port demotion, and task `mach_vm_map` MIG exchanges; sends to the serverless synthetic bootstrap port fail with `MACH_SEND_INVALID_DEST` instead of blocking |
 | 50 | return the single guest thread's stable special reply port, allocating one synthetic receive right on first use |
 | 70 | mint a synthetic process voucher token per successful creation; no banks or attributes are modeled |
 
