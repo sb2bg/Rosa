@@ -5729,12 +5729,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         const auto opcode = code[cursor++];
-        if (hasOperandSizeOverride && opcode != 0x0BU && opcode != 0x39U &&
+        if (hasOperandSizeOverride && opcode != 0x03U && opcode != 0x0BU && opcode != 0x39U &&
             opcode != 0x89U && opcode != 0x8BU && opcode != 0xF7U &&
             opcode != 0xFFU) {
             throw DecodeError(
                 address, remaining,
-                "operand-size override is only supported for 16-bit OR, CMP, MOV, and memory INC in the general decoder");
+                "operand-size override is only supported for 16-bit ADD, OR, CMP, MOV, and memory INC in the general decoder");
         }
         if (hasGsOverride && opcode != 0x89U && opcode != 0x8BU &&
             opcode != 0xC7U &&
@@ -6482,7 +6482,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto destination =
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
-            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+            const auto width = static_cast<std::uint8_t>(
+                rexW ? 64U : (hasOperandSizeOverride ? 16U : 32U));
             instruction.opcode = Opcode::AddRegMem;
             instruction.operands.push_back(RegisterOperand{destination, width});
             instruction.operands.push_back(

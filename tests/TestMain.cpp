@@ -4723,6 +4723,55 @@ void testAddRegisterFromIndexedGuestMemory() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted indexed ADD r64 changed flags");
 }
 
+void testAddRegisterFromWordGuestMemory() {
+    // Observed in libsqlite3: ADD ax, [rcx+rdx*2] with an operand-size override.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x03, 0x04, 0x51, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000C3A3EULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddRegMem,
+           "word ADD r16 memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "word ADD r16 memory length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 16 &&
+               memory.base == rosa::x86::Register::Rcx && memory.index &&
+               *memory.index == rosa::x86::Register::Rdx && memory.scale == 2 &&
+               memory.displacement == 0 && memory.width == 16,
+           "ADD ax, [rcx+rdx*2] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("add ax, [rcx+rdx*2]") != std::string::npos,
+           "word ADD r16 memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 2>{0x02, 0x00});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000C3A3EULL});
+    rosa::x86::X86State state;
+    state.rax = 0xABCD0001ULL;
+    state.rcx = target.value;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0xABCD0003ULL}, "word ADD r16 memory result differs");
+    expectEqual(state.rflags, std::uint64_t{0x6}, "word ADD r16 memory flags differ");
+    expectEqual(state.rcx, target.value, "word ADD r16 changed its base");
+    expectEqual(state.rdx, std::uint64_t{0}, "word ADD r16 changed its index");
+
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 2>{0x01, 0x00});
+    rosa::x86::X86State carryState;
+    carryState.rax = 0xABCDFFFFULL;
+    carryState.rcx = target.value;
+    carryState.rdx = 0;
+    carryState.rflags = 0x2;
+    static_cast<void>(block.execute(carryState, &addressSpace));
+    expectEqual(carryState.rax, std::uint64_t{0xABCD0000ULL},
+                "word ADD r16 carry result differs");
+    expectEqual(carryState.rflags, std::uint64_t{0x57}, "word ADD r16 carry flags differ");
+}
+
 void testAddRegisterToGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x4C, 0x01, 0x73, 0x10, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -32383,6 +32432,7 @@ int main() {
         {"SUB byte register from guest memory", testSubtractByteRegisterFromGuestMemory},
         {"ADD register from guest memory", testAddRegisterFromGuestMemory},
         {"ADD register from indexed guest memory", testAddRegisterFromIndexedGuestMemory},
+        {"ADD word register from guest memory", testAddRegisterFromWordGuestMemory},
         {"ADD register to guest memory", testAddRegisterToGuestMemory},
         {"ADD register to SIB guest memory", testAddRegisterToSibGuestMemory},
         {"ADD register to register", testAddRegisterToRegister},
