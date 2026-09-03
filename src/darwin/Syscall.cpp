@@ -139,6 +139,7 @@ constexpr std::uint32_t guestSocketDatagram = 2;
 constexpr std::size_t guestSockaddrUnixSize = 106;
 constexpr std::string_view guestSystemLogSocket = "/var/run/syslog";
 constexpr std::uint64_t guestIoctlFileDescriptorType = 0x4004667A;
+constexpr std::uint64_t guestIoctlWindowSize = 0x40087468U;
 constexpr std::uint32_t guestDeviceTypeTerminal = 3;
 constexpr std::uint32_t guestMountWait = 1;
 constexpr std::uint32_t guestMountNowait = 2;
@@ -1006,9 +1007,28 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
     if (number == syscallIoctl) {
         const auto descriptor = std::bit_cast<std::int32_t>(
             static_cast<std::uint32_t>(state.rdi));
+        if (state.rsi == guestIoctlWindowSize) {
+            if (descriptor < STDIN_FILENO || descriptor > STDERR_FILENO) {
+                setError(state, EBADF);
+                return {};
+            }
+            // The synthetic console has no host terminal behind it; report
+            // the conventional 80x24 size callers use for formatting.
+            constexpr std::array<std::uint8_t, 8> windowSize{24, 0, 80, 0,
+                                                            0,  0, 0,  0};
+            try {
+                addressSpace.writeBytes(guest::GuestAddress{state.rdx},
+                                        windowSize);
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            setSuccess(state, 0);
+            return {};
+        }
         if (state.rsi != guestIoctlFileDescriptorType) {
             std::ostringstream reason;
-            reason << "only ioctl(FIODTYPE) on a standard guest descriptor is implemented; got fd="
+            reason << "only ioctl(FIODTYPE/TIOCGWINSZ) on a standard guest descriptor is implemented; got fd="
                    << std::dec << descriptor << " request=0x" << std::hex
                    << state.rsi;
             throw unsupported(state, syscallRip, reason.str());

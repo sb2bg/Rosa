@@ -20716,6 +20716,29 @@ void testDarwinIoctlStandardDescriptorType() {
     expectEqual(addressSpace.readU32(typeAddress), UINT32_MAX,
                 "faulted ioctl(FIODTYPE) changed a valid output buffer");
 
+    // The synthetic console reports a conventional 80x24 window.
+    constexpr auto windowSizeRequest = UINT64_C(0x40087468);
+    state.rax = ioctlNumber;
+    state.rdi = STDIN_FILENO;
+    state.rsi = windowSizeRequest;
+    state.rdx = typeAddress.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "ioctl(TIOCGWINSZ) did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6}, "ioctl(TIOCGWINSZ) did not clear BSD carry");
+    expectEqual(addressSpace.readBytes(typeAddress, 8),
+                std::vector<std::uint8_t>({24, 0, 80, 0, 0, 0, 0, 0}),
+                "synthetic console window size differs");
+
+    state.rax = ioctlNumber;
+    state.rdi = 3;
+    state.rsi = windowSizeRequest;
+    state.rdx = typeAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "ioctl(TIOCGWINSZ) on a nonstandard descriptor returned the wrong errno");
+
     state.rax = ioctlNumber;
     state.rdi = STDERR_FILENO;
     state.rsi = 0;

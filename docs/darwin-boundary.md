@@ -16,6 +16,7 @@ Rosa implements only the x86_64 Darwin operations reached by the controlled fixt
 | `sigaction` | `0x0200002e` | signal number, new 16-byte action, old-action copyout | record task-local signal dispositions without host delivery; report EINVAL/EFAULT for bad numbers and pointers |
 | `dup` | `0x02000029` | guest fd | allocate a unique guest fd sharing the same guest open-description identity |
 | `munmap` | `0x02000049` | guest address/size | validate BSD alignment/size semantics and deallocate only guest mappings |
+| `ioctl` | `0x02000036` | guest fd/request/output | answer `FIODTYPE` and a conventional 80x24 `TIOCGWINSZ` on the synthetic console streams |
 | `fcntl(F_GETPATH)` | `0x0200005c` | guest fd/cmd/output | copy the controlled guest path through guest memory |
 | `sysctl` | `0x020000ca` | x86 Darwin MIB and guest buffers | implement name-to-OID plus observed lockdown, boot-argument, kernel-version, and CPU-count reads |
 | `shared_region_check_np` | `0x02000126` | guest address-pointer in `RDI` | copy out the installed Intel cache base, or return `EINVAL` when no compatible cache exists |
