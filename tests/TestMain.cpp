@@ -16240,6 +16240,34 @@ void testOr32BitRegistersGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x6}, "OR r32, r32 flags differ");
 }
 
+void testOr16BitRegistersGeneratedExecution() {
+    // Observed in libsqlite3: OR CX, AX with an operand-size override (66 09).
+    constexpr std::array<std::uint8_t, 4> code{0x66, 0x09, 0xC1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10007A042ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrRegReg, "OR r16, r16 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "OR r16, r16 length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx && destination.width == 16 &&
+               source.reg == rosa::x86::Register::Rax && source.width == 16,
+           "OR cx, ax operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("or cx, ax") != std::string::npos,
+           "OR cx, ax dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10007A042ULL});
+    rosa::x86::X86State state;
+    state.rcx = 0xAAAAAAAA0000F0F0ULL;
+    state.rax = 0xBBBBBBBB00000F0FULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xAAAAAAAA0000FFFFULL},
+                "OR r16, r16 result or upper preservation differs");
+    expectEqual(state.rax, std::uint64_t{0xBBBBBBBB00000F0FULL}, "OR r16, r16 changed source");
+    expectEqual(state.rflags, std::uint64_t{0x86}, "OR r16, r16 flags differ");
+}
+
 void testXor32BitRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 6> code{0x31, 0xF6, 0x45, 0x31, 0xC0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -33737,6 +33765,7 @@ int main() {
         {"OR dword short immediate guest memory", testOrDwordShortImmediateGuestMemory},
         {"ADD dword short immediate guest memory", testAddDwordShortImmediateGuestMemory},
         {"OR 32-bit registers generated execution", testOr32BitRegistersGeneratedExecution},
+        {"OR 16-bit registers generated execution", testOr16BitRegistersGeneratedExecution},
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
         {"XOR 8-bit registers generated execution", testXor8BitRegistersGeneratedExecution},
         {"XOR 32-bit register from guest memory", testXor32BitRegisterFromGuestMemory},

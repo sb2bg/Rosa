@@ -1167,6 +1167,7 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << (memory.width == 8    ? "or byte ["
+                       : memory.width == 16  ? "or word ["
                        : memory.width == 32  ? "or dword ["
                                              : "or qword [");
             if (memory.ripRelative) {
