@@ -18115,6 +18115,38 @@ void testMovupsRegisterToGuestMemoryWithSib() {
     expectEqual(state.xmm[0].high, std::uint64_t{0x1020304050607080ULL},
                 "faulted indexed MOVUPS changed high XMM lane");
     expectEqual(state.rflags, std::uint64_t{0xBD7}, "faulted indexed MOVUPS changed flags");
+
+    // Observed in libsqlite3: MOVUPD [RBP-0x180], XMM0 (66 0F 11 stores like MOVUPS).
+    constexpr std::array<std::uint8_t, 9> unalignedDoubleCode{0x66, 0x0F, 0x11, 0x85,
+                                                              0x80, 0xFE, 0xFF, 0xFF, 0xC3};
+    const auto unalignedDoubleDecoded =
+        decoder.decodeBlock(unalignedDoubleCode, rosa::guest::GuestAddress{0x100002D1DULL});
+    expect(unalignedDoubleDecoded[0].opcode == rosa::x86::Opcode::MovupsMemReg,
+           "MOVUPD [mem], xmm opcode differs");
+    expectEqual(unalignedDoubleDecoded[0].length, std::uint8_t{8},
+                "MOVUPD [mem], xmm length differs");
+    const auto unalignedDoubleMemory =
+        std::get<rosa::x86::MemoryOperand>(unalignedDoubleDecoded[0].operands[0]);
+    expect(unalignedDoubleMemory.base == rosa::x86::Register::Rbp &&
+               unalignedDoubleMemory.displacement == -0x180 &&
+               unalignedDoubleMemory.width == 128,
+           "MOVUPD [rbp-0x180], xmm0 memory operand differs");
+    expect(rosa::debug::dumpX86(unalignedDoubleDecoded).find("movups [rbp-0x180], xmm0") !=
+               std::string::npos,
+           "MOVUPD [mem], xmm dump differs");
+    const auto unalignedDoubleBlock =
+        translator.translate(unalignedDoubleCode, rosa::guest::GuestAddress{0x100002D1DULL});
+    constexpr rosa::guest::GuestAddress unalignedDoubleTarget{0x8100};
+    rosa::x86::X86State unalignedDoubleState;
+    unalignedDoubleState.rbp = unalignedDoubleTarget.value + 0x180;
+    unalignedDoubleState.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    unalignedDoubleState.rflags = 0x8D7;
+    static_cast<void>(unalignedDoubleBlock.execute(unalignedDoubleState, &addressSpace));
+    expectEqual(addressSpace.readU64(unalignedDoubleTarget), unalignedDoubleState.xmm[0].low,
+                "MOVUPD stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8108}),
+                unalignedDoubleState.xmm[0].high, "MOVUPD stored the wrong high lane");
+    expectEqual(unalignedDoubleState.rflags, std::uint64_t{0x8D7}, "MOVUPD store changed flags");
 }
 
 void testMovupsRegisterToRipRelativeGuestMemory() {

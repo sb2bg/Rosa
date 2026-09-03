@@ -3680,17 +3680,21 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        const bool movupdStore = code[cursor] == 0x66U;
+        const auto movupsStorePrefixEnd = cursor + (movupdStore ? 1U : 0U);
         const bool movupsStoreHasRex =
-            code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+            movupsStorePrefixEnd < code.size() &&
+            code[movupsStorePrefixEnd] >= 0x40U &&
+            code[movupsStorePrefixEnd] <= 0x4FU;
         const auto movupsStoreOpcodeOffset =
-            cursor + (movupsStoreHasRex ? 1U : 0U);
+            movupsStorePrefixEnd + (movupsStoreHasRex ? 1U : 0U);
         if (code.size() - movupsStoreOpcodeOffset >= 2 &&
             code[movupsStoreOpcodeOffset] == 0x0FU &&
             code[movupsStoreOpcodeOffset + 1] == 0x11U) {
             if (code.size() - movupsStoreOpcodeOffset < 3) {
                 throw DecodeError(address, remaining, "truncated movups [base+disp], xmm");
             }
-            const auto rex = movupsStoreHasRex ? code[cursor] : 0U;
+            const auto rex = movupsStoreHasRex ? code[movupsStorePrefixEnd] : 0U;
             const bool rexR = (rex & 0x4U) != 0;
             const bool rexX = (rex & 0x2U) != 0;
             const bool rexB = (rex & 0x1U) != 0;
