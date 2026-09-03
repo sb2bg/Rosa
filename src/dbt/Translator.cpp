@@ -3559,6 +3559,20 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::Cwde: {
+            if (!instruction.operands.empty()) {
+                throw std::runtime_error("internal decoder error: CWDE operands");
+            }
+            const auto value =
+                builder.readGuestRegister(x86::Register::Rax, ir::Width::I16, instruction.address);
+            const auto shifted =
+                builder.shiftLeft(value, 48, ir::Width::I64, instruction.address);
+            const auto extended =
+                builder.shiftRightArithmetic(shifted, 48, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(x86::Register::Rax, extended, ir::Width::I32,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::MovMemImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: mov memory immediate count");

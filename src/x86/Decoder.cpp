@@ -5718,7 +5718,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x3BU &&
             code[cursor] != 0x80U &&
             code[cursor] != 0x81U && code[cursor] != 0xC0U &&
-            code[cursor] != 0xC1U &&
+            code[cursor] != 0xC1U && code[cursor] != 0x98U &&
             code[cursor] != 0xC6U && code[cursor] != 0xC7U &&
             code[cursor] != 0xD0U && code[cursor] != 0xD1U &&
             code[cursor] != 0xD2U &&
@@ -5778,6 +5778,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             opcode != 0x23U &&
             opcode != 0x0FU &&
             opcode != 0x81U && opcode != 0xC0U && opcode != 0xC1U &&
+            opcode != 0x98U &&
             opcode != 0xC6U && opcode != 0xC7U && opcode != 0xD0U &&
             opcode != 0xD1U &&
             opcode != 0xD2U &&
@@ -5884,6 +5885,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 32});
         } else if (opcode == 0x98U && rexW) {
             instruction.opcode = Opcode::Cdqe;
+        } else if (opcode == 0x98U && !hasRex) {
+            instruction.opcode = Opcode::Cwde;
         } else if (hasRex && opcode >= 0xB0U && opcode <= 0xB7U) {
             instruction.opcode = Opcode::MovRegImm;
             instruction.operands.push_back(RegisterOperand{

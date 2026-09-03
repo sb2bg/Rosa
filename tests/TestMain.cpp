@@ -11867,6 +11867,33 @@ void testCdqeGeneratedExecution() {
     expectEqual(positive.rflags, std::uint64_t{0xAD7}, "CDQE changed flags");
 }
 
+void testCwdeGeneratedExecution() {
+    // Observed in libsqlite3: bare CWDE (opcode 98 without REX).
+    constexpr std::array<std::uint8_t, 2> code{0x98, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x100119273ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::Cwde, "CWDE opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{1}, "CWDE length differs");
+    expect(decoded[0].operands.empty(), "CWDE unexpectedly has explicit operands");
+    expect(rosa::debug::dumpX86(decoded).find("cwde") != std::string::npos, "CWDE dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x100119273ULL});
+    rosa::x86::X86State negative;
+    negative.rax = 0xAAAAAAAAFFFF8001ULL;
+    negative.rflags = 0x8D7;
+    static_cast<void>(block.execute(negative));
+    expectEqual(negative.rax, std::uint64_t{0xFFFF8001ULL}, "CWDE negative result differs");
+    expectEqual(negative.rflags, std::uint64_t{0x8D7}, "CWDE changed flags");
+
+    rosa::x86::X86State positive;
+    positive.rax = 0xFFFFFFFFFFFF0080ULL;
+    positive.rflags = 0xAD7;
+    static_cast<void>(block.execute(positive));
+    expectEqual(positive.rax, std::uint64_t{0x80}, "CWDE positive result differs");
+    expectEqual(positive.rflags, std::uint64_t{0xAD7}, "CWDE changed flags");
+}
+
 void testMovGuestMemoryToLegacy32BitRegister() {
     constexpr std::array<std::uint8_t, 4> code{0x8B, 0x4E, 0x0C, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -32856,6 +32883,7 @@ int main() {
         {"MOVSXD RIP-relative guest dword", testMovsxdRipRelativeGuestDword},
         {"MOVSXD register", testMovsxdRegister},
         {"CDQE generated execution", testCdqeGeneratedExecution},
+        {"CWDE generated execution", testCwdeGeneratedExecution},
         {"legacy MOV guest memory to 32-bit register", testMovGuestMemoryToLegacy32BitRegister},
         {"TEST register generated execution", testTestRegisterGeneratedExecution},
         {"TEST 16-bit registers generated execution", testTest16BitRegistersGeneratedExecution},

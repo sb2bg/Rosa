@@ -525,6 +525,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::Cdqe:
             stream << "cdqe";
             break;
+        case x86::Opcode::Cwde:
+            stream << "cwde";
+            break;
         case x86::Opcode::MovMemImm: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << (memory.width == 8    ? "mov byte ["
