@@ -9219,6 +9219,46 @@ void testMovRegisterToGuestMemory() {
     expectEqual(faultState.rdi, state.rdi, "failed guest-memory MOV changed the source register");
 }
 
+void testMovHighByteRegisterToGuestMemory() {
+    // Observed in libsqlite3: MOV [RSI+RDI+0x5], AH without a REX prefix.
+    constexpr std::array<std::uint8_t, 5> code{0x88, 0x64, 0x3E, 0x05, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000ABB15ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovMemReg,
+           "MOV [memory], high-byte-register opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "MOV [memory], AH length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rsi && memory.index &&
+               *memory.index == rosa::x86::Register::Rdi && memory.scale == 1 &&
+               memory.displacement == 5 && memory.width == 8,
+           "MOV [rsi+rdi+0x5], AH memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rax && source.width == 8 &&
+               source.byteOffset == 1,
+           "MOV [memory], AH source differs");
+    expect(rosa::debug::dumpX86(decoded).find("mov [rsi+rdi*1+0x5], ah") != std::string::npos,
+           "MOV [memory], AH dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8105};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000ABB15ULL});
+    rosa::x86::X86State state;
+    state.rsi = 0x8100;
+    state.rdi = 0;
+    state.rax = 0x112233445566FF00ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readBytes(target, 1).front(), std::uint8_t{0xFF},
+                "MOV [memory], AH stored the wrong byte");
+    expectEqual(state.rax, std::uint64_t{0x112233445566FF00ULL},
+                "MOV [memory], AH changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOV [memory], AH changed flags");
+}
+
 void testMovRegisterToRipRelativeGuestMemory() {
     constexpr std::array<std::uint8_t, 8> observed{0x4C, 0x89, 0x3D, 0x10, 0x33, 0x09, 0x00, 0xC3};
     constexpr rosa::guest::GuestAddress observedRip{0x7FF800011FF9ULL};
@@ -33403,6 +33443,7 @@ int main() {
         {"CMP 64-bit registers", testCompare64BitRegisters},
         {"CMP 32-bit registers", testCompare32BitRegisters},
         {"MOV register to guest memory", testMovRegisterToGuestMemory},
+        {"MOV high-byte register to guest memory", testMovHighByteRegisterToGuestMemory},
         {"MOV register to RIP-relative guest memory", testMovRegisterToRipRelativeGuestMemory},
         {"MOV RIP-relative guest dword to register", testMovRipRelativeGuestDwordToRegister},
         {"MOV 32-bit register to guest memory", testMov32BitRegisterToGuestMemory},

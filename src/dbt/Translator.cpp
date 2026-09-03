@@ -3391,7 +3391,16 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             if (!address) {
                 address = builder.constant(0, ir::Width::I64, instruction.address);
             }
-            const auto value = builder.readGuestRegister(source.reg, width, instruction.address);
+            if (source.byteOffset > 1 ||
+                (source.byteOffset == 1 && source.width != 8)) {
+                throw std::runtime_error("invalid byte-lane MOV store source");
+            }
+            auto value = source.byteOffset == 0
+                             ? builder.readGuestRegister(source.reg, width, instruction.address)
+                             : builder.shiftRightLogical(
+                                   builder.readGuestRegister(source.reg, ir::Width::I64,
+                                                             instruction.address),
+                                   8, ir::Width::I64, instruction.address);
             builder.storeGuest(*address, value, width, instruction.address);
             break;
         }

@@ -7897,8 +7897,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
             const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             if (rexW || mode > 0x3U ||
-                (!hasRex && regEncoding >= 0x4U) ||
-                (!hasRex && mode == 0x3U && rmEncoding >= 0x4U)) {
+                (!hasRex && mode == 0x3U &&
+                 (regEncoding >= 0x4U || rmEncoding >= 0x4U))) {
                 throw DecodeError(
                     address, remaining,
                     "only MOV byte [base+index*scale+disp8/disp32], low-byte-register is supported");
@@ -7964,8 +7964,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     ? MemoryOperand{Register::Rax, displacement, 8,
                                     std::nullopt, 1, false, true}
                     : MemoryOperand{base, displacement, 8, index, scale});
+            // Without REX, encodings 4-7 name AH/CH/DH/BH instead of
+            // SPL/BPL/SIL/DIL. Fold them to their low-byte base register
+            // with a one-byte lane offset.
+            const bool highByteSource = !hasRex && regEncoding >= 0x4U;
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(regEncoding, rexR), 8});
+                highByteSource
+                    ? decodeRegister(static_cast<std::uint8_t>(regEncoding & 0x3U), false)
+                    : decodeRegister(regEncoding, rexR),
+                8, highByteSource ? std::uint8_t{1} : std::uint8_t{0}});
             }
         } else if (opcode == 0x8AU) {
             if (code.size() - cursor < 1) {
