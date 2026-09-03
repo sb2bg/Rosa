@@ -9382,6 +9382,70 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                          : static_cast<std::uint64_t>(
                                static_cast<std::uint32_t>(immediate)),
                     32});
+            } else if (mode <= 0x2U && extension == 0x1U && !rexR) {
+                const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+                if (mode == 0 && rmEncoding == 0x5U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "RIP-relative OR [memory], imm32 is not supported");
+                }
+                auto base = decodeRegister(rmEncoding, rexB);
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
+                if (rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated OR memory SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    const auto baseEncoding =
+                        static_cast<std::uint8_t>(sib & 0x7U);
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(
+                            address, remaining,
+                            "no-base OR [memory], imm32 SIB is not supported");
+                    }
+                    base = decodeRegister(baseEncoding, rexB);
+                    if (indexEncoding != 0x4U || rexX) {
+                        index = decodeRegister(indexEncoding, rexX);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated OR memory disp8");
+                    }
+                    displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated OR memory disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining, "truncated OR memory imm32");
+                }
+                const auto immediate = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+                instruction.opcode = Opcode::OrMemImm;
+                instruction.operands.push_back(MemoryOperand{
+                    base, displacement,
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U), index,
+                    scale});
+                instruction.operands.push_back(ImmediateOperand{
+                    rexW ? static_cast<std::uint64_t>(
+                               static_cast<std::int64_t>(immediate))
+                         : static_cast<std::uint64_t>(
+                               static_cast<std::uint32_t>(immediate)),
+                    32});
             } else {
                 throw DecodeError(
                     address, remaining,

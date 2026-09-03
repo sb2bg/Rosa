@@ -15483,6 +15483,37 @@ void testOrImmediateIntoGuestByteMemory() {
     expectEqual(sibState.r12, page.value, "SIB byte OR changed its base");
     expectEqual(sibState.rflags & definedLogicFlags, std::uint64_t{0x4},
                 "SIB byte OR defined flags differ");
+
+    // Observed in libsqlite3: OR dword [rbp-0x60], 0x4001 (opcode 81 /1).
+    constexpr std::array<std::uint8_t, 8> fullCode{0x81, 0x4D, 0xA0, 0x01,
+                                                  0x40, 0x00, 0x00, 0xC3};
+    const auto fullDecoded =
+        decoder.decodeBlock(fullCode, rosa::guest::GuestAddress{0x1000F3281ULL});
+    expect(fullDecoded[0].opcode == rosa::x86::Opcode::OrMemImm,
+           "dword OR opcode differs");
+    expectEqual(fullDecoded[0].length, std::uint8_t{7}, "dword OR length differs");
+    const auto fullMemory = std::get<rosa::x86::MemoryOperand>(fullDecoded[0].operands[0]);
+    const auto fullImmediate = std::get<rosa::x86::ImmediateOperand>(fullDecoded[0].operands[1]);
+    expect(fullMemory.base == rosa::x86::Register::Rbp && fullMemory.displacement == -96 &&
+               fullMemory.width == 32 && !fullMemory.index &&
+               fullImmediate.value == 0x4001 && fullImmediate.width == 32,
+           "OR dword [rbp-0x60], 0x4001 operands differ");
+    expect(rosa::debug::dumpX86(fullDecoded).find("or dword [rbp-0x60], 0x4001") !=
+               std::string::npos,
+           "OR dword [rbp-0x60], 0x4001 dump differs");
+    const auto fullBlock =
+        translator.translate(fullCode, rosa::guest::GuestAddress{0x1000F3281ULL});
+    constexpr rosa::guest::GuestAddress fullTarget{0x8200};
+    addressSpace.writeU32(fullTarget, 0x0001);
+    rosa::x86::X86State fullState;
+    fullState.rbp = fullTarget.value + 96;
+    fullState.rflags = 0x8D7;
+    static_cast<void>(fullBlock.execute(fullState, &addressSpace));
+    expectEqual(addressSpace.readU32(fullTarget), std::uint32_t{0x4001},
+                "OR dword immediate memory result differs");
+    expectEqual(fullState.rbp, fullTarget.value + 96, "OR dword immediate changed its base");
+    expectEqual(fullState.rflags & definedLogicFlags, std::uint64_t{0},
+                "OR dword immediate defined flags differ");
 }
 
 void testAddDwordShortImmediateGuestMemory() {
