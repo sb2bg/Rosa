@@ -2944,6 +2944,36 @@ updateShiftRightFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t r
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateShiftRightArithmeticFlags32(x86::X86State *state, std::uint64_t lhsValue,
+                                  std::uint64_t resultValue, std::uint64_t unmaskedCount) {
+    const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x1FU);
+    if (count == 0) {
+        return state;
+    }
+    const auto lhs = static_cast<std::uint32_t>(lhsValue);
+    const auto result = static_cast<std::uint32_t>(resultValue);
+    auto replacedFlags = flagCarry | flagParity | flagZero | flagSign;
+    if (count == 1) {
+        replacedFlags |= flagOverflow;
+    }
+    auto flags = (state->rflags & ~replacedFlags) | flagReservedOne;
+    flags |= (lhs >> (count - 1U)) & 1U;
+    if ((std::popcount(static_cast<unsigned>(result & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result >> 31U) != 0) {
+        flags |= flagSign;
+    }
+    // SAR defines OF as zero for a one-bit shift. It is undefined for
+    // larger counts, so Rosa preserves the incoming value in that case.
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateShiftRightArithmeticFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t result,
                                   std::uint64_t unmaskedCount) {
     const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x3FU);
@@ -4541,16 +4571,18 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            if (reg.width != 64) {
-                throw std::runtime_error("internal decoder error: SAR width is not 64 bits");
+            if (reg.width != 32 && reg.width != 64) {
+                throw std::runtime_error("internal decoder error: SAR width is not 32 or 64 bits");
             }
+            const auto width = reg.width == 32 ? ir::Width::I32 : ir::Width::I64;
             const auto lhs =
-                builder.readGuestRegister(reg.reg, ir::Width::I64, instruction.address);
-            const auto count = static_cast<std::uint8_t>(immediate.value & 0x3FU);
+                builder.readGuestRegister(reg.reg, width, instruction.address);
+            const auto count = static_cast<std::uint8_t>(
+                immediate.value & (reg.width == 64 ? 0x3FU : 0x1FU));
             const auto result =
-                builder.shiftRightArithmetic(lhs, count, ir::Width::I64, instruction.address);
-            builder.writeGuestRegister(reg.reg, result, ir::Width::I64, instruction.address);
-            builder.updateShiftRightArithmeticFlags(lhs, result, count, ir::Width::I64,
+                builder.shiftRightArithmetic(lhs, count, width, instruction.address);
+            builder.writeGuestRegister(reg.reg, result, width, instruction.address);
+            builder.updateShiftRightArithmeticFlags(lhs, result, count, width,
                                                     instruction.address);
             break;
         }
@@ -8468,8 +8500,15 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             }
             break;
         case ir::Opcode::ShiftRightArithmetic:
-            assembler.asrImmediate(hostRegister(*operation.result), hostRegister(*operation.lhs),
-                                   static_cast<std::uint8_t>(operation.immediate));
+            if (operation.width == ir::Width::I32) {
+                assembler.asrImmediate32(hostRegister(*operation.result),
+                                         hostRegister(*operation.lhs),
+                                         static_cast<std::uint8_t>(operation.immediate));
+            } else {
+                assembler.asrImmediate(hostRegister(*operation.result),
+                                       hostRegister(*operation.lhs),
+                                       static_cast<std::uint8_t>(operation.immediate));
+            }
             break;
         case ir::Opcode::MultiplyLow:
             assembler.multiplyLow(hostRegister(*operation.result), hostRegister(*operation.lhs),
@@ -9923,7 +9962,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
             assembler.movImmediate(arm64::x3, operation.immediate);
-            assembler.movImmediate(arm64::x16, pointerBits(&updateShiftRightArithmeticFlags64));
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
+                                                   ? pointerBits(&updateShiftRightArithmeticFlags32)
+                                                   : pointerBits(&updateShiftRightArithmeticFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateRotateLeftFlags:

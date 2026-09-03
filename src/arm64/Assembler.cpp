@@ -314,6 +314,24 @@ void Assembler::asrImmediate(XRegister destination, XRegister source, std::uint8
                               : std::string{});
 }
 
+void Assembler::asrImmediate32(XRegister destination, XRegister source, std::uint8_t shift) {
+    requireRegister(destination);
+    requireRegister(source);
+    if (shift >= 32U) {
+        throw std::invalid_argument("32-bit ASR immediate must be less than 32");
+    }
+    if (shift == 0) {
+        mov32(destination, source);
+        return;
+    }
+    const auto word = 0x13007C00U | (static_cast<std::uint32_t>(shift) << 16U) |
+                      (static_cast<std::uint32_t>(source.encoding) << 5U) |
+                      static_cast<std::uint32_t>(destination.encoding);
+    emit(word, recordListing_ ? "asr w" + std::to_string(destination.encoding) + ", w" +
+                                    std::to_string(source.encoding) + ", #" + std::to_string(shift)
+                              : std::string{});
+}
+
 void Assembler::reverseBytes32(XRegister destination, XRegister source) {
     requireRegister(destination);
     requireRegister(source);

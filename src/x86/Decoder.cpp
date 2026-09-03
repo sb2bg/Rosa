@@ -8121,7 +8121,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor++];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            const bool observedSar = rexW && extension == 0x7U;
+            const bool observedSar = extension == 0x7U;
             const bool observedRor =
                 rexW && !rexR && !rexX && extension == 0x1U;
             const bool observedRol =
@@ -8166,7 +8166,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                       (extension != 0x4U && extension != 0x5U)))) {
                     throw DecodeError(
                         address, remaining,
-                        "only ROL r32/r64, ROR r64, SHL/SHR r32/r64, and SAR r64 register forms from opcode C1 are supported");
+                        "only ROL r32/r64, ROR r64, SHL/SHR r32/r64, and SAR r32/r64 register forms from opcode C1 are supported");
                 }
                 instruction.opcode = extension == 0x0U   ? Opcode::RolRegImm
                                      : extension == 0x1U ? Opcode::RorRegImm

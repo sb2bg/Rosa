@@ -3021,6 +3021,7 @@ void testAssemblerEncodings() {
     assembler.lslImmediate(rosa::arm64::x10, rosa::arm64::x9, 32);
     assembler.lsrImmediate(rosa::arm64::x10, rosa::arm64::x9, 31);
     assembler.asrImmediate(rosa::arm64::x10, rosa::arm64::x9, 3);
+    assembler.asrImmediate32(rosa::arm64::x10, rosa::arm64::x9, 3);
     assembler.lslVariable(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.lsrVariable(rosa::arm64::x10, rosa::arm64::x9, rosa::arm64::x11);
     assembler.multiplyLow(rosa::arm64::x11, rosa::arm64::x9, rosa::arm64::x10);
@@ -3042,8 +3043,8 @@ void testAssemblerEncodings() {
     assembler.isb();
     assembler.ret();
 
-    const std::array<std::uint32_t, 25> expected{
-        0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0xD35FFD2AU, 0x9343FD2AU, 0x9ACB212AU, 0x9ACB252AU,
+    const std::array<std::uint32_t, 26> expected{
+        0xD2800540U, 0x8B0B012AU, 0xD3607D2AU, 0xD35FFD2AU, 0x9343FD2AU, 0x13037D2AU, 0x9ACB212AU, 0x9ACB252AU,
         0x9B0A7D2BU, 0x9BCA7D2CU, 0x93C9814BU, 0x8A0B012AU, 0xAA0B012AU, 0xCA0B012AU, 0x5AC0092AU,
         0xDAC00D2AU, 0x93407D2AU, 0xF9400009U, 0xB9400009U, 0xF9000009U, 0xD63F0200U, 0xA9BF7BFDU,
         0xA8C17BFDU, 0xD5033BBFU, 0xD5033FDFU, 0xD65F03C0U,
@@ -12754,6 +12755,45 @@ void testShiftRightArithmetic64ImmediateGeneratedExecution() {
     static_cast<void>(zeroBlock.execute(zeroState));
     expectEqual(zeroState.rcx, std::uint64_t{0x8000000000000007ULL}, "SAR masked-zero changed RCX");
     expectEqual(zeroState.rflags, std::uint64_t{0xAD7}, "SAR masked-zero changed flags");
+}
+
+void testShiftRightArithmetic32ImmediateGeneratedExecution() {
+    // Observed in sqlite: sar ecx, 4 without a REX prefix.
+    constexpr std::array<std::uint8_t, 4> code{0xC1, 0xF9, 0x04, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x100045B67ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SarRegImm, "SAR r32, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "SAR r32 length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx && destination.width == 32 &&
+               immediate.value == 4,
+           "SAR ecx, 4 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("sar ecx, 0x4") != std::string::npos,
+           "SAR ecx, 4 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x100045B67ULL});
+    rosa::x86::X86State state;
+    state.rcx = 0xAABBCCDD80000001ULL;
+    state.rflags = 0x810;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xF8000000ULL}, "SAR ecx, 4 result differs");
+    constexpr std::uint64_t definedManyFlags = (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U);
+    expectEqual(state.rflags & definedManyFlags,
+                std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "SAR ecx, 4 defined flags differ");
+
+    constexpr std::array<std::uint8_t, 4> countOne{0xC1, 0xF9, 0x01, 0xC3};
+    const auto oneBlock = translator.translate(countOne, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State oneState;
+    oneState.rcx = 0x80000000ULL;
+    oneState.rflags = (1U << 11U) | (1U << 4U) | (1U << 0U);
+    static_cast<void>(oneBlock.execute(oneState));
+    expectEqual(oneState.rcx, std::uint64_t{0xC0000000ULL}, "SAR ecx, 1 result differs");
+    constexpr std::uint64_t definedOneFlags = definedManyFlags | (std::uint64_t{1} << 11U);
+    expectEqual(oneState.rflags & definedOneFlags, std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "SAR ecx, 1 defined flags differ");
 }
 
 void testRotateLeft16ImmediateGeneratedExecution() {
@@ -31288,6 +31328,8 @@ int main() {
         {"SHR 64-bit immediate generated execution", testShiftRight64ImmediateGeneratedExecution},
         {"SAR 64-bit immediate generated execution",
          testShiftRightArithmetic64ImmediateGeneratedExecution},
+        {"SAR 32-bit immediate generated execution",
+         testShiftRightArithmetic32ImmediateGeneratedExecution},
         {"ROL 16-bit immediate generated execution", testRotateLeft16ImmediateGeneratedExecution},
         {"ROL 32-bit immediate generated execution", testRotateLeft32ImmediateGeneratedExecution},
         {"ROL 64-bit immediate generated execution", testRotateLeft64ImmediateGeneratedExecution},
