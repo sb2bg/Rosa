@@ -22009,6 +22009,43 @@ void testDarwinDuplicateGuestDescriptor() {
                 "failed dup allocated a guest descriptor");
 }
 
+void testDarwinStat64SystemDatabasesAbsent() {
+    constexpr auto stat64Number = UINT64_C(0x02000152);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress statAddress{0x8300};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 144> sentinel = [] {
+        std::array<std::uint8_t, 144> bytes{};
+        bytes.fill(0xA5);
+        return bytes;
+    }();
+    addressSpace.writeBytes(statAddress, sentinel);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+
+    for (const char *path : {"/etc/passwd", "/etc/master.passwd", "/etc/group"}) {
+        const std::string pathString(path);
+        std::vector<std::uint8_t> pathBytes(pathString.begin(), pathString.end());
+        pathBytes.push_back(0);
+        addressSpace.writeBytes(pathAddress, pathBytes);
+        state.rax = stat64Number;
+        state.rdi = pathAddress.value;
+        state.rsi = statAddress.value;
+        state.rflags = 0x2;
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x7FF802E310E4ULL}));
+        expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                    "system database stat64 did not report absence");
+        expect((state.rflags & 1U) != 0, "system database stat64 did not set BSD carry");
+    }
+    expectEqual(addressSpace.readBytes(statAddress, sentinel.size()),
+                std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+                "absent system database stat64 touched its output buffer");
+}
+
 void testDarwinStat64MappedFile() {
     constexpr auto stat64Number = UINT64_C(0x02000152);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -32201,6 +32238,7 @@ int main() {
         {"Darwin openat guest cryptex directory", testDarwinOpenatGuestCryptexDirectory},
         {"Darwin duplicate guest descriptor", testDarwinDuplicateGuestDescriptor},
         {"Darwin stat64 mapped file", testDarwinStat64MappedFile},
+        {"Darwin stat64 absent system databases", testDarwinStat64SystemDatabasesAbsent},
         {"Darwin fstat64 standard descriptor", testDarwinFstat64StandardDescriptor},
         {"Darwin write_nocancel", testDarwinWriteNoCancel},
         {"Darwin getfsstat64 synthetic root", testDarwinGetfsstat64SyntheticRoot},

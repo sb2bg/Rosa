@@ -1888,6 +1888,13 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             setError(state, ENAMETOOLONG);
             return {};
         }
+        if (*path == guestPasswdDatabase || *path == guestMasterPasswdDatabase ||
+            *path == guestGroupDatabase) {
+            // Matches the unprovisioned open() above: libsystem_info's file
+            // backend falls back across open, stat, and fstat probes.
+            setError(state, ENOENT);
+            return {};
+        }
         if (!std::filesystem::path{*path}.is_absolute()) {
             throw unsupported(state, syscallRip,
                               "only absolute mapped user-file stat64 is implemented");

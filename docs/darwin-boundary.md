@@ -20,7 +20,7 @@ Rosa implements only the x86_64 Darwin operations reached by the controlled fixt
 | `sysctl` | `0x020000ca` | x86 Darwin MIB and guest buffers | implement name-to-OID plus observed lockdown, boot-argument, kernel-version, and CPU-count reads |
 | `shared_region_check_np` | `0x02000126` | guest address-pointer in `RDI` | copy out the installed Intel cache base, or return `EINVAL` when no compatible cache exists |
 | `proc_info` | `0x02000150` | observed `PROC_INFO_CALL_SET_DYLD_IMAGES` arguments | register/finalize guest TASK_DYLD_INFO metadata without copying or forwarding its pointer |
-| `stat64` / `fstat64` / `fstatat64` | `0x02000152` / `0x02000153` / `0x020001d6` | controlled guest path or descriptor plus output | translate metadata into the explicit 144-byte x86_64 Darwin stat layout |
+| `stat64` / `fstat64` / `fstatat64` | `0x02000152` / `0x02000153` / `0x020001d6` | controlled guest path or descriptor plus output | translate metadata into the explicit 144-byte x86_64 Darwin stat layout; report `ENOENT` for the unprovisioned system user/group databases |
 | `thread_selfid` | `0x02000174` | none | return guest thread ID 1 |
 | `__mac_syscall` | `0x0200017d` | guest policy/call/request | implement the observed Sandbox map-with-linking check and unrestricted development AMFI dyld policy |
 | `fsgetpath` | `0x020001ab` | guest output buffer/size and guest fsid/object ID | implement only dyld's empty identity-tuple probe, returning `ENOTSUP` without touching output |
