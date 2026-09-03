@@ -28882,6 +28882,44 @@ void testAnd8BitAccumulatorImmediate() {
                 "AND AL, imm8 zero defined flags differ");
 }
 
+void testAnd16BitRegisterShortImmediate() {
+    // Observed in libsqlite3: AND AX, 0xc (66 83 /4).
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x83, 0xE0, 0x0C, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10004D4E9ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegImm, "AND r16, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "AND r16, imm8 length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 16 &&
+               immediate.width == 8 && immediate.value == 0x0C,
+           "AND AX, 0xc operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("and ax, 0xc") != std::string::npos,
+           "AND AX, 0xc dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10004D4E9ULL});
+    rosa::x86::X86State state;
+    state.rax = 0x112233445566FF05ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x1122334455660004ULL},
+                "AND AX, imm8 result differs");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0},
+                "AND AX, imm8 nonzero defined flags differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0xFFEEDDCCBBAA5500ULL;
+    zeroState.rflags = 0x8D7;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0xFFEEDDCCBBAA0000ULL},
+                "AND AX, imm8 zero result changed upper RAX bytes");
+    expectEqual(zeroState.rflags & definedLogicFlags, std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "AND AX, imm8 zero defined flags differ");
+}
+
 void testAndAccumulatorImmediate() {
     constexpr std::array<std::uint8_t, 6> code{0x25, 0x00, 0xF0, 0x00, 0x00, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -33370,6 +33408,7 @@ int main() {
         {"BSR 64-bit registers", testBitScanReverse64},
         {"legacy AND 32-bit immediate", testLegacyAnd32Immediate},
         {"AND 8-bit accumulator immediate", testAnd8BitAccumulatorImmediate},
+        {"AND 16-bit register short immediate", testAnd16BitRegisterShortImmediate},
         {"AND accumulator immediate", testAndAccumulatorImmediate},
         {"AND 8-bit register immediate", testAnd8BitRegisterImmediate},
         {"AND 32-bit register immediate", testAnd32BitRegisterImmediate},
