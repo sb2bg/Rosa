@@ -15905,6 +15905,33 @@ void testXorpsRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "XORPS changed flags");
 }
 
+void testXorpdRegisterGeneratedExecution() {
+    // Observed in sqlite: XORPD xmm2, xmm2.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x57, 0xD2, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x100046E60ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorpdRegReg, "XORPD xmm, xmm opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "XORPD length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]).reg ==
+               rosa::x86::XmmRegister::Xmm2,
+           "XORPD destination differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]).reg ==
+               rosa::x86::XmmRegister::Xmm2,
+           "XORPD source differs");
+    expect(rosa::debug::dumpX86(decoded).find("xorpd xmm2, xmm2") != std::string::npos,
+           "XORPD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x100046E60ULL});
+    rosa::x86::X86State state;
+    state.xmm[2] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[2].low, std::uint64_t{0}, "XORPD low lane differs");
+    expectEqual(state.xmm[2].high, std::uint64_t{0}, "XORPD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "XORPD changed flags");
+}
+
 void testPxorRegisterGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0xEF, 0xC0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -32221,6 +32248,7 @@ int main() {
         {"XOR 8-bit accumulator immediate", testXor8BitAccumulatorImmediate},
         {"XOR 8-bit register immediate", testXor8BitRegisterImmediate},
         {"XORPS register generated execution", testXorpsRegisterGeneratedExecution},
+        {"XORPD register generated execution", testXorpdRegisterGeneratedExecution},
         {"PXOR register generated execution", testPxorRegisterGeneratedExecution},
         {"PXOR guest memory generated execution", testPxorGuestMemoryGeneratedExecution},
         {"PAND RIP-relative guest memory generated execution",

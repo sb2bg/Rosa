@@ -5570,6 +5570,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             break;
         }
         case x86::Opcode::XorpsRegReg:
+        case x86::Opcode::XorpdRegReg:
         case x86::Opcode::PxorRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: vector xor operand count");

@@ -1676,6 +1676,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
+        case x86::Opcode::XorpdRegReg:
+            stream << "xorpd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
+            break;
         case x86::Opcode::VxorpsRegRegReg:
         case x86::Opcode::VxorpsYmmRegRegReg: {
             const auto ymm =
