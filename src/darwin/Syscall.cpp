@@ -134,6 +134,7 @@ constexpr std::string_view guestMasterPasswdDatabase = "/etc/master.passwd";
 constexpr std::string_view guestGroupDatabase = "/etc/group";
 constexpr std::string_view guestFeatureFlagsSharedMemory =
     "com.apple.featureflags.shm";
+constexpr std::string_view guestFeatureFlagsDirectory = "/System/Library/FeatureFlags/";
 constexpr std::uint16_t guestModeDirectory = 0040000;
 constexpr std::uint16_t guestModeReadExecute = 0555;
 constexpr std::uint32_t guestFcntlGetPath = 50;
@@ -1889,6 +1890,14 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             // Rosa provisions no system user/group databases; DirectoryService
             // backs real users on hardware. libsystem_info's file backend
             // already handles a missing database, so report it absent.
+            setError(state, ENOENT);
+            return {};
+        }
+        if ((flags & O_ACCMODE) == O_RDONLY &&
+            std::string_view(*path).starts_with(guestFeatureFlagsDirectory)) {
+            // Rosa provisions no FeatureFlags disclosure domains; the
+            // framework falls back to compiled-in defaults when a domain
+            // file is absent, so report it absent.
             setError(state, ENOENT);
             return {};
         }

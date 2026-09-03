@@ -25312,6 +25312,39 @@ void testDarwinOpenSystemDatabasesAbsent() {
                 "absent system database open allocated a descriptor");
 }
 
+void testDarwinOpenFeatureFlagsDisclosuresAbsent() {
+    // Observed under an Objective-C fixture: libsystem_featureflags probes
+    // its disclosure domains and falls back when they are absent.
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+
+    for (const char *path : {"/System/Library/FeatureFlags/GlobalDisclosures.plist",
+                             "/System/Library/FeatureFlags/Domain/MadeUp.plist"}) {
+        const std::string pathString(path);
+        std::vector<std::uint8_t> pathBytes(pathString.begin(), pathString.end());
+        pathBytes.push_back(0);
+        addressSpace.writeBytes(pathAddress, pathBytes);
+        state.rax = openNumber;
+        state.rdi = pathAddress.value;
+        state.rsi = O_RDONLY | O_NONBLOCK | O_CLOEXEC;
+        state.rdx = 0;
+        state.rflags = 0x2;
+        static_cast<void>(dispatcher.dispatch(
+            addressSpace, state, rosa::guest::GuestAddress{0x7FF802E30330ULL}));
+        expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                    "FeatureFlags disclosure open did not report absence");
+        expect((state.rflags & 1U) != 0, "FeatureFlags disclosure open did not set BSD carry");
+    }
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+                "absent FeatureFlags disclosure open allocated a descriptor");
+}
+
 void testDarwinMmapReadOnlyUserFile() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr auto mmapNumber = UINT64_C(0x020000C5);
@@ -35431,6 +35464,7 @@ int main() {
         {"Darwin open relative read-only file", testDarwinOpenRelativeReadOnlyFile},
         {"Darwin read host read-only file", testDarwinReadHostReadOnlyFile},
         {"Darwin open absent system databases", testDarwinOpenSystemDatabasesAbsent},
+        {"Darwin open absent FeatureFlags disclosures", testDarwinOpenFeatureFlagsDisclosuresAbsent},
         {"Darwin mmap read-only user file", testDarwinMmapReadOnlyUserFile},
         {"Darwin fcntl F_GETPATH", testDarwinFcntlGetPath},
         {"Darwin simple-ASL socket flow", testDarwinSimpleAslSocketFlow},
