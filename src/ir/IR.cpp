@@ -1414,11 +1414,11 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::OrGuestMemory:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "source");
-            if (operation.width != Width::I8 &&
+            if (operation.width != Width::I8 && operation.width != Width::I16 &&
                 operation.width != Width::I32 &&
                 operation.width != Width::I64) {
                 errors.emplace_back(
-                    "or_guest_memory currently requires i8, i32, or i64");
+                    "or_guest_memory currently requires i8, i16, i32, or i64");
             }
             break;
         case Opcode::AndGuestMemory:

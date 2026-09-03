@@ -15707,6 +15707,44 @@ void testOrImmediateIntoGuestByteMemory() {
                 "OR dword immediate defined flags differ");
 }
 
+void testOrShortImmediateIntoGuestWordMemory() {
+    // Observed in libsqlite3: OR word [rax+0x72], 1 (66 83 /1).
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x83, 0x48, 0x72, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000A3509ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrMemImm, "word OR opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "word OR length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rax && memory.displacement == 0x72 &&
+               memory.width == 16 && !memory.index && immediate.value == 1 &&
+               immediate.width == 8,
+           "OR word [rax+0x72], 1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("or word [rax+0x72], 0x1") != std::string::npos,
+           "OR word [rax+0x72], 1 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8072};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> initial{0x00, 0x00};
+    addressSpace.writeBytes(target, initial);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000A3509ULL});
+    rosa::x86::X86State state;
+    state.rax = page.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expect(addressSpace.readBytes(target, 2) == std::vector<std::uint8_t>({0x01, 0x00}),
+           "OR word immediate stored the wrong result");
+    expectEqual(state.rax, page.value, "OR word immediate changed its base");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0},
+                "OR word immediate defined flags differ");
+}
+
 void testAddDwordShortImmediateGuestMemory() {
     // Observed in libxpc: ADD dword [r15+0x1c], 0x10 with REX.B.
     constexpr std::array<std::uint8_t, 6> code{0x41, 0x83, 0x47, 0x1C, 0x10, 0xC3};
@@ -33215,6 +33253,7 @@ int main() {
         {"OR 8-bit register into indexed guest memory", testOr8BitRegisterIntoIndexedGuestMemory},
         {"OR 32-bit register into indexed guest memory", testOr32BitRegisterIntoIndexedGuestMemory},
         {"OR immediate into guest byte memory", testOrImmediateIntoGuestByteMemory},
+        {"OR short immediate into guest word memory", testOrShortImmediateIntoGuestWordMemory},
         {"OR short immediate generated execution", testOrShortImmediateGeneratedExecution},
         {"OR dword short immediate guest memory", testOrDwordShortImmediateGuestMemory},
         {"ADD dword short immediate guest memory", testAddDwordShortImmediateGuestMemory},

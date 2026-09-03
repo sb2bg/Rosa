@@ -1804,6 +1804,36 @@ extern "C" __attribute__((noinline)) x86::X86State *orGuest8(GuestExecutionConte
     }
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *orGuest16(GuestExecutionContext *context,
+                                                               x86::X86State *state,
+                                                               std::uint64_t address,
+                                                               std::uint64_t sourceValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated 16-bit guest OR has no address space");
+        }
+        constexpr auto width = sizeof(std::uint16_t);
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, width,
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU16(guest::GuestAddress{address});
+        const auto result =
+            static_cast<std::uint16_t>(original | static_cast<std::uint16_t>(sourceValue));
+        const std::array resultBytes{
+            static_cast<std::uint8_t>(result),
+            static_cast<std::uint8_t>(result >> 8U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, resultBytes);
+        return updateLogicFlags16(state, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint16_t);
+        }
+        return nullptr;
+    }
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *orGuest32(GuestExecutionContext *context,
                                                               x86::X86State *state,
                                                               std::uint64_t address,
@@ -5440,14 +5470,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
             const auto byteForm = memory.width == 8 && immediate.width == 8;
+            const auto wordShortForm = memory.width == 16 && immediate.width == 8;
             const auto dwordShortForm = memory.width == 32 && immediate.width == 8;
             const auto qwordShortForm = memory.width == 64 && immediate.width == 8;
             const auto dwordFullForm = memory.width == 32 && immediate.width == 32;
             const auto qwordFullForm = memory.width == 64 && immediate.width == 32;
-            if ((!byteForm && !dwordShortForm && !qwordShortForm && !dwordFullForm &&
-                 !qwordFullForm) ||
+            if ((!byteForm && !wordShortForm && !dwordShortForm && !qwordShortForm &&
+                 !dwordFullForm && !qwordFullForm) ||
                 memory.segment != x86::Segment::None) {
-                throw std::runtime_error("only OR byte [memory], imm8 and OR "
+                throw std::runtime_error("only OR byte/word [memory], imm8 and OR "
                                           "dword/qword [memory], imm8/imm32 are implemented");
             }
             auto address =
@@ -5474,6 +5505,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 address = builder.add(address, displacement, ir::Width::I64, instruction.address);
             }
             const auto width = byteForm   ? ir::Width::I8
+                               : wordShortForm ? ir::Width::I16
                                : dwordShortForm || dwordFullForm ? ir::Width::I32
                                                                  : ir::Width::I64;
             const auto sourceValue =
@@ -9271,10 +9303,10 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             break;
         }
         case ir::Opcode::OrGuestMemory: {
-            if (operation.width != ir::Width::I8 && operation.width != ir::Width::I32 &&
-                operation.width != ir::Width::I64) {
+            if (operation.width != ir::Width::I8 && operation.width != ir::Width::I16 &&
+                operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 8-, 32-, or 64-bit guest memory OR");
+                    "ARM64 backend only implements 8-, 16-, 32-, or 64-bit guest memory OR");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -9285,6 +9317,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(arm64::x16,
                                    operation.width == ir::Width::I8    ? pointerBits(&orGuest8)
+                                   : operation.width == ir::Width::I16 ? pointerBits(&orGuest16)
                                    : operation.width == ir::Width::I32 ? pointerBits(&orGuest32)
                                                                        : pointerBits(&orGuest64));
             assembler.blr(arm64::x16);

@@ -2091,11 +2091,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if ((extension != 0x7U && !(extension == 0x4U && mode == 0x3U)) ||
+            if ((extension != 0x7U && !(extension == 0x4U && mode == 0x3U) &&
+                 !(extension == 0x1U && mode != 0x3U)) ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only CMP r16 or word [base+index*scale+disp8/disp32], imm8 and AND r16, imm8 are supported");
+                    "only CMP r16 or word [base+index*scale+disp8/disp32], imm8, AND r16, imm8, and OR word [base+index*scale+disp8/disp32], imm8 are supported");
             }
             auto operandCursor = wordShortImmediateOpcodeOffset + 2;
             auto base = decodeRegister(rmEncoding, rexB);
@@ -2149,6 +2150,23 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.opcode = Opcode::AndRegImm;
                 instruction.operands.push_back(RegisterOperand{
                     decodeRegister(rmEncoding, rexB), 16});
+                instruction.operands.push_back(ImmediateOperand{
+                    static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
+                const auto length = operandCursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = operandCursor;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+            if (extension == 0x1U) {
+                instruction.opcode = Opcode::OrMemImm;
+                instruction.operands.push_back(MemoryOperand{
+                    base, displacement, 16, index, scale});
                 instruction.operands.push_back(ImmediateOperand{
                     static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
                 const auto length = operandCursor - instructionStart;
