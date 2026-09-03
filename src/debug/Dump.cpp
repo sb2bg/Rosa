@@ -703,7 +703,7 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "dec " << (memory.width == 8   ? "byte"
                                   : memory.width == 32 ? "dword"
                                                        : "qword")
-                   << " [" << x86::registerName(memory.base);
+                   << " [" << (memory.ripRelative ? "rip" : x86::registerName(memory.base));
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index) << '*'
                        << static_cast<unsigned>(memory.scale);
@@ -714,6 +714,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 stream << "+0x" << memory.displacement;
             }
             stream << ']';
+            if (memory.ripRelative) {
+                const auto target = instruction.address.value + instruction.length +
+                                    static_cast<std::uint64_t>(memory.displacement);
+                stream << " ; 0x" << target;
+            }
             break;
         }
         case x86::Opcode::IncReg:

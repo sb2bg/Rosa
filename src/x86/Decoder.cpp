@@ -9152,6 +9152,21 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         rexW ? 64U : hasOperandSizeOverride ? 16U : 32U),
                     index,
                     scale, hasBase, ripRelative});
+            } else if (extension == 0x1U && mode == 0x0U && rmEncoding == 0x5U &&
+                       !rexR && !rexX && !rexB) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated RIP-relative DEC disp32");
+                }
+                const auto displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+                instruction.opcode = Opcode::DecMem;
+                instruction.operands.push_back(MemoryOperand{
+                    Register::Rax, displacement,
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U), std::nullopt,
+                    1, false, true});
             } else if (extension == 0x1U && mode <= 0x2U && !rexR &&
                        !rexX && rmEncoding != 0x4U &&
                        !(mode == 0 && rmEncoding == 0x5U && !rexB)) {
@@ -9162,7 +9177,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                           "truncated DEC memory disp8");
                     }
                     displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-                } else if (mode == 0x2U) {
+                } else if (mode == 0x2U || (mode == 0 && rmEncoding == 0x5U)) {
                     if (code.size() - cursor < 4) {
                         throw DecodeError(address, remaining,
                                           "truncated DEC memory disp32");
@@ -9305,7 +9320,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                        (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register/memory INC /0, register/dword/qword memory DEC /1, register/memory CALL /2, register/based/RIP-relative memory JMP /4, and based qword memory PUSH /6 are supported from opcode FF");
+                    "only register/memory INC /0, register/based/RIP-relative dword/qword memory DEC /1, register/memory CALL /2, register/based/RIP-relative memory JMP /4, and based qword memory PUSH /6 are supported from opcode FF");
             } else {
                 auto baseEncoding = rmEncoding;
                 if (rmEncoding == 0x4U) {

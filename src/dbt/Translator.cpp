@@ -4087,7 +4087,10 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             auto address =
-                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
             if (memory.index) {
                 auto index =
                     builder.readGuestRegister(*memory.index, ir::Width::I64, instruction.address);

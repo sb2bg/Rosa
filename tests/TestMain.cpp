@@ -5697,6 +5697,40 @@ void testDecrement64BitGuestMemory() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "failed DEC qword changed flags");
 }
 
+void testDecrementRipRelativeGuestMemory() {
+    // Observed in sqlite: dec qword [rip+disp32].
+    constexpr std::array<std::uint8_t, 8> code{0x48, 0xFF, 0x0D, 0x02, 0xF3,
+                                              0x1A, 0x00, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000460AFULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::DecMem,
+           "RIP-relative DEC qword opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7}, "RIP-relative DEC qword length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 64,
+           "RIP-relative DEC qword addressing differs");
+    expectEqual(memory.displacement, std::int64_t{0x1AF302},
+                "RIP-relative DEC qword displacement differs");
+    expect(rosa::debug::dumpX86(decoded).find("dec qword [rip+0x1af302]") != std::string::npos,
+           "RIP-relative DEC qword dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x1BF000};
+    constexpr rosa::guest::GuestAddress target{0x1BF309};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10000});
+    rosa::x86::X86State state;
+    state.rflags = 0x3;
+    addressSpace.writeU64(target, 5);
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{4},
+                "RIP-relative DEC qword result differs");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "RIP-relative DEC qword flags differ or CF changed");
+}
+
 void testDecrement32BitGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x41, 0xFF, 0x4B, 0x08, 0xC3};
     constexpr rosa::guest::GuestAddress instructionAddress{0x7FF802D0EF1EULL};
@@ -31188,6 +31222,7 @@ int main() {
         {"INC 32-bit SIB guest memory", testIncrement32BitSibGuestMemory},
         {"INC 64-bit guest memory", testIncrement64BitGuestMemory},
         {"DEC 64-bit guest memory", testDecrement64BitGuestMemory},
+        {"DEC RIP-relative guest memory", testDecrementRipRelativeGuestMemory},
         {"DEC 32-bit guest memory", testDecrement32BitGuestMemory},
         {"DEC 8-bit scaled guest memory", testDecrement8BitScaledGuestMemory},
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
