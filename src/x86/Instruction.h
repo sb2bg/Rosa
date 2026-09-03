@@ -86,6 +86,7 @@ enum class Opcode {
     BitSetRegImm,
     BitResetRegImm,
     BitTestRegReg,
+    BitSetRegReg,
     BitTestMemImm,
     BitScanForwardRegReg,
     BitScanReverseRegReg,

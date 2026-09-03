@@ -28491,6 +28491,49 @@ void testBitTestRegisterIndex32() {
     expectEqual(qwordState.rflags, std::uint64_t{0xAD6}, "BT r64 clear-bit semantics differ");
 }
 
+void testBitSetRegisterIndex64() {
+    // Observed in libsqlite3: BTS R11, RAX with REX.WB.
+    constexpr std::array<std::uint8_t, 5> code{0x49, 0x0F, 0xAB, 0xC3, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10011B46AULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::BitSetRegReg, "BTS r64, r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "BTS r64, r64 length differs");
+    const auto value = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto index = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(value.reg == rosa::x86::Register::R11 && value.width == 64 &&
+               index.reg == rosa::x86::Register::Rax && index.width == 64,
+           "BTS r11, rax operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("bts r11, rax") != std::string::npos,
+           "BTS r11, rax dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10011B46AULL});
+    rosa::x86::X86State clearState;
+    clearState.r11 = 0;
+    clearState.rax = 5;
+    clearState.rflags = 0xAD7;
+    static_cast<void>(block.execute(clearState));
+    expectEqual(clearState.r11, std::uint64_t{0x20}, "BTS r64 did not set the indexed bit");
+    expectEqual(clearState.rax, std::uint64_t{5}, "BTS r64 changed its index operand");
+    expectEqual(clearState.rflags, std::uint64_t{0xAD6}, "BTS r64 clear-CF semantics differ");
+
+    rosa::x86::X86State setState;
+    setState.r11 = 0x20;
+    setState.rax = 5;
+    setState.rflags = 0xAD6;
+    static_cast<void>(block.execute(setState));
+    expectEqual(setState.r11, std::uint64_t{0x20}, "BTS r64 changed an already-set bit");
+    expectEqual(setState.rflags, std::uint64_t{0xAD7}, "BTS r64 set-CF semantics differ");
+
+    rosa::x86::X86State maskedState;
+    maskedState.r11 = 0;
+    maskedState.rax = 69;
+    maskedState.rflags = 0xAD7;
+    static_cast<void>(block.execute(maskedState));
+    expectEqual(maskedState.r11, std::uint64_t{0x20}, "BTS r64 did not mask its index modulo 64");
+    expectEqual(maskedState.rflags, std::uint64_t{0xAD6}, "BTS r64 masked-CF semantics differ");
+}
+
 void testBitTestGuestDwordImmediate() {
     constexpr std::array<std::uint8_t, 9> observed{0x0F, 0xBA, 0xA3, 0x90, 0x00,
                                                    0x00, 0x00, 0x15, 0xC3};
@@ -33253,6 +33296,7 @@ int main() {
         {"BT 32-bit register with immediate", testBitTestRegisterImmediate32},
         {"BTS/BTR 64-bit register with immediate", testBitSetResetRegisterImmediate64},
         {"BT 32-bit register with register index", testBitTestRegisterIndex32},
+        {"BTS 64-bit register with register index", testBitSetRegisterIndex64},
         {"BT guest dword with immediate", testBitTestGuestDwordImmediate},
         {"BSF 32-bit registers", testBitScanForward32},
         {"BSF 64-bit registers", testBitScanForward64},

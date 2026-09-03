@@ -5756,6 +5756,34 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateBitTestFlags(shifted, 0, width, instruction.address);
             break;
         }
+        case x86::Opcode::BitSetRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: BTS register operand count");
+            }
+            const auto valueRegister = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto indexRegister = std::get<x86::RegisterOperand>(instruction.operands[1]);
+            if (valueRegister.width != indexRegister.width ||
+                (valueRegister.width != 32 && valueRegister.width != 64)) {
+                throw std::runtime_error(
+                    "only matching 32-bit and 64-bit register-indexed BTS is implemented");
+            }
+            const auto width = valueRegister.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto value =
+                builder.readGuestRegister(valueRegister.reg, width, instruction.address);
+            const auto index =
+                builder.readGuestRegister(indexRegister.reg, width, instruction.address);
+            const auto indexMask =
+                builder.constant(valueRegister.width - 1U, width, instruction.address);
+            const auto maskedIndex = builder.bitAnd(index, indexMask, width, instruction.address);
+            const auto shifted =
+                builder.shiftRightLogical(value, maskedIndex, width, instruction.address);
+            const auto one = builder.constant(1, width, instruction.address);
+            const auto mask = builder.shiftLeft(one, maskedIndex, width, instruction.address);
+            const auto result = builder.bitOr(value, mask, width, instruction.address);
+            builder.writeGuestRegister(valueRegister.reg, result, width, instruction.address);
+            builder.updateBitTestFlags(shifted, 0, width, instruction.address);
+            break;
+        }
         case x86::Opcode::BitTestMemImm: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto bitIndex = std::get<x86::ImmediateOperand>(instruction.operands[1]);
