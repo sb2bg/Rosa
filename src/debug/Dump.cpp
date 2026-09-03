@@ -2446,13 +2446,16 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         }
         case x86::Opcode::MovdMemXmm:
         case x86::Opcode::MovssMemXmm:
-        case x86::Opcode::MovsdMemXmm: {
+        case x86::Opcode::MovsdMemXmm:
+        case x86::Opcode::MovlpsMemXmm: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << (instruction.opcode == x86::Opcode::MovssMemXmm
                            ? "movss dword ["
                        : instruction.opcode == x86::Opcode::MovsdMemXmm
                            ? "movsd qword ["
+                       : instruction.opcode == x86::Opcode::MovlpsMemXmm
+                           ? "movlps qword ["
                            : "movd dword [")
                    << (memory.ripRelative ? "rip"
                                           : x86::registerName(memory.base));
@@ -2622,10 +2625,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
         }
-        case x86::Opcode::MovsdRegMem: {
+        case x86::Opcode::MovsdRegMem:
+        case x86::Opcode::MovlpsRegMem: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);
-            stream << "movsd "
+            stream << (instruction.opcode == x86::Opcode::MovlpsRegMem ? "movlps "
+                                                                      : "movsd ")
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0]).reg)

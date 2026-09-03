@@ -3537,6 +3537,97 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
         }
 
+        if ((code[cursor] == 0x0FU && code.size() - cursor >= 3 &&
+             (code[cursor + 1] == 0x12U || code[cursor + 1] == 0x13U)) ||
+            (code.size() - cursor >= 4 && code[cursor] >= 0x40U && code[cursor] <= 0x4FU &&
+             code[cursor + 1] == 0x0FU &&
+             (code[cursor + 2] == 0x12U || code[cursor + 2] == 0x13U))) {
+            const bool movlpsHasRex = code[cursor] != 0x0FU;
+            const auto movlpsRex = movlpsHasRex ? code[cursor] : std::uint8_t{0};
+            const auto movlpsOpcodeOffset = cursor + (movlpsHasRex ? 2U : 1U);
+            const bool movlpsLoad = code[movlpsOpcodeOffset] == 0x12U;
+            const auto modrm = code[movlpsOpcodeOffset + 1];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            const auto xmmEncoding = static_cast<std::uint8_t>(
+                ((modrm >> 3U) & 0x7U) | ((movlpsRex & 0x4U) != 0 ? 8U : 0U));
+            if (mode == 0x3U) {
+                throw DecodeError(address, remaining,
+                                  "register-direct MOVLPS is not supported");
+            }
+            auto operandCursor = movlpsOpcodeOffset + 2;
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
+            auto baseEncoding = rmEncoding;
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (!ripRelative && rmEncoding == 0x4U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOVLPS memory SIB");
+                }
+                const auto sib = code[operandCursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(address, remaining,
+                                      "no-base MOVLPS memory SIB is not supported");
+                }
+                if (indexEncoding != 0x4U || (movlpsRex & 0x2U) != 0) {
+                    index = decodeRegister(indexEncoding, (movlpsRex & 0x2U) != 0);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            } else if (!ripRelative && ((movlpsRex & 0x2U) != 0)) {
+                throw DecodeError(address, remaining,
+                                  "REX.X requires a MOVLPS memory SIB");
+            }
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOVLPS memory disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[operandCursor++]);
+            } else if (mode == 0x2U || ripRelative) {
+                if (code.size() - operandCursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOVLPS memory disp32");
+                }
+                displacement = readI32(code.subspan(operandCursor, 4));
+                operandCursor += 4;
+            }
+            const auto xmm =
+                XmmRegisterOperand{static_cast<XmmRegister>(xmmEncoding)};
+            const auto memory = ripRelative
+                                    ? MemoryOperand{Register::Rax, displacement, 64,
+                                                    std::nullopt, 1, false, true}
+                                    : MemoryOperand{
+                                          decodeRegister(baseEncoding,
+                                                         (movlpsRex & 0x1U) != 0),
+                                          displacement, 64, index, scale};
+            instruction.opcode =
+                movlpsLoad ? Opcode::MovlpsRegMem : Opcode::MovlpsMemXmm;
+            if (movlpsLoad) {
+                instruction.operands.push_back(xmm);
+                instruction.operands.push_back(memory);
+            } else {
+                instruction.operands.push_back(memory);
+                instruction.operands.push_back(xmm);
+            }
+            const auto length = operandCursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            cursor = operandCursor;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0xF3U && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x11U) {
             if (code.size() - cursor < 4) {

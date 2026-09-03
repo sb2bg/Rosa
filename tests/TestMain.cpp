@@ -20883,6 +20883,73 @@ void testMovsdXmmMemoryMoves() {
     expectEqual(storeState.rflags, std::uint64_t{0xAD7}, "MOVSD store changed flags");
 }
 
+void testMovlpsXmmMemoryMoves() {
+    // Observed in libsystem_c under grep: MOVLPS qword [rax+0x4], xmm0.
+    constexpr std::array<std::uint8_t, 5> storeCode{0x0F, 0x13, 0x40, 0x04, 0xC3};
+    constexpr rosa::guest::GuestAddress instructionAddress{0x7FF802D7BADE};
+    const rosa::x86::Decoder decoder;
+    const auto storeDecoded = decoder.decodeBlock(storeCode, instructionAddress);
+    expect(storeDecoded[0].opcode == rosa::x86::Opcode::MovlpsMemXmm,
+           "MOVLPS [memory], xmm opcode differs");
+    expectEqual(storeDecoded[0].length, std::uint8_t{4}, "MOVLPS [memory], xmm length differs");
+    const auto storeMemory = std::get<rosa::x86::MemoryOperand>(storeDecoded[0].operands[0]);
+    const auto storeSource =
+        std::get<rosa::x86::XmmRegisterOperand>(storeDecoded[0].operands[1]);
+    expect(storeMemory.base == rosa::x86::Register::Rax && storeMemory.displacement == 4 &&
+               storeMemory.width == 64 && storeSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "MOVLPS qword [rax+0x4], xmm0 operands differ");
+    expect(rosa::debug::dumpX86(storeDecoded).find("movlps qword [rax+0x4], xmm0") !=
+               std::string::npos,
+           "MOVLPS [memory], xmm dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+
+    const rosa::dbt::Translator translator;
+    const auto storeBlock = translator.translate(storeCode, instructionAddress);
+    rosa::x86::X86State storeState;
+    storeState.rax = target.value - 4;
+    storeState.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    storeState.rflags = 0xAD7;
+    static_cast<void>(storeBlock.execute(storeState, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVLPS did not store the low XMM qword");
+    expectEqual(storeState.xmm[0].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVLPS store changed its high XMM source lane");
+    expectEqual(storeState.rflags, std::uint64_t{0xAD7}, "MOVLPS store changed flags");
+
+    constexpr std::array<std::uint8_t, 5> loadCode{0x0F, 0x12, 0x45, 0xE0, 0xC3};
+    const auto loadDecoded = decoder.decodeBlock(loadCode, instructionAddress);
+    expect(loadDecoded[0].opcode == rosa::x86::Opcode::MovlpsRegMem,
+           "MOVLPS xmm, [memory] opcode differs");
+    expectEqual(loadDecoded[0].length, std::uint8_t{4}, "MOVLPS xmm, [memory] length differs");
+    const auto loadDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(loadDecoded[0].operands[0]);
+    const auto loadMemory = std::get<rosa::x86::MemoryOperand>(loadDecoded[0].operands[1]);
+    expect(loadDestination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               loadMemory.base == rosa::x86::Register::Rbp && loadMemory.displacement == -0x20 &&
+               loadMemory.width == 64,
+           "MOVLPS xmm0, qword [rbp-0x20] operands differ");
+    expect(rosa::debug::dumpX86(loadDecoded).find("movlps xmm0, qword [rbp-0x20]") !=
+               std::string::npos,
+           "MOVLPS xmm, [memory] dump differs");
+
+    const auto loadBlock = translator.translate(loadCode, instructionAddress);
+    rosa::x86::X86State loadState;
+    loadState.rbp = target.value + 0x20;
+    loadState.xmm[0] = {.low = 0xAAAAAAAAAAAAAAAAULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    loadState.rflags = 0xAD7;
+    static_cast<void>(loadBlock.execute(loadState, &addressSpace));
+    expectEqual(loadState.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVLPS load did not copy the guest qword into the low lane");
+    expectEqual(loadState.xmm[0].high, std::uint64_t{0xBBBBBBBBBBBBBBBBULL},
+                "MOVLPS load did not preserve the high lane");
+    expectEqual(loadState.rflags, std::uint64_t{0xAD7}, "MOVLPS load changed flags");
+}
+
 void testExtractpsXmmToGuestMemory() {
     constexpr std::array<std::uint8_t, 8> laneThreeCode{0x66, 0x0F, 0x3A, 0x17,
                                                         0x45, 0xCC, 0x03, 0xC3};
@@ -34010,6 +34077,7 @@ int main() {
         {"MOVD XMM to guest memory", testMovdXmmToGuestMemory},
         {"MOVSS XMM to guest memory", testMovssXmmToGuestMemory},
         {"MOVSD XMM memory moves", testMovsdXmmMemoryMoves},
+        {"MOVLPS XMM memory moves", testMovlpsXmmMemoryMoves},
         {"EXTRACTPS XMM to guest memory", testExtractpsXmmToGuestMemory},
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},
         {"PINSRD register to XMM", testPinsrdRegisterToXmm},
