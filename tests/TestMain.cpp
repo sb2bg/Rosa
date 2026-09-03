@@ -28199,6 +28199,35 @@ void testAndImmediateIntoGuestWord() {
            "faulted cross-page AND qword immediate changed memory");
     expectEqual(boundaryState.rflags, std::uint64_t{0xAD7},
                 "faulted cross-page AND qword immediate changed flags");
+
+    // Observed in libsqlite3: AND dword [rsi+0x30], -17 (opcode 83 /4).
+    constexpr std::array<std::uint8_t, 5> dwordCode{0x83, 0x66, 0x30, 0xEF, 0xC3};
+    const auto dwordDecoded =
+        decoder.decodeBlock(dwordCode, rosa::guest::GuestAddress{0x1000A3A54ULL});
+    expect(dwordDecoded[0].opcode == rosa::x86::Opcode::AndMemImm && dwordDecoded[0].length == 4,
+           "AND dword [memory], imm8 opcode or length differs");
+    const auto dwordMemory = std::get<rosa::x86::MemoryOperand>(dwordDecoded[0].operands[0]);
+    const auto dwordImmediate = std::get<rosa::x86::ImmediateOperand>(dwordDecoded[0].operands[1]);
+    expect(dwordMemory.base == rosa::x86::Register::Rsi && dwordMemory.displacement == 0x30 &&
+               dwordMemory.width == 32 && dwordImmediate.value == UINT64_MAX - 16 &&
+               dwordImmediate.width == 8,
+           "AND dword [rsi+0x30], -17 operands differ");
+    expect(rosa::debug::dumpX86(dwordDecoded).find("and dword [rsi+0x30], 0xffffffffffffffef") !=
+               std::string::npos,
+           "AND dword [memory], imm8 dump differs");
+
+    constexpr rosa::guest::GuestAddress dwordTarget{0x8230};
+    addressSpace.writeU32(dwordTarget, 0xFFFFFFFFU);
+    const auto dwordBlock =
+        translator.translate(dwordCode, rosa::guest::GuestAddress{0x1000A3A54ULL});
+    rosa::x86::X86State dwordState;
+    dwordState.rsi = 0x8200;
+    dwordState.rflags = 0x8D7;
+    static_cast<void>(dwordBlock.execute(dwordState, &addressSpace));
+    expectEqual(addressSpace.readU32(dwordTarget), std::uint32_t{0xFFFFFFEFU},
+                "AND dword immediate stored the wrong result");
+    expectEqual(dwordState.rsi, std::uint64_t{0x8200}, "AND dword immediate changed its base");
+    expectEqual(dwordState.rflags, std::uint64_t{0x82}, "AND dword immediate flags differ");
 }
 
 void testAndImmediateIntoGuestByte() {

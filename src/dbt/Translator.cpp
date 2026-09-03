@@ -5678,11 +5678,12 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
             const auto byteForm = memory.width == 8 && immediate.width == 8;
             const auto wordForm = memory.width == 16 && immediate.width == 16;
+            const auto dwordShortForm = memory.width == 32 && immediate.width == 8;
             const auto qwordShortForm = memory.width == 64 && immediate.width == 8;
-            if ((!byteForm && !wordForm && !qwordShortForm) ||
+            if ((!byteForm && !wordForm && !dwordShortForm && !qwordShortForm) ||
                 memory.segment != x86::Segment::None) {
                 throw std::runtime_error("only AND byte [memory], imm8, AND word [memory], imm16, "
-                                         "and AND qword [memory], imm8 are implemented");
+                                          "and AND dword/qword [memory], imm8 are implemented");
             }
             auto address =
                 memory.ripRelative
@@ -5707,9 +5708,10 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                      ir::Width::I64, instruction.address);
                 address = builder.add(address, displacement, ir::Width::I64, instruction.address);
             }
-            const auto width = byteForm   ? ir::Width::I8
-                               : wordForm ? ir::Width::I16
-                                          : ir::Width::I64;
+            const auto width = byteForm        ? ir::Width::I8
+                               : wordForm        ? ir::Width::I16
+                               : dwordShortForm  ? ir::Width::I32
+                                                 : ir::Width::I64;
             const auto source = builder.constant(immediate.value, width, instruction.address);
             builder.andGuestMemory(address, source, width, instruction.address);
             break;
