@@ -17668,6 +17668,39 @@ void testMovdqaGuestMemoryToRegister() {
                 "RIP-relative MOVDQA loaded the wrong high lane");
     expectEqual(ripRelativeState.rflags, std::uint64_t{0x8D7}, "RIP-relative MOVDQA changed flags");
 
+    // REX.R extended destination observed in sqlite: movdqa xmm8, [rip+disp32].
+    constexpr std::array<std::uint8_t, 10> rexRipRelativeCode{
+        0x66, 0x44, 0x0F, 0x6F, 0x05, 0x17, 0xA0, 0x17, 0x00, 0xC3,
+    };
+    const auto rexRipRelativeDecoded = decoder.decodeBlock(
+        rexRipRelativeCode, rosa::guest::GuestAddress{0x100046E10ULL});
+    expect(rexRipRelativeDecoded[0].opcode == rosa::x86::Opcode::MovdqaRegMem,
+           "REX RIP-relative MOVDQA opcode differs");
+    expectEqual(rexRipRelativeDecoded[0].length, std::uint8_t{9},
+                "REX RIP-relative MOVDQA length differs");
+    const auto rexRipRelativeMemory =
+        std::get<rosa::x86::MemoryOperand>(rexRipRelativeDecoded[0].operands[1]);
+    const auto rexRipRelativeDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(rexRipRelativeDecoded[0].operands[0]);
+    expect(rexRipRelativeDestination.reg == rosa::x86::XmmRegister::Xmm8,
+           "REX RIP-relative MOVDQA destination differs");
+    expect(rexRipRelativeMemory.ripRelative && !rexRipRelativeMemory.hasBase,
+           "REX RIP-relative MOVDQA addressing differs");
+    expect(rosa::debug::dumpX86(rexRipRelativeDecoded).find("movdqa xmm8, [rip+0x17a017]") !=
+               std::string::npos,
+           "REX RIP-relative MOVDQA dump differs");
+    const auto rexRipRelativeBlock =
+        translator.translate(rexRipRelativeCode, rosa::guest::GuestAddress{0x10000});
+    rosa::x86::X86State rexRipRelativeState;
+    rexRipRelativeState.xmm[8] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    rexRipRelativeState.rflags = 0x8D7;
+    static_cast<void>(
+        rexRipRelativeBlock.execute(rexRipRelativeState, &ripRelativeAddressSpace));
+    expectEqual(rexRipRelativeState.xmm[8].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "REX RIP-relative MOVDQA loaded the wrong low lane");
+    expectEqual(rexRipRelativeState.xmm[8].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "REX RIP-relative MOVDQA loaded the wrong high lane");
+
     constexpr std::array<std::uint8_t, 5> registerCode{0x66, 0x0F, 0x6F, 0xE8, 0xC3};
     const auto registerDecoded =
         decoder.decodeBlock(registerCode, rosa::guest::GuestAddress{0x3000});

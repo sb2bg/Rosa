@@ -4037,35 +4037,41 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[cursor + 4];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (rexW || rexX || mode == 0x3U || rmEncoding == 0x4U ||
-                (mode == 0 && rmEncoding == 0x5U && !rexB)) {
+            if (rexW || rexX || mode == 0x3U || rmEncoding == 0x4U) {
                 throw DecodeError(
                     address, remaining,
-                    "only REX-extended MOVDQA xmm, [base+disp8/disp32] is supported");
+                    "only REX-extended MOVDQA xmm, [base/RIP+disp8/disp32] is supported");
             }
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
+            const bool needsDisp32 = mode == 0x2U || (mode == 0 && rmEncoding == 0x5U);
             auto operandCursor = cursor + 5;
             std::int64_t displacement = 0;
-            if (mode == 0x1U) {
-                if (operandCursor >= code.size()) {
-                    throw DecodeError(address, remaining,
-                                      "truncated REX MOVDQA load disp8");
-                }
-                displacement =
-                    std::bit_cast<std::int8_t>(code[operandCursor++]);
-            } else if (mode == 0x2U) {
+            if (needsDisp32) {
                 if (code.size() - operandCursor < 4) {
                     throw DecodeError(address, remaining,
                                       "truncated REX MOVDQA load disp32");
                 }
                 displacement = readI32(code.subspan(operandCursor, 4));
                 operandCursor += 4;
+            } else if (mode == 0x1U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated REX MOVDQA load disp8");
+                }
+                displacement =
+                    std::bit_cast<std::int8_t>(code[operandCursor++]);
+            }
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, operandCursor - instructionStart, displacement));
             }
             instruction.opcode = Opcode::MovdqaRegMem;
             instruction.operands.push_back(XmmRegisterOperand{
                 static_cast<XmmRegister>(static_cast<std::uint8_t>(
                     ((modrm >> 3U) & 0x7U) | (rexR ? 8U : 0U)))});
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, rexB), displacement, 128});
+                ripRelative ? Register::Rax : decodeRegister(rmEncoding, rexB), displacement,
+                128, std::nullopt, 1, !ripRelative, ripRelative});
             const auto length = operandCursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(
