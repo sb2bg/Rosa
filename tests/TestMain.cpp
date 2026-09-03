@@ -7292,6 +7292,48 @@ void testLockedExchangeAddGuestDwordRegister() {
     expectEqual(faultState.rflags, std::uint64_t{0xBD7}, "cross-page LOCK XADD changed flags");
 }
 
+void testLockedExchangeAddRipRelativeGuestQword() {
+    // Observed in libsystem_c: LOCK XADD qword [rip+disp32], r14.
+    constexpr std::array<std::uint8_t, 10> code{0xF0, 0x4C, 0x0F, 0xC1, 0x35,
+                                               0x51, 0x4D, 0x9A, 0x40, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x7FF802D15AB6ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockXaddMemReg,
+           "RIP-relative LOCK XADD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9}, "RIP-relative LOCK XADD length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 64 &&
+               memory.displacement == 0x409A4D51 && source.reg == rosa::x86::Register::R14 &&
+               source.width == 64,
+           "LOCK XADD qword [rip+disp32], r14 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("lock xadd qword [rip+0x409a4d51], r14") !=
+               std::string::npos,
+           "LOCK XADD qword [rip+disp32], r14 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    constexpr rosa::guest::GuestAddress syntheticRip{0x7FFFULL};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0x100);
+    const rosa::dbt::Translator translator;
+    // Execute at a synthetic RIP whose computed target stays in the page.
+    constexpr std::array<std::uint8_t, 10> executableCode{0xF0, 0x4C, 0x0F, 0xC1, 0x35,
+                                                          0xF8, 0x00, 0x00, 0x00, 0xC3};
+    const auto block = translator.translate(executableCode, syntheticRip);
+    rosa::x86::X86State state;
+    state.r14 = 0x22;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0x122},
+                "RIP-relative LOCK XADD memory result differs");
+    expectEqual(state.r14, std::uint64_t{0x100},
+                "RIP-relative LOCK XADD did not return the old value");
+    expectEqual(state.rflags, std::uint64_t{0x6}, "RIP-relative LOCK XADD flags differ");
+}
+
 void testLockedExchangeAddGuestQwordRegister() {
     constexpr std::array<std::uint8_t, 6> code{0xF0, 0x49, 0x0F, 0xC1, 0x07, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -31776,6 +31818,7 @@ int main() {
         {"LOCK ADD guest qword register", testLockedAddGuestQwordRegister},
         {"LOCK XADD guest dword register", testLockedExchangeAddGuestDwordRegister},
         {"LOCK XADD guest qword register", testLockedExchangeAddGuestQwordRegister},
+        {"LOCK XADD RIP-relative guest qword", testLockedExchangeAddRipRelativeGuestQword},
         {"LOCK INC guest dword", testLockedIncrementGuestDword},
         {"LOCK INC RIP-relative guest dword", testLockedIncrementRipRelativeGuestDword},
         {"LOCK DEC guest dword", testLockedDecrementGuestDword},

@@ -4942,33 +4942,42 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const bool rexR = (xaddRex & 0x4U) != 0;
                 const bool rexX = (xaddRex & 0x2U) != 0;
                 const bool rexB = (xaddRex & 0x1U) != 0;
-                if (mode == 0x3U || rmEncoding == 0x4U ||
-                    (mode == 0 && rmEncoding == 0x5U) || rexX) {
+                const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
+                if (mode == 0x3U || rmEncoding == 0x4U || rexX ||
+                    (mode == 0 && rmEncoding == 0x5U && rexB)) {
                     throw DecodeError(
                         address, remaining,
-                        "only LOCK XADD dword/qword [base+disp8/disp32], r32/r64 is supported");
+                        "only LOCK XADD dword/qword [base/RIP+disp8/disp32], r32/r64 is supported");
                 }
                 std::int64_t displacement = 0;
-                if (mode == 0x1U) {
-                    if (cursor >= code.size()) {
-                        throw DecodeError(address, remaining,
-                                          "truncated LOCK XADD disp8");
-                    }
-                    displacement =
-                        std::bit_cast<std::int8_t>(code[cursor++]);
-                } else if (mode == 0x2U) {
+                if (ripRelative || mode == 0x2U) {
                     if (code.size() - cursor < 4) {
                         throw DecodeError(address, remaining,
                                           "truncated LOCK XADD disp32");
                     }
                     displacement = readI32(code.subspan(cursor, 4));
                     cursor += 4;
+                } else if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated LOCK XADD disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[cursor++]);
+                }
+                if (ripRelative) {
+                    static_cast<void>(relativeTarget(
+                        address, cursor - instructionStart, displacement));
                 }
                 const auto width =
                     static_cast<std::uint8_t>(rexW ? 64U : 32U);
                 instruction.opcode = Opcode::LockXaddMemReg;
-                instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(rmEncoding, rexB), displacement, width});
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement, width,
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{decodeRegister(rmEncoding, rexB),
+                                        displacement, width});
                 instruction.operands.push_back(RegisterOperand{
                     decodeRegister(regEncoding, rexR), width});
                 const auto length = cursor - instructionStart;
