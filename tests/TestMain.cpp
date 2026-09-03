@@ -31744,6 +31744,72 @@ void testIndirectGuestMemoryCallFault() {
     expectEqual(state.rsp, std::uint64_t{0x9000}, "failed indirect call changed RSP");
 }
 
+void testIndexedIndirectGuestMemoryCall() {
+    // Observed in libobjc under an Objective-C fixture: CALL qword [rax+rcx].
+    constexpr std::array<std::uint8_t, 3> code{0xFF, 0x14, 0x08};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802A17E62ULL};
+    constexpr rosa::guest::GuestAddress pointerAddress{0x7000000F7680ULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF802A17D9AULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expectEqual(decoded.size(), std::size_t{1},
+                "indexed indirect CALL did not terminate its block");
+    expect(decoded[0].opcode == rosa::x86::Opcode::CallMem,
+           "indexed indirect CALL opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(!memory.ripRelative && memory.hasBase &&
+               memory.base == rosa::x86::Register::Rax && memory.index &&
+               *memory.index == rosa::x86::Register::Rcx && memory.scale == 1 &&
+               memory.displacement == 0 && memory.width == 64,
+           "indexed indirect CALL operand differs");
+    expectEqual(decoded[0].fallthrough->value, rip.value + code.size(),
+                "indexed indirect CALL fallthrough differs");
+    expect(rosa::debug::dumpX86(decoded).find("call qword [rax+rcx]") != std::string::npos,
+           "indexed indirect CALL dump differs");
+
+    // REX.X-extended scaled index: CALL qword [r8+r9*8].
+    constexpr std::array<std::uint8_t, 4> extendedCode{0x43, 0xFF, 0x14, 0xC8};
+    const auto extendedDecoded = decoder.decodeBlock(extendedCode, rip);
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::CallMem,
+           "extended indexed indirect CALL opcode differs");
+    const auto extendedMemory =
+        std::get<rosa::x86::MemoryOperand>(extendedDecoded[0].operands[0]);
+    expect(extendedMemory.base == rosa::x86::Register::R8 && extendedMemory.index &&
+               *extendedMemory.index == rosa::x86::Register::R9 &&
+               extendedMemory.scale == 8 && extendedMemory.displacement == 0,
+           "extended indexed indirect CALL operand differs");
+    expect(rosa::debug::dumpX86(extendedDecoded).find("call qword [r8+r9*8]") !=
+               std::string::npos,
+           "extended indexed indirect CALL dump differs");
+
+    constexpr rosa::guest::GuestAddress pointerPage{pointerAddress.value &
+                                                    ~(rosa::guest::guestPageSize - 1)};
+    constexpr rosa::guest::GuestAddress stackPage{0x700000000000ULL};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(pointerPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(pointerAddress, target.value);
+    addressSpace.mapAnonymous(stackPage, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State state;
+    state.rip = rip.value;
+    state.rax = pointerAddress.value - 0x80;
+    state.rcx = 0x80;
+    state.rsp = stackPage.value + 0x100;
+    state.rflags = 0x8D7;
+    const auto exit = block.execute(state, &addressSpace);
+    expect(exit == rosa::dbt::BlockExit::Call,
+           "indexed indirect CALL produced the wrong block exit");
+    expectEqual(state.rip, target.value, "indexed indirect CALL selected the wrong target");
+    expectEqual(state.rax, pointerAddress.value - 0x80,
+                "indexed indirect CALL changed its base register");
+    expectEqual(state.rcx, std::uint64_t{0x80},
+                "indexed indirect CALL changed its index register");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "indexed indirect CALL changed flags");
+}
+
 void testRipRelativeIndirectGuestMemoryCall() {
     constexpr std::array<std::uint8_t, 6> code{0xFF, 0x15, 0xA0, 0x23, 0xB1, 0x40};
     constexpr rosa::guest::GuestAddress rip{0x7FF802BA1A6AULL};
@@ -34616,6 +34682,7 @@ int main() {
         {"indirect guest-memory call", testIndirectGuestMemoryCall},
         {"indirect guest-memory call fault", testIndirectGuestMemoryCallFault},
         {"RIP-relative indirect guest-memory call", testRipRelativeIndirectGuestMemoryCall},
+        {"indexed indirect guest-memory call", testIndexedIndirectGuestMemoryCall},
         {"indirect guest-register call", testIndirectGuestRegisterCall},
         {"unsigned-below conditional", testUnsignedBelowConditional},
         {"unsigned-below long conditional", testUnsignedBelowLongConditional},

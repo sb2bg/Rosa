@@ -10302,13 +10302,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     decodeRegister(rmEncoding, rexB), 64});
                 instruction.fallthrough = guest::GuestAddress{
                     address.value + (cursor - instructionStart)};
-            } else if (extension != 0x2U || mode > 0x2U || rexR || rexX ||
+            } else if (extension != 0x2U || mode > 0x2U || rexR ||
                        (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register/memory INC /0, register/based/SIB/RIP-relative dword/qword memory DEC /1, register/memory CALL /2, register/based/RIP-relative memory JMP /4, and based qword memory PUSH /6 are supported from opcode FF");
+                    "only register/memory INC /0, register/based/SIB/RIP-relative dword/qword memory DEC /1, register/based/SIB/RIP-relative memory CALL /2, register/based/RIP-relative memory JMP /4, and based qword memory PUSH /6 are supported from opcode FF");
             } else {
                 auto baseEncoding = rmEncoding;
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
                 if (rmEncoding == 0x4U) {
                     if (cursor >= code.size()) {
                         throw DecodeError(address, remaining,
@@ -10319,12 +10321,18 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     const auto indexEncoding =
                         static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
                     baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-                    if (scaleBits != 0 || indexEncoding != 0x4U ||
-                        (mode == 0 && baseEncoding == 0x5U && !rexB)) {
+                    if (mode == 0 && baseEncoding == 0x5U && !rexB) {
                         throw DecodeError(
                             address, remaining,
-                            "only no-index SIB addressing is supported for indirect CALL");
+                            "no-base SIB addressing is not supported for indirect CALL");
                     }
+                    if (indexEncoding != 0x4U || rexX) {
+                        index = decodeRegister(indexEncoding, rexX);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                } else if (rexX) {
+                    throw DecodeError(address, remaining,
+                                      "REX.X requires an indirect CALL SIB byte");
                 }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
@@ -10343,7 +10351,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 instruction.opcode = Opcode::CallMem;
                 instruction.operands.push_back(MemoryOperand{
-                    decodeRegister(baseEncoding, rexB), displacement, 64});
+                    decodeRegister(baseEncoding, rexB), displacement, 64, index, scale});
                 instruction.fallthrough = guest::GuestAddress{
                     address.value + (cursor - instructionStart)};
             }
