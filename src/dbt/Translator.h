@@ -37,32 +37,27 @@ struct BlockExecutionResult {
 class TranslatedBlock {
   public:
     static constexpr std::size_t optimizedLoopWarmupExecutions = 1024;
-    static constexpr std::size_t optimizedLoopMinimumRemainingExecutions =
-        10000000;
+    static constexpr std::size_t optimizedMemoryLoopWarmupExecutions = 100'000'000;
+    static constexpr std::size_t optimizedLoopMinimumRemainingExecutions = 10000000;
 
     TranslatedBlock(std::vector<x86::DecodedInstruction> decoded, ir::Block ir,
-                    arm64::Program program,
-                    std::shared_ptr<arm64::ExecutableArena> executableArena,
+                    arm64::Program program, std::shared_ptr<arm64::ExecutableArena> executableArena,
                     std::size_t maximumInstructions,
                     std::optional<bool> cachedInternalSelfEdge = std::nullopt,
-                    std::optional<guest::GuestAddress> cachedCallReturnAddress =
-                        std::nullopt);
-    TranslatedBlock(std::vector<std::uint8_t> sourceBytes,
-                    guest::GuestAddress start,
-                    guest::GuestAddress lastInstructionAddress,
-                    std::size_t maximumInstructions, arm64::Program program,
-                    arm64::ExecutableCode executable,
+                    std::optional<guest::GuestAddress> cachedCallReturnAddress = std::nullopt);
+    TranslatedBlock(std::vector<std::uint8_t> sourceBytes, guest::GuestAddress start,
+                    guest::GuestAddress lastInstructionAddress, std::size_t maximumInstructions,
+                    arm64::Program program, arm64::ExecutableCode executable,
                     bool cachedInternalSelfEdge,
-                    std::optional<guest::GuestAddress>
-                        cachedCallReturnAddress);
+                    std::optional<guest::GuestAddress> cachedCallReturnAddress);
 
     [[nodiscard]] BlockExit execute(x86::X86State &state,
                                     guest::AddressSpace *addressSpace = nullptr,
                                     TimestampCounterReader timestampCounterReader = nullptr) const;
-    [[nodiscard]] BlockExecutionResult executeRepeated(
-        x86::X86State &state, guest::AddressSpace &addressSpace,
-        TimestampCounterReader timestampCounterReader,
-        std::size_t maximumExecutions) const;
+    [[nodiscard]] BlockExecutionResult
+    executeRepeated(x86::X86State &state, guest::AddressSpace &addressSpace,
+                    TimestampCounterReader timestampCounterReader,
+                    std::size_t maximumExecutions) const;
 
     [[nodiscard]] const std::vector<x86::DecodedInstruction> &decoded() const;
     [[nodiscard]] std::span<const std::uint8_t> sourceBytes() const noexcept {
@@ -78,21 +73,12 @@ class TranslatedBlock {
     }
     void resetExecutionCount() noexcept { executionCount_ = 0; }
     void recordExecutions(std::size_t count) noexcept { executionCount_ += count; }
-    [[nodiscard]] std::size_t executionCount() const noexcept {
-        return executionCount_;
-    }
-    [[nodiscard]] bool isOptimizationCandidate() const noexcept {
-        return optimizationCandidate_;
-    }
-    [[nodiscard]] bool usesOptimizedLoop() const noexcept {
-        return optimizedLoop_ != nullptr;
-    }
-    [[nodiscard]] bool hasInternalSelfEdge() const noexcept {
-        return hasInternalSelfEdge_;
-    }
+    [[nodiscard]] std::size_t executionCount() const noexcept { return executionCount_; }
+    [[nodiscard]] bool isOptimizationCandidate() const noexcept { return optimizationCandidate_; }
+    [[nodiscard]] bool usesOptimizedLoop() const noexcept { return optimizedLoop_ != nullptr; }
+    [[nodiscard]] bool hasInternalSelfEdge() const noexcept { return hasInternalSelfEdge_; }
     void promoteOptimizedLoopIfHot(std::size_t remainingBudget);
-    [[nodiscard]] std::size_t
-    executionBatchLimit(std::size_t requested) const noexcept;
+    [[nodiscard]] std::size_t executionBatchLimit(std::size_t requested) const noexcept;
 
   private:
     mutable std::vector<x86::DecodedInstruction> decoded_;
@@ -106,29 +92,26 @@ class TranslatedBlock {
     std::size_t executionCount_{};
     bool hasInternalSelfEdge_{};
     bool optimizationCandidate_{};
+    std::size_t optimizationWarmupExecutions_{optimizedLoopWarmupExecutions};
     std::unique_ptr<OptimizedLoop> optimizedLoop_;
 };
 
 class Translator {
   public:
     explicit Translator(bool retainProgramListing = true)
-        : executableArena_(
-              std::make_shared<arm64::ExecutableArena>()),
+        : executableArena_(std::make_shared<arm64::ExecutableArena>()),
           retainProgramListing_(retainProgramListing) {}
 
     [[nodiscard]] TranslatedBlock
     translate(std::span<const std::uint8_t> code, guest::GuestAddress start,
               std::size_t maximumInstructions = std::numeric_limits<std::size_t>::max()) const;
-    [[nodiscard]] TranslatedBlock loadCached(
-        std::vector<std::uint8_t> sourceBytes, guest::GuestAddress start,
-        guest::GuestAddress lastInstructionAddress,
-        std::size_t maximumInstructions, arm64::Program program,
-        arm64::ExecutableCode executable,
-        bool hasInternalSelfEdge,
-        std::optional<guest::GuestAddress> callReturnAddress) const;
+    [[nodiscard]] TranslatedBlock
+    loadCached(std::vector<std::uint8_t> sourceBytes, guest::GuestAddress start,
+               guest::GuestAddress lastInstructionAddress, std::size_t maximumInstructions,
+               arm64::Program program, arm64::ExecutableCode executable, bool hasInternalSelfEdge,
+               std::optional<guest::GuestAddress> callReturnAddress) const;
 
-    [[nodiscard]] const std::shared_ptr<arm64::ExecutableArena> &
-    executableArena() const noexcept {
+    [[nodiscard]] const std::shared_ptr<arm64::ExecutableArena> &executableArena() const noexcept {
         return executableArena_;
     }
 
