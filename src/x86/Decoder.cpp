@@ -2689,28 +2689,36 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         if (code[cursor] == 0x66U && code.size() - cursor >= 2) {
             const auto afterPrefix = cursor + 1;
-            const bool hasPunpcklwdRex =
+            const bool hasPunpcklRex =
                 code[afterPrefix] >= 0x40U && code[afterPrefix] <= 0x4FU;
-            const auto punpcklwdOpcodeOffset =
-                afterPrefix + (hasPunpcklwdRex ? 1U : 0U);
-            if (code.size() - punpcklwdOpcodeOffset >= 2 &&
-                code[punpcklwdOpcodeOffset] == 0x0FU &&
-                code[punpcklwdOpcodeOffset + 1] == 0x61U) {
-                if (code.size() - punpcklwdOpcodeOffset < 3) {
+            const auto punpcklOpcodeOffset =
+                afterPrefix + (hasPunpcklRex ? 1U : 0U);
+            const auto punpcklSecondOpcode =
+                (code.size() - punpcklOpcodeOffset >= 2 &&
+                 code[punpcklOpcodeOffset] == 0x0FU)
+                    ? code[punpcklOpcodeOffset + 1]
+                    : 0U;
+            if (punpcklSecondOpcode == 0x61U || punpcklSecondOpcode == 0x6CU) {
+                if (code.size() - punpcklOpcodeOffset < 3) {
                     throw DecodeError(address, remaining,
-                                      "truncated PUNPCKLWD xmm, xmm");
+                                      punpcklSecondOpcode == 0x61U
+                                          ? "truncated PUNPCKLWD xmm, xmm"
+                                          : "truncated PUNPCKLQDQ xmm, xmm");
                 }
                 const auto rex =
-                    hasPunpcklwdRex ? code[afterPrefix] : 0U;
-                const auto modrm = code[punpcklwdOpcodeOffset + 2];
+                    hasPunpcklRex ? code[afterPrefix] : 0U;
+                const auto modrm = code[punpcklOpcodeOffset + 2];
                 const auto mode =
                     static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
                 if (mode != 0x3U || (rex & 0xAU) != 0) {
-                    throw DecodeError(
-                        address, remaining,
-                        "only register-direct PUNPCKLWD xmm, xmm is supported");
+                    throw DecodeError(address, remaining,
+                                      punpcklSecondOpcode == 0x61U
+                                          ? "only register-direct PUNPCKLWD xmm, xmm is supported"
+                                          : "only register-direct PUNPCKLQDQ xmm, xmm is supported");
                 }
-                instruction.opcode = Opcode::PunpcklwdRegReg;
+                instruction.opcode = punpcklSecondOpcode == 0x61U
+                                         ? Opcode::PunpcklwdRegReg
+                                         : Opcode::PunpcklqdqRegReg;
                 instruction.operands.push_back(XmmRegisterOperand{
                     static_cast<XmmRegister>(static_cast<std::uint8_t>(
                         ((modrm >> 3U) & 0x7U) |
@@ -2719,7 +2727,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     static_cast<XmmRegister>(static_cast<std::uint8_t>(
                         (modrm & 0x7U) |
                         ((rex & 0x1U) != 0 ? 8U : 0U)))});
-                const auto end = punpcklwdOpcodeOffset + 3;
+                const auto end = punpcklOpcodeOffset + 3;
                 const auto length = end - instructionStart;
                 instruction.length = static_cast<std::uint8_t>(length);
                 std::copy_n(

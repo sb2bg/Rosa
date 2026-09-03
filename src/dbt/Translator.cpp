@@ -5683,6 +5683,17 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.address);
             break;
         }
+        case x86::Opcode::PunpcklqdqRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: PUNPCKLQDQ operand count");
+            }
+            // DEST[63:0] is preserved; DEST[127:64] takes SRC[63:0].
+            const auto destination = std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source = std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto sourceLow = builder.readGuestXmmLane(source, false, instruction.address);
+            builder.writeGuestXmmLane(destination, true, sourceLow, instruction.address);
+            break;
+        }
         case x86::Opcode::PandnRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: pandn register operand count");

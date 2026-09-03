@@ -18467,6 +18467,43 @@ void testPunpcklwdRegisters() {
            "REX PUNPCKLWD operands differ");
 }
 
+void testPunpcklqdqRegisters() {
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x6C, 0xD1, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802AB965FULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PunpcklqdqRegReg, "PUNPCKLQDQ opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "PUNPCKLQDQ length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]).reg ==
+                   rosa::x86::XmmRegister::Xmm2 &&
+               std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]).reg ==
+                   rosa::x86::XmmRegister::Xmm1,
+           "PUNPCKLQDQ operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("punpcklqdq xmm2, xmm1") != std::string::npos,
+           "PUNPCKLQDQ dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State state;
+    state.xmm[2] = {.low = UINT64_C(0x2222222222222222), .high = UINT64_C(0xAAAAAAAAAAAAAAAA)};
+    state.xmm[1] = {.low = UINT64_C(0x1111111111111111), .high = UINT64_C(0xBBBBBBBBBBBBBBBB)};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[2].low, UINT64_C(0x2222222222222222), "PUNPCKLQDQ low lane differs");
+    expectEqual(state.xmm[2].high, UINT64_C(0x1111111111111111), "PUNPCKLQDQ high lane differs");
+    expectEqual(state.xmm[1].low, UINT64_C(0x1111111111111111), "PUNPCKLQDQ changed its source");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "PUNPCKLQDQ changed flags");
+
+    constexpr std::array<std::uint8_t, 5> aliasCode{0x66, 0x0F, 0x6C, 0xC0, 0xC3};
+    const auto aliasBlock = translator.translate(aliasCode, rosa::guest::GuestAddress{0x1000});
+    state.xmm[0] = {.low = UINT64_C(0xDEADBEEFCAFEBABE), .high = UINT64_MAX};
+    static_cast<void>(aliasBlock.execute(state));
+    expectEqual(state.xmm[0].low, UINT64_C(0xDEADBEEFCAFEBABE),
+                "aliased PUNPCKLQDQ low lane differs");
+    expectEqual(state.xmm[0].high, UINT64_C(0xDEADBEEFCAFEBABE),
+                "aliased PUNPCKLQDQ high lane differs");
+}
+
 void testPorRegisters() {
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0xEB, 0xD1, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -30721,6 +30758,7 @@ int main() {
         {"PSHUFB register execution", testPshufbRegisters},
         {"PSHUFB RIP-relative guest memory", testPshufbRipRelativeGuestMemory},
         {"PUNPCKLWD register execution", testPunpcklwdRegisters},
+        {"PUNPCKLQDQ register execution", testPunpcklqdqRegisters},
         {"POR register execution", testPorRegisters},
         {"MOVD register to XMM", testMovdRegisterToXmm},
         {"MOVD guest memory to XMM", testMovdGuestMemoryToXmm},

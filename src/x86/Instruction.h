@@ -132,6 +132,7 @@ enum class Opcode {
     PshufdRegRegImm,
     ShufpdRegRegImm,
     PunpcklwdRegReg,
+    PunpcklqdqRegReg,
     PalignrRegRegImm,
     PblendwRegRegImm,
     PinsrbXmmReg,
