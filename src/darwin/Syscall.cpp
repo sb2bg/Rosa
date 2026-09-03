@@ -104,6 +104,7 @@ constexpr std::size_t maximumLongPath = 8192;
 constexpr std::size_t guestPathMaximum = 1024;
 constexpr std::uint32_t guestOpenDirectory = 0x00100000;
 constexpr std::uint32_t guestOpenNoFollowAny = 0x20000000;
+constexpr std::uint32_t guestOpenCloseOnExec = 0x01000000;
 constexpr std::uint32_t guestOpenRootDirectory =
     guestOpenDirectory | guestOpenNoFollowAny;
 constexpr std::uint64_t guestProtectionRead = 0x1;
@@ -1778,7 +1779,10 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         }
         const auto flags = static_cast<std::uint32_t>(state.rsi);
         const auto mode = static_cast<std::uint32_t>(state.rdx);
-        if (*path == guestRandomDevice && flags == 0 && mode == 0) {
+        if (*path == guestRandomDevice && mode == 0 &&
+            (flags == 0 || flags == guestOpenCloseOnExec)) {
+            // Close-on-exec is meaningless without an exec boundary: guest
+            // descriptors never escape the single Rosa process.
             const auto descriptor = fileSpace_.openRandomDevice(flags);
             setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
             return {};

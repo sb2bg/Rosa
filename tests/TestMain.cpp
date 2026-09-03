@@ -21858,6 +21858,28 @@ void testDarwinOpenAndReadUrandomNoCancel() {
                randomFile->flags == 0,
            "open_nocancel stored the wrong random-device metadata");
 
+    // sqlite opens /dev/urandom with O_CLOEXEC; close-on-exec is meaningless
+    // without an exec boundary, so the flag is accepted and recorded.
+    state.rax = openNoCancelNumber;
+    state.rsi = 0x01000000;
+    state.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{4},
+                "open_nocancel /dev/urandom with O_CLOEXEC returned the wrong descriptor");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "open_nocancel /dev/urandom with O_CLOEXEC did not clear BSD carry");
+    const auto *cloexecFile = dispatcher.fileSpace().lookup(rosa::darwin::GuestFileDescriptor{4});
+    expect(cloexecFile != nullptr &&
+               cloexecFile->kind == rosa::darwin::GuestFileKind::RandomDevice &&
+               cloexecFile->flags == 0x01000000,
+           "open_nocancel stored the wrong close-on-exec metadata");
+    state.rax = closeNoCancelNumber;
+    state.rdi = 4;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "close_nocancel close-on-exec fd did not succeed");
+
     state.rax = readNoCancelNumber;
     state.rdi = 3;
     state.rsi = bufferAddress.value;
