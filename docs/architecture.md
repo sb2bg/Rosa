@@ -34,7 +34,7 @@ Guest architectural state is represented by `x86::X86State`, including all gener
 
 Every generated exit reconstructs guest state and writes the next guest RIP. Direct, conditional, and register-indirect branches select a guest RIP; they never branch to a guest address as a host pointer. The dispatcher handles guest `call` pushes and `ret` pops against the guest address space, so host return addresses never enter guest state.
 
-Guest addresses use the `GuestAddress` strong type. The address space provides permission-checked anonymous, sparse, commpage, and Mach-O segment mappings with a 4 KiB guest-page contract. Generated helpers cover guarded 8/16/32/64-bit integer and 128-bit XMM accesses. Instruction fetches and syscall buffers come from those mappings; generated code does not treat guest virtual addresses as host pointers.
+Guest addresses use the `GuestAddress` strong type. The address space provides permission-checked anonymous, sparse, commpage, and Mach-O segment mappings with a 4 KiB guest-page contract. Generated helpers cover guarded 8/16/32/64-bit integer and 128-bit XMM accesses. Repeated byte loops may cache a checked anonymous mapping as a host span, coalesce checks for adjacent loads, and elide per-iteration checks for monotonic read or write spans only after a runtime guard proves exact termination and the complete remaining range; executable and file-backed mappings stay on the helper path. Instruction fetches and syscall buffers come from the mapping model, and no guest virtual address is directly reinterpreted as a host pointer.
 
 Guest Mach names live in a task-local `GuestPortSpace`. It records receive, send, and send-once rights, urefs, queue limits, contexts, guards, and synthetic task/host/reply object types without ever reusing a host `mach_port_t`. Guest file descriptors likewise live in a task-local `GuestFileSpace`; duplicated descriptors retain a shared open-description identity. The current root and cryptex-directory capabilities are synthetic guest VFS objects, not host descriptors.
 
@@ -91,21 +91,31 @@ are copied together and invalidate each contiguous arena range once.
 - arm64 macOS only;
 - eight temporary SSA values before the intentionally simple allocator rejects a block;
 - one host thread and one guest thread;
-- no general guest `mmap` or direct host-pointer memory fast path; the observed BSD `munmap` and Mach VM operations are semantic guest-map operations;
+- no general guest `mmap`, identity map, or unchecked host-pointer memory path; the observed BSD `munmap` and Mach VM operations are semantic guest-map operations;
 - only the failure-driven BSD, Mach, VFS, and x86 machdep operations listed in `darwin-boundary.md`;
 - only version-2 x86 shared-cache slide fixups; no general Mach-O binding/rebase engine;
 - instruction encodings remain deliberately incomplete and are added only after an observed failure.
 
 On the tested userspace, the ordinary C fixture completes through dyld,
 21 shared-cache images, libSystem initialization, libc `printf`, return from
-`main`, and guest exit. With 16-instruction translation bounds it executes
+`main`, and guest exit. With 32-instruction translation bounds it executes
 about 784,000 blocks, creates about 12,847 translations, and consumes about
 3.97 MiB in one JIT arena mapping. Unsupported instructions and Darwin
 operations still fail with their precise guest address and diagnostic state.
 
-The scalar prime-sieve fixture uses the same dynamic path but executes about
-28.7 million blocks. It makes the current tiering boundary concrete: internal
-self-edge batching keeps repeated baseline blocks inside generated code, but
-guest byte loads and stores still cross checked helpers, and the LLVM tier does
-not yet accept memory-bearing loops. On the M1 Pro development host this leaves
-a roughly 21.0x median gap to Rosetta for the same scalar x86_64 binary.
+The scalar prime-sieve fixture uses the same dynamic path and executes about
+25.3 million blocks. Internal self-edge batching keeps repeated baseline blocks
+inside generated code. A checked first byte access can install an anonymous
+mapping window; adjacent loads share range guards, while monotonic read and
+write loops may reuse a host pointer only after a runtime guard proves exact
+termination, positive nonwrapping stride, and complete mapping containment. The
+LLVM tier accepts narrow read-only exact-stride and write-only unsigned-below
+forms after performing the same whole-invocation proof. It keeps mixed-width
+guest values and intermediate conditions in SSA and falls back to the baseline
+before executing when a direct anonymous view cannot be proven. Persistent
+blocks rebuild omitted IR only after a self-loop becomes hot. On the M1 Pro
+development host, 61 alternating warm process trials put the same scalar
+x86_64 binary at a 24.4 ms Rosetta median and a 65.0 ms baseline Rosa median, a
+2.7x gap rather than the earlier 21.0x. Forced LLVM promotion saved about 8 ms
+inside the traces but cost about 29 ms to compile, so the production memory-tier
+threshold is 100 million observed executions and this benchmark stays baseline.

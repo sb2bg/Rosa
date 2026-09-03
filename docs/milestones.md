@@ -70,35 +70,42 @@ Dynamic-library commands are parsed but not acted upon.
 - cache-PC provenance records execution in 21 images, including libSystem, libsystem_kernel, libsystem_pthread, libsystem_platform, libc, malloc, dispatch, Objective-C, libc++abi, XPC, trace, secinit, container management, and libsystem_darwin;
 - a normal Clang-driver-linked x86_64 Mach-O with `LC_MAIN` and an `LC_LOAD_DYLIB` dependency on `/usr/lib/libSystem.B.dylib` completes dyld and library initialization;
 - libc formats the program's `printf`, crosses Darwin `write_nocancel`, returns from the ordinary `main`, and exits with status zero;
-- an `-O2` scalar prime-sieve application completes ten passes to one million through the same ordinary dynamic path, verifies 78,498 primes and their sum, and exercises about 28.7 million guest blocks;
+- an `-O2` scalar prime-sieve application completes ten passes to one million through the same ordinary dynamic path, verifies 78,498 primes and their sum, and exercises about 25.3 million guest blocks with 32-instruction application blocks;
 - that application-driven frontier added register-direct unsigned 32-bit `DIV`, with focused decode, IR, execution, and fault-semantics coverage;
 - no custom `_start`, static link, binary patch, interpreter fallback, or Rosetta runtime execution is involved in that frontier run.
 
 This proves deliberately small ordinary applications, not general macOS
 compatibility. The next compatibility frontier is a richer C program that
 exercises heap allocation, file I/O, environment access, and additional libc
-paths. The next performance frontier is compiling memory-bearing hot loops or
-linking translated blocks into traces.
+paths. The next performance frontier is persisting optimized memory traces or
+linking translated blocks into broader direct traces.
 
 ### R5 performance snapshot
 
 On the current M1 Pro host, the uncached release path is roughly 0.09 seconds,
 down from 1.23 seconds before pooled executable allocation, non-retained
 runtime listings, lazy shared-cache page rebasing, allocation-free scalar
-guest memory, release IPO, and 16-instruction dyld blocks. Peak resident size
+guest memory, release IPO, and bounded multi-instruction dyld blocks. Peak resident size
 is about 96 MB rather than 956 MB. The opt-in persistent translation cache
 stores relocatable AArch64 and publishes a warm 4 MiB cache image as one JIT
-batch. Across five alternating process batches, a baseline-only warm build ran
-in 50.5–53.8 ms while Rosetta ran the same fixture in 8.1–8.4 ms, leaving about
-a 6.5x gap rather than 37x. The next structural speed work is direct block/trace
-linking; process-persistent compilation has removed most repeated frontend and
-publication cost.
+batch. Across eleven alternating warm-cache process trials, the baseline-only
+Rosa median was 46.4 ms while Rosetta's median was 10.5 ms, leaving about a
+4.4x gap rather than 37x. The next structural speed work is broader direct
+block/trace linking; process-persistent compilation has removed most repeated
+frontend and publication cost.
 
-The scalar prime sieve exposes the steady-state gap more clearly: across eleven
-alternating warm process trials, the same x86_64 binary had a 28.5 ms Rosetta
-median and a 598.1 ms baseline Rosa median, or 21.0x. Its marking and reduction
-loops contain guest memory operations and therefore cannot enter the current
-register-only LLVM loop tier.
+The scalar prime sieve exposes the steady-state gap more clearly. Its first
+baseline measurement was a 28.5 ms Rosetta median and a 598.1 ms Rosa median,
+or 21.0x. After generated self-edge batching, checked anonymous byte windows,
+native and deferred flags, guest-register forwarding and pinning, adjacent-load
+guard coalescing, and guarded monotonic read/write spans, 61 alternating warm
+process trials measured 24.4 ms through Rosetta and 65.0 ms through baseline
+Rosa: a 2.7x gap and a 9.2x Rosa speedup. The LLVM tier now accepts the sieve's
+proven anonymous read and write loops, reconstructing IR lazily even from a
+persistent baseline entry. Forced promotion saved about 8 ms of trace execution
+but cost about 29 ms of ORC compilation, so memory traces use a measured
+100-million-execution threshold and this short process remains on the faster
+baseline path.
 
 ## Verification notes
 

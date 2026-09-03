@@ -266,7 +266,7 @@ through libc, and exits with status zero.
                          arm64 macOS host
 ```
 
-Generated blocks receive an explicit `X86State*`, update architectural state, and return the next guest action to the dispatcher. Guest virtual addresses are never treated as host pointers. Syscalls leave generated code and cross a semantic compatibility boundary. An x86 `syscall` is never rewritten as an ARM `svc`.
+Generated blocks receive an explicit `X86State*`, update architectural state, and return the next guest action to the dispatcher. Guest virtual addresses are never reinterpreted as host pointers; repeated-loop byte fast paths first resolve a permission-checked anonymous mapping, coalesce bounds checks for adjacent loads, and permit unchecked monotonic spans only after proving exact loop termination and complete containment of the remaining range. Syscalls leave generated code and cross a semantic compatibility boundary. An x86 `syscall` is never rewritten as an ARM `svc`.
 
 Instruction support is deliberately encoding-specific and failure-driven. The current surface covers the integer, control-flow, flag, memory, atomic, string, and SIMD forms needed by the controlled fixtures and dyld probe. Unsupported encodings fail rather than silently changing execution strategy.
 
@@ -298,34 +298,43 @@ cmake --build build/release --target benchmark_entrypoint
 
 When Homebrew LLVM is installed, CMake reports `Rosa LLVM optimizing JIT` and
 eligible 64-bit, register-only conditional self-loops become hot after 1,024
-executions. Rosa only pays the compilation cost when the dispatcher also has
-at least ten million executions left in its current budget. It lowers the
-existing IR to LLVM SSA, keeps guest registers in SSA across iterations,
-materializes lazy x86 flags only at the side exit, optimizes at `-O2`, and
-executes the result through ORC. This includes both the benchmark's
-`DEC`/`JNE` loop and multi-instruction shapes such as `ADD`/`CMP`/`JNE`. Cold,
-short-budget, and unsupported blocks continue through the baseline emitter.
-Pass `-DROSA_ENABLE_LLVM_JIT=OFF` to measure or test the fallback path
+executions. A narrow memory tier also accepts proven anonymous byte read/write
+loops, including exact constant-stride reductions and unsigned dynamic-stride
+stores. It validates the complete invocation range before passing a host span
+to LLVM; rejected, executable, file-backed, wrapping, and faulting cases remain
+on the checked baseline. Because ORC compilation costs about 29 ms for the two
+sieve traces on the development host, memory loops require 100 million observed
+executions before promotion. Rosa also requires at least ten million dispatcher
+executions left in the current budget. The tier keeps guest registers in LLVM
+SSA, materializes lazy x86 flags only at the side exit, and optimizes at `-O2`.
+Persistent baseline blocks lazily reconstruct IR only after a self-loop becomes
+hot. Pass `-DROSA_ENABLE_LLVM_JIT=OFF` to measure or test the fallback path
 explicitly.
 
 The ordinary dynamic fixture is also a cold-start benchmark. On the current
 M1 Pro development host, the uncached release path is roughly 0.09 seconds,
 down from 1.23 seconds before pooled executable allocation, lazy shared-cache
 rebasing, bounded multi-instruction blocks, allocation-free scalar memory
-accesses, and release IPO. Five alternating warm-cache batches put the
-baseline-only Rosa build at 50.5–53.8 milliseconds and the same x86_64 fixture
-through Rosetta at 8.1–8.4 milliseconds: a remaining gap of about 6.5x, down
-from 37x at the start of this optimization pass. This is a host- and
+accesses, and release IPO. Eleven alternating warm-cache process trials put the
+baseline-only Rosa median at 46.4 milliseconds and the same x86_64 fixture
+through Rosetta at 10.5 milliseconds: a remaining gap of about 4.4x, down from
+37x at the start of this optimization pass. This is a host- and
 userspace-specific frontier measurement, not a general application-performance
 claim.
 
-The prime sieve separates steady-state execution from launch overhead. It
-executes about 28.7 million guest blocks per process. In eleven alternating warm
-process trials on the same host, the scalar x86_64 binary had a 28.5 ms Rosetta
-median and a 598.1 ms baseline Rosa median, a 21.0x gap. Rosa also occasionally
-fell into a roughly 1.35 s cluster consistent with performance-versus-efficiency
-core scheduling. The wider compute gap points past translation caching and
-toward memory-bearing hot-loop compilation or direct block/trace linking.
+The prime sieve separates steady-state execution from launch overhead. With
+32-instruction dynamic blocks it executes about 25.3 million guest blocks per
+process. In 61 alternating warm process trials on the same M1 Pro host, the
+scalar x86_64 binary had a 24.4 ms Rosetta median and a 65.0 ms baseline Rosa
+median, a 2.7x gap. That is a 9.2x Rosa improvement over the earlier 598.1 ms
+baseline. Generated self-edge batching, anonymous byte-window fast paths,
+native and deferred flag lowering, native 32-bit arithmetic and immediate
+folding, guest-register forwarding and pinning, branchless `SET`/`CMOV`,
+adjacent-load guard coalescing, and guarded monotonic read/write spans account
+for the gain. A memory-loop LLVM experiment reduced trace execution by about
+8 ms but cost about 29 ms to compile, so this short benchmark deliberately
+remains on the faster baseline tier. Persisting optimized code or broader
+direct trace formation is the next structural performance step.
 
 ## Documentation
 
