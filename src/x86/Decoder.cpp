@@ -975,6 +975,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
              code[setOpcodeOffset + 1] == 0x98U ||
              code[setOpcodeOffset + 1] == 0x99U ||
              code[setOpcodeOffset + 1] == 0x9CU ||
+             code[setOpcodeOffset + 1] == 0x9DU ||
+             code[setOpcodeOffset + 1] == 0x9EU ||
              code[setOpcodeOffset + 1] == 0x9FU)) {
             if (code.size() - setOpcodeOffset < 3) {
                 throw DecodeError(address, remaining, "truncated setcc r8");
@@ -993,7 +995,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 (mode == 0x3U && !setHasRex && rmEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register or byte memory SETO/SETB/SETAE/SETE/SETNE/SETBE/SETA/SETS/SETNS/SETL/SETG is supported");
+                    "only register or byte memory SETO/SETB/SETAE/SETE/SETNE/SETBE/SETA/SETS/SETNS/SETL/SETGE/SETLE/SETG is supported");
             }
             instruction.condition =
                 conditionOpcode == 0x90U   ? Condition::Overflow
@@ -1006,7 +1008,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 : conditionOpcode == 0x98U ? Condition::Sign
                 : conditionOpcode == 0x99U ? Condition::NotSign
                 : conditionOpcode == 0x9CU ? Condition::Less
-                                           : Condition::Greater;
+                : conditionOpcode == 0x9DU ? Condition::GreaterOrEqual
+                : conditionOpcode == 0x9EU ? Condition::LessOrEqual
+                                            : Condition::Greater;
             auto operandCursor = setOpcodeOffset + 3;
             if (mode == 0x3U) {
                 instruction.opcode = Opcode::SetccReg;

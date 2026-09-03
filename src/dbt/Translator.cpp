@@ -9063,13 +9063,16 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                 *operation.condition != x86::Condition::BelowOrEqual &&
                 *operation.condition != x86::Condition::Less &&
                 *operation.condition != x86::Condition::Greater &&
+                *operation.condition != x86::Condition::GreaterOrEqual &&
+                *operation.condition != x86::Condition::LessOrEqual &&
                 *operation.condition != x86::Condition::AboveOrEqual &&
                 *operation.condition != x86::Condition::Above &&
                 *operation.condition != x86::Condition::Sign &&
                 *operation.condition != x86::Condition::NotSign) {
                 throw std::runtime_error("ARM64 backend only implements "
-                                         "overflow/equality/below/below-or-equal/less/greater/"
-                                         "above-or-equal/above/sign/not-sign condition values");
+                                          "overflow/equality/below/below-or-equal/less/greater/"
+                                          "greater-or-equal/less-or-equal/"
+                                          "above-or-equal/above/sign/not-sign condition values");
             }
             constexpr std::uint8_t carryFlagBit = 0;
             constexpr std::uint8_t zeroFlagBit = 6;
@@ -9126,6 +9129,17 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                 assembler.tbnz(arm64::x16, signFlagBit, done);
             } else if (*operation.condition == x86::Condition::Less) {
                 // OF is bit 11; align it with SF at bit 7 and require inequality.
+                assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
+                assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
+                assembler.tbz(arm64::x17, signFlagBit, done);
+            } else if (*operation.condition == x86::Condition::GreaterOrEqual) {
+                // OF is bit 11; align it with SF at bit 7 and require equality.
+                assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
+                assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
+                assembler.tbnz(arm64::x17, signFlagBit, done);
+            } else if (*operation.condition == x86::Condition::LessOrEqual) {
+                assembler.tbnz(arm64::x16, zeroFlagBit, satisfied);
+                // OF is bit 11; align it with SF at bit 7 and require equality.
                 assembler.lsrImmediate(arm64::x17, arm64::x16, 4);
                 assembler.bitXor(arm64::x17, arm64::x16, arm64::x17);
                 assembler.tbz(arm64::x17, signFlagBit, done);

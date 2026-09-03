@@ -31270,6 +31270,68 @@ void testSetBelowLowByteRegister() {
     expectEqual(state.rflags, std::uint64_t{0x896 & ~carry}, "not-taken SETB changed flags");
 }
 
+void testSetGreaterOrEqualLowByteRegister() {
+    // Observed in libsqlite3: SETGE CL (0F 9D).
+    constexpr std::uint64_t sign = std::uint64_t{1} << 7U;
+    constexpr std::uint64_t overflow = std::uint64_t{1} << 11U;
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x9D, 0xC1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10007A5A9ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::SetccReg &&
+               decoded[0].condition == rosa::x86::Condition::GreaterOrEqual,
+           "SETGE opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "SETGE length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rcx && destination.width == 8,
+           "SETGE CL destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("setge cl") != std::string::npos,
+           "SETGE CL dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10007A5A9ULL});
+    rosa::x86::X86State state;
+    state.rcx = 0x1122334455667788ULL;
+    state.rflags = 0x46;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0x1122334455667701ULL},
+                "taken SETGE did not merge one into CL");
+    expectEqual(state.rflags, std::uint64_t{0x46}, "taken SETGE changed flags");
+
+    state.rcx = 0xFFEEDDCCBBAA9988ULL;
+    state.rflags = 0x46 | sign;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{0xFFEEDDCCBBAA9900ULL},
+                "not-taken SETGE did not merge zero into CL");
+    expectEqual(state.rflags, std::uint64_t{0x46 | sign}, "not-taken SETGE changed flags");
+
+    state.rcx = 0;
+    state.rflags = 0x46 | sign | overflow;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rcx, std::uint64_t{1}, "overflowed SETGE did not merge one into CL");
+
+    // SETLE shares the new less-or-equal evaluation: ZF set takes it.
+    constexpr std::array<std::uint8_t, 4> lessEqualCode{0x0F, 0x9E, 0xC1, 0xC3};
+    const auto lessEqualDecoded =
+        decoder.decodeBlock(lessEqualCode, rosa::guest::GuestAddress{0x2000});
+    expect(lessEqualDecoded[0].opcode == rosa::x86::Opcode::SetccReg &&
+               lessEqualDecoded[0].condition == rosa::x86::Condition::LessOrEqual,
+           "SETLE opcode or condition differs");
+    expect(rosa::debug::dumpX86(lessEqualDecoded).find("setle cl") != std::string::npos,
+           "SETLE CL dump differs");
+    const auto lessEqualBlock =
+        translator.translate(lessEqualCode, rosa::guest::GuestAddress{0x2000});
+    rosa::x86::X86State lessEqualState;
+    lessEqualState.rcx = 0xFF00ULL;
+    lessEqualState.rflags = 0x8D6 | zeroFlag;
+    static_cast<void>(lessEqualBlock.execute(lessEqualState));
+    expectEqual(lessEqualState.rcx, std::uint64_t{0xFF01ULL}, "taken SETLE did not merge one");
+
+    lessEqualState.rcx = 0xFF00ULL;
+    lessEqualState.rflags = 0x06;
+    static_cast<void>(lessEqualBlock.execute(lessEqualState));
+    expectEqual(lessEqualState.rcx, std::uint64_t{0xFF00ULL}, "untaken SETLE merged one");
+}
+
 void testSetAboveLowByteRegister() {
     constexpr std::uint64_t carryFlag = std::uint64_t{1} << 0U;
     constexpr std::uint64_t zeroFlag = std::uint64_t{1} << 6U;
@@ -33695,6 +33757,7 @@ int main() {
         {"based memory-indirect jump", testBasedMemoryIndirectJump},
         {"set overflow low-byte register", testSetOverflowLowByteRegister},
         {"set below low-byte register", testSetBelowLowByteRegister},
+        {"set greater-or-equal low-byte register", testSetGreaterOrEqualLowByteRegister},
         {"set above low-byte register", testSetAboveLowByteRegister},
         {"set equal RIP-relative guest byte", testSetEqualRipRelativeGuestByte},
         {"set equal SIB guest byte", testSetEqualSibGuestByte},
