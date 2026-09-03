@@ -17605,6 +17605,50 @@ void testPackedDwordShiftAndAddGeneratedExecution() {
     expectEqual(addState.rflags, std::uint64_t{0xAD7}, "PADDD changed flags");
 }
 
+void testPackedDwordAddRipMemory() {
+    // Observed in libobjc under an Objective-C fixture: PADDD xmm0, [RIP+disp32].
+    constexpr std::array<std::uint8_t, 9> code{0x66, 0x0F, 0xFE, 0x05,
+                                               0x12, 0xFA, 0x02, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802A1BAF6ULL};
+    constexpr rosa::guest::GuestAddress sourceAddress{0x7FF802A4B510ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PadddRegMem, "PADDD m128 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8}, "PADDD m128 length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0,
+           "PADDD m128 destination differs");
+    expect(memory.ripRelative && !memory.hasBase && !memory.index && memory.width == 128 &&
+               memory.displacement == 0x2FA12,
+           "PADDD m128 memory operand differs");
+    expectEqual(observedRip.value + decoded[0].length + memory.displacement,
+                sourceAddress.value, "PADDD m128 target differs");
+    expect(rosa::debug::dumpX86(decoded).find("paddd xmm0, xmmword [rip+0x2fa12]") !=
+               std::string::npos,
+           "PADDD m128 dump differs");
+
+    constexpr rosa::guest::GuestAddress sourcePage{sourceAddress.value &
+                                                   ~(rosa::guest::guestPageSize - 1)};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(sourcePage, rosa::guest::guestPageSize * 2,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(sourceAddress, 0xFFFFFFFF00000002ULL);
+    addressSpace.writeU64(rosa::guest::GuestAddress{sourceAddress.value + 8},
+                          0xFFFFFFFF80000000ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x00000002FFFFFFFFULL, .high = 0xFFFFFFFF80000000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0000000100000001ULL},
+                "PADDD m128 low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0xFFFFFFFE00000000ULL},
+                "PADDD m128 high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "PADDD m128 changed flags");
+}
+
 void testPackedQwordLogicalRightShiftImmediate() {
     constexpr std::array<std::uint8_t, 6> observed{0x66, 0x0F, 0x73, 0xD2, 0x20, 0xC3};
     constexpr rosa::guest::GuestAddress rip{0x7FF80681D31DULL};
@@ -34785,6 +34829,7 @@ int main() {
         {"packed dword shift and add generated execution",
          testPackedDwordShiftAndAddGeneratedExecution},
         {"packed qword logical right shift immediate", testPackedQwordLogicalRightShiftImmediate},
+        {"packed dword add RIP-relative memory", testPackedDwordAddRipMemory},
         {"packed horizontal add and MOVD extract", testPackedHorizontalAddAndMovdExtract},
         {"PMOVZXBD register to register", testPmovzxbdRegisterToRegister},
         {"PANDN register generated execution", testPandnRegisterGeneratedExecution},

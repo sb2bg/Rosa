@@ -739,6 +739,45 @@ andGuestMemoryXmm128(GuestExecutionContext *context, x86::X86State *state, std::
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+addGuestMemoryXmm128(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                     std::uint64_t registerIndex) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated PADDD has no guest address space");
+        }
+        if (registerIndex >= state->xmm.size()) {
+            throw std::runtime_error("generated PADDD has an invalid XMM register");
+        }
+        const auto bytes = context->addressSpace->readBytes(guest::GuestAddress{address}, 16);
+        std::uint64_t sourceLow = 0;
+        std::uint64_t sourceHigh = 0;
+        std::memcpy(&sourceLow, bytes.data(), sizeof(sourceLow));
+        std::memcpy(&sourceHigh, bytes.data() + sizeof(sourceLow), sizeof(sourceHigh));
+        const auto original = state->xmm[registerIndex];
+        const auto sumLane = [](std::uint64_t destinationLane, std::uint64_t sourceLane) {
+            const auto low =
+                static_cast<std::uint32_t>(destinationLane) + static_cast<std::uint32_t>(sourceLane);
+            const auto high = static_cast<std::uint32_t>(destinationLane >> 32U) +
+                              static_cast<std::uint32_t>(sourceLane >> 32U);
+            return static_cast<std::uint64_t>(low) |
+                   (static_cast<std::uint64_t>(high) << 32U);
+        };
+        state->xmm[registerIndex] = {
+            .low = sumLane(original.low, sourceLow),
+            .high = sumLane(original.high, sourceHigh),
+        };
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = 16;
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 testXmmBits128(x86::X86State *state, std::uint64_t destinationIndex,
                std::uint64_t sourceIndex) noexcept {
     if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
@@ -6392,6 +6431,41 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.addXmmDwords(destination, source, instruction.address);
             break;
         }
+        case x86::Opcode::PadddRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: PADDD memory operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            if (memory.width != 128 ||
+                (memory.ripRelative
+                     ? memory.hasBase || memory.index.has_value()
+                     : !memory.hasBase || memory.index.has_value()) ||
+                memory.segment != x86::Segment::None) {
+                throw std::runtime_error(
+                    "only RIP-relative or based PADDD xmm, m128 is implemented");
+            }
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement =
+                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                     ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            // A single guest-memory helper performs the whole read-modify-write:
+            // no IR value may stay live in a caller-saved host register across
+            // the call.
+            builder.addGuestMemoryXmm(address, destination, instruction.address);
+            break;
+        }
         case x86::Opcode::PaddqRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: PADDQ operand count");
@@ -8631,6 +8705,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::LoadGuestSignExtendedDwordsXmm ||
             operation.opcode == ir::Opcode::XorGuestMemoryXmm ||
             operation.opcode == ir::Opcode::AndGuestMemoryXmm ||
+            operation.opcode == ir::Opcode::AddGuestMemoryXmm ||
             operation.opcode == ir::Opcode::TestXmmBits ||
             operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
             operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
@@ -8686,6 +8761,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::LoadGuestSignExtendedDwordsXmm ||
             operation.opcode == ir::Opcode::XorGuestMemoryXmm ||
             operation.opcode == ir::Opcode::AndGuestMemoryXmm ||
+            operation.opcode == ir::Opcode::AddGuestMemoryXmm ||
             operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
             (operation.opcode == ir::Opcode::ShuffleXmmBytes && operation.lhs.has_value()) ||
             operation.opcode == ir::Opcode::RepeatMoveByte ||
@@ -10294,6 +10370,25 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                                    static_cast<std::uint64_t>(*operation.guestXmmRegister));
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(arm64::x16, pointerBits(&andGuestMemoryXmm128));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(completed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0, static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(completed);
+            break;
+        }
+        case ir::Opcode::AddGuestMemoryXmm: {
+            const auto fault = assembler.makeLabel();
+            const auto completed = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x3,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&addGuestMemoryXmm128));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(completed);

@@ -1942,6 +1942,25 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               instruction.operands[1])
                               .reg);
             break;
+        case x86::Opcode::PadddRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "paddd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", xmmword ["
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::PaddqRegReg:
             stream << "paddq "
                    << x86::xmmRegisterName(
@@ -3160,6 +3179,11 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::AndGuestMemoryXmm:
             stream << "and_guest_memory_xmm.i128 "
+                   << valueName(*operation.lhs) << ", "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::AddGuestMemoryXmm:
+            stream << "add_guest_memory_xmm.i128 "
                    << valueName(*operation.lhs) << ", "
                    << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;

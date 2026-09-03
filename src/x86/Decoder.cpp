@@ -2853,7 +2853,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     static_cast<std::uint8_t>(modrm & 0x7U);
                 const auto expectedOpcodeExtension =
                     secondOpcode == 0x72U ? 0x6U : 0x2U;
-                if (mode != 0x3U || (rex & 0xAU) != 0 ||
+                const bool packedMemorySource =
+                    !isImmediateShift && secondOpcode == 0xFEU && mode != 0x3U;
+                if ((mode != 0x3U && !packedMemorySource) || (rex & 0xAU) != 0 ||
                     (isImmediateShift &&
                      (regEncoding != expectedOpcodeExtension ||
                       (rex & 0x4U) != 0))) {
@@ -2863,7 +2865,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                             ? "only register-direct PSLLD xmm, imm8 is supported"
                         : secondOpcode == 0x73U
                             ? "only register-direct PSRLQ xmm, imm8 is supported"
-                            : "only register-direct PADDD xmm, xmm is supported");
+                        : secondOpcode == 0xFEU
+                            ? "only PADDD xmm, xmm/m128 is supported"
+                            : "only register-direct PADDQ xmm, xmm is supported");
                 }
                 if (isImmediateShift) {
                     instruction.opcode = secondOpcode == 0x72U
@@ -2874,6 +2878,62 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                             rmEncoding | ((rex & 0x1U) != 0 ? 8U : 0U)))});
                     instruction.operands.push_back(ImmediateOperand{
                         code[opcodeOffset + 3], 8});
+                } else if (packedMemorySource) {
+                    const bool ripRelative =
+                        mode == 0 && rmEncoding == 0x5U && (rex & 0x1U) == 0;
+                    if (rmEncoding == 0x4U) {
+                        throw DecodeError(
+                            address, remaining,
+                            "SIB-addressed PADDD xmm, m128 is not supported");
+                    }
+                    auto operandCursor = opcodeOffset + 3;
+                    std::int64_t displacement = 0;
+                    if (mode == 0x1U) {
+                        if (operandCursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated PADDD m128 disp8");
+                        }
+                        displacement = std::bit_cast<std::int8_t>(
+                            code[operandCursor++]);
+                    } else if (mode == 0x2U || ripRelative) {
+                        if (code.size() - operandCursor < 4) {
+                            throw DecodeError(address, remaining,
+                                              "truncated PADDD m128 disp32");
+                        }
+                        displacement =
+                            readI32(code.subspan(operandCursor, 4));
+                        operandCursor += 4;
+                    }
+                    if (ripRelative) {
+                        static_cast<void>(relativeTarget(
+                            address, operandCursor - instructionStart,
+                            displacement));
+                    }
+                    instruction.opcode = Opcode::PadddRegMem;
+                    instruction.operands.push_back(XmmRegisterOperand{
+                        static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                            regEncoding | ((rex & 0x4U) != 0 ? 8U : 0U)))});
+                    instruction.operands.push_back(
+                        ripRelative
+                            ? MemoryOperand{Register::Rax, displacement, 128,
+                                            std::nullopt, 1, false, true}
+                            : MemoryOperand{
+                                  decodeRegister(rmEncoding,
+                                                 (rex & 0x1U) != 0),
+                                  displacement, 128});
+                    const auto memoryEnd = operandCursor - instructionStart;
+                    instruction.length =
+                        static_cast<std::uint8_t>(memoryEnd);
+                    std::copy_n(
+                        code.begin() +
+                            static_cast<std::ptrdiff_t>(instructionStart),
+                        memoryEnd, instruction.bytes.begin());
+                    result.push_back(std::move(instruction));
+                    cursor = operandCursor;
+                    if (result.size() == maximumInstructions) {
+                        return result;
+                    }
+                    continue;
                 } else {
                     instruction.opcode = secondOpcode == 0xFEU
                                              ? Opcode::PadddRegReg
