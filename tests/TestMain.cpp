@@ -15919,6 +15919,31 @@ void testPcmpeqdRegisterGeneratedExecution() {
     expectEqual(distinctState.xmm[1].low, std::uint64_t{0x9999999911111111ULL},
                 "PCMPEQD changed its source");
     expectEqual(distinctState.rflags, std::uint64_t{0xAD7}, "distinct PCMPEQD changed flags");
+
+    // Observed in sqlite: REX.R+B pcmpeqd xmm13, xmm13.
+    constexpr std::array<std::uint8_t, 6> extended{0x66, 0x45, 0x0F, 0x76, 0xED, 0xC3};
+    const auto extendedDecoded =
+        decoder.decodeBlock(extended, rosa::guest::GuestAddress{0x100046E3DULL});
+    expect(extendedDecoded[0].opcode == rosa::x86::Opcode::PcmpeqdRegReg,
+           "extended PCMPEQD opcode differs");
+    expectEqual(extendedDecoded[0].length, std::uint8_t{5}, "extended PCMPEQD length differs");
+    expect(std::get<rosa::x86::XmmRegisterOperand>(extendedDecoded[0].operands[0]).reg ==
+                   rosa::x86::XmmRegister::Xmm13 &&
+               std::get<rosa::x86::XmmRegisterOperand>(extendedDecoded[0].operands[1]).reg ==
+                   rosa::x86::XmmRegister::Xmm13,
+           "extended PCMPEQD operands differ");
+    expect(rosa::debug::dumpX86(extendedDecoded).find("pcmpeqd xmm13, xmm13") !=
+               std::string::npos,
+           "extended PCMPEQD dump differs");
+    const auto extendedBlock =
+        translator.translate(extended, rosa::guest::GuestAddress{0x100046E3DULL});
+    rosa::x86::X86State extendedState;
+    extendedState.xmm[13] = {.low = 0x2222222211111111ULL, .high = 0x4444444433333333ULL};
+    extendedState.rflags = 0x8D7;
+    static_cast<void>(extendedBlock.execute(extendedState));
+    expectEqual(extendedState.xmm[13].low, UINT64_MAX, "extended PCMPEQD low lane differs");
+    expectEqual(extendedState.xmm[13].high, UINT64_MAX, "extended PCMPEQD high lane differs");
+    expectEqual(extendedState.rflags, std::uint64_t{0x8D7}, "extended PCMPEQD changed flags");
 }
 
 void testPackedDwordShiftAndAddGeneratedExecution() {
