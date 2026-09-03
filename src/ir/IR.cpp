@@ -599,6 +599,18 @@ void Builder::convertIntToDoubleXmm(ValueId value, x86::XmmRegister destination,
     });
 }
 
+void Builder::scalarDoubleXmm(ValueId sourceBits, x86::XmmRegister destination,
+                              std::uint8_t operation, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ScalarDoubleXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = sourceBits,
+        .guestXmmRegister = destination,
+        .immediate = operation,
+    });
+}
+
 void Builder::addXmmDwords(x86::XmmRegister destination,
                            x86::XmmRegister source,
                            guest::GuestAddress rip) {
@@ -1695,6 +1707,13 @@ std::vector<std::string> verify(const Block &block) {
                  operation.width != Width::I64)) {
                 errors.emplace_back(
                     "convert_int_to_double_xmm requires an XMM register and i32 or i64");
+            }
+            break;
+        case Opcode::ScalarDoubleXmm:
+            checkUse(operation.lhs, "source double bits");
+            if (!operation.guestXmmRegister || operation.immediate > 3U) {
+                errors.emplace_back(
+                    "scalar_double_xmm requires an XMM register and operation 0-3");
             }
             break;
         case Opcode::AddXmmDwords:

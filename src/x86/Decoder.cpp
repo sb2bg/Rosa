@@ -3776,6 +3776,92 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
         }
 
+        if (code[cursor] == 0xF2U && code.size() - cursor >= 4) {
+            auto scalarCursor = cursor + 1;
+            std::uint8_t scalarRex = 0;
+            if (code[scalarCursor] >= 0x40U && code[scalarCursor] <= 0x4FU &&
+                code.size() - scalarCursor >= 4) {
+                scalarRex = code[scalarCursor++];
+            }
+            if (code.size() - scalarCursor >= 3 && code[scalarCursor] == 0x0FU &&
+                (code[scalarCursor + 1] == 0x58U || code[scalarCursor + 1] == 0x59U ||
+                 code[scalarCursor + 1] == 0x5CU || code[scalarCursor + 1] == 0x5EU)) {
+                const auto scalarOpcode = code[scalarCursor + 1];
+                const auto modrm = code[scalarCursor + 2];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto regEncoding =
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+                const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+                const auto destination = XmmRegisterOperand{static_cast<XmmRegister>(
+                    static_cast<std::uint8_t>(regEncoding |
+                                              ((scalarRex & 0x4U) != 0 ? 8U : 0U)))};
+                auto operandCursor = scalarCursor + 3;
+                if (mode == 0x3U) {
+                    instruction.opcode = scalarOpcode == 0x58U   ? Opcode::AddsdXmmReg
+                                         : scalarOpcode == 0x59U ? Opcode::MulsdXmmReg
+                                         : scalarOpcode == 0x5CU ? Opcode::SubsdXmmReg
+                                                                 : Opcode::DivsdXmmReg;
+                    instruction.operands.push_back(destination);
+                    instruction.operands.push_back(XmmRegisterOperand{
+                        static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                            rmEncoding | ((scalarRex & 0x1U) != 0 ? 8U : 0U)))});
+                } else {
+                    const bool ripRelative =
+                        mode == 0 && rmEncoding == 0x5U && (scalarRex & 0x1U) == 0;
+                    if (rmEncoding == 0x4U ||
+                        (mode == 0 && rmEncoding == 0x5U && (scalarRex & 0x1U) != 0)) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only RIP-relative or based scalar-double xmm, m64 is supported");
+                    }
+                    std::int64_t displacement = 0;
+                    if (mode == 0x1U) {
+                        if (operandCursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated scalar-double disp8");
+                        }
+                        displacement =
+                            std::bit_cast<std::int8_t>(code[operandCursor++]);
+                    } else if (mode == 0x2U || ripRelative) {
+                        if (code.size() - operandCursor < 4) {
+                            throw DecodeError(address, remaining,
+                                              "truncated scalar-double disp32");
+                        }
+                        displacement = readI32(code.subspan(operandCursor, 4));
+                        operandCursor += 4;
+                    }
+                    if (ripRelative) {
+                        static_cast<void>(relativeTarget(
+                            address, operandCursor - instructionStart,
+                            displacement));
+                    }
+                    instruction.opcode = scalarOpcode == 0x58U   ? Opcode::AddsdXmmMem
+                                         : scalarOpcode == 0x59U ? Opcode::MulsdXmmMem
+                                         : scalarOpcode == 0x5CU ? Opcode::SubsdXmmMem
+                                                                 : Opcode::DivsdXmmMem;
+                    instruction.operands.push_back(destination);
+                    instruction.operands.push_back(
+                        ripRelative
+                            ? MemoryOperand{Register::Rax, displacement, 64,
+                                            std::nullopt, 1, false, true}
+                            : MemoryOperand{
+                                  decodeRegister(rmEncoding,
+                                                 (scalarRex & 0x1U) != 0),
+                                  displacement, 64});
+                }
+                const auto length = operandCursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = operandCursor;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
         if (code[cursor] == 0xF3U && code.size() - cursor >= 3 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x11U) {
             if (code.size() - cursor < 4) {

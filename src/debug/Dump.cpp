@@ -2702,6 +2702,56 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             }
             break;
         }
+        case x86::Opcode::AddsdXmmReg:
+        case x86::Opcode::AddsdXmmMem:
+        case x86::Opcode::SubsdXmmReg:
+        case x86::Opcode::SubsdXmmMem:
+        case x86::Opcode::MulsdXmmReg:
+        case x86::Opcode::MulsdXmmMem:
+        case x86::Opcode::DivsdXmmReg:
+        case x86::Opcode::DivsdXmmMem: {
+            const auto mnemonic = instruction.opcode == x86::Opcode::AddsdXmmReg ||
+                                          instruction.opcode == x86::Opcode::AddsdXmmMem
+                                      ? "addsd "
+                                  : instruction.opcode == x86::Opcode::SubsdXmmReg ||
+                                          instruction.opcode == x86::Opcode::SubsdXmmMem
+                                      ? "subsd "
+                                  : instruction.opcode == x86::Opcode::MulsdXmmReg ||
+                                          instruction.opcode == x86::Opcode::MulsdXmmMem
+                                      ? "mulsd "
+                                      : "divsd ";
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::AddsdXmmMem ||
+                instruction.opcode == x86::Opcode::SubsdXmmMem ||
+                instruction.opcode == x86::Opcode::MulsdXmmMem ||
+                instruction.opcode == x86::Opcode::DivsdXmmMem;
+            stream << mnemonic
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", ";
+            if (!fromMemory) {
+                stream << x86::xmmRegisterName(
+                    std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                stream << "qword [";
+                if (memory.ripRelative) {
+                    stream << "rip";
+                } else {
+                    stream << x86::registerName(memory.base);
+                }
+                if (memory.displacement < 0) {
+                    stream << "-0x" << -memory.displacement;
+                } else if (memory.displacement > 0) {
+                    stream << "+0x" << memory.displacement;
+                }
+                stream << ']';
+            }
+            break;
+        }
         case x86::Opcode::MovsdRegMem:
         case x86::Opcode::MovlpsRegMem: {
             const auto memory =
@@ -3260,6 +3310,15 @@ std::string dumpIr(const ir::Block &block) {
                    << widthName(operation.width) << ' ' << valueName(*operation.lhs)
                    << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;
+        case ir::Opcode::ScalarDoubleXmm: {
+            const auto operationName = operation.immediate == 0U   ? "scalar_add_double_xmm"
+                                       : operation.immediate == 1U ? "scalar_subtract_double_xmm"
+                                       : operation.immediate == 2U ? "scalar_multiply_double_xmm"
+                                                                   : "scalar_divide_double_xmm";
+            stream << operationName << ' ' << valueName(*operation.lhs) << ", "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        }
         case ir::Opcode::AddXmmDwords:
             stream << "add_xmm_dwords.i32 "
                    << x86::xmmRegisterName(*operation.guestXmmRegister)

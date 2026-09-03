@@ -20300,6 +20300,99 @@ void testConvertInt32ToDoubleXmm() {
     expectEqual(regState.rflags, std::uint64_t{0xAD7}, "CVTSI2SD register form changed flags");
 }
 
+void testScalarDoubleArithmeticXmm() {
+    // Observed in Foundation under an Objective-C fixture: DIVSD xmm0, [RIP+disp32].
+    constexpr std::array<std::uint8_t, 9> divCode{0xF2, 0x0F, 0x5E, 0x05,
+                                                  0xF6, 0x55, 0xED, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress divRip{0x7FF8040AC76AULL};
+    const rosa::x86::Decoder decoder;
+    const auto divDecoded = decoder.decodeBlock(divCode, divRip);
+    expect(divDecoded[0].opcode == rosa::x86::Opcode::DivsdXmmMem,
+           "DIVSD xmm, m64 opcode differs");
+    expectEqual(divDecoded[0].length, std::uint8_t{8}, "DIVSD xmm, m64 length differs");
+    const auto divDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(divDecoded[0].operands[0]);
+    const auto divMemory = std::get<rosa::x86::MemoryOperand>(divDecoded[0].operands[1]);
+    expect(divDestination.reg == rosa::x86::XmmRegister::Xmm0,
+           "DIVSD xmm, m64 destination differs");
+    expect(divMemory.ripRelative && !divMemory.hasBase && !divMemory.index &&
+               divMemory.width == 64 && divMemory.displacement == 0xED55F6,
+           "DIVSD xmm, m64 memory operand differs");
+    expect(rosa::debug::dumpX86(divDecoded).find("divsd xmm0, qword [rip+0xed55f6]") !=
+               std::string::npos,
+           "DIVSD xmm, m64 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress sourceAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(sourceAddress, 0x4004000000000000ULL); // 2.5.
+    const rosa::dbt::Translator translator;
+    constexpr std::array<std::uint8_t, 9> divExecuteCode{0xF2, 0x0F, 0x5E, 0x05,
+                                                         0xF8, 0x70, 0x00, 0x00, 0xC3};
+    const auto divBlock =
+        translator.translate(divExecuteCode, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(divBlock.intermediateRepresentation())
+                   .find("scalar_divide_double_xmm") != std::string::npos,
+           "DIVSD did not lower through scalar-double IR");
+    rosa::x86::X86State divState;
+    // 7.5 / 2.5 == 3.0; the high lane is preserved, unlike CVTSI2SD.
+    divState.xmm[0] = {.low = 0x401E000000000000ULL, .high = 0xAAAAAAAAAAAAAAAAULL};
+    divState.rflags = 0xAD7;
+    static_cast<void>(divBlock.execute(divState, &addressSpace));
+    expectEqual(divState.xmm[0].low, std::uint64_t{0x4008000000000000ULL},
+                "DIVSD produced the wrong quotient");
+    expectEqual(divState.xmm[0].high, std::uint64_t{0xAAAAAAAAAAAAAAAAULL},
+                "DIVSD did not preserve the high lane");
+    expectEqual(divState.rflags, std::uint64_t{0xAD7}, "DIVSD changed flags");
+
+    struct ScalarDoubleCase {
+        std::uint8_t opcode;
+        rosa::x86::Opcode expected;
+        std::string_view name;
+        std::uint64_t destinationBits;
+        std::uint64_t sourceBits;
+        std::uint64_t expectedBits;
+    };
+    constexpr ScalarDoubleCase cases[] = {
+        {0x58, rosa::x86::Opcode::AddsdXmmReg, "addsd", 0x3FF8000000000000ULL,
+         0x4002000000000000ULL, 0x400E000000000000ULL}, // 1.5 + 2.25 == 3.75.
+        {0x5C, rosa::x86::Opcode::SubsdXmmReg, "subsd", 0x4014000000000000ULL,
+         0x4020000000000000ULL, 0xC008000000000000ULL}, // 5.0 - 8.0 == -3.0.
+        {0x59, rosa::x86::Opcode::MulsdXmmReg, "mulsd", 0x4004000000000000ULL,
+         0x4010000000000000ULL, 0x4024000000000000ULL}, // 2.5 * 4.0 == 10.0.
+        {0x5E, rosa::x86::Opcode::DivsdXmmReg, "divsd", 0x401E000000000000ULL,
+         0x4004000000000000ULL, 0x4008000000000000ULL}, // 7.5 / 2.5 == 3.0.
+    };
+    for (const auto &doubleCase : cases) {
+        const std::array<std::uint8_t, 5> code{0xF2, 0x0F, doubleCase.opcode, 0xC1, 0xC3};
+        const auto decoded = decoder.decodeBlock(code, divRip);
+        expect(decoded[0].opcode == doubleCase.expected,
+               std::string(doubleCase.name) + " xmm, xmm opcode differs");
+        expectEqual(decoded[0].length, std::uint8_t{4},
+                    std::string(doubleCase.name) + " xmm, xmm length differs");
+        expect(rosa::debug::dumpX86(decoded).find(
+                   std::string(doubleCase.name) + " xmm0, xmm1") != std::string::npos,
+               std::string(doubleCase.name) + " xmm, xmm dump differs");
+
+        const auto block = translator.translate(code, divRip);
+        rosa::x86::X86State state;
+        state.xmm[0] = {.low = doubleCase.destinationBits, .high = 0xBBBBBBBBBBBBBBBBULL};
+        state.xmm[1] = {.low = doubleCase.sourceBits, .high = 0xCCCCCCCCCCCCCCCCULL};
+        state.rflags = 0xAD7;
+        static_cast<void>(block.execute(state));
+        expectEqual(state.xmm[0].low, doubleCase.expectedBits,
+                    std::string(doubleCase.name) + " produced the wrong result");
+        expectEqual(state.xmm[0].high, std::uint64_t{0xBBBBBBBBBBBBBBBBULL},
+                    std::string(doubleCase.name) + " did not preserve the high lane");
+        expectEqual(state.xmm[1].low, doubleCase.sourceBits,
+                    std::string(doubleCase.name) + " changed its source");
+        expectEqual(state.rflags, std::uint64_t{0xAD7},
+                    std::string(doubleCase.name) + " changed flags");
+    }
+}
+
 void testMovqGuestMemoryToXmm() {
     constexpr std::array<std::uint8_t, 6> code{0xF3, 0x0F, 0x7E, 0x40, 0x38, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -35138,6 +35231,7 @@ int main() {
         {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
         {"CVTSI2SD int32 to XMM", testConvertInt32ToDoubleXmm},
+        {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
         {"PSHUFB register execution", testPshufbRegisters},
         {"PSHUFB RIP-relative guest memory", testPshufbRipRelativeGuestMemory},

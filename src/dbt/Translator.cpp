@@ -826,6 +826,25 @@ convertInt64ToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+scalarDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
+                std::uint64_t sourceBits, std::uint64_t operation) noexcept {
+    if (destinationIndex >= state->xmm.size()) {
+        return state;
+    }
+    // Host IEEE-754 arithmetic matches the guest default MXCSR behavior
+    // (round to nearest, no denormal flushing on either side).
+    const auto destination =
+        std::bit_cast<double>(state->xmm[destinationIndex].low);
+    const auto source = std::bit_cast<double>(sourceBits);
+    const auto result = operation == 0U   ? destination + source
+                        : operation == 1U ? destination - source
+                        : operation == 2U ? destination * source
+                                          : destination / source;
+    state->xmm[destinationIndex].low = std::bit_cast<std::uint64_t>(result);
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 compareEqualXmmBytes128(x86::X86State *state, std::uint64_t destinationIndex,
                         std::uint64_t sourceIndex) noexcept {
     if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
@@ -4157,6 +4176,74 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             // no IR value stays live across its call.
             builder.convertIntToDoubleXmm(integer, destination, width,
                                           instruction.address);
+            break;
+        }
+        case x86::Opcode::AddsdXmmReg:
+        case x86::Opcode::AddsdXmmMem:
+        case x86::Opcode::SubsdXmmReg:
+        case x86::Opcode::SubsdXmmMem:
+        case x86::Opcode::MulsdXmmReg:
+        case x86::Opcode::MulsdXmmMem:
+        case x86::Opcode::DivsdXmmReg:
+        case x86::Opcode::DivsdXmmMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: scalar-double operand count");
+            }
+            const auto operation = instruction.opcode == x86::Opcode::AddsdXmmReg ||
+                                           instruction.opcode == x86::Opcode::AddsdXmmMem
+                                       ? std::uint8_t{0}
+                                   : instruction.opcode == x86::Opcode::SubsdXmmReg ||
+                                           instruction.opcode == x86::Opcode::SubsdXmmMem
+                                       ? std::uint8_t{1}
+                                   : instruction.opcode == x86::Opcode::MulsdXmmReg ||
+                                           instruction.opcode == x86::Opcode::MulsdXmmMem
+                                       ? std::uint8_t{2}
+                                       : std::uint8_t{3};
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::AddsdXmmMem ||
+                instruction.opcode == x86::Opcode::SubsdXmmMem ||
+                instruction.opcode == x86::Opcode::MulsdXmmMem ||
+                instruction.opcode == x86::Opcode::DivsdXmmMem;
+            ir::ValueId sourceBits{};
+            if (!fromMemory) {
+                const auto source =
+                    std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+                sourceBits = builder.readGuestXmmLane(source, false,
+                                                      instruction.address);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                if (memory.width != 64 ||
+                    (memory.ripRelative
+                         ? memory.hasBase || memory.index.has_value()
+                         : !memory.hasBase) ||
+                    memory.segment != x86::Segment::None) {
+                    throw std::runtime_error(
+                        "unsupported scalar-double memory addressing");
+                }
+                auto address =
+                    memory.ripRelative
+                        ? builder.constant(instruction.address.value + instruction.length,
+                                           ir::Width::I64, instruction.address)
+                        : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                    instruction.address);
+                if (memory.displacement != 0) {
+                    const auto displacement = builder.constant(
+                        static_cast<std::uint64_t>(memory.displacement),
+                        ir::Width::I64, instruction.address);
+                    address = builder.add(address, displacement, ir::Width::I64,
+                                          instruction.address);
+                }
+                sourceBits =
+                    builder.loadGuest(address, ir::Width::I64, instruction.address);
+            }
+            // The arithmetic helper is pure: the source bits are consumed
+            // here, so no IR value stays live across its call.
+            builder.scalarDoubleXmm(sourceBits, destination, operation,
+                                     instruction.address);
             break;
         }
         case x86::Opcode::MovlpsRegMem:
@@ -8874,6 +8961,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::CompareEqualXmmDwords ||
             operation.opcode == ir::Opcode::ShiftLeftXmmDwords ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
+            operation.opcode == ir::Opcode::ScalarDoubleXmm ||
             operation.opcode == ir::Opcode::AddXmmDwords ||
             operation.opcode == ir::Opcode::HorizontalAddXmmDwords ||
             operation.opcode == ir::Opcode::AndNotXmm ||
@@ -10632,6 +10720,15 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                                    operation.width == ir::Width::I32
                                        ? pointerBits(&convertInt32ToDoubleXmm)
                                        : pointerBits(&convertInt64ToDoubleXmm));
+            assembler.blr(arm64::x16);
+            break;
+        }
+        case ir::Opcode::ScalarDoubleXmm: {
+            assembler.movImmediate(arm64::x1,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x3, operation.immediate);
+            assembler.movImmediate(arm64::x16, pointerBits(&scalarDoubleXmm));
             assembler.blr(arm64::x16);
             break;
         }

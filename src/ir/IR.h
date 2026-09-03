@@ -67,6 +67,7 @@ enum class Opcode {
     CompareEqualXmmDwords,
     ShiftLeftXmmDwords,
     ConvertIntToDoubleXmm,
+    ScalarDoubleXmm,
     AddXmmDwords,
     HorizontalAddXmmDwords,
     AndNotXmm,
@@ -246,6 +247,10 @@ class Builder {
                             guest::GuestAddress rip);
     void convertIntToDoubleXmm(ValueId value, x86::XmmRegister destination,
                                Width width, guest::GuestAddress rip);
+    // Selector: 0 = add, 1 = subtract, 2 = multiply, 3 = divide. The source
+    // is a raw double bit pattern; the destination high lane is preserved.
+    void scalarDoubleXmm(ValueId sourceBits, x86::XmmRegister destination,
+                         std::uint8_t operation, guest::GuestAddress rip);
     void addXmmDwords(x86::XmmRegister destination,
                       x86::XmmRegister source,
                       guest::GuestAddress rip);
