@@ -447,17 +447,21 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        const bool testImmediateHasGs =
+            code[cursor] == 0x65U && code.size() - cursor >= 2;
+        const auto testImmediateBase = cursor + (testImmediateHasGs ? 1U : 0U);
         const bool testImmediateHasRex =
-            code[cursor] >= 0x40U && code[cursor] <= 0x4FU;
+            testImmediateBase < code.size() && code[testImmediateBase] >= 0x40U &&
+            code[testImmediateBase] <= 0x4FU;
         const auto testImmediateOpcodeOffset =
-            cursor + (testImmediateHasRex ? 1U : 0U);
+            testImmediateBase + (testImmediateHasRex ? 1U : 0U);
         if (testImmediateOpcodeOffset < code.size() &&
             code[testImmediateOpcodeOffset] == 0xF6U) {
             if (code.size() - testImmediateOpcodeOffset < 2) {
                 throw DecodeError(address, remaining,
                                   "truncated F6 ModRM byte");
             }
-            const auto rex = testImmediateHasRex ? code[cursor] : 0U;
+            const auto rex = testImmediateHasRex ? code[testImmediateBase] : 0U;
             const bool rexX = (rex & 0x2U) != 0;
             const bool rexB = (rex & 0x1U) != 0;
             const auto modrm = code[testImmediateOpcodeOffset + 1];
@@ -597,9 +601,13 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(
                     ripRelative
                         ? MemoryOperand{Register::Rax, displacement, 8,
-                                        std::nullopt, 1, false, true}
+                                        std::nullopt, 1, false, true,
+                                        testImmediateHasGs ? Segment::Gs
+                                                           : Segment::None}
                         : MemoryOperand{base, displacement, 8, index, scale,
-                                        hasBase, false});
+                                        hasBase, false,
+                                        testImmediateHasGs ? Segment::Gs
+                                                           : Segment::None});
             }
             instruction.operands.push_back(ImmediateOperand{immediate, 8});
             result.push_back(std::move(instruction));
@@ -2007,12 +2015,13 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             const auto rex =
                 wordLogicImmediateHasRex ? code[cursor + 1] : 0U;
-            if ((rex & 0xEU) != 0) {
+            if ((rex & 0xAU) != 0) {
                 throw DecodeError(
                     address, remaining,
-                    "word immediate memory operation does not support REX.W/R/X");
+                    "word immediate memory operation does not support REX.W/R");
             }
             const auto rexB = (rex & 0x1U) != 0;
+            const auto rexX = (rex & 0x2U) != 0;
             const auto modrm = code[wordLogicImmediateOpcodeOffset + 1];
             const auto mode =
                 static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
@@ -2021,13 +2030,39 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto rmEncoding =
                 static_cast<std::uint8_t>(modrm & 0x7U);
             if ((extension != 0x4U && extension != 0x7U && extension != 0x1U) ||
-                mode > 0x2U || rmEncoding == 0x4U ||
-                (mode == 0 && rmEncoding == 0x5U)) {
+                mode > 0x2U || (mode == 0 && rmEncoding == 0x5U) ||
+                (rexX && rmEncoding != 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only OR /1, AND /4 and CMP /7 word [base+disp8/disp32], imm16 are supported");
+                    "only OR /1, AND /4 and CMP /7 word [base+index*scale+disp8/disp32], imm16 are supported");
             }
             auto operandCursor = wordLogicImmediateOpcodeOffset + 2;
+            auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (rmEncoding == 0x4U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated word logic immediate SIB");
+                }
+                const auto sib = code[operandCursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding =
+                    static_cast<std::uint8_t>(sib & 0x7U);
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "no-base word logic immediate SIB is not supported");
+                }
+                base = decodeRegister(baseEncoding, rexB);
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
                 if (operandCursor >= code.size()) {
@@ -2056,7 +2091,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                  : extension == 0x1U ? Opcode::OrMemImm
                                                      : Opcode::CmpMemImm;
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, rexB), displacement, 16});
+                base, displacement, 16, index, scale});
             instruction.operands.push_back(ImmediateOperand{immediate, 16});
             const auto length = operandCursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);

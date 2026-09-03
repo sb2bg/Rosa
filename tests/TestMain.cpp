@@ -6212,6 +6212,59 @@ void testCompare32BitRegisterWithGsAbsoluteMemory() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted GS-absolute CMP changed flags");
 }
 
+void testTestByteGsAbsoluteMemory() {
+    // Observed in libobjc under an Objective-C fixture: TEST byte gs:[0x160], 1.
+    constexpr std::array<std::uint8_t, 10> observedCode{0x65, 0xF6, 0x04, 0x25, 0x60,
+                                                        0x01, 0x00, 0x00, 0x01, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802A20BB1ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(observedCode, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestMemImm,
+           "GS-absolute TEST byte opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9}, "GS-absolute TEST byte length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(!memory.hasBase && !memory.index && !memory.ripRelative &&
+               memory.displacement == 0x160 && memory.width == 8 &&
+               memory.segment == rosa::x86::Segment::Gs && immediate.value == 1,
+           "GS-absolute TEST byte memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("test byte [gs:0x160], 0x1") != std::string::npos,
+           "GS-absolute TEST byte dump differs");
+
+    constexpr rosa::guest::GuestAddress gsBase{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8160};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(gsBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 1>{0x03});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(observedCode, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find("read_guest_gs_base.i64") !=
+               std::string::npos,
+           "GS-absolute TEST byte did not lower through guest GS base");
+    rosa::x86::X86State state;
+    state.gsBase = gsBase.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.gsBase, gsBase.value, "GS-absolute TEST byte changed GS base");
+    // 0x03 & 0x01 == 0x01: nonzero, no sign, odd parity.
+    expectEqual(state.rflags & ((1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U)),
+                std::uint64_t{0}, "GS-absolute TEST byte flags differ");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.gsBase = gsBase.value;
+    faultState.rflags = 0xAD7;
+    bool faulted = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        faulted = std::string_view(error.what()).find("unmapped") != std::string_view::npos;
+    }
+    expect(faulted, "GS-absolute TEST byte accepted unmapped memory");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted GS-absolute TEST byte changed flags");
+}
+
 void testCompareByteRegisterWithScaledGuestMemory() {
     constexpr std::array<std::uint8_t, 5> code{0x41, 0x3A, 0x14, 0x0E, 0xC3};
     constexpr rosa::guest::GuestAddress observedRip{0x7FF8000050A3ULL};
@@ -8917,6 +8970,37 @@ void testCompareGuestWordWithShortImmediate() {
     expectEqual(indexedState.rflags, std::uint64_t{0x46}, "REX.X CMP word equal flags differ");
     expectEqual(indexedState.rbx, std::uint64_t{0x8200}, "REX.X CMP word changed its base");
     expectEqual(indexedState.r12, std::uint64_t{0}, "REX.X CMP word changed its index");
+
+    // Observed in libobjc: CMP word [rax+rcx+0x8], 0x25ff (opcode 66 81 /7 SIB).
+    constexpr std::array<std::uint8_t, 8> sibCode{0x66, 0x81, 0x7C, 0x08,
+                                                  0x08, 0xFF, 0x25, 0xC3};
+    const auto sibDecoded =
+        decoder.decodeBlock(sibCode, rosa::guest::GuestAddress{0x7FF8040AC762ULL});
+    expect(sibDecoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "SIB CMP word imm16 opcode differs");
+    expectEqual(sibDecoded[0].length, std::uint8_t{7}, "SIB CMP word imm16 length differs");
+    const auto sibMemory = std::get<rosa::x86::MemoryOperand>(sibDecoded[0].operands[0]);
+    const auto sibImmediate = std::get<rosa::x86::ImmediateOperand>(sibDecoded[0].operands[1]);
+    expect(sibMemory.base == rosa::x86::Register::Rax && sibMemory.index &&
+               *sibMemory.index == rosa::x86::Register::Rcx && sibMemory.scale == 1 &&
+               sibMemory.displacement == 0x08 && sibMemory.width == 16 &&
+               sibImmediate.value == 0x25FF && sibImmediate.width == 16,
+           "CMP word [rax+rcx+0x8], 0x25ff operands differ");
+    expect(rosa::debug::dumpX86(sibDecoded).find("cmp word [rax+rcx*1+0x8], 0x25ff") !=
+               std::string::npos,
+           "SIB CMP word imm16 dump differs");
+    constexpr rosa::guest::GuestAddress sibTarget{0x8208};
+    addressSpace.writeBytes(sibTarget, std::array<std::uint8_t, 2>{0xFF, 0x25});
+    const auto sibBlock =
+        translator.translate(sibCode, rosa::guest::GuestAddress{0x7FF8040AC762ULL});
+    rosa::x86::X86State sibState;
+    sibState.rax = 0x8200;
+    sibState.rcx = 0;
+    sibState.rflags = 0x8D7;
+    static_cast<void>(sibBlock.execute(sibState, &addressSpace));
+    expectEqual(sibState.rflags, std::uint64_t{0x46}, "SIB CMP word imm16 equal flags differ");
+    expectEqual(sibState.rax, std::uint64_t{0x8200}, "SIB CMP word imm16 changed its base");
+    expectEqual(sibState.rcx, std::uint64_t{0}, "SIB CMP word imm16 changed its index");
 }
 
 void testCompare16BitRegisterWithShortImmediate() {
@@ -35122,6 +35206,7 @@ int main() {
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
         {"CMP 32-bit register with GS-absolute guest memory",
          testCompare32BitRegisterWithGsAbsoluteMemory},
+        {"TEST byte with GS-absolute guest memory", testTestByteGsAbsoluteMemory},
         {"CMP byte register with scaled guest memory",
          testCompareByteRegisterWithScaledGuestMemory},
         {"legacy CMP 32-bit register with guest memory",

@@ -1514,6 +1514,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                        : memory.width == 16 ? "test word ["
                        : memory.width == 32 ? "test dword ["
                                             : "test qword [");
+            if (memory.segment == x86::Segment::Gs) {
+                stream << "gs:";
+            }
             if (memory.ripRelative) {
                 stream << "rip";
             } else if (memory.hasBase) {

@@ -7261,6 +7261,10 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                      ir::Width::I64, instruction.address);
                 address = builder.add(address, displacement, ir::Width::I64, instruction.address);
             }
+            if (memory.segment == x86::Segment::Gs) {
+                const auto gsBase = builder.readGuestGsBase(instruction.address);
+                address = builder.add(gsBase, address, ir::Width::I64, instruction.address);
+            }
             const auto value = builder.loadGuest(address, width, instruction.address);
             const auto mask = builder.constant(immediate.value, width, instruction.address);
             const auto result = builder.bitAnd(value, mask, width, instruction.address);
