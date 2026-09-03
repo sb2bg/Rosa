@@ -664,6 +664,35 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             }
             break;
         }
+        case x86::Opcode::AddMemImm: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << (memory.width == 32 ? "add dword [" : "add qword [");
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else if (memory.hasBase) {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                if (memory.hasBase || memory.ripRelative) {
+                    stream << '+';
+                }
+                stream << "0x" << memory.displacement;
+            }
+            stream << "], 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[1])
+                          .value;
+            if (memory.ripRelative) {
+                stream << " ; 0x"
+                       << instruction.address.value + instruction.length +
+                              static_cast<std::uint64_t>(
+                                  memory.displacement);
+            }
+            break;
+        }
         case x86::Opcode::IncMem: {
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << "inc " << (memory.width == 8    ? "byte"
@@ -1100,7 +1129,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::OrMemImm: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "or byte ["
+            stream << (memory.width == 8    ? "or byte ["
+                      : memory.width == 32 ? "or dword ["
+                                           : "or qword [")
                    << (memory.ripRelative ? "rip"
                                           : x86::registerName(memory.base));
             if (memory.displacement < 0) {

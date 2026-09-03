@@ -14925,6 +14925,87 @@ void testOrImmediateIntoGuestByteMemory() {
                 "SIB byte OR defined flags differ");
 }
 
+void testAddDwordShortImmediateGuestMemory() {
+    // Observed in libxpc: ADD dword [r15+0x1c], 0x10 with REX.B.
+    constexpr std::array<std::uint8_t, 6> code{0x41, 0x83, 0x47, 0x1C, 0x10, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x7FF802B4D50CULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddMemImm,
+           "ADD dword [memory], imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "ADD dword [memory], imm8 length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R15 && memory.displacement == 0x1C &&
+               memory.width == 32 && immediate.value == 0x10 && immediate.width == 8,
+           "ADD dword [r15+0x1c], 0x10 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("add dword [r15+0x1c], 0x10") != std::string::npos,
+           "ADD dword [r15+0x1c], 0x10 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x801C};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 0x7FFFFFF0);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x7FF802B4D50CULL});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find("add_guest_memory.i32") !=
+               std::string::npos,
+           "ADD dword short did not lower through 32-bit guest-memory IR");
+    rosa::x86::X86State state;
+    state.r15 = page.value;
+    state.rflags = 0x2;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0x80000000},
+                "ADD dword short memory result differs");
+    expectEqual(state.r15, page.value, "ADD dword short changed its base");
+    constexpr std::uint64_t definedFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedFlags,
+                std::uint64_t{(1U << 2U) | (1U << 7U) | (1U << 11U)},
+                "ADD dword short defined flags differ");
+}
+
+void testOrDwordShortImmediateGuestMemory() {
+    // OR dword [r15+0x1c], 0x10 with REX.B.
+    constexpr std::array<std::uint8_t, 6> code{0x41, 0x83, 0x4F, 0x1C, 0x10, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::OrMemImm,
+           "OR dword [memory], imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "OR dword [memory], imm8 length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R15 && memory.displacement == 0x1C &&
+               memory.width == 32 && immediate.value == 0x10 && immediate.width == 8,
+           "OR dword [r15+0x1c], 0x10 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("or dword [r15+0x1c], 0x10") != std::string::npos,
+           "OR dword [r15+0x1c], 0x10 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x801C};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 0x00FF00);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find("or_guest_memory.i32") !=
+               std::string::npos,
+           "OR dword short did not lower through 32-bit guest-memory IR");
+    rosa::x86::X86State state;
+    state.r15 = page.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0x00FF10},
+                "OR dword short memory result differs");
+    expectEqual(state.r15, page.value, "OR dword short changed its base");
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0x0},
+                "OR dword short defined flags differ");
+}
+
 void testOrShortImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x48, 0x83, 0xC8, 0xFF, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -31529,6 +31610,8 @@ int main() {
         {"OR 32-bit register into indexed guest memory", testOr32BitRegisterIntoIndexedGuestMemory},
         {"OR immediate into guest byte memory", testOrImmediateIntoGuestByteMemory},
         {"OR short immediate generated execution", testOrShortImmediateGeneratedExecution},
+        {"OR dword short immediate guest memory", testOrDwordShortImmediateGuestMemory},
+        {"ADD dword short immediate guest memory", testAddDwordShortImmediateGuestMemory},
         {"OR 32-bit registers generated execution", testOr32BitRegistersGeneratedExecution},
         {"XOR 32-bit register generated execution", testXor32BitRegisterGeneratedExecution},
         {"XOR 8-bit registers generated execution", testXor8BitRegistersGeneratedExecution},

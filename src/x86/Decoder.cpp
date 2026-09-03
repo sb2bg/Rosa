@@ -9448,6 +9448,140 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     static_cast<std::uint64_t>(
                         static_cast<std::int64_t>(immediate)),
                     8});
+            } else if (extension == 0x1U && mode <= 0x2U && !rexR) {
+                const bool ripRelative =
+                    mode == 0 && rmEncoding == 0x5U && !rexB;
+                auto base = decodeRegister(rmEncoding, rexB);
+                if (!ripRelative && rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(
+                            address, remaining,
+                            "truncated short OR memory SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    const auto baseEncoding =
+                        static_cast<std::uint8_t>(sib & 0x7U);
+                    if (indexEncoding != 0x4U || rexX) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only no-index short OR memory SIB is supported");
+                    }
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(
+                            address, remaining,
+                            "no-base short OR memory SIB is not supported");
+                    }
+                    base = decodeRegister(baseEncoding, rexB);
+                }
+                std::int64_t displacement = 0;
+                if (ripRelative || mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(
+                            address, remaining,
+                            "truncated short OR memory disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                } else if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(
+                            address, remaining,
+                            "truncated short OR memory disp8");
+                    }
+                    displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                }
+                if (cursor >= code.size()) {
+                    throw DecodeError(
+                        address, remaining,
+                        "truncated short OR memory immediate");
+                }
+                const auto immediate =
+                    std::bit_cast<std::int8_t>(code[cursor++]);
+                if (ripRelative) {
+                    static_cast<void>(relativeTarget(
+                        address, cursor - instructionStart, displacement));
+                }
+                instruction.opcode = Opcode::OrMemImm;
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement,
+                                        static_cast<std::uint8_t>(rexW ? 64U : 32U),
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{base, displacement,
+                                        static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                instruction.operands.push_back(ImmediateOperand{
+                    static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(immediate)),
+                    8});
+            } else if (extension == 0x0U && mode <= 0x2U && !rexR) {
+                const bool ripRelative =
+                    mode == 0 && rmEncoding == 0x5U && !rexB;
+                auto base = decodeRegister(rmEncoding, rexB);
+                if (!ripRelative && rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(
+                            address, remaining,
+                            "truncated short ADD memory SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    const auto baseEncoding =
+                        static_cast<std::uint8_t>(sib & 0x7U);
+                    if (indexEncoding != 0x4U || rexX) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only no-index short ADD memory SIB is supported");
+                    }
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(
+                            address, remaining,
+                            "no-base short ADD memory SIB is not supported");
+                    }
+                    base = decodeRegister(baseEncoding, rexB);
+                }
+                std::int64_t displacement = 0;
+                if (ripRelative || mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(
+                            address, remaining,
+                            "truncated short ADD memory disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                } else if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(
+                            address, remaining,
+                            "truncated short ADD memory disp8");
+                    }
+                    displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+                }
+                if (cursor >= code.size()) {
+                    throw DecodeError(
+                        address, remaining,
+                        "truncated short ADD memory immediate");
+                }
+                const auto immediate =
+                    std::bit_cast<std::int8_t>(code[cursor++]);
+                if (ripRelative) {
+                    static_cast<void>(relativeTarget(
+                        address, cursor - instructionStart, displacement));
+                }
+                instruction.opcode = Opcode::AddMemImm;
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement,
+                                        static_cast<std::uint8_t>(rexW ? 64U : 32U),
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{base, displacement,
+                                        static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                instruction.operands.push_back(ImmediateOperand{
+                    static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(immediate)),
+                    8});
             } else if (extension == 0x7U && mode <= 0x2U && !rexR) {
                 const bool ripRelative =
                     mode == 0 && rmEncoding == 0x5U && !rexB;

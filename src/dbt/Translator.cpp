@@ -4007,6 +4007,40 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.addGuestMemory(address, sourceValue, width, instruction.address);
             break;
         }
+        case x86::Opcode::AddMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: memory immediate add operand count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (memory.width != 32 && memory.width != 64) {
+                throw std::runtime_error(
+                    "only 32- and 64-bit memory-destination short ADD is implemented");
+            }
+            if (immediate.width != 8) {
+                throw std::runtime_error(
+                    "only imm8 memory-destination short ADD is implemented");
+            }
+            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : memory.hasBase
+                      ? builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address)
+                      : builder.constant(0, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement =
+                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                     ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64, instruction.address);
+            }
+            const auto sourceValue =
+                builder.constant(immediate.value, width, instruction.address);
+            builder.addGuestMemory(address, sourceValue, width, instruction.address);
+            break;
+        }
         case x86::Opcode::IncReg: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: increment operand count");
@@ -5079,20 +5113,43 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            const auto byteForm = memory.width == 8 && immediate.width == 8;
+            const auto dwordShortForm = memory.width == 32 && immediate.width == 8;
+            const auto qwordShortForm = memory.width == 64 && immediate.width == 8;
+            if ((!byteForm && !dwordShortForm && !qwordShortForm) ||
+                memory.segment != x86::Segment::None) {
+                throw std::runtime_error("only OR byte [memory], imm8 and OR "
+                                         "dword/qword [memory], imm8 are implemented");
+            }
             auto address =
                 memory.ripRelative
                     ? builder.constant(instruction.address.value + instruction.length,
                                        ir::Width::I64, instruction.address)
-                    : builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+                    : memory.hasBase
+                      ? builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address)
+                      : builder.constant(0, ir::Width::I64, instruction.address);
+            if (memory.index) {
+                auto index =
+                    builder.readGuestRegister(*memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64, instruction.address);
+            }
             if (memory.displacement != 0) {
                 const auto displacement =
                     builder.constant(static_cast<std::uint64_t>(memory.displacement),
                                      ir::Width::I64, instruction.address);
                 address = builder.add(address, displacement, ir::Width::I64, instruction.address);
             }
+            const auto width = byteForm   ? ir::Width::I8
+                               : dwordShortForm ? ir::Width::I32
+                                                : ir::Width::I64;
             const auto sourceValue =
-                builder.constant(immediate.value, ir::Width::I8, instruction.address);
-            builder.orGuestMemory(address, sourceValue, ir::Width::I8, instruction.address);
+                builder.constant(immediate.value, width, instruction.address);
+            builder.orGuestMemory(address, sourceValue, width, instruction.address);
             break;
         }
         case x86::Opcode::OrRegImm: {
