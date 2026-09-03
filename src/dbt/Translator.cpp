@@ -2040,6 +2040,34 @@ lockedDecrementGuest32(GuestExecutionContext *context, x86::X86State *state,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+lockedDecrementGuest64(GuestExecutionContext *context, x86::X86State *state,
+                       std::uint64_t address) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated LOCK DEC has no guest address space");
+        }
+        constexpr auto width = sizeof(std::uint64_t);
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, width,
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU64(guest::GuestAddress{address});
+        const auto result = original - 1U;
+        context->addressSpace->writeU64(guest::GuestAddress{address}, result);
+        // The LOCK prefix is also a full memory fence. Guest execution is
+        // single-threaded today; this preserves ordering at the helper
+        // boundary without claiming multi-thread atomicity yet.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return updateDecFlags64(state, original, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint64_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 decrementGuest32(GuestExecutionContext *context, x86::X86State *state,
                  std::uint64_t address) noexcept {
     try {
@@ -4325,9 +4353,10 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 throw std::runtime_error("internal decoder error: LOCK INC/DEC operand count");
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            if (memory.width != 32) {
-                throw std::runtime_error("only LOCK INC/DEC dword [base+disp] is implemented");
+            if (memory.width != 32 && memory.width != 64) {
+                throw std::runtime_error("only LOCK INC/DEC dword/qword [base+disp] is implemented");
             }
+            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
             const auto base =
                 memory.ripRelative
                     ? builder.constant(instruction.address.value + instruction.length,
@@ -4341,9 +4370,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 address = builder.add(base, displacement, ir::Width::I64, instruction.address);
             }
             if (instruction.opcode == x86::Opcode::LockIncMem) {
-                builder.lockedIncrementGuestMemory(address, ir::Width::I32, instruction.address);
+                builder.lockedIncrementGuestMemory(address, width, instruction.address);
             } else {
-                builder.lockedDecrementGuestMemory(address, ir::Width::I32, instruction.address);
+                builder.lockedDecrementGuestMemory(address, width, instruction.address);
             }
             break;
         }
@@ -9185,9 +9214,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
         }
         case ir::Opcode::LockedIncrementGuestMemory:
         case ir::Opcode::LockedDecrementGuestMemory: {
-            if (operation.width != ir::Width::I32) {
+            if (operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 32-bit guest-memory LOCK INC/DEC");
+                    "ARM64 backend only implements 32- and 64-bit guest-memory LOCK INC/DEC");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -9198,7 +9227,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.movImmediate(arm64::x16,
                                    operation.opcode == ir::Opcode::LockedIncrementGuestMemory
                                        ? pointerBits(&lockedIncrementGuest32)
-                                       : pointerBits(&lockedDecrementGuest32));
+                                       : operation.width == ir::Width::I32
+                                             ? pointerBits(&lockedDecrementGuest32)
+                                             : pointerBits(&lockedDecrementGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

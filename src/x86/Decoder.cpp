@@ -5004,6 +5004,63 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                     code[operandCursor] <= 0x4FU;
             const auto lockRex =
                 hasLockRex ? code[operandCursor++] : std::uint8_t{0};
+            const bool lockRexW = (lockRex & 0x8U) != 0;
+            const bool lockRexR = (lockRex & 0x4U) != 0;
+            const bool lockRexX = (lockRex & 0x2U) != 0;
+            const bool lockRexB = (lockRex & 0x1U) != 0;
+            if (code.size() - operandCursor >= 2 && code[operandCursor] == 0xFFU) {
+                const auto modrm = code[operandCursor + 1];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+                const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+                const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !lockRexB;
+                if (extension != 0x1U || mode > 0x2U || lockRexR || lockRexX ||
+                    (mode == 0 && rmEncoding == 0x5U && lockRexB) || rmEncoding == 0x4U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only LOCK DEC dword/qword [base/RIP+disp8/disp32] is supported from prefix F0 FF /1");
+                }
+                operandCursor += 2;
+                std::int64_t displacement = 0;
+                if (ripRelative || mode == 0x2U) {
+                    if (code.size() - operandCursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated LOCK DEC disp32");
+                    }
+                    displacement = readI32(code.subspan(operandCursor, 4));
+                    operandCursor += 4;
+                } else if (mode == 0x1U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated LOCK DEC disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[operandCursor++]);
+                }
+                if (ripRelative) {
+                    static_cast<void>(relativeTarget(
+                        address, operandCursor - instructionStart, displacement));
+                }
+                const auto width = static_cast<std::uint8_t>(lockRexW ? 64U : 32U);
+                instruction.opcode = Opcode::LockDecMem;
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement, width,
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{decodeRegister(rmEncoding, lockRexB),
+                                        displacement, width});
+                const auto length = operandCursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(
+                    code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                    length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = operandCursor;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
             if (code.size() - operandCursor < 3 ||
                 code[operandCursor] != 0x0FU ||
                 code[operandCursor + 1] != 0xB1U) {

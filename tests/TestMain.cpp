@@ -7861,6 +7861,46 @@ void testLockedDecrementGuestDword() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted LOCK DEC changed flags");
 }
 
+void testLockedDecrementRipRelativeGuestQword() {
+    // Observed in libsystem_c: LOCK DEC qword [rip+disp32].
+    constexpr std::array<std::uint8_t, 9> code{0xF0, 0x48, 0xFF, 0x0D, 0x99,
+                                              0x4B, 0x9A, 0x40, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x7FF802D15C6FULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockDecMem,
+           "RIP-relative LOCK DEC opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8}, "RIP-relative LOCK DEC length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.ripRelative && !memory.hasBase && memory.width == 64 &&
+               memory.displacement == 0x409A4B99,
+           "LOCK DEC qword [rip+disp32] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("lock dec qword [rip+0x409a4b99]") !=
+               std::string::npos,
+           "LOCK DEC qword [rip+disp32] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    constexpr rosa::guest::GuestAddress syntheticRip{0x7FF8ULL};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0x8000000000000001ULL);
+    const rosa::dbt::Translator translator;
+    // Execute at a synthetic RIP whose computed target stays in the page.
+    constexpr std::array<std::uint8_t, 9> executableCode{0xF0, 0x48, 0xFF, 0x0D, 0x00,
+                                                         0x01, 0x00, 0x00, 0xC3};
+    const auto block = translator.translate(executableCode, syntheticRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("locked_decrement_guest_memory.i64") != std::string::npos,
+           "LOCK DEC qword did not lower through 64-bit locked guest-memory IR");
+    rosa::x86::X86State state;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(target), std::uint64_t{0x8000000000000000ULL},
+                "LOCK DEC qword result differs");
+    expectEqual(state.rflags, std::uint64_t{0x87}, "LOCK DEC qword flags differ or changed CF");
+}
+
 void testCompareGuestMemoryWith32BitImmediate() {
     constexpr std::array<std::uint8_t, 9> code{
         0x81, 0x7F, 0x04, 0x0C, 0x00, 0x00, 0x01, 0x75, 0x00,
@@ -31898,6 +31938,7 @@ int main() {
         {"LOCK INC guest dword", testLockedIncrementGuestDword},
         {"LOCK INC RIP-relative guest dword", testLockedIncrementRipRelativeGuestDword},
         {"LOCK DEC guest dword", testLockedDecrementGuestDword},
+        {"LOCK DEC RIP-relative guest qword", testLockedDecrementRipRelativeGuestQword},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
         {"CMP SIB guest memory with 32-bit immediate", testCompareGuestSibMemoryWith32BitImmediate},
         {"CMP guest qword with 32-bit immediate", testCompareGuestQwordWith32BitImmediate},

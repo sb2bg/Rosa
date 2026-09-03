@@ -462,7 +462,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << (instruction.opcode == x86::Opcode::LockIncMem
                            ? "lock inc dword ["
-                           : "lock dec dword [")
+                           : memory.width == 32 ? "lock dec dword ["
+                                                : "lock dec qword [")
                    << (memory.ripRelative ? "rip"
                                           : x86::registerName(memory.base));
             if (memory.displacement < 0) {
