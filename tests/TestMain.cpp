@@ -24113,6 +24113,35 @@ void testMachReplyPortTrap() {
            "mach_reply_port lost a previously allocated receive right");
 }
 
+void testMachSpecialReplyPortTrap() {
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::MachDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::specialReplyPortTrapNumber;
+    state.rdi = 0x6000026000C0ULL;
+    state.rsi = 0x803;
+    state.rflags = 0x8D7;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2FB70ULL});
+    const rosa::darwin::GuestMachPortName first{static_cast<std::uint32_t>(state.rax)};
+    expect(first.value != 0, "thread_get_special_reply_port returned MACH_PORT_NULL");
+    expect(dispatcher.ownsReceiveRight(first),
+           "thread_get_special_reply_port did not allocate a guest receive right");
+    expect(first != dispatcher.taskSelfPortName(),
+           "thread_get_special_reply_port collided with the guest task-self port");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "thread_get_special_reply_port applied BSD carry-flag semantics");
+
+    state.rax = rosa::darwin::MachDispatcher::specialReplyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2FB70ULL});
+    const rosa::darwin::GuestMachPortName second{static_cast<std::uint32_t>(state.rax)};
+    expect(second == first, "repeated thread_get_special_reply_port reallocated its right");
+
+    state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
+    dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+    const rosa::darwin::GuestMachPortName fresh{static_cast<std::uint32_t>(state.rax)};
+    expect(fresh != first, "mach_reply_port reused the special reply port name");
+}
+
 void testMachPortConstructTrap() {
     constexpr rosa::guest::GuestAddress optionsAddress{0x8100};
     constexpr rosa::guest::GuestAddress outputAddress{0x8200};
@@ -31782,6 +31811,7 @@ int main() {
         {"Mach port mod-refs trap", testMachPortModRefsTrap},
         {"Mach port deallocate trap", testMachPortDeallocateTrap},
         {"Mach reply-port trap", testMachReplyPortTrap},
+        {"Mach special reply-port trap", testMachSpecialReplyPortTrap},
         {"Mach port construct trap", testMachPortConstructTrap},
         {"Mach VM allocate trap", testMachVmAllocateTrap},
         {"Mach VM deallocate trap", testMachVmDeallocateTrap},

@@ -1840,6 +1840,25 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = kernSuccess;
         return;
     }
+    case 50U: {
+        // thread_get_special_reply_port takes no arguments and returns the
+        // calling thread's stable special reply port, creating it on first
+        // use. Rosa has one guest thread, so one synthetic reply receive
+        // right is cached for the process lifetime.
+        if (!specialReplyPort_) {
+            GuestPort port;
+            port.type = GuestPortType::Reply;
+            port.queueLimit = machPortQlimitDefault;
+            const auto name = portSpace_.allocateReceiveRight(port);
+            if (!name) {
+                state.rax = 0; // MACH_PORT_NULL models allocation exhaustion.
+                return;
+            }
+            specialReplyPort_ = *name;
+        }
+        state.rax = specialReplyPort_->value;
+        return;
+    }
     default:
         throw unsupported(state, syscallRip);
     }

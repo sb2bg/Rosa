@@ -39,6 +39,7 @@ class MachDispatcher {
     static constexpr std::uint64_t taskSelfTrapNumber = syscallClass | 28U;
     static constexpr std::uint64_t hostSelfTrapNumber = syscallClass | 29U;
     static constexpr std::uint64_t machMessage2TrapNumber = syscallClass | 47U;
+    static constexpr std::uint64_t specialReplyPortTrapNumber = syscallClass | 50U;
 
     [[nodiscard]] static constexpr bool isMachTrap(std::uint64_t number) {
         return (number & syscallClassMask) == syscallClass;
@@ -75,6 +76,7 @@ class MachDispatcher {
     GuestPortSpace portSpace_;
     std::optional<GuestPortConstructObservation> lastPortConstruct_;
     std::optional<GuestMachPortName> taskDebugControlPort_;
+    std::optional<GuestMachPortName> specialReplyPort_;
 };
 
 } // namespace rosa::darwin
