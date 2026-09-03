@@ -16166,6 +16166,47 @@ void testXorByteRegisterFromScaledGuestMemory() {
     expectEqual(faultState.rflags, std::uint64_t{0x8D7}, "failed XOR byte memory changed flags");
 }
 
+void testXorByteRegisterFromDisplacedGuestMemory() {
+    // Observed in libsqlite3: XOR DL, byte [RBP-0x88] (opcode 32 with disp32).
+    constexpr std::array<std::uint8_t, 7> code{0x32, 0x95, 0x78, 0xFF,
+                                               0xFF, 0xFF, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x10011B4DEULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegMem,
+           "XOR r8, byte [displaced memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6},
+                "XOR r8, byte [displaced memory] length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx && destination.width == 8 &&
+               memory.base == rosa::x86::Register::Rbp && !memory.index &&
+               memory.displacement == -136 && memory.width == 8,
+           "XOR DL, byte [RBP-0x88] operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("xor dl, [rbp-0x88]") != std::string::npos,
+           "XOR DL, byte [RBP-0x88] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> memoryValue{0x0F};
+    addressSpace.writeBytes(target, memoryValue);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x10011B4DEULL});
+    rosa::x86::X86State state;
+    state.rdx = 0xAABBCCDD123456F0ULL;
+    state.rbp = target.value + 136;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rdx, std::uint64_t{0xAABBCCDD123456FFULL},
+                "XOR byte displaced memory result differs");
+    expectEqual(state.rbp, target.value + 136, "XOR byte displaced memory changed its base");
+    constexpr std::uint64_t definedLogicFlags = 0x1U | 0x4U | 0x40U | 0x80U | 0x800U;
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{0x84},
+                "XOR byte displaced memory flags differ");
+}
+
 void testXor64BitRegisterFromGuestMemory() {
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x33, 0x08, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -33007,6 +33048,8 @@ int main() {
         {"XOR 8-bit registers generated execution", testXor8BitRegistersGeneratedExecution},
         {"XOR 32-bit register from guest memory", testXor32BitRegisterFromGuestMemory},
         {"XOR byte register from scaled guest memory", testXorByteRegisterFromScaledGuestMemory},
+        {"XOR byte register from displaced guest memory",
+         testXorByteRegisterFromDisplacedGuestMemory},
         {"XOR 64-bit register from guest memory", testXor64BitRegisterFromGuestMemory},
         {"XOR 64-bit register from indexed guest memory with displacement",
          testXor64BitRegisterFromIndexedGuestMemoryWithDisplacement},

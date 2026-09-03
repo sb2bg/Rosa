@@ -7223,34 +7223,60 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto destinationEncoding =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode != 0 || rmEncoding != 0x4U ||
+            if (mode > 0x2U || (mode == 0 && rmEncoding == 0x5U) ||
                 (!hasRex && destinationEncoding >= 0x4U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only representable-byte XOR register, byte [base+index*scale] from opcode 32 is supported");
+                    "only representable-byte XOR register, byte [base+index*scale+disp8/disp32] from opcode 32 is supported");
             }
-            if (cursor >= code.size()) {
+            auto base = decodeRegister(rmEncoding, rexB);
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (rmEncoding == 0x4U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated byte XOR memory SIB");
+                }
+                const auto sib = code[cursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "no-base byte XOR SIB is not supported");
+                }
+                base = decodeRegister(baseEncoding, rexB);
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            } else if (rexX) {
                 throw DecodeError(address, remaining,
-                                  "truncated byte XOR memory SIB");
+                                  "REX.X requires a byte XOR SIB");
             }
-            const auto sib = code[cursor++];
-            const auto scaleBits =
-                static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
-            const auto indexEncoding =
-                static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
-            const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-            if ((indexEncoding == 0x4U && !rexX) || baseEncoding == 0x5U) {
-                throw DecodeError(
-                    address, remaining,
-                    "byte XOR SIB requires register base and index");
+            std::int64_t displacement = 0;
+            if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated byte XOR disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            } else if (mode == 0x2U) {
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated byte XOR disp32");
+                }
+                displacement = readI32(code.subspan(cursor, 4));
+                cursor += 4;
             }
             instruction.opcode = Opcode::XorRegMem;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(destinationEncoding, rexR), 8});
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(baseEncoding, rexB), 0, 8,
-                decodeRegister(indexEncoding, rexX),
-                static_cast<std::uint8_t>(1U << scaleBits)});
+                base, displacement, 8, index, scale});
         } else if (opcode == 0x63U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated movsxd r64, [memory]");
