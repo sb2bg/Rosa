@@ -46,6 +46,7 @@ constexpr std::uint64_t syscallGetpid = unixSyscallClass | 20U;
 constexpr std::uint64_t syscallGetuid = unixSyscallClass | 24U;
 constexpr std::uint64_t syscallGeteuid = unixSyscallClass | 25U;
 constexpr std::uint64_t syscallGettid = unixSyscallClass | 286U;
+constexpr std::uint64_t syscallGetegid = unixSyscallClass | 43U;
 constexpr std::uint64_t syscallGetrlimit = unixSyscallClass | 194U;
 constexpr std::uint32_t guestRlimitPosixFlag = 0x1000U;
 constexpr std::uint32_t guestRlimitCount = 9U;
@@ -1631,6 +1632,12 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         // before touching the out-pointers). CoreFoundation expects this and
         // falls back to its default identity.
         setError(state, ESRCH);
+        return {};
+    }
+    if (number == syscallGetegid) {
+        // Same one-process model as getuid/geteuid: the host effective group
+        // ID is the guest's. Reached as CoreFoundation's gettid fallback.
+        setSuccess(state, static_cast<std::uint64_t>(::getegid()));
         return {};
     }
     if (number == syscallGetrlimit) {

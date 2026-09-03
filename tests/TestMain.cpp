@@ -21846,6 +21846,25 @@ void testDarwinGettidReportsNoOverrideIdentity() {
                 "gettid with unmapped out-pointers returned the wrong errno");
 }
 
+void testDarwinGetegid() {
+    constexpr auto getegidNumber = UINT64_C(0x0200002B);
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = getegidNumber;
+    state.rdi = 0x3;
+    state.rsi = 0x7000000FAB04ULL;
+    state.rdx = 0xFFFFFFFFFFFFFFFFULL;
+    state.rflags = 0x86;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E311B0ULL});
+    expect(!outcome.exited, "getegid terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(::getegid()),
+                "getegid returned the wrong group identity");
+    expectEqual(state.rflags, std::uint64_t{0x86},
+                "getegid did not apply successful BSD carry semantics");
+}
+
 void testDarwinGetrlimit() {
     constexpr auto getrlimitNumber = UINT64_C(0x020000C2);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -34768,6 +34787,7 @@ int main() {
         {"Darwin getuid", testDarwinGetuid},
         {"Darwin geteuid", testDarwinGeteuid},
         {"Darwin gettid without override identity", testDarwinGettidReportsNoOverrideIdentity},
+        {"Darwin getegid", testDarwinGetegid},
         {"Darwin getrlimit", testDarwinGetrlimit},
         {"Darwin sigaction", testDarwinSigaction},
         {"Darwin gettimeofday", testDarwinGettimeofday},
