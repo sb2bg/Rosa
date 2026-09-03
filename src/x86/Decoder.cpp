@@ -6745,11 +6745,16 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 !(mode == 0 && rmEncoding == 0x5U);
             const bool isCmovMemory =
                 isConditionalMove && mode != 0x3U;
-            if ((!isImulRipMemory && !isMovsxMemory && !isCmovMemory && mode != 0x3U) ||
+            const bool isBtMemory =
+                secondOpcode == 0xBAU &&
+                (static_cast<std::uint8_t>((modrm >> 3U) & 0x7U) == 0x4U) &&
+                mode != 0x3U && !(mode == 0 && rmEncoding == 0x5U);
+            if ((!isImulRipMemory && !isMovsxMemory && !isCmovMemory && !isBtMemory &&
+                 mode != 0x3U) ||
                 (rexX && secondOpcode != 0xBAU && !isMovsxMemory)) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct CMOVO/CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVL/CMOVGE/CMOVLE/BT/BTS/MOVSX/IMUL/SHLD/SHRD/BSF/BSR is supported");
+                    "only register-direct CMOVO/CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVL/CMOVGE/CMOVLE/BT/BTS/MOVSX/IMUL/SHLD/SHRD/BSF/BSR and based BT m32/m64, imm8 are supported");
             }
             const auto rawReg =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
@@ -6779,6 +6784,71 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     throw DecodeError(
                         address, remaining,
                         "only register-direct BT/BTS/BTR r32/r64, imm8 is supported from 0F BA");
+                }
+                if (isBtMemory) {
+                    const auto width =
+                        static_cast<std::uint8_t>(rexW ? 64U : 32U);
+                    auto baseEncoding = rmEncoding;
+                    std::optional<Register> index;
+                    std::uint8_t scale = 1;
+                    if (rmEncoding == 0x4U) {
+                        if (cursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated BT memory SIB byte");
+                        }
+                        const auto sib = code[cursor++];
+                        const auto scaleBits =
+                            static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                        const auto indexEncoding =
+                            static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                        baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                        if (mode == 0 && baseEncoding == 0x5U) {
+                            throw DecodeError(address, remaining,
+                                              "no-base BT memory SIB is not supported");
+                        }
+                        if (indexEncoding != 0x4U || rexX) {
+                            index = decodeRegister(indexEncoding, rexX);
+                            scale = static_cast<std::uint8_t>(1U << scaleBits);
+                        }
+                    }
+                    std::int64_t displacement = 0;
+                    if (mode == 0x1U) {
+                        if (cursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated BT memory disp8");
+                        }
+                        displacement =
+                            std::bit_cast<std::int8_t>(code[cursor++]);
+                    } else if (mode == 0x2U) {
+                        if (code.size() - cursor < 4) {
+                            throw DecodeError(address, remaining,
+                                              "truncated BT memory disp32");
+                        }
+                        displacement = readI32(code.subspan(cursor, 4));
+                        cursor += 4;
+                    }
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated BT memory imm8");
+                    }
+                    instruction.opcode = Opcode::BitTestMemImm;
+                    instruction.operands.push_back(MemoryOperand{
+                        decodeRegister(baseEncoding, rexB), displacement,
+                        width, index, scale});
+                    instruction.operands.push_back(
+                        ImmediateOperand{code[cursor++], 8});
+                    const auto memoryLength = cursor - instructionStart;
+                    instruction.length =
+                        static_cast<std::uint8_t>(memoryLength);
+                    std::copy_n(
+                        code.begin() +
+                            static_cast<std::ptrdiff_t>(instructionStart),
+                        memoryLength, instruction.bytes.begin());
+                    result.push_back(std::move(instruction));
+                    if (result.size() == maximumInstructions) {
+                        return result;
+                    }
+                    continue;
                 }
                 instruction.opcode = rawReg == 0x4U   ? Opcode::BitTestRegImm
                                      : rawReg == 0x5U ? Opcode::BitSetRegImm

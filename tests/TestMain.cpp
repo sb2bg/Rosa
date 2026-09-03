@@ -30070,6 +30070,67 @@ void testBitScanForward32() {
            "extended BSF r32 did not clear ZF for a nonzero source");
 }
 
+void testBitTestMemoryImmediate32() {
+    // Observed in libblocks under an Objective-C fixture: BT dword [r14+0x8], 0x1c.
+    constexpr std::array<std::uint8_t, 7> code{0x41, 0x0F, 0xBA, 0x66,
+                                               0x08, 0x1C, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802B28CC0ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::BitTestMemImm,
+           "BT m32, imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6}, "BT m32, imm8 length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(!memory.ripRelative && memory.hasBase &&
+               memory.base == rosa::x86::Register::R14 && !memory.index &&
+               memory.displacement == 8 && memory.width == 32,
+           "BT m32, imm8 memory operand differs");
+    expectEqual(immediate.value, std::uint64_t{0x1C}, "BT m32, imm8 bit index differs");
+    expect(rosa::debug::dumpX86(decoded).find("bt dword [r14+0x8], 0x1c") != std::string::npos,
+           "BT m32, imm8 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8108};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    // Bit 28 (0x1C) set.
+    addressSpace.writeU32(target, 0x10000000);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("update_bit_test_flags.i32") != std::string::npos,
+           "BT m32, imm8 did not lower through typed flags IR");
+    rosa::x86::X86State setState;
+    setState.r14 = target.value - 8;
+    setState.rflags = 0xAD6;
+    static_cast<void>(block.execute(setState, &addressSpace));
+    expectEqual(setState.r14, target.value - 8, "BT m32, imm8 changed its base");
+    expectEqual(setState.rflags, std::uint64_t{0xAD7}, "BT m32, imm8 set-CF semantics differ");
+
+    addressSpace.writeU32(target, 0xEFFFFFFF);
+    rosa::x86::X86State clearState;
+    clearState.r14 = target.value - 8;
+    clearState.rflags = 0xAD7;
+    static_cast<void>(block.execute(clearState, &addressSpace));
+    expectEqual(clearState.rflags, std::uint64_t{0xAD6}, "BT m32, imm8 clear-CF semantics differ");
+
+    // An out-of-range immediate is masked to five bits without striding:
+    // bit 40 is bit 8 of the same dword, even when the next dword has bit 8 set.
+    constexpr std::array<std::uint8_t, 7> maskedCode{0x41, 0x0F, 0xBA, 0x66,
+                                                     0x08, 0x28, 0xC3};
+    const auto maskedBlock = translator.translate(maskedCode, observedRip);
+    addressSpace.writeU32(target, 0x00000000);
+    addressSpace.writeU32(rosa::guest::GuestAddress{target.value + 4}, 0x00000100);
+    rosa::x86::X86State maskedState;
+    maskedState.r14 = target.value - 8;
+    maskedState.rflags = 0xAD7;
+    static_cast<void>(maskedBlock.execute(maskedState, &addressSpace));
+    expectEqual(maskedState.rflags, std::uint64_t{0xAD6},
+                "BT m32 strode into the neighboring unit");
+}
+
 void testBitTestRegisterImmediate32() {
     constexpr std::array<std::uint8_t, 5> code{0x0F, 0xBA, 0xE6, 0x09, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -35423,6 +35484,7 @@ int main() {
         {"AND immediate into guest word", testAndImmediateIntoGuestWord},
         {"AND immediate into guest byte", testAndImmediateIntoGuestByte},
         {"BT 32-bit register with immediate", testBitTestRegisterImmediate32},
+        {"BT 32-bit memory with immediate", testBitTestMemoryImmediate32},
         {"BTS/BTR 64-bit register with immediate", testBitSetResetRegisterImmediate64},
         {"BT 32-bit register with register index", testBitTestRegisterIndex32},
         {"BTS 64-bit register with register index", testBitSetRegisterIndex64},

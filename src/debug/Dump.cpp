@@ -1378,7 +1378,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::BitTestMemImm: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "bt dword [" << x86::registerName(memory.base);
+            stream << "bt " << (memory.width == 32 ? "dword [" : "qword [")
+                   << x86::registerName(memory.base);
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {

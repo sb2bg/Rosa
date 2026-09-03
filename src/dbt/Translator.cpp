@@ -6401,23 +6401,51 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             break;
         }
         case x86::Opcode::BitTestMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: BT memory operand count");
+            }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto bitIndex = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            if (memory.width != 32 || bitIndex.width != 8 || memory.index || !memory.hasBase ||
-                memory.ripRelative) {
-                throw std::runtime_error("only based dword BT memory operands are implemented");
+            if ((memory.width != 32 && memory.width != 64) || bitIndex.width != 8 ||
+                (memory.ripRelative ? memory.hasBase || memory.index.has_value()
+                                    : !memory.hasBase) ||
+                memory.segment != x86::Segment::None) {
+                throw std::runtime_error(
+                    "only based 32-bit and 64-bit BT memory operands are implemented");
             }
+            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            // Like the register form, an immediate bit offset is masked to
+            // the operand width; unlike a register offset it never strides
+            // into a neighboring unit (pinned by differential tests).
+            const auto maskedBit = static_cast<std::uint8_t>(
+                bitIndex.value & (memory.width == 32 ? 0x1FU : 0x3FU));
             auto address =
-                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
-            if (memory.displacement != 0) {
-                const auto displacement =
-                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
-                                     ir::Width::I64, instruction.address);
-                address = builder.add(address, displacement, ir::Width::I64, instruction.address);
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address =
+                    builder.add(address, index, ir::Width::I64, instruction.address);
             }
-            const auto value = builder.loadGuest(address, ir::Width::I32, instruction.address);
-            builder.updateBitTestFlags(value, static_cast<std::uint8_t>(bitIndex.value & 0x1FU),
-                                       ir::Width::I32, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto value = builder.loadGuest(address, width, instruction.address);
+            builder.updateBitTestFlags(value, maskedBit, width, instruction.address);
             break;
         }
         case x86::Opcode::BitScanReverseRegReg: {
