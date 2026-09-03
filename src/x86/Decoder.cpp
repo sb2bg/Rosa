@@ -1211,11 +1211,33 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 continue;
             }
-            if (rmEncoding == 0x4U ||
-                (mode == 0 && rmEncoding == 0x5U)) {
+            if ((mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only MOVSX r32, byte [base+disp8/disp32] is supported without REX");
+                    "only MOVSX r32, byte [base+index*scale+disp8/disp32] is supported without REX");
+            }
+            auto baseEncoding = rmEncoding;
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (rmEncoding == 0x4U) {
+                if (operandCursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated MOVSX byte SIB");
+                }
+                const auto sib = code[operandCursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                const auto indexEncoding =
+                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(address, remaining,
+                                      "no-base MOVSX byte SIB is not supported");
+                }
+                if (indexEncoding != 0x4U) {
+                    index = decodeRegister(indexEncoding, false);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -1239,7 +1261,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), false),
                 32});
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, false), displacement, 8});
+                decodeRegister(baseEncoding, false), displacement, 8, index,
+                scale});
             const auto length = operandCursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(

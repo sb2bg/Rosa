@@ -10973,6 +10973,39 @@ void testMovsxGuestByteTo32BitRegister() {
     expectEqual(negativeState.rflags, std::uint64_t{0xAD7},
                 "negative MOVSX byte memory changed flags");
 
+    // Observed in sqlite: MOVSX ESI, byte [RDX+RSI] with a no-index SIB.
+    constexpr std::array<std::uint8_t, 5> sibCode{0x0F, 0xBE, 0x34, 0x32, 0xC3};
+    const auto sibDecoded =
+        decoder.decodeBlock(sibCode, rosa::guest::GuestAddress{0x10004748FULL});
+    expect(sibDecoded[0].opcode == rosa::x86::Opcode::MovsxRegMem,
+           "SIB MOVSX opcode differs");
+    expectEqual(sibDecoded[0].length, std::uint8_t{4}, "SIB MOVSX length differs");
+    const auto sibDestination =
+        std::get<rosa::x86::RegisterOperand>(sibDecoded[0].operands[0]);
+    const auto sibMemory = std::get<rosa::x86::MemoryOperand>(sibDecoded[0].operands[1]);
+    expect(sibDestination.reg == rosa::x86::Register::Rsi && sibDestination.width == 32 &&
+               sibMemory.base == rosa::x86::Register::Rdx && sibMemory.index &&
+               *sibMemory.index == rosa::x86::Register::Rsi && sibMemory.scale == 1 &&
+               sibMemory.width == 8 && sibMemory.displacement == 0,
+           "MOVSX ESI, byte [RDX+RSI] operands differ");
+    expect(rosa::debug::dumpX86(sibDecoded).find("movsx esi, byte [rdx+rsi*1]") !=
+               std::string::npos,
+           "MOVSX ESI, byte [RDX+RSI] dump differs");
+    const auto sibBlock =
+        translator.translate(sibCode, rosa::guest::GuestAddress{0x10004748FULL});
+    constexpr rosa::guest::GuestAddress sibSource{0x8140};
+    constexpr std::array<std::uint8_t, 1> sibNegative{0x80};
+    addressSpace.writeBytes(sibSource, sibNegative);
+    rosa::x86::X86State sibState;
+    sibState.rdx = 0x8100;
+    sibState.rsi = 0x40;
+    sibState.rflags = 0x8D7;
+    static_cast<void>(sibBlock.execute(sibState, &addressSpace));
+    expectEqual(sibState.rsi, std::uint64_t{0xFFFFFF80},
+                "SIB MOVSX byte memory result differs");
+    expectEqual(sibState.rdx, std::uint64_t{0x8100}, "SIB MOVSX changed its base");
+    expectEqual(sibState.rflags, std::uint64_t{0x8D7}, "SIB MOVSX changed flags");
+
     constexpr std::array<std::uint8_t, 6> observedCode{0x49, 0x0F, 0xBE, 0x5D, 0x00, 0xC3};
     const auto observedDecoded =
         decoder.decodeBlock(observedCode, rosa::guest::GuestAddress{0x7FF802ACEDD0ULL});
