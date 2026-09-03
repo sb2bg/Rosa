@@ -363,7 +363,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::XchgMemReg: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "xchg " << (memory.width == 32 ? "dword" : "qword")
+            stream << "xchg "
+                   << (memory.width == 8    ? "byte"
+                       : memory.width == 32 ? "dword"
+                                            : "qword")
                    << " [";
             if (memory.ripRelative) {
                 stream << "rip";

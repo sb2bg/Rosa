@@ -1523,10 +1523,10 @@ std::vector<std::string> verify(const Block &block) {
                 errors.emplace_back(
                     "exchange_guest_memory lacks a destination register");
             }
-            if (operation.width != Width::I32 &&
+            if (operation.width != Width::I8 && operation.width != Width::I32 &&
                 operation.width != Width::I64) {
                 errors.emplace_back(
-                    "exchange_guest_memory currently requires i32 or i64");
+                    "exchange_guest_memory currently requires i8, i32 or i64");
             }
             break;
         case Opcode::LockedAddGuestMemory:

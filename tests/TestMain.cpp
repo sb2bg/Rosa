@@ -7450,6 +7450,67 @@ void testExchangeGuestQwordWithIndex() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "indexed XCHG qword changed flags");
 }
 
+void testExchangeGuestByteWithRegister() {
+    // Observed in Foundation under an Objective-C fixture: XCHG byte [r14+0x37], al.
+    constexpr std::array<std::uint8_t, 5> code{0x41, 0x86, 0x46, 0x37, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8040AC6FAULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::XchgMemReg,
+           "XCHG byte memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "XCHG byte memory length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(!memory.ripRelative && memory.hasBase &&
+               memory.base == rosa::x86::Register::R14 && !memory.index &&
+               memory.displacement == 0x37 && memory.width == 8,
+           "XCHG byte memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rax && source.width == 8,
+           "XCHG byte source differs");
+    expect(rosa::debug::dumpX86(decoded).find("xchg byte [r14+0x37], al") != std::string::npos,
+           "XCHG byte dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8137};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(target, std::array<std::uint8_t, 1>{0x5A});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(
+        rosa::debug::dumpIr(block.intermediateRepresentation()).find("exchange_guest_memory.i8") !=
+            std::string::npos,
+        "XCHG byte did not lower through byte guest-memory IR");
+    rosa::x86::X86State state;
+    state.r14 = target.value - 0x37;
+    state.rax = 0x11223344556677A5ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readBytes(target, 1).front(), std::uint8_t{0xA5},
+                "XCHG byte stored the wrong value");
+    expectEqual(state.rax, std::uint64_t{0x112233445566775AULL},
+                "XCHG byte returned the wrong old memory value");
+    expectEqual(state.r14, target.value - 0x37, "XCHG byte changed its address base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "XCHG byte changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.r14 = target.value - 0x37;
+    faultState.rax = 0xA5A5A5A5A5A5A5A5ULL;
+    faultState.rflags = 0xAD7;
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") != std::string_view::npos;
+    }
+    expect(rejected, "XCHG byte accepted an unmapped target");
+    expectEqual(faultState.rax, std::uint64_t{0xA5A5A5A5A5A5A5A5ULL},
+                "faulted XCHG byte changed RAX");
+    expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted XCHG byte changed flags");
+}
+
 void testLockedAddGuestQwordRegister() {
     constexpr rosa::guest::GuestAddress instructionAddress{0x7FF7000249E1ULL};
     constexpr rosa::guest::GuestAddress target{0x7FF7000A5330ULL};
@@ -34763,6 +34824,7 @@ int main() {
         {"XCHG guest dword with register", testExchangeGuestDwordWithRegister},
         {"XCHG guest qword with register", testExchangeGuestQwordWithRegister},
         {"XCHG guest qword with index", testExchangeGuestQwordWithIndex},
+        {"XCHG guest byte with register", testExchangeGuestByteWithRegister},
         {"LOCK OR guest dword immediate", testLockedOrGuestDwordImmediate},
         {"LOCK OR guest word immediate", testLockedOrGuestWordImmediate},
         {"LOCK AND guest word immediate", testLockedAndGuestWordImmediate},
