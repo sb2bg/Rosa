@@ -31368,6 +31368,42 @@ void testConditionalMoveGreater64() {
                 "CMOVG took when SF differed from OF");
 }
 
+void testConditionalMoveGreater32Legacy() {
+    // Observed in sqlite: CMOVG EAX, EBX without a REX prefix.
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x4F, 0xC3, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000600A2ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmovccReg &&
+               decoded[0].condition == rosa::x86::Condition::Greater,
+           "legacy CMOVG opcode or condition differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "legacy CMOVG length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 32 &&
+               source.reg == rosa::x86::Register::Rbx && source.width == 32,
+           "CMOVG EAX, EBX operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmovg eax, ebx") != std::string::npos,
+           "CMOVG EAX, EBX dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000600A2ULL});
+    const auto execute = [&block](std::uint64_t flags) {
+        rosa::x86::X86State state;
+        state.rax = 0xAABBCCDD11223344ULL;
+        state.rbx = 0x88776655DEADBEEFULL;
+        state.rflags = flags;
+        static_cast<void>(block.execute(state));
+        return state;
+    };
+    // Greater means ZF=0 and SF=OF: cleared flags take, ZF set does not.
+    const auto taken = execute(0x2);
+    expectEqual(taken.rax, std::uint64_t{0xDEADBEEF}, "legacy CMOVG did not take when greater");
+    expectEqual(taken.rflags, std::uint64_t{0x2}, "taken legacy CMOVG changed flags");
+    const auto notTaken = execute(0x2 | (std::uint64_t{1} << 6U));
+    expectEqual(notTaken.rax, std::uint64_t{0x11223344},
+                "legacy CMOVG moved when ZF was set");
+}
+
 void testConditionalMoveEqual32Extended() {
     constexpr std::array<std::uint8_t, 5> code{0x41, 0x0F, 0x44, 0xC0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -32508,6 +32544,7 @@ int main() {
         {"conditional move greater-or-equal 32-bit", testConditionalMoveGreaterOrEqual32},
         {"conditional move less and overflow 64-bit", testConditionalMoveLessAndOverflow64},
         {"conditional move greater 64-bit", testConditionalMoveGreater64},
+        {"conditional move greater 32-bit legacy", testConditionalMoveGreater32Legacy},
         {"conditional move equal extended 32-bit", testConditionalMoveEqual32Extended},
         {"unsigned-above conditional", testUnsignedAboveConditional},
         {"unsigned-above long conditional", testUnsignedAboveLongConditional},

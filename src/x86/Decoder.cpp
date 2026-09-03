@@ -5399,7 +5399,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                  code[cursor + 1] == 0x49U ||
                  code[cursor + 1] == 0x4CU ||
                  code[cursor + 1] == 0x4DU ||
-                 code[cursor + 1] == 0x4EU)) {
+                 code[cursor + 1] == 0x4EU ||
+                 code[cursor + 1] == 0x4FU)) {
                 const auto modrm = code[cursor + 2];
                 const auto mode =
                     static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
@@ -5425,6 +5426,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                             ? Condition::GreaterOrEqual
                                         : code[cursor + 1] == 0x40U
                                             ? Condition::Overflow
+                                        : code[cursor + 1] == 0x4FU
+                                            ? Condition::Greater
                                             : Condition::LessOrEqual;
                 instruction.operands.push_back(RegisterOperand{
                     decodeRegister(
