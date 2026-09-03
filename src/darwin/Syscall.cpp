@@ -53,6 +53,7 @@ constexpr std::uint64_t syscallDup = unixSyscallClass | 41U;
 constexpr std::uint64_t syscallIoctl = unixSyscallClass | 54U;
 constexpr std::uint64_t syscallMunmap = unixSyscallClass | 73U;
 constexpr std::uint64_t syscallMprotect = unixSyscallClass | 74U;
+constexpr std::uint64_t syscallMadvise = unixSyscallClass | 75U;
 constexpr std::uint64_t syscallFcntl = unixSyscallClass | 92U;
 constexpr std::uint64_t syscallSocket = unixSyscallClass | 97U;
 constexpr std::uint64_t syscallConnect = unixSyscallClass | 98U;
@@ -2393,6 +2394,18 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             return {};
         }
         throw std::runtime_error("unreachable guest mprotect result");
+    }
+    if (number == syscallMadvise) {
+        // Advice never affects correctness: Rosa has no page cache, swap, or
+        // wired pages to manage, so every known behavior is a successful
+        // no-op. Reject only unknown behaviors, which indicate a guest bug.
+        // Darwin behaviors run NORMAL..CAN_REUSE (0..9) plus PAGEOUT (10).
+        if (state.rdx > 10) {
+            setError(state, EINVAL);
+            return {};
+        }
+        setSuccess(state, 0);
+        return {};
     }
     if (number == syscallMunmap) {
         // XNU's BSD munmap requires a page-aligned start and nonzero size,

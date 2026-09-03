@@ -24426,6 +24426,29 @@ void testDarwinMprotect() {
                 "mprotect with unknown protection bits returned the wrong errno");
 }
 
+void testDarwinMadvise() {
+    constexpr auto madviseNumber = UINT64_C(0x0200004B);
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    // Observed in libsqlite3: MADV_CAN_REUSE (9) over a malloc region.
+    state.rax = madviseNumber;
+    state.rdi = 0x100216000ULL;
+    state.rsi = 0xC000ULL;
+    state.rdx = 9;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "madvise(MADV_CAN_REUSE) did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x2}, "madvise did not clear BSD carry");
+
+    state.rax = madviseNumber;
+    state.rdx = 11;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "madvise with unknown behavior returned the wrong errno");
+}
+
 void testDarwinMapWithLinking() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr auto mapWithLinkingNumber = UINT64_C(0x02000226);
@@ -33509,6 +33532,7 @@ int main() {
         {"Darwin proc_info unique identifier", testDarwinProcInfoUniqueIdentifier},
         {"Darwin proc_info short BSD info", testDarwinProcInfoShortBsdInfo},
         {"Darwin mprotect", testDarwinMprotect},
+        {"Darwin madvise", testDarwinMadvise},
         {"Darwin map_with_linking", testDarwinMapWithLinking},
         {"Darwin munmap", testDarwinMunmap},
         {"generated Darwin munmap", testGeneratedDarwinMunmap},
