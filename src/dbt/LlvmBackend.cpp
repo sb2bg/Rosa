@@ -1,8 +1,13 @@
 #include "dbt/LlvmBackend.h"
+#include "guest/AddressSpace.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -39,11 +44,27 @@ namespace {
 
 constexpr std::size_t guestRegisterCount = 16;
 
+struct MemoryLoopPlan {
+    enum class Access : std::uint8_t { Read, Write };
+    enum class Termination : std::uint8_t { ExactNotEqual, UnsignedBelow };
+
+    x86::Register inductionRegister{};
+    x86::Register baseRegister{};
+    std::optional<x86::Register> stepRegister;
+    std::uint64_t constantStep{};
+    std::uint64_t limit{};
+    std::uint64_t minimumOffset{};
+    std::uint64_t maximumOffset{};
+    Access access{Access::Read};
+    Termination termination{Termination::ExactNotEqual};
+};
+
 struct LoopAnalysis {
     std::array<bool, guestRegisterCount> touchedRegisters{};
     const ir::Operation *finalFlags{};
     const ir::Operation *exit{};
     bool selfEdgeWhenConditionTrue{};
+    std::optional<MemoryLoopPlan> memory;
 };
 
 bool isReplacingFlagUpdate(ir::Opcode opcode) noexcept {
@@ -62,13 +83,18 @@ std::optional<LoopAnalysis> analyzeLoop(const ir::Block &block) {
 
     LoopAnalysis analysis;
     std::vector<bool> defined(block.valueCount, false);
+    std::vector<const ir::Operation *> definitions(block.valueCount, nullptr);
     std::vector<ir::Opcode> flagUpdates;
+    std::vector<const ir::Operation *> memoryOperations;
+    bool flagsAvailable = false;
 
-    const auto define = [&defined](const std::optional<ir::ValueId> &value) {
+    const auto define = [&defined, &definitions](const std::optional<ir::ValueId> &value,
+                                                 const ir::Operation &operation) {
         if (!value || value->value >= defined.size() || defined[value->value]) {
             return false;
         }
         defined[value->value] = true;
+        definitions[value->value] = &operation;
         return true;
     };
     const auto use = [&defined](const std::optional<ir::ValueId> &value) {
@@ -88,18 +114,15 @@ std::optional<LoopAnalysis> analyzeLoop(const ir::Block &block) {
 
     for (std::size_t index = 0; index < block.operations.size(); ++index) {
         const auto &operation = block.operations[index];
-        if (operation.width != ir::Width::I64) {
-            return std::nullopt;
-        }
 
         switch (operation.opcode) {
         case ir::Opcode::Constant:
-            if (!define(operation.result)) {
+            if (!define(operation.result, operation)) {
                 return std::nullopt;
             }
             break;
         case ir::Opcode::ReadGuestReg:
-            if (!touch(operation.guestRegister) || !define(operation.result)) {
+            if (!touch(operation.guestRegister) || !define(operation.result, operation)) {
                 return std::nullopt;
             }
             break;
@@ -108,14 +131,43 @@ std::optional<LoopAnalysis> analyzeLoop(const ir::Block &block) {
                 return std::nullopt;
             }
             break;
+        case ir::Opcode::ConditionalMoveGuestReg:
+            if (!touch(operation.guestRegister) || !operation.condition || !flagsAvailable ||
+                (operation.lhs && !use(operation.lhs)) ||
+                (!operation.lhs && operation.immediate >= guestRegisterCount)) {
+                return std::nullopt;
+            }
+            if (!operation.lhs) {
+                analysis.touchedRegisters[operation.immediate] = true;
+            }
+            break;
         case ir::Opcode::Add:
         case ir::Opcode::Sub:
         case ir::Opcode::And:
         case ir::Opcode::Or:
         case ir::Opcode::Xor:
-            if (!use(operation.lhs) || !use(operation.rhs) || !define(operation.result)) {
+            if (!use(operation.lhs) || !use(operation.rhs) ||
+                !define(operation.result, operation)) {
                 return std::nullopt;
             }
+            break;
+        case ir::Opcode::EvaluateCondition:
+            if (!operation.condition || !flagsAvailable || !define(operation.result, operation)) {
+                return std::nullopt;
+            }
+            break;
+        case ir::Opcode::LoadGuest:
+            if (operation.width != ir::Width::I8 || !use(operation.lhs) ||
+                !define(operation.result, operation)) {
+                return std::nullopt;
+            }
+            memoryOperations.push_back(&operation);
+            break;
+        case ir::Opcode::StoreGuest:
+            if (operation.width != ir::Width::I8 || !use(operation.lhs) || !use(operation.rhs)) {
+                return std::nullopt;
+            }
+            memoryOperations.push_back(&operation);
             break;
         case ir::Opcode::UpdateAddFlags:
         case ir::Opcode::UpdateSubFlags:
@@ -124,6 +176,7 @@ std::optional<LoopAnalysis> analyzeLoop(const ir::Block &block) {
             }
             flagUpdates.push_back(operation.opcode);
             analysis.finalFlags = &operation;
+            flagsAvailable = true;
             break;
         case ir::Opcode::UpdateIncFlags:
         case ir::Opcode::UpdateDecFlags:
@@ -132,6 +185,7 @@ std::optional<LoopAnalysis> analyzeLoop(const ir::Block &block) {
             }
             flagUpdates.push_back(operation.opcode);
             analysis.finalFlags = &operation;
+            flagsAvailable = true;
             break;
         case ir::Opcode::UpdateLogicFlags:
             if (!use(operation.lhs)) {
@@ -139,6 +193,7 @@ std::optional<LoopAnalysis> analyzeLoop(const ir::Block &block) {
             }
             flagUpdates.push_back(operation.opcode);
             analysis.finalFlags = &operation;
+            flagsAvailable = true;
             break;
         case ir::Opcode::ExitBlock: {
             if (index + 1 != block.operations.size() ||
@@ -175,7 +230,246 @@ std::optional<LoopAnalysis> analyzeLoop(const ir::Block &block) {
         }
     }
 
+    if (!memoryOperations.empty()) {
+        const auto &update = *analysis.finalFlags;
+        const auto &exit = *analysis.exit;
+        const auto access = memoryOperations.front()->opcode == ir::Opcode::LoadGuest
+                                ? MemoryLoopPlan::Access::Read
+                                : MemoryLoopPlan::Access::Write;
+        if (std::ranges::any_of(memoryOperations, [&](const auto *operation) {
+                return (operation->opcode == ir::Opcode::LoadGuest) !=
+                       (access == MemoryLoopPlan::Access::Read);
+            })) {
+            return std::nullopt;
+        }
+        const auto termination = exit.condition == x86::Condition::NotEqual
+                                     ? MemoryLoopPlan::Termination::ExactNotEqual
+                                     : MemoryLoopPlan::Termination::UnsignedBelow;
+        if (update.opcode != ir::Opcode::UpdateSubFlags || update.width != ir::Width::I64 ||
+            !update.lhs || !update.rhs || !analysis.selfEdgeWhenConditionTrue ||
+            (access == MemoryLoopPlan::Access::Read &&
+             exit.condition != x86::Condition::NotEqual) ||
+            (access == MemoryLoopPlan::Access::Write && exit.condition != x86::Condition::Below)) {
+            return std::nullopt;
+        }
+        const auto *limit = definitions[update.rhs->value];
+        if (limit == nullptr || limit->opcode != ir::Opcode::Constant || limit->immediate == 0) {
+            return std::nullopt;
+        }
+
+        std::optional<x86::Register> inductionRegister;
+        std::optional<x86::Register> stepRegister;
+        std::uint64_t constantStep{};
+        std::size_t inductionWriteIndex = block.operations.size();
+        for (std::size_t operationIndex = 0; operationIndex < block.operations.size();
+             ++operationIndex) {
+            const auto &operation = block.operations[operationIndex];
+            if (operation.opcode != ir::Opcode::WriteGuestReg ||
+                operation.width != ir::Width::I64 || !operation.guestRegister ||
+                operation.lhs != update.lhs) {
+                continue;
+            }
+            const auto *increment = definitions[operation.lhs->value];
+            if (increment == nullptr || increment->opcode != ir::Opcode::Add ||
+                increment->width != ir::Width::I64 || !increment->lhs || !increment->rhs) {
+                continue;
+            }
+            for (const auto [readValue, stepValue] :
+                 {std::pair{*increment->lhs, *increment->rhs},
+                  std::pair{*increment->rhs, *increment->lhs}}) {
+                const auto *read = definitions[readValue.value];
+                const auto *stepDefinition = definitions[stepValue.value];
+                if (read != nullptr && read->opcode == ir::Opcode::ReadGuestReg &&
+                    read->width == ir::Width::I64 &&
+                    read->guestRegister == operation.guestRegister && stepDefinition != nullptr &&
+                    (stepDefinition->opcode == ir::Opcode::Constant ||
+                     stepDefinition->opcode == ir::Opcode::ReadGuestReg)) {
+                    inductionRegister = operation.guestRegister;
+                    if (stepDefinition->opcode == ir::Opcode::Constant) {
+                        constantStep = stepDefinition->immediate;
+                    } else if (stepDefinition->width == ir::Width::I64 &&
+                               stepDefinition->guestRegister) {
+                        stepRegister = stepDefinition->guestRegister;
+                    }
+                    inductionWriteIndex = operationIndex;
+                    break;
+                }
+            }
+        }
+        if (!inductionRegister || (!stepRegister && constantStep == 0)) {
+            return std::nullopt;
+        }
+        const auto inductionWrites =
+            std::ranges::count_if(block.operations, [&](const auto &operation) {
+                return operation.guestRegister == inductionRegister &&
+                       (operation.opcode == ir::Opcode::WriteGuestReg ||
+                        operation.opcode == ir::Opcode::ConditionalMoveGuestReg);
+            });
+        if (inductionWrites != 1 || (stepRegister && *stepRegister == *inductionRegister)) {
+            return std::nullopt;
+        }
+
+        std::optional<x86::Register> baseRegister;
+        auto minimumOffset = UINT64_MAX;
+        std::uint64_t maximumOffset{};
+        for (const auto *memoryOperation : memoryOperations) {
+            std::uint64_t offset{};
+            std::size_t inductionTerms{};
+            std::size_t baseTerms{};
+            std::optional<x86::Register> loadBase;
+            std::function<bool(ir::ValueId, std::size_t)> flatten = [&](ir::ValueId value,
+                                                                        std::size_t depth) {
+                if (depth > block.valueCount) {
+                    return false;
+                }
+                const auto *definition = definitions[value.value];
+                if (definition == nullptr) {
+                    return false;
+                }
+                if (definition->opcode == ir::Opcode::Add && definition->width == ir::Width::I64 &&
+                    definition->lhs && definition->rhs) {
+                    return flatten(*definition->lhs, depth + 1) &&
+                           flatten(*definition->rhs, depth + 1);
+                }
+                if (definition->opcode == ir::Opcode::Constant) {
+                    if (definition->immediate > UINT64_MAX - offset) {
+                        return false;
+                    }
+                    offset += definition->immediate;
+                    return true;
+                }
+                if (definition->opcode != ir::Opcode::ReadGuestReg ||
+                    definition->width != ir::Width::I64 || !definition->guestRegister) {
+                    return false;
+                }
+                if (definition->guestRegister == inductionRegister) {
+                    const auto definitionIndex =
+                        static_cast<std::size_t>(definition - block.operations.data());
+                    if (definitionIndex >= inductionWriteIndex) {
+                        return false;
+                    }
+                    ++inductionTerms;
+                    return inductionTerms == 1;
+                }
+                if (loadBase && loadBase != definition->guestRegister) {
+                    return false;
+                }
+                loadBase = definition->guestRegister;
+                ++baseTerms;
+                return baseTerms == 1;
+            };
+            if (!memoryOperation->lhs || !flatten(*memoryOperation->lhs, 0) ||
+                inductionTerms != 1 || baseTerms != 1 || !loadBase ||
+                *loadBase == *inductionRegister || (baseRegister && baseRegister != loadBase)) {
+                return std::nullopt;
+            }
+            baseRegister = loadBase;
+            minimumOffset = std::min(minimumOffset, offset);
+            maximumOffset = std::max(maximumOffset, offset);
+        }
+        if (!baseRegister) {
+            return std::nullopt;
+        }
+        const auto baseChanges = std::ranges::any_of(block.operations, [&](const auto &operation) {
+            return operation.guestRegister == baseRegister &&
+                   (operation.opcode == ir::Opcode::WriteGuestReg ||
+                    operation.opcode == ir::Opcode::ConditionalMoveGuestReg);
+        });
+        if (baseChanges) {
+            return std::nullopt;
+        }
+        const auto stepChanges =
+            stepRegister && std::ranges::any_of(block.operations, [&](const auto &operation) {
+                return operation.guestRegister == stepRegister &&
+                       (operation.opcode == ir::Opcode::WriteGuestReg ||
+                        operation.opcode == ir::Opcode::ConditionalMoveGuestReg);
+            });
+        if (stepChanges || (stepRegister && *stepRegister == *baseRegister)) {
+            return std::nullopt;
+        }
+        analysis.memory = MemoryLoopPlan{*inductionRegister, *baseRegister,    stepRegister,
+                                         constantStep,       limit->immediate, minimumOffset,
+                                         maximumOffset,      access,           termination};
+    }
+
     return analysis;
+}
+
+struct PreparedMemory {
+    std::uint8_t *bytes{};
+    std::uint64_t guestBase{};
+};
+
+std::optional<PreparedMemory> prepareMemory(const MemoryLoopPlan &plan, x86::X86State &state,
+                                            guest::AddressSpace *addressSpace,
+                                            std::size_t maximumExecutions) noexcept {
+    if (addressSpace == nullptr || maximumExecutions == 0) {
+        return std::nullopt;
+    }
+    const auto readRegister = [&](x86::Register reg) {
+        std::uint64_t value{};
+        std::memcpy(&value, reinterpret_cast<const std::byte *>(&state) + x86::registerOffset(reg),
+                    sizeof(value));
+        return value;
+    };
+    const auto induction = readRegister(plan.inductionRegister);
+    const auto base = readRegister(plan.baseRegister);
+    const auto step = plan.stepRegister ? readRegister(*plan.stepRegister) : plan.constantStep;
+    if (step == 0 || induction >= plan.limit) {
+        return std::nullopt;
+    }
+    const auto remaining = plan.limit - induction;
+    std::uint64_t naturalExecutions{};
+    if (plan.termination == MemoryLoopPlan::Termination::ExactNotEqual) {
+        if (remaining < step || remaining % step != 0) {
+            return std::nullopt;
+        }
+        naturalExecutions = remaining / step;
+    } else {
+        naturalExecutions = 1U + (remaining - 1U) / step;
+    }
+    const auto executions =
+        std::min<std::uint64_t>(naturalExecutions, static_cast<std::uint64_t>(maximumExecutions));
+    if (executions == 0 || executions - 1U > UINT64_MAX / step) {
+        return std::nullopt;
+    }
+    const auto lastAdvance = (executions - 1U) * step;
+    const auto checkedAdd = [](std::uint64_t lhs,
+                               std::uint64_t rhs) -> std::optional<std::uint64_t> {
+        if (rhs > UINT64_MAX - lhs) {
+            return std::nullopt;
+        }
+        return lhs + rhs;
+    };
+    const auto firstInductionAddress = checkedAdd(base, induction);
+    const auto firstAddress = firstInductionAddress
+                                  ? checkedAdd(*firstInductionAddress, plan.minimumOffset)
+                                  : std::nullopt;
+    const auto lastInduction = checkedAdd(induction, lastAdvance);
+    const auto lastInductionAddress =
+        lastInduction ? checkedAdd(base, *lastInduction) : std::nullopt;
+    const auto lastAddress =
+        lastInductionAddress ? checkedAdd(*lastInductionAddress, plan.maximumOffset) : std::nullopt;
+    if (!firstAddress || !lastAddress || *lastAddress < *firstAddress) {
+        return std::nullopt;
+    }
+    if (plan.termination == MemoryLoopPlan::Termination::UnsignedBelow &&
+        executions == naturalExecutions && (!lastInduction || step > UINT64_MAX - *lastInduction)) {
+        return std::nullopt;
+    }
+    try {
+        const auto view = addressSpace->directMemoryView(guest::GuestAddress{*firstAddress},
+                                                         plan.access == MemoryLoopPlan::Access::Read
+                                                             ? guest::Permission::Read
+                                                             : guest::Permission::Write);
+        if (!view || *lastAddress < view->base.value ||
+            *lastAddress - view->base.value >= view->bytes.size()) {
+            return std::nullopt;
+        }
+        return PreparedMemory{view->bytes.data(), view->base.value};
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 #if ROSA_HAS_LLVM
@@ -192,6 +486,7 @@ constexpr std::uint64_t arithmeticFlagMask =
 
 struct PendingFlags {
     ir::Opcode opcode{};
+    ir::Width width{ir::Width::I64};
     llvm::Value *lhs{};
     llvm::Value *rhs{};
     llvm::Value *result{};
@@ -269,6 +564,19 @@ class LlvmEngine {
         return llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), value);
     }
 
+    static std::uint32_t widthBits(ir::Width width) { return static_cast<std::uint32_t>(width); }
+
+    static std::uint64_t widthMask(ir::Width width) {
+        return width == ir::Width::I64 ? UINT64_MAX : (UINT64_C(1) << widthBits(width)) - 1U;
+    }
+
+    static llvm::Value *normalize(llvm::IRBuilder<> &builder, llvm::Value *value, ir::Width width) {
+        if (width == ir::Width::I64) {
+            return value;
+        }
+        return builder.CreateAnd(value, constant64(builder.getContext(), widthMask(width)));
+    }
+
     static llvm::Value *stateAddress(llvm::IRBuilder<> &builder, llvm::Value *state,
                                      std::size_t offset) {
         return builder.CreateGEP(llvm::Type::getInt8Ty(builder.getContext()), state,
@@ -307,53 +615,52 @@ class LlvmEngine {
     static FlagValues calculateFlags(llvm::IRBuilder<> &builder, llvm::Value *incomingFlags,
                                      const PendingFlags &pending) {
         auto &context = builder.getContext();
+        auto *result = normalize(builder, pending.result, pending.width);
+        auto *lhs = pending.lhs ? normalize(builder, pending.lhs, pending.width) : nullptr;
+        auto *rhs = pending.rhs ? normalize(builder, pending.rhs, pending.width) : nullptr;
+        const auto signMask = UINT64_C(1) << (widthBits(pending.width) - 1U);
         auto *falseValue = llvm::ConstantInt::getFalse(context);
         FlagValues flags{
             .carry = falseValue,
-            .parity = parityEven(builder, pending.result),
+            .parity = parityEven(builder, result),
             .auxiliaryCarry = falseValue,
-            .zero = builder.CreateICmpEQ(pending.result, constant64(context, 0)),
-            .sign = bitIsSet(builder, pending.result, UINT64_C(1) << 63U),
+            .zero = builder.CreateICmpEQ(result, constant64(context, 0)),
+            .sign = bitIsSet(builder, result, signMask),
             .overflow = falseValue,
         };
 
         switch (pending.opcode) {
         case ir::Opcode::UpdateAddFlags:
-            flags.carry = builder.CreateICmpULT(pending.result, pending.lhs);
-            flags.auxiliaryCarry = bitIsSet(
-                builder,
-                builder.CreateXor(builder.CreateXor(pending.lhs, pending.rhs), pending.result),
-                flagAuxiliaryCarry);
-            flags.overflow = bitIsSet(
-                builder,
-                builder.CreateAnd(builder.CreateNot(builder.CreateXor(pending.lhs, pending.rhs)),
-                                  builder.CreateXor(pending.lhs, pending.result)),
-                UINT64_C(1) << 63U);
-            break;
-        case ir::Opcode::UpdateSubFlags:
-            flags.carry = builder.CreateICmpULT(pending.lhs, pending.rhs);
-            flags.auxiliaryCarry = bitIsSet(
-                builder,
-                builder.CreateXor(builder.CreateXor(pending.lhs, pending.rhs), pending.result),
-                flagAuxiliaryCarry);
+            flags.carry = builder.CreateICmpULT(result, lhs);
+            flags.auxiliaryCarry =
+                bitIsSet(builder, builder.CreateXor(builder.CreateXor(lhs, rhs), result),
+                         flagAuxiliaryCarry);
             flags.overflow =
                 bitIsSet(builder,
-                         builder.CreateAnd(builder.CreateXor(pending.lhs, pending.rhs),
-                                           builder.CreateXor(pending.lhs, pending.result)),
-                         UINT64_C(1) << 63U);
+                         builder.CreateAnd(builder.CreateNot(builder.CreateXor(lhs, rhs)),
+                                           builder.CreateXor(lhs, result)),
+                         signMask);
+            break;
+        case ir::Opcode::UpdateSubFlags:
+            flags.carry = builder.CreateICmpULT(lhs, rhs);
+            flags.auxiliaryCarry =
+                bitIsSet(builder, builder.CreateXor(builder.CreateXor(lhs, rhs), result),
+                         flagAuxiliaryCarry);
+            flags.overflow = bitIsSet(
+                builder,
+                builder.CreateAnd(builder.CreateXor(lhs, rhs), builder.CreateXor(lhs, result)),
+                signMask);
             break;
         case ir::Opcode::UpdateIncFlags:
         case ir::Opcode::UpdateDecFlags:
             flags.carry = bitIsSet(builder, incomingFlags, flagCarry);
-            flags.auxiliaryCarry =
-                bitIsSet(builder,
-                         builder.CreateXor(builder.CreateXor(pending.lhs, constant64(context, 1)),
-                                           pending.result),
-                         flagAuxiliaryCarry);
+            flags.auxiliaryCarry = bitIsSet(
+                builder, builder.CreateXor(builder.CreateXor(lhs, constant64(context, 1)), result),
+                flagAuxiliaryCarry);
             flags.overflow = builder.CreateICmpEQ(
-                pending.lhs, constant64(context, pending.opcode == ir::Opcode::UpdateIncFlags
-                                                     ? UINT64_C(0x7fffffffffffffff)
-                                                     : UINT64_C(0x8000000000000000)));
+                lhs,
+                constant64(context, pending.opcode == ir::Opcode::UpdateIncFlags ? signMask - 1U
+                                                                                 : signMask));
             break;
         case ir::Opcode::UpdateLogicFlags:
             break;
@@ -426,8 +733,8 @@ class LlvmEngine {
         auto &context = module.getContext();
         auto *i64 = llvm::Type::getInt64Ty(context);
         auto *pointer = llvm::PointerType::get(context, 0);
-        auto *functionType =
-            llvm::FunctionType::get(i64, std::array<llvm::Type *, 2>{pointer, i64}, false);
+        auto *functionType = llvm::FunctionType::get(
+            i64, std::array<llvm::Type *, 4>{pointer, i64, pointer, i64}, false);
         auto *function = llvm::Function::Create(functionType, llvm::GlobalValue::ExternalLinkage,
                                                 functionName, module);
         function->setCallingConv(llvm::CallingConv::C);
@@ -437,6 +744,10 @@ class LlvmEngine {
         state->setName("state");
         llvm::Value *maximumExecutions = arguments++;
         maximumExecutions->setName("maximum_executions");
+        llvm::Value *memoryBytes = arguments++;
+        memoryBytes->setName("memory_bytes");
+        llvm::Value *memoryGuestBase = arguments++;
+        memoryGuestBase->setName("memory_guest_base");
 
         auto *entry = llvm::BasicBlock::Create(context, "entry", function);
         auto *body = llvm::BasicBlock::Create(context, "loop", function);
@@ -472,54 +783,108 @@ class LlvmEngine {
 
         std::vector<llvm::Value *> values(block.valueCount, nullptr);
         PendingFlags pending;
+        const auto writeGuestRegister = [&](x86::Register guestRegister, ir::Width width,
+                                            llvm::Value *source) {
+            const auto index = static_cast<std::size_t>(guestRegister);
+            source = normalize(builder, source, width);
+            if (width == ir::Width::I64 || width == ir::Width::I32) {
+                currentRegisters[index] = source;
+                return;
+            }
+            const auto mask = widthMask(width);
+            currentRegisters[index] = builder.CreateOr(
+                builder.CreateAnd(currentRegisters[index], constant64(context, ~mask)), source);
+        };
         for (const auto &operation : block.operations) {
             const auto value = [&values](const std::optional<ir::ValueId> &id) {
                 return values[id->value];
             };
             switch (operation.opcode) {
             case ir::Opcode::Constant:
-                values[operation.result->value] = constant64(context, operation.immediate);
+                values[operation.result->value] =
+                    constant64(context, operation.immediate & widthMask(operation.width));
                 break;
             case ir::Opcode::ReadGuestReg:
-                values[operation.result->value] =
-                    currentRegisters[static_cast<std::size_t>(*operation.guestRegister)];
+                values[operation.result->value] = normalize(
+                    builder, currentRegisters[static_cast<std::size_t>(*operation.guestRegister)],
+                    operation.width);
                 break;
             case ir::Opcode::WriteGuestReg:
-                currentRegisters[static_cast<std::size_t>(*operation.guestRegister)] =
-                    value(operation.lhs);
+                writeGuestRegister(*operation.guestRegister, operation.width, value(operation.lhs));
                 break;
+            case ir::Opcode::ConditionalMoveGuestReg: {
+                const auto flags = calculateFlags(builder, incomingFlags, pending);
+                auto *condition = conditionValue(builder, *operation.condition, flags);
+                auto *source =
+                    operation.lhs ? value(operation.lhs) : currentRegisters[operation.immediate];
+                const auto index = static_cast<std::size_t>(*operation.guestRegister);
+                auto *selected = builder.CreateSelect(
+                    condition, normalize(builder, source, operation.width),
+                    normalize(builder, currentRegisters[index], operation.width));
+                writeGuestRegister(*operation.guestRegister, operation.width, selected);
+                break;
+            }
             case ir::Opcode::Add:
-                values[operation.result->value] =
-                    builder.CreateAdd(value(operation.lhs), value(operation.rhs));
+                values[operation.result->value] = normalize(
+                    builder, builder.CreateAdd(value(operation.lhs), value(operation.rhs)),
+                    operation.width);
                 break;
             case ir::Opcode::Sub:
-                values[operation.result->value] =
-                    builder.CreateSub(value(operation.lhs), value(operation.rhs));
+                values[operation.result->value] = normalize(
+                    builder, builder.CreateSub(value(operation.lhs), value(operation.rhs)),
+                    operation.width);
                 break;
             case ir::Opcode::And:
-                values[operation.result->value] =
-                    builder.CreateAnd(value(operation.lhs), value(operation.rhs));
+                values[operation.result->value] = normalize(
+                    builder, builder.CreateAnd(value(operation.lhs), value(operation.rhs)),
+                    operation.width);
                 break;
             case ir::Opcode::Or:
                 values[operation.result->value] =
-                    builder.CreateOr(value(operation.lhs), value(operation.rhs));
+                    normalize(builder, builder.CreateOr(value(operation.lhs), value(operation.rhs)),
+                              operation.width);
                 break;
             case ir::Opcode::Xor:
-                values[operation.result->value] =
-                    builder.CreateXor(value(operation.lhs), value(operation.rhs));
+                values[operation.result->value] = normalize(
+                    builder, builder.CreateXor(value(operation.lhs), value(operation.rhs)),
+                    operation.width);
                 break;
+            case ir::Opcode::EvaluateCondition: {
+                const auto flags = calculateFlags(builder, incomingFlags, pending);
+                auto *condition = conditionValue(builder, *operation.condition, flags);
+                values[operation.result->value] = builder.CreateZExt(condition, i64);
+                break;
+            }
+            case ir::Opcode::LoadGuest: {
+                auto *offset = builder.CreateSub(value(operation.lhs), memoryGuestBase);
+                auto *address =
+                    builder.CreateGEP(llvm::Type::getInt8Ty(context), memoryBytes, offset);
+                auto *loaded = builder.CreateLoad(llvm::Type::getInt8Ty(context), address);
+                values[operation.result->value] = builder.CreateZExt(loaded, i64);
+                break;
+            }
+            case ir::Opcode::StoreGuest: {
+                auto *offset = builder.CreateSub(value(operation.lhs), memoryGuestBase);
+                auto *address =
+                    builder.CreateGEP(llvm::Type::getInt8Ty(context), memoryBytes, offset);
+                builder.CreateStore(
+                    builder.CreateTrunc(value(operation.rhs), llvm::Type::getInt8Ty(context)),
+                    address);
+                break;
+            }
             case ir::Opcode::UpdateAddFlags:
             case ir::Opcode::UpdateSubFlags:
-                pending = PendingFlags{operation.opcode, value(operation.lhs), value(operation.rhs),
-                                       value(operation.third)};
+                pending = PendingFlags{operation.opcode, operation.width, value(operation.lhs),
+                                       value(operation.rhs), value(operation.third)};
                 break;
             case ir::Opcode::UpdateIncFlags:
             case ir::Opcode::UpdateDecFlags:
-                pending = PendingFlags{operation.opcode, value(operation.lhs), nullptr,
-                                       value(operation.rhs)};
+                pending = PendingFlags{operation.opcode, operation.width, value(operation.lhs),
+                                       nullptr, value(operation.rhs)};
                 break;
             case ir::Opcode::UpdateLogicFlags:
-                pending = PendingFlags{operation.opcode, nullptr, nullptr, value(operation.lhs)};
+                pending = PendingFlags{operation.opcode, operation.width, nullptr, nullptr,
+                                       value(operation.lhs)};
                 break;
             case ir::Opcode::ExitBlock:
                 break;
@@ -595,6 +960,7 @@ LlvmEngine &engine() {
 
 struct OptimizedLoop::Impl {
     OptimizedLoopEntry entry{};
+    std::optional<MemoryLoopPlan> memory;
 #if ROSA_HAS_LLVM
     llvm::orc::ResourceTrackerSP resources;
 #endif
@@ -618,6 +984,24 @@ OptimizedLoopEntry OptimizedLoop::entry() const noexcept {
     return implementation_ ? implementation_->entry : nullptr;
 }
 
+std::optional<std::size_t> OptimizedLoop::execute(x86::X86State &state,
+                                                  guest::AddressSpace *addressSpace,
+                                                  std::size_t maximumExecutions) const {
+    if (!implementation_ || implementation_->entry == nullptr) {
+        return std::nullopt;
+    }
+    PreparedMemory prepared;
+    if (implementation_->memory) {
+        const auto memory =
+            prepareMemory(*implementation_->memory, state, addressSpace, maximumExecutions);
+        if (!memory) {
+            return std::nullopt;
+        }
+        prepared = *memory;
+    }
+    return implementation_->entry(&state, maximumExecutions, prepared.bytes, prepared.guestBase);
+}
+
 std::unique_ptr<OptimizedLoop> compileOptimizedLoop(const ir::Block &block) {
     const auto analysis = analyzeLoop(block);
     if (!analysis) {
@@ -627,6 +1011,7 @@ std::unique_ptr<OptimizedLoop> compileOptimizedLoop(const ir::Block &block) {
     auto compiled = engine().compile(block, *analysis);
     auto implementation = std::make_unique<OptimizedLoop::Impl>();
     implementation->entry = compiled.entry;
+    implementation->memory = analysis->memory;
     implementation->resources = std::move(compiled.resources);
     return std::unique_ptr<OptimizedLoop>(new OptimizedLoop(std::move(implementation)));
 #else
@@ -637,6 +1022,15 @@ std::unique_ptr<OptimizedLoop> compileOptimizedLoop(const ir::Block &block) {
 bool canCompileOptimizedLoop(const ir::Block &block) noexcept {
     try {
         return analyzeLoop(block).has_value();
+    } catch (...) {
+        return false;
+    }
+}
+
+bool optimizedLoopUsesMemory(const ir::Block &block) noexcept {
+    try {
+        const auto analysis = analyzeLoop(block);
+        return analysis && analysis->memory.has_value();
     } catch (...) {
         return false;
     }
