@@ -11233,6 +11233,41 @@ void testMovsxGuestByteTo32BitRegister() {
     expectEqual(extendedMemoryState.rflags, std::uint64_t{0xAD7},
                 "extended MOVSX r32 byte memory changed flags");
 
+    // Observed in libsqlite3: MOVSX ESI, byte [RBX+R12] with a REX.X-indexed SIB.
+    constexpr std::array<std::uint8_t, 6> indexedCode{0x42, 0x0F, 0xBE, 0x34, 0x23, 0xC3};
+    const auto indexedDecoded =
+        decoder.decodeBlock(indexedCode, rosa::guest::GuestAddress{0x1000480BEULL});
+    const auto indexedDestination =
+        std::get<rosa::x86::RegisterOperand>(indexedDecoded[0].operands[0]);
+    const auto indexedMemory = std::get<rosa::x86::MemoryOperand>(indexedDecoded[0].operands[1]);
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::MovsxRegMem &&
+               indexedDecoded[0].length == 5 &&
+               indexedDestination.reg == rosa::x86::Register::Rsi &&
+               indexedDestination.width == 32 && indexedMemory.base == rosa::x86::Register::Rbx &&
+               indexedMemory.index && *indexedMemory.index == rosa::x86::Register::R12 &&
+               indexedMemory.scale == 1 && indexedMemory.width == 8 &&
+               indexedMemory.displacement == 0,
+           "REX.X MOVSX ESI, byte [RBX+R12] decode differs");
+    expect(rosa::debug::dumpX86(indexedDecoded).find("movsx esi, byte [rbx+r12*1]") !=
+               std::string::npos,
+           "REX.X MOVSX dump differs");
+    const auto indexedBlock =
+        translator.translate(indexedCode, rosa::guest::GuestAddress{0x1000480BEULL});
+    constexpr rosa::guest::GuestAddress indexedSource{0x8180};
+    constexpr std::array<std::uint8_t, 1> indexedNegative{0xFF};
+    addressSpace.writeBytes(indexedSource, indexedNegative);
+    rosa::x86::X86State indexedState;
+    indexedState.rbx = 0x8100;
+    indexedState.r12 = 0x80;
+    indexedState.rsi = 0x0123456789ABCDEFULL;
+    indexedState.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(indexedState, &addressSpace));
+    expectEqual(indexedState.rsi, std::uint64_t{0xFFFFFFFFULL},
+                "REX.X MOVSX byte memory result differs");
+    expectEqual(indexedState.rbx, std::uint64_t{0x8100}, "REX.X MOVSX changed its base");
+    expectEqual(indexedState.r12, std::uint64_t{0x80}, "REX.X MOVSX changed its index");
+    expectEqual(indexedState.rflags, std::uint64_t{0x8D7}, "REX.X MOVSX changed flags");
+
     rosa::guest::AddressSpace unmapped;
     rosa::x86::X86State faultState;
     faultState.rdi = source.value;

@@ -6082,7 +6082,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 secondOpcode == 0xBEU && mode != 0x3U &&
                 !(mode == 0 && rmEncoding == 0x5U);
             if ((!isImulRipMemory && !isMovsxMemory && mode != 0x3U) ||
-                (rexX && secondOpcode != 0xBAU)) {
+                (rexX && secondOpcode != 0xBAU && !isMovsxMemory)) {
                 throw DecodeError(
                     address, remaining,
                     "only register-direct CMOVO/CMOVB/CMOVAE/CMOVE/CMOVNE/CMOVA/CMOVS/CMOVNS/CMOVL/CMOVGE/CMOVLE/BT/MOVSX/IMUL/SHLD/SHRD/BSF/BSR is supported");
