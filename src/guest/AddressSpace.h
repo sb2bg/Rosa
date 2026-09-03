@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -50,6 +51,11 @@ struct SegmentMapping {
     Permission maximumPermissions{Permission::None};
     std::span<const std::uint8_t> initialBytes;
     std::string label;
+};
+
+struct DirectMemoryView {
+    GuestAddress base{};
+    std::span<std::uint8_t> bytes;
 };
 
 enum class ProtectResult : std::uint8_t {
@@ -102,6 +108,8 @@ class AddressSpace {
     void writeU64(GuestAddress address, std::uint64_t value);
     void writeU32(GuestAddress address, std::uint32_t value);
     void writeBytes(GuestAddress address, std::span<const std::uint8_t> bytes);
+    [[nodiscard]] std::optional<DirectMemoryView> directMemoryView(GuestAddress address,
+                                                                   Permission required);
 
     [[nodiscard]] std::span<const std::uint8_t> executableBytes(GuestAddress address) const;
     [[nodiscard]] std::uint64_t executableVersion() const noexcept {

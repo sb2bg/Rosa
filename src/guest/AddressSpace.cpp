@@ -875,6 +875,17 @@ void AddressSpace::writeU32(GuestAddress address, std::uint32_t value) {
     writeBytes(address, bytes);
 }
 
+std::optional<DirectMemoryView> AddressSpace::directMemoryView(GuestAddress address,
+                                                               Permission required) {
+    auto &mapping = find(address, 1, required);
+    if (mapping.fileBytes || !mapping.readableBytes.empty() ||
+        mapping.bytes.size() != mapping.size ||
+        (hasPermission(required, Permission::Write) && isExecutable(mapping.permissions))) {
+        return std::nullopt;
+    }
+    return DirectMemoryView{mapping.base, mapping.bytes};
+}
+
 void AddressSpace::writeBytes(GuestAddress address, std::span<const std::uint8_t> bytes) {
     if (bytes.empty()) {
         return;
