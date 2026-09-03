@@ -12198,6 +12198,66 @@ void testTestGuestByteImmediateGeneratedExecution() {
                 "permission-faulted TEST byte changed flags");
 }
 
+void testDwordMemoryImmediateGeneratedExecution() {
+    // Observed in libsqlite3: TEST dword [rbp-0xa0], 0x10000 (opcode F7 /0).
+    constexpr std::array<std::uint8_t, 11> code{0xF7, 0x85, 0x60, 0xFF, 0xFF, 0xFF,
+                                                0x00, 0x00, 0x01, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x1000C3448ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestMemImm,
+           "TEST dword [memory], imm32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{10}, "TEST dword [memory], imm32 length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbp && memory.hasBase && !memory.ripRelative &&
+               !memory.index && memory.displacement == -160 && memory.width == 32,
+           "TEST dword [rbp-0xa0] memory operand differs");
+    expect(immediate.value == 0x10000 && immediate.width == 32,
+           "TEST dword [rbp-0xa0] immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("test dword [rbp-0xa0], 0x10000") !=
+               std::string::npos,
+           "TEST dword [rbp-0xa0] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 0x10000);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    rosa::x86::X86State state;
+    state.rax = 0x1122334455667788ULL;
+    state.rbp = target.value + 160;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    constexpr std::uint64_t definedLogicFlags =
+        (1U << 0U) | (1U << 2U) | (1U << 6U) | (1U << 7U) | (1U << 11U);
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{1U << 2U},
+                "TEST dword nonzero-result defined flags differ");
+    expectEqual(state.rax, std::uint64_t{0x1122334455667788ULL},
+                "TEST dword changed an unrelated register");
+    expectEqual(state.rbp, target.value + 160, "TEST dword changed its base register");
+    expectEqual(addressSpace.readU32(target), std::uint32_t{0x10000},
+                "TEST dword changed guest memory");
+
+    addressSpace.writeU32(target, 0);
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{(1U << 2U) | (1U << 6U)},
+                "TEST dword zero-result defined flags differ");
+
+    addressSpace.writeU32(target, 0x80000000);
+    constexpr std::array<std::uint8_t, 11> signCode{0xF7, 0x85, 0x60, 0xFF, 0xFF, 0xFF,
+                                                    0x00, 0x00, 0x00, 0x80, 0xC3};
+    const auto signBlock = translator.translate(signCode, codeAddress);
+    state.rflags = 0x8D7;
+    static_cast<void>(signBlock.execute(state, &addressSpace));
+    expectEqual(state.rflags & definedLogicFlags, std::uint64_t{(1U << 2U) | (1U << 7U)},
+                "TEST dword sign-result defined flags differ");
+}
+
 void testLfenceGeneratedExecution() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0xAE, 0xE8, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -32468,6 +32528,8 @@ int main() {
          testTestLowByteRegisterImmediateGeneratedExecution},
         {"TEST guest byte immediate generated execution",
          testTestGuestByteImmediateGeneratedExecution},
+        {"TEST guest dword immediate generated execution",
+         testDwordMemoryImmediateGeneratedExecution},
         {"LFENCE generated execution", testLfenceGeneratedExecution},
         {"MFENCE generated execution", testMfenceGeneratedExecution},
         {"SIDT generated execution", testSidtGeneratedExecution},

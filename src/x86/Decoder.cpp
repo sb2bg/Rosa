@@ -8630,6 +8630,40 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(MemoryOperand{
                     decodeRegister(rmEncoding, rexB), displacement,
                     static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+            } else if (extension == 0x0U && mode <= 0x2U && !rexR && !rexX &&
+                       rmEncoding != 0x4U &&
+                       !(mode == 0 && rmEncoding == 0x5U)) {
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated TEST memory disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[cursor++]);
+                } else if (mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated TEST memory disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                }
+                if (code.size() - cursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated TEST memory immediate");
+                }
+                const auto immediate = readI32(code.subspan(cursor, 4));
+                cursor += 4;
+                instruction.opcode = Opcode::TestMemImm;
+                instruction.operands.push_back(MemoryOperand{
+                    decodeRegister(rmEncoding, rexB), displacement,
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                instruction.operands.push_back(ImmediateOperand{
+                    rexW ? static_cast<std::uint64_t>(
+                               static_cast<std::int64_t>(immediate))
+                         : static_cast<std::uint32_t>(immediate),
+                    static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             } else {
             if (mode != 0x3U ||
                 (extension != 0x0U && extension != 0x2U &&
@@ -8637,7 +8671,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                  extension != 0x4U && extension != 0x5U) ||
                 (extension != 0x0U && (rexR || rexX))) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct TEST /0, NOT /2, NEG /3, MUL /4, IMUL /5, DIV /6, IDIV r32 /7, and memory MUL /4 and IMUL /5 from opcode F7 are supported");
+                                  "only register-direct TEST /0, NOT /2, NEG /3, MUL /4, IMUL /5, DIV /6, IDIV r32 /7, and memory TEST /0, MUL /4 and IMUL /5 from opcode F7 are supported");
             }
             instruction.opcode = extension == 0x0U   ? Opcode::TestRegImm
                                  : extension == 0x2U ? Opcode::NotReg

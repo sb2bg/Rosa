@@ -6321,9 +6321,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            if (memory.width != 8 || immediate.width != 8) {
+            if (memory.width != immediate.width ||
+                (memory.width != 8 && memory.width != 16 && memory.width != 32 &&
+                 memory.width != 64)) {
                 throw std::runtime_error("unsupported internal TEST memory immediate width");
             }
+            const auto width = memory.width == 8    ? ir::Width::I8
+                               : memory.width == 16 ? ir::Width::I16
+                               : memory.width == 32 ? ir::Width::I32
+                                                    : ir::Width::I64;
             auto address =
                 memory.ripRelative
                     ? builder.constant(instruction.address.value + instruction.length,
@@ -6347,10 +6353,10 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                      ir::Width::I64, instruction.address);
                 address = builder.add(address, displacement, ir::Width::I64, instruction.address);
             }
-            const auto value = builder.loadGuest(address, ir::Width::I8, instruction.address);
-            const auto mask = builder.constant(immediate.value, ir::Width::I8, instruction.address);
-            const auto result = builder.bitAnd(value, mask, ir::Width::I8, instruction.address);
-            builder.updateLogicFlags(result, ir::Width::I8, instruction.address);
+            const auto value = builder.loadGuest(address, width, instruction.address);
+            const auto mask = builder.constant(immediate.value, width, instruction.address);
+            const auto result = builder.bitAnd(value, mask, width, instruction.address);
+            builder.updateLogicFlags(result, width, instruction.address);
             break;
         }
         case x86::Opcode::CmpRegImm: {
