@@ -1648,29 +1648,37 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             setError(state, ENOENT);
             return {};
         }
-        if ((mode == F_OK || mode == R_OK) &&
-            std::filesystem::path{*path}.is_absolute()) {
-            std::error_code error;
-            const auto canonicalPath =
-                std::filesystem::canonical(*path, error);
-            if (error) {
-                setError(state, error.value());
-                return {};
-            }
-            if (!isWithinDirectory(fileSpace_.currentDirectory(),
-                                   canonicalPath)) {
-                std::ostringstream reason;
-                reason << "guest VFS has no mapping for access path \""
-                       << *path << '"';
-                throw unsupported(state, syscallRip, reason.str());
-            }
-            setSuccess(state, 0);
+        if (mode > (F_OK | R_OK | W_OK | X_OK)) {
+            setError(state, EINVAL);
             return {};
         }
-        std::ostringstream reason;
-        reason << "only the chroot-marker and mapped read-access probes are implemented; got path=\""
-               << *path << "\" mode=0x" << std::hex << mode;
-        throw unsupported(state, syscallRip, reason.str());
+        // Resolve relative guest paths against the task's current directory,
+        // mirroring the read-only open policy: paths inside it are answered
+        // from host metadata, paths outside it have no guest VFS mapping.
+        const auto directPath = std::filesystem::path{*path};
+        const auto queryPath = directPath.is_absolute()
+                                   ? directPath
+                                   : fileSpace_.currentDirectory() / directPath;
+        std::error_code canonicalError;
+        const auto canonicalPath =
+            std::filesystem::canonical(queryPath, canonicalError);
+        if (canonicalError) {
+            setError(state, canonicalError.value());
+            return {};
+        }
+        if (!isWithinDirectory(fileSpace_.currentDirectory(),
+                               canonicalPath)) {
+            std::ostringstream reason;
+            reason << "guest VFS has no mapping for access path \""
+                   << *path << '"';
+            throw unsupported(state, syscallRip, reason.str());
+        }
+        if (::access(canonicalPath.c_str(), static_cast<int>(mode)) != 0) {
+            setError(state, errno);
+            return {};
+        }
+        setSuccess(state, 0);
+        return {};
     }
     if (number == syscallShmOpen) {
         std::optional<std::string> name;

@@ -21957,6 +21957,62 @@ void testDarwinAccessMappedDirectory() {
     expect((state.rflags & 1U) != 0, "missing mapped-path access did not set BSD carry");
 }
 
+void testDarwinAccessRelativePath() {
+    constexpr auto accessNumber = UINT64_C(0x02000021);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+
+    // sqlite probes its default ":memory:" database name, which never
+    // exists as a file in the guest working directory.
+    const std::string missing = ":memory:";
+    std::vector<std::uint8_t> missingBytes(missing.begin(), missing.end());
+    missingBytes.push_back(0);
+    addressSpace.writeBytes(pathAddress, missingBytes);
+    state.rax = accessNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = F_OK;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOENT),
+                "relative missing-path access returned the wrong errno");
+    expect((state.rflags & 1U) != 0, "relative missing-path access did not set BSD carry");
+
+    // A relative path resolving inside the guest working directory answers
+    // from host metadata like the absolute mapped probes.
+    std::string presentName;
+    if (std::filesystem::is_directory(dispatcher.fileSpace().currentDirectory() /
+                                      "test-fixtures")) {
+        presentName = "test-fixtures";
+    } else if (std::filesystem::is_directory(dispatcher.fileSpace().currentDirectory() /
+                                             "build/debug/test-fixtures")) {
+        presentName = "build/debug/test-fixtures";
+    }
+    expect(!presentName.empty(), "relative access fixture is missing");
+    std::vector<std::uint8_t> presentBytes(presentName.begin(), presentName.end());
+    presentBytes.push_back(0);
+    addressSpace.writeBytes(pathAddress, presentBytes);
+    state.rax = accessNumber;
+    state.rsi = R_OK;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "relative present-path access did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "relative present-path access did not clear BSD carry");
+
+    // Modes outside the access bitmask fail instead of reaching the VFS.
+    state.rax = accessNumber;
+    state.rsi = 0x80;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EINVAL),
+                "out-of-range access mode returned the wrong errno");
+}
+
 void testDarwinGetattrlistRootVolume() {
     constexpr auto getattrlistNumber = UINT64_C(0x020000DC);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -31513,6 +31569,7 @@ int main() {
         {"Darwin getfsstat64 synthetic root", testDarwinGetfsstat64SyntheticRoot},
         {"Darwin access chroot marker", testDarwinAccessChrootMarker},
         {"Darwin access mapped directory", testDarwinAccessMappedDirectory},
+        {"Darwin access relative path", testDarwinAccessRelativePath},
         {"Darwin getattrlist root volume", testDarwinGetattrlistRootVolume},
         {"Darwin getattrlist mapped-file full path", testDarwinGetattrlistMappedFileFullPath},
         {"Darwin fstatat64 synthetic directory", testDarwinFstatat64SyntheticDirectory},

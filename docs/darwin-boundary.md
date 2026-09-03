@@ -6,6 +6,7 @@ Rosa implements only the x86_64 Darwin operations reached by the controlled fixt
 | --- | ---: | --- | --- |
 | `exit` | `0x02000001` | status in `RDI` | terminate the guest dispatch loop |
 | `write` / `write_nocancel` | `0x02000004` / `0x0200018d` | fd in `RDI`, address in `RSI`, count in `RDX` | copy guest bytes, then call host `write` |
+| `access` | `0x02000021` | guest path/mode | resolve relative paths against the guest working directory and answer F_OK/R_OK/W_OK/X_OK from host metadata inside it; report ENOENT/EINVAL without a VFS mapping outside it |
 | `open` | `0x02000005` | guest path/flags/mode | open controlled user files or allocate synthetic guest directory descriptors for the observed root operations |
 | `close` | `0x02000006` | guest fd | remove a task-local guest descriptor |
 | `getpid` | `0x02000014` | none | return the single Rosa process identity used by the current one-process model |
