@@ -21805,6 +21805,47 @@ void testDarwinGeteuid() {
                 "geteuid did not apply successful BSD carry semantics");
 }
 
+void testDarwinGettidReportsNoOverrideIdentity() {
+    // Observed under an Objective-C fixture: CoreFoundation probes the
+    // per-thread override identity and falls back on ESRCH.
+    constexpr auto gettidNumber = UINT64_C(0x0200011E);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress uidAddress{0x8100};
+    constexpr rosa::guest::GuestAddress gidAddress{0x8108};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 16> sentinel{0xA5, 0x5A, 0xA5, 0x5A, 0xA5, 0x5A, 0xA5, 0x5A,
+                                                    0x5A, 0xA5, 0x5A, 0xA5, 0x5A, 0xA5, 0x5A, 0xA5};
+    addressSpace.writeBytes(uidAddress, sentinel);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = gettidNumber;
+    state.rdi = uidAddress.value;
+    state.rsi = gidAddress.value;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E31190ULL});
+    expect(!outcome.exited, "gettid terminated the guest");
+    expectEqual(state.rax, static_cast<std::uint64_t>(ESRCH),
+                "gettid without an override identity returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "gettid did not set BSD carry");
+    // XNU checks for an active override before touching the out-pointers.
+    expect(addressSpace.readBytes(uidAddress, sentinel.size()) ==
+               std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
+           "gettid without an override identity touched its out-pointers");
+
+    // Even unmapped out-pointers report ESRCH rather than EFAULT.
+    state.rax = gettidNumber;
+    state.rdi = 0x700000000000ULL;
+    state.rsi = 0x700000000008ULL;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ESRCH),
+                "gettid with unmapped out-pointers returned the wrong errno");
+}
+
 void testDarwinGetrlimit() {
     constexpr auto getrlimitNumber = UINT64_C(0x020000C2);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -34726,6 +34767,7 @@ int main() {
         {"Darwin getpid", testDarwinGetpid},
         {"Darwin getuid", testDarwinGetuid},
         {"Darwin geteuid", testDarwinGeteuid},
+        {"Darwin gettid without override identity", testDarwinGettidReportsNoOverrideIdentity},
         {"Darwin getrlimit", testDarwinGetrlimit},
         {"Darwin sigaction", testDarwinSigaction},
         {"Darwin gettimeofday", testDarwinGettimeofday},
