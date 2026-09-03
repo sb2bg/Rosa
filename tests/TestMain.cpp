@@ -14959,6 +14959,49 @@ void testSignedMultiply64GeneratedExecution() {
                 "overflowing REX IMUL r32 did not set CF and OF");
 }
 
+void testSignedMultiply32BasedMemoryGeneratedExecution() {
+    // Observed in dyld under an Objective-C fixture: IMUL esi, dword [rdi+0x4].
+    constexpr std::array<std::uint8_t, 5> code{0x0F, 0xAF, 0x77, 0x04, 0xC3};
+    constexpr rosa::guest::GuestAddress rip{0x7FF802A94B04ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::ImulRegMem,
+           "IMUL r32, [base+disp8] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "IMUL r32, [base+disp8] length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rsi && destination.width == 32,
+           "IMUL r32, [base+disp8] destination differs");
+    expect(!memory.ripRelative && memory.hasBase &&
+               memory.base == rosa::x86::Register::Rdi && !memory.index &&
+               memory.displacement == 4 && memory.width == 32,
+           "IMUL r32, [base+disp8] memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("imul esi, dword [rdi+0x4]") !=
+               std::string::npos,
+           "IMUL r32, [base+disp8] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress sourceAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(sourceAddress, 0xFFFFFFFD);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rip);
+    rosa::x86::X86State state;
+    state.rsi = 6;
+    state.rdi = sourceAddress.value - 4;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    // 6 * -3 == -18, zero-extended into rsi.
+    expectEqual(state.rsi, std::uint64_t{0xFFFFFFEE},
+                "IMUL r32, [base+disp8] result differs");
+    expectEqual(state.rflags, std::uint64_t{0xD6},
+                "IMUL r32, [base+disp8] flags differ");
+    expectEqual(state.rdi, sourceAddress.value - 4,
+                "IMUL r32, [base+disp8] changed its base register");
+}
+
 void testSignedMultiply64RipMemoryGeneratedExecution() {
     constexpr std::array<std::uint8_t, 9> code{0x48, 0x0F, 0xAF, 0x35, 0x4D,
                                                0x77, 0x08, 0x00, 0xC3};
@@ -34491,6 +34534,8 @@ int main() {
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
         {"signed IMUL 64-bit RIP-relative memory execution",
          testSignedMultiply64RipMemoryGeneratedExecution},
+        {"signed IMUL 32-bit based memory execution",
+         testSignedMultiply32BasedMemoryGeneratedExecution},
         {"signed IMUL 64-bit immediate generated execution",
          testSignedMultiply64ImmediateGeneratedExecution},
         {"signed IMUL 64-bit memory immediate generated execution",

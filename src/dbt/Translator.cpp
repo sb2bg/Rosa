@@ -5461,26 +5461,54 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
-            if (!memory.ripRelative || memory.width != 64) {
-                throw std::runtime_error("only RIP-relative qword IMUL memory is implemented");
+            if ((destination.width != 32 && destination.width != 64) ||
+                (memory.width != 32 && memory.width != 64) ||
+                (memory.width == 32 && destination.width != 32) ||
+                (memory.ripRelative
+                     ? memory.hasBase || memory.index.has_value()
+                     : !memory.hasBase)) {
+                throw std::runtime_error(
+                    "only 32-bit and 64-bit register-from-memory IMUL are implemented");
             }
-            auto address = builder.constant(instruction.address.value + instruction.length,
-                                            ir::Width::I64, instruction.address);
+            // The legacy REX decoder emits a 32-bit destination with a qword
+            // memory operand; keep its established 64-bit lowering there.
+            const auto width = destination.width == 32 && memory.width == 32
+                                   ? ir::Width::I32
+                                   : ir::Width::I64;
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                instruction.address);
+            if (memory.index) {
+                auto index = builder.readGuestRegister(
+                    *memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index,
+                        static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address =
+                    builder.add(address, index, ir::Width::I64, instruction.address);
+            }
             if (memory.displacement != 0) {
                 const auto displacement =
                     builder.constant(static_cast<std::uint64_t>(memory.displacement),
                                      ir::Width::I64, instruction.address);
-                address = builder.add(address, displacement, ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
             }
-            const auto rhs = builder.loadGuest(address, ir::Width::I64, instruction.address);
+            const auto rhs = builder.loadGuest(address, width, instruction.address);
             // Guest-memory helpers may clobber host temporaries. Materialize the
             // register operand only after the load returns successfully.
             const auto lhs =
-                builder.readGuestRegister(destination.reg, ir::Width::I64, instruction.address);
-            const auto result = builder.multiplyLow(lhs, rhs, ir::Width::I64, instruction.address);
-            builder.writeGuestRegister(destination.reg, result, ir::Width::I64,
+                builder.readGuestRegister(destination.reg, width, instruction.address);
+            const auto result = builder.multiplyLow(lhs, rhs, width, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, width,
                                        instruction.address);
-            builder.updateSignedMultiplyFlags(lhs, rhs, ir::Width::I64, instruction.address);
+            builder.updateSignedMultiplyFlags(lhs, rhs, width, instruction.address);
             break;
         }
         case x86::Opcode::ImulRegRegImm: {

@@ -5890,27 +5890,92 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto modrm = code[cursor + 2];
                 const auto mode =
                     static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-                if (mode != 0x3U) {
-                    throw DecodeError(
-                        address, remaining,
-                        "only register-direct IMUL r32, r32 is supported without REX");
+                const auto regEncoding =
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+                const auto rmEncoding =
+                    static_cast<std::uint8_t>(modrm & 0x7U);
+                if (mode == 0x3U) {
+                    instruction.opcode = Opcode::ImulRegReg;
+                    instruction.length = 3;
+                    std::copy_n(
+                        code.begin() + static_cast<std::ptrdiff_t>(cursor), 3,
+                        instruction.bytes.begin());
+                    instruction.operands.push_back(RegisterOperand{
+                        decodeRegister(regEncoding, false), 32});
+                    instruction.operands.push_back(RegisterOperand{
+                        decodeRegister(rmEncoding, false), 32});
+                    result.push_back(std::move(instruction));
+                    cursor += 3;
+                    if (result.size() == maximumInstructions) {
+                        return result;
+                    }
+                    continue;
                 }
-                instruction.opcode = Opcode::ImulRegReg;
-                instruction.length = 3;
+                // Two-operand IMUL r32 from memory (observed in dyld under an
+                // Objective-C fixture).
+                const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
+                auto operandCursor = cursor + 3;
+                auto baseEncoding = rmEncoding;
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
+                if (!ripRelative && rmEncoding == 0x4U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated IMUL r32 memory SIB");
+                    }
+                    const auto sib = code[operandCursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(address, remaining,
+                                          "no-base IMUL r32 memory SIB is not supported");
+                    }
+                    if (indexEncoding != 0x4U) {
+                        index = decodeRegister(indexEncoding, false);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated IMUL r32 memory disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[operandCursor++]);
+                } else if (mode == 0x2U || ripRelative) {
+                    if (code.size() - operandCursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated IMUL r32 memory disp32");
+                    }
+                    displacement = readI32(code.subspan(operandCursor, 4));
+                    operandCursor += 4;
+                }
+                if (ripRelative) {
+                    static_cast<void>(relativeTarget(
+                        address, operandCursor - instructionStart,
+                        displacement));
+                }
+                instruction.opcode = Opcode::ImulRegMem;
+                instruction.operands.push_back(
+                    RegisterOperand{decodeRegister(regEncoding, false), 32});
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement, 32,
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{decodeRegister(baseEncoding, false),
+                                        displacement, 32, index, scale});
+                const auto length = operandCursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
                 std::copy_n(
-                    code.begin() + static_cast<std::ptrdiff_t>(cursor), 3,
-                    instruction.bytes.begin());
-                instruction.operands.push_back(RegisterOperand{
-                    decodeRegister(static_cast<std::uint8_t>(
-                                       (modrm >> 3U) & 0x7U),
-                                   false),
-                    32});
-                instruction.operands.push_back(RegisterOperand{
-                    decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U),
-                                   false),
-                    32});
+                    code.begin() +
+                        static_cast<std::ptrdiff_t>(instructionStart),
+                    length, instruction.bytes.begin());
                 result.push_back(std::move(instruction));
-                cursor += 3;
+                cursor = operandCursor;
                 if (result.size() == maximumInstructions) {
                     return result;
                 }
