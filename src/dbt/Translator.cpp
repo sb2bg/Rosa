@@ -4797,6 +4797,53 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             break;
         }
+        case x86::Opcode::MulMem: {
+            if (instruction.operands.size() != 1 ||
+                !std::holds_alternative<x86::MemoryOperand>(instruction.operands[0])) {
+                throw std::runtime_error("internal decoder error: memory mul operand count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            if ((memory.width != 32 && memory.width != 64) || !memory.hasBase ||
+                memory.ripRelative || memory.index ||
+                memory.segment != x86::Segment::None) {
+                throw std::runtime_error("only based dword/qword memory MUL is implemented");
+            }
+            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            auto address =
+                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement =
+                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                     ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64, instruction.address);
+            }
+            const auto rhs = builder.loadGuest(address, width, instruction.address);
+            // Read RAX after the load helper so no caller-saved IR value
+            // remains live across the helper boundary.
+            const auto lhs =
+                builder.readGuestRegister(x86::Register::Rax, width, instruction.address);
+            if (memory.width == 32) {
+                const auto product =
+                    builder.multiplyLow(lhs, rhs, ir::Width::I64, instruction.address);
+                const auto high =
+                    builder.shiftRightLogical(product, 32, ir::Width::I64, instruction.address);
+                builder.writeGuestRegister(x86::Register::Rax, product, ir::Width::I32,
+                                           instruction.address);
+                builder.writeGuestRegister(x86::Register::Rdx, high, ir::Width::I32,
+                                           instruction.address);
+                builder.updateMultiplyFlags(high, ir::Width::I32, instruction.address);
+            } else {
+                const auto low = builder.multiplyLow(lhs, rhs, ir::Width::I64, instruction.address);
+                const auto high =
+                    builder.multiplyHighUnsigned(lhs, rhs, ir::Width::I64, instruction.address);
+                builder.writeGuestRegister(x86::Register::Rax, low, ir::Width::I64,
+                                           instruction.address);
+                builder.writeGuestRegister(x86::Register::Rdx, high, ir::Width::I64,
+                                           instruction.address);
+                builder.updateMultiplyFlags(high, ir::Width::I64, instruction.address);
+            }
+            break;
+        }
         case x86::Opcode::DivReg: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: div operand count");

@@ -13504,6 +13504,51 @@ void testUnsignedMultiplyGeneratedExecution() {
                 "MUL r32 nonzero-high defined flags differ");
 }
 
+void testUnsignedMultiplyMemoryGeneratedExecution() {
+    // Observed in libsystem_pthread: MUL qword [rdx] with REX.W.
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0xF7, 0x22, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x7FF802E6FF01ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MulMem, "MUL memory opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "MUL memory length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.base == rosa::x86::Register::Rdx && memory.displacement == 0 &&
+               memory.width == 64,
+           "MUL qword [rdx] operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("mul qword [rdx]") != std::string::npos,
+           "MUL qword [rdx] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 4);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x7FF802E6FF01ULL});
+    rosa::x86::X86State state;
+    state.rax = 3;
+    state.rdx = target.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{12}, "MUL memory low result differs");
+    expectEqual(state.rdx, std::uint64_t{0}, "MUL memory high result differs");
+    expectEqual(addressSpace.readU64(target), std::uint64_t{4},
+                "MUL memory changed guest memory");
+    expectEqual(state.rflags, std::uint64_t{0xD6}, "MUL memory zero-high defined flags differ");
+
+    addressSpace.writeU64(target, 2);
+    rosa::x86::X86State wideState;
+    wideState.rax = UINT64_MAX;
+    wideState.rdx = target.value;
+    wideState.rflags = 0x2;
+    static_cast<void>(block.execute(wideState, &addressSpace));
+    expectEqual(wideState.rax, std::uint64_t{UINT64_MAX - 1}, "MUL memory wide low differs");
+    expectEqual(wideState.rdx, std::uint64_t{1}, "MUL memory wide high differs");
+    expectEqual(wideState.rflags, std::uint64_t{0x803},
+                "MUL memory nonzero-high defined flags differ");
+}
+
 void testUnsignedDivideByteGeneratedExecution() {
     constexpr std::array<std::uint8_t, 3> observedCode{0xF6, 0xF2, 0xC3}; // div dl
     constexpr rosa::guest::GuestAddress observedRip{0x7FF802C75758ULL};
@@ -31838,6 +31883,7 @@ int main() {
         {"NEG 64-bit generated execution", testNeg64GeneratedExecution},
         {"REP MOVSB generated execution", testRepMovsbGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
+        {"unsigned MUL memory generated execution", testUnsignedMultiplyMemoryGeneratedExecution},
         {"unsigned byte DIV generated execution", testUnsignedDivideByteGeneratedExecution},
         {"unsigned qword register DIV generated execution",
          testUnsignedDivideQwordRegisterGeneratedExecution},

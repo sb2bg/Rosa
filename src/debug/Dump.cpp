@@ -950,6 +950,19 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           std::get<x86::RegisterOperand>(
                               instruction.operands[0]));
             break;
+        case x86::Opcode::MulMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << (memory.width == 32 ? "mul dword [" : "mul qword [")
+                   << x86::registerName(memory.base);
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::DivReg:
             stream << "div "
                    << registerOperandName(

@@ -55,6 +55,7 @@ enum class Opcode {
     NotReg,
     NegReg,
     MulReg,
+    MulMem,
     DivReg,
     DivMem,
     IdivReg,
