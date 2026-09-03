@@ -4094,10 +4094,58 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const bool rexB = (rex & 0x1U) != 0;
                 const auto modrm = code[opcodeOffset + 3];
                 const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-                if (rexW || mode != 0x3U) {
+                if (rexW) {
                     throw DecodeError(
                         address, remaining,
-                        "only register-direct PINSRB xmm, r32, imm8 is supported");
+                        "PINSRB does not support REX.W");
+                }
+                const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+                if (mode != 0x3U) {
+                    if (rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only PINSRB xmm, byte [base+disp8/disp32], imm8 memory operands are supported");
+                    }
+                    auto operandCursor = opcodeOffset + 4;
+                    std::int64_t displacement = 0;
+                    if (mode == 0x1U) {
+                        if (operandCursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated PINSRB memory disp8");
+                        }
+                        displacement =
+                            std::bit_cast<std::int8_t>(code[operandCursor++]);
+                    } else if (mode == 0x2U) {
+                        if (code.size() - operandCursor < 4) {
+                            throw DecodeError(address, remaining,
+                                              "truncated PINSRB memory disp32");
+                        }
+                        displacement = readI32(code.subspan(operandCursor, 4));
+                        operandCursor += 4;
+                    }
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated PINSRB memory immediate");
+                    }
+                    const auto lane = code[operandCursor++];
+                    instruction.opcode = Opcode::PinsrbXmmMem;
+                    instruction.operands.push_back(XmmRegisterOperand{
+                        static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                            ((modrm >> 3U) & 0x7U) | (rexR ? 8U : 0U)))});
+                    instruction.operands.push_back(MemoryOperand{
+                        decodeRegister(rmEncoding, rexB), displacement, 8});
+                    instruction.operands.push_back(ImmediateOperand{lane, 8});
+                    const auto length = operandCursor - instructionStart;
+                    instruction.length = static_cast<std::uint8_t>(length);
+                    std::copy_n(
+                        code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
+                    result.push_back(std::move(instruction));
+                    cursor = operandCursor;
+                    if (result.size() == maximumInstructions) {
+                        return result;
+                    }
+                    continue;
                 }
                 instruction.opcode = Opcode::PinsrbXmmReg;
                 instruction.operands.push_back(XmmRegisterOperand{

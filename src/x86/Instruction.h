@@ -146,6 +146,7 @@ enum class Opcode {
     PalignrRegRegImm,
     PblendwRegRegImm,
     PinsrbXmmReg,
+    PinsrbXmmMem,
     PinsrdXmmMem,
     PinsrdXmmReg,
     ExtractpsMemXmmImm,

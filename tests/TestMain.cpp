@@ -21066,6 +21066,49 @@ void testPinsrbRegisterToXmm() {
     expectEqual(extendedState.rflags, std::uint64_t{0xAD7}, "extended PINSRB changed flags");
 }
 
+void testPinsrbGuestMemoryToXmm() {
+    // Observed in libsqlite3: PINSRB XMM2, byte [RBX-0xc8], 1.
+    constexpr std::array<std::uint8_t, 11> code{0x66, 0x0F, 0x3A, 0x20, 0x93, 0x38,
+                                                0xFF, 0xFF, 0xFF, 0x01, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x100082D87ULL});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PinsrbXmmMem,
+           "PINSRB xmm, byte [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{10}, "PINSRB xmm, byte [memory] length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm2, "PINSRB memory destination differs");
+    expect(memory.base == rosa::x86::Register::Rbx && memory.displacement == -200 &&
+               memory.width == 8,
+           "PINSRB byte [rbx-0xc8] memory operand differs");
+    expect(immediate.value == 1, "PINSRB memory lane differs");
+    expect(rosa::debug::dumpX86(decoded).find("pinsrb xmm2, byte [rbx-0xc8], 0x1") !=
+               std::string::npos,
+           "PINSRB memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 1> sourceByte{0xAB};
+    addressSpace.writeBytes(target, sourceByte);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x100082D87ULL});
+    rosa::x86::X86State state;
+    state.rbx = target.value + 200;
+    state.xmm[2] = {.low = 0x0706050403020100ULL, .high = 0x0F0E0D0C0B0A0908ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[2].low, std::uint64_t{0x070605040302AB00ULL},
+                "PINSRB memory wrote the wrong low-lane byte");
+    expectEqual(state.xmm[2].high, std::uint64_t{0x0F0E0D0C0B0A0908ULL},
+                "PINSRB memory changed the other XMM lane");
+    expectEqual(state.rbx, target.value + 200, "PINSRB memory changed its base");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "PINSRB memory changed flags");
+}
+
 void testPblendwRegisters() {
     constexpr std::array<std::uint8_t, 7> code{0x66, 0x0F, 0x3A, 0x0E, 0xC8, 0x0F, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -33841,6 +33884,7 @@ int main() {
         {"PINSRD register to XMM", testPinsrdRegisterToXmm},
         {"PINSRQ register to XMM", testPinsrqRegisterToXmm},
         {"PINSRB register to XMM", testPinsrbRegisterToXmm},
+        {"PINSRB guest memory to XMM", testPinsrbGuestMemoryToXmm},
         {"PBLENDW registers", testPblendwRegisters},
         {"register move execution", testRegisterMoveExecution},
         {"LEA base displacement execution", testLeaBaseDisplacementExecution},
