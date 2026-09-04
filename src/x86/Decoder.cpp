@@ -9311,6 +9311,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             auto baseEncoding = rmEncoding;
             std::optional<Register> index;
+            std::uint8_t scale = 1;
             if (!ripRelative && rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining,
@@ -9322,15 +9323,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto indexEncoding =
                     static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
                 baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-                if (scaleBits != 0 ||
-                    (mode == 0 && baseEncoding == 0x5U)) {
+                if (mode == 0 && baseEncoding == 0x5U) {
                     throw DecodeError(
                         address, remaining,
-                        "only scale-one, based SIB addressing is supported for SUB memory operands");
+                        "no-base SUB memory SIB is not supported");
                 }
                 if (indexEncoding != 0x4U || rexX) {
                     index = decodeRegister(indexEncoding, rexX);
                 }
+                scale = static_cast<std::uint8_t>(1U << scaleBits);
             }
             std::int64_t displacement = 0;
             if (ripRelative) {
@@ -9363,7 +9364,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::SubRegMem;
             instruction.operands.push_back(RegisterOperand{destination, width});
             instruction.operands.push_back(
-                MemoryOperand{base, displacement, width, index, 1,
+                MemoryOperand{base, displacement, width, index, scale,
                               !ripRelative, ripRelative});
         } else if (opcode == 0x19U) {
             if (cursor >= code.size()) {

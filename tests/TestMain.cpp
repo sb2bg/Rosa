@@ -21250,6 +21250,42 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testSubScaledIndexMemory() {
+    // Observed in CoreFoundation under an AppKit fixture: SUB EBX, [RDX+RCX*4].
+    constexpr std::array<std::uint8_t, 4> code{0x2B, 0x1C, 0x8A, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802ED7E70ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SubRegMem,
+           "scaled SUB opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "scaled SUB length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rbx && destination.width == 32,
+           "scaled SUB destination differs");
+    expect(memory.base == rosa::x86::Register::Rdx && memory.index &&
+               *memory.index == rosa::x86::Register::Rcx && memory.scale == 4 &&
+               memory.width == 32 && memory.displacement == 0,
+           "scaled SUB memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("sub rbx, [rdx+rcx*4]") != std::string::npos,
+           "scaled SUB dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(rosa::guest::GuestAddress{0x8100}, 0x2F);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rdx = 0x80F0;
+    state.rcx = 0x4;
+    state.rbx = 0x100;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    // 0x100 - 0x2F == 0xD1.
+    expectEqual(state.rbx, std::uint64_t{0xD1}, "scaled SUB result differs");
+}
+
 void testLockXaddWordMemory() {
     // Observed in libsystem_trace under an AppKit fixture:
     // LOCK XADD word [RIP+disp32], AX (66 F0 0F C1 /r).
@@ -37901,6 +37937,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"SUB scaled-index memory", testSubScaledIndexMemory},
         {"LOCK XADD word memory", testLockXaddWordMemory},
         {"LOCK XADD indexed memory", testLockXaddIndexedMemory},
         {"MOVMSKPD registers execution", testMovmskpdRegisters},

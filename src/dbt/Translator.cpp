@@ -6350,8 +6350,13 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        ir::Width::I64, instruction.address)
                     : builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
             if (memory.index) {
-                const auto index =
+                auto index =
                     builder.readGuestRegister(*memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
                 address = builder.add(address, index, ir::Width::I64, instruction.address);
             }
             if (memory.displacement != 0) {
