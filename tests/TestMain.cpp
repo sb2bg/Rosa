@@ -21968,6 +21968,64 @@ void testMovdXmmToGuestMemory() {
                 "faulted RIP-relative MOVD store changed flags");
 }
 
+void testMovssXmmFromGuestMemory() {
+    // Observed in CoreGraphics under an Objective-C fixture: MOVSS xmm0, [rbp-0x2c].
+    constexpr std::array<std::uint8_t, 6> code{0xF3, 0x0F, 0x10, 0x45, 0xD4, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF80968BE24ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovssRegMem,
+           "MOVSS xmm, [memory] opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "MOVSS xmm, [memory] length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0,
+           "MOVSS xmm0, [memory] destination differs");
+    expect(!memory.ripRelative && memory.hasBase &&
+               memory.base == rosa::x86::Register::Rbp && !memory.index &&
+               memory.displacement == -0x2C && memory.width == 32,
+           "MOVSS xmm0, dword [rbp-0x2c] memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("movss xmm0, dword [rbp-0x2c]") !=
+               std::string::npos,
+           "MOVSS xmm, [memory] dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress sourceAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(sourceAddress, 0x4048F5C3);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rbp = sourceAddress.value + 0x2C;
+    state.xmm[0] = {.low = 0xAAAAAAAAAAAAAAAAULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x4048F5C3ULL},
+                "MOVSS load low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0}, "MOVSS load did not zero the high lane");
+    expectEqual(state.rbp, sourceAddress.value + 0x2C, "MOVSS load changed its base");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVSS load changed flags");
+
+    // REX-extended store: MOVSS [r15+0x8], xmm0.
+    constexpr std::array<std::uint8_t, 7> storeCode{0xF3, 0x41, 0x0F, 0x11,
+                                                    0x47, 0x08, 0xC3};
+    const auto storeDecoded = decoder.decodeBlock(storeCode, observedRip);
+    expect(storeDecoded[0].opcode == rosa::x86::Opcode::MovssMemXmm,
+           "REX MOVSS store opcode differs");
+    expectEqual(storeDecoded[0].length, std::uint8_t{6}, "REX MOVSS store length differs");
+    const auto storeMemory = std::get<rosa::x86::MemoryOperand>(storeDecoded[0].operands[0]);
+    const auto storeSource =
+        std::get<rosa::x86::XmmRegisterOperand>(storeDecoded[0].operands[1]);
+    expect(storeMemory.base == rosa::x86::Register::R15 &&
+               storeMemory.displacement == 8 && storeSource.reg == rosa::x86::XmmRegister::Xmm0,
+           "MOVSS [r15+0x8], xmm0 operands differ");
+    expect(rosa::debug::dumpX86(storeDecoded).find("movss dword [r15+0x8], xmm0") !=
+               std::string::npos,
+           "REX MOVSS store dump differs");
+}
+
 void testMovssXmmToGuestMemory() {
     constexpr std::array<std::uint8_t, 6> code{0xF3, 0x0F, 0x11, 0x45, 0xD0, 0xC3};
     constexpr rosa::guest::GuestAddress instructionAddress{0x7FF802C67F31ULL};
@@ -36312,6 +36370,7 @@ int main() {
         {"MOVD guest memory to XMM", testMovdGuestMemoryToXmm},
         {"MOVD XMM to guest memory", testMovdXmmToGuestMemory},
         {"MOVSS XMM to guest memory", testMovssXmmToGuestMemory},
+        {"MOVSS XMM from guest memory", testMovssXmmFromGuestMemory},
         {"MOVSD XMM memory moves", testMovsdXmmMemoryMoves},
         {"MOVLPS XMM memory moves", testMovlpsXmmMemoryMoves},
         {"EXTRACTPS XMM to guest memory", testExtractpsXmmToGuestMemory},

@@ -4584,6 +4584,52 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.storeGuest(address, value, ir::Width::I32, instruction.address);
             break;
         }
+        case x86::Opcode::MovssRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: scalar XMM memory-load operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            if (memory.width != 32 ||
+                (memory.ripRelative ? memory.hasBase || memory.index.has_value()
+                                    : !memory.hasBase) ||
+                memory.segment != x86::Segment::None) {
+                throw std::runtime_error("unsupported dword scalar XMM load addressing");
+            }
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            if (memory.index) {
+                auto index =
+                    builder.readGuestRegister(*memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64, instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement =
+                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                     ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64, instruction.address);
+            }
+            // MOVSS zeroes the upper three destination dwords; the I32 load
+            // already zero-extends into the low lane.
+            const auto value =
+                builder.loadGuest(address, ir::Width::I32, instruction.address);
+            builder.writeGuestXmmLane(destination, false, value, instruction.address);
+            builder.writeGuestXmmLane(
+                destination, true,
+                builder.constant(0, ir::Width::I64, instruction.address),
+                instruction.address);
+            break;
+        }
         case x86::Opcode::MovdRegXmm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: MOVD register-XMM operand count");

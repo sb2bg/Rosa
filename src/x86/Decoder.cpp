@@ -4498,61 +4498,98 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
         }
 
-        if (code[cursor] == 0xF3U && code.size() - cursor >= 3 &&
-            code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x11U) {
-            if (code.size() - cursor < 4) {
-                throw DecodeError(address, remaining,
-                                  "truncated MOVSS [memory], xmm");
-            }
-            const auto modrm = code[cursor + 3];
+        if ((code[cursor] == 0xF3U && code.size() - cursor >= 4 &&
+             code[cursor + 1] == 0x0FU &&
+             (code[cursor + 2] == 0x10U || code[cursor + 2] == 0x11U)) ||
+            (code.size() - cursor >= 5 && code[cursor] == 0xF3U &&
+             code[cursor + 1] >= 0x40U && code[cursor + 1] <= 0x4FU &&
+             code[cursor + 2] == 0x0FU &&
+             (code[cursor + 3] == 0x10U || code[cursor + 3] == 0x11U))) {
+            const bool hasMovssRex = code[cursor + 1] != 0x0FU;
+            const auto rex = hasMovssRex ? code[cursor + 1] : 0U;
+            const auto rexR = (rex & 0x4U) != 0;
+            const auto rexX = (rex & 0x2U) != 0;
+            const auto rexB = (rex & 0x1U) != 0;
+            const auto opcodeOffset = cursor + (hasMovssRex ? 2U : 1U);
+            const bool isLoad = code[opcodeOffset + 1] == 0x10U;
+            const auto modrm = code[opcodeOffset + 2];
             const auto mode =
                 static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode == 0x3U || (mode == 0 && rmEncoding == 0x5U)) {
+            const auto xmm = XmmRegisterOperand{static_cast<XmmRegister>(
+                static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) |
+                                          (rexR ? 8U : 0U)))};
+            if (mode == 0x3U) {
                 throw DecodeError(
                     address, remaining,
-                    "only based no-index MOVSS [memory], xmm is supported");
+                    "register-direct MOVSS is not supported");
             }
-            auto operandCursor = cursor + 4;
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
+            if (mode == 0 && rmEncoding == 0x5U && rexB) {
+                throw DecodeError(address, remaining,
+                                  "R13-based MOVSS is not supported");
+            }
+            auto operandCursor = opcodeOffset + 3;
             auto baseEncoding = rmEncoding;
-            if (rmEncoding == 0x4U) {
+            std::optional<Register> index;
+            std::uint8_t scale = 1;
+            if (!ripRelative && rmEncoding == 0x4U) {
                 if (operandCursor >= code.size()) {
                     throw DecodeError(address, remaining,
-                                      "truncated MOVSS store SIB byte");
+                                      "truncated MOVSS SIB byte");
                 }
                 const auto sib = code[operandCursor++];
+                const auto scaleBits =
+                    static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
                 const auto indexEncoding =
                     static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
                 baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-                if (indexEncoding != 0x4U ||
-                    (mode == 0 && baseEncoding == 0x5U)) {
-                    throw DecodeError(
-                        address, remaining,
-                        "only based no-index MOVSS store SIB operands are supported");
+                if (mode == 0 && baseEncoding == 0x5U) {
+                    throw DecodeError(address, remaining,
+                                      "no-base MOVSS SIB is not supported");
                 }
+                if (indexEncoding != 0x4U || rexX) {
+                    index = decodeRegister(indexEncoding, rexX);
+                    scale = static_cast<std::uint8_t>(1U << scaleBits);
+                }
+            } else if (!ripRelative && rexX) {
+                throw DecodeError(address, remaining,
+                                  "REX.X requires a MOVSS SIB");
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
                 if (operandCursor >= code.size()) {
                     throw DecodeError(address, remaining,
-                                      "truncated MOVSS store disp8");
+                                      "truncated MOVSS disp8");
                 }
                 displacement =
                     std::bit_cast<std::int8_t>(code[operandCursor++]);
-            } else if (mode == 0x2U) {
+            } else if (mode == 0x2U || ripRelative) {
                 if (code.size() - operandCursor < 4) {
                     throw DecodeError(address, remaining,
-                                      "truncated MOVSS store disp32");
+                                      "truncated MOVSS disp32");
                 }
                 displacement = readI32(code.subspan(operandCursor, 4));
                 operandCursor += 4;
             }
-            instruction.opcode = Opcode::MovssMemXmm;
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(baseEncoding, false), displacement, 32});
-            instruction.operands.push_back(XmmRegisterOperand{
-                static_cast<XmmRegister>(static_cast<std::uint8_t>(
-                    (modrm >> 3U) & 0x7U))});
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, operandCursor - instructionStart, displacement));
+            }
+            const auto memory = ripRelative
+                                    ? MemoryOperand{Register::Rax, displacement, 32,
+                                                    std::nullopt, 1, false, true}
+                                    : MemoryOperand{decodeRegister(baseEncoding, rexB),
+                                                    displacement, 32, index, scale};
+            instruction.opcode =
+                isLoad ? Opcode::MovssRegMem : Opcode::MovssMemXmm;
+            if (isLoad) {
+                instruction.operands.push_back(xmm);
+                instruction.operands.push_back(memory);
+            } else {
+                instruction.operands.push_back(memory);
+                instruction.operands.push_back(xmm);
+            }
             const auto length = operandCursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(

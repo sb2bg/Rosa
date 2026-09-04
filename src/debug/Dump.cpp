@@ -3021,15 +3021,18 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         }
         case x86::Opcode::MovsdRegMem:
-        case x86::Opcode::MovlpsRegMem: {
+        case x86::Opcode::MovlpsRegMem:
+        case x86::Opcode::MovssRegMem: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);
             stream << (instruction.opcode == x86::Opcode::MovlpsRegMem ? "movlps "
-                                                                      : "movsd ")
+                       : instruction.opcode == x86::Opcode::MovssRegMem ? "movss "
+                                                                       : "movsd ")
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0]).reg)
-                   << ", qword [";
+                   << (instruction.opcode == x86::Opcode::MovssRegMem ? ", dword ["
+                                                                     : ", qword [");
             if (memory.ripRelative) {
                 stream << "rip";
             } else if (memory.hasBase) {
