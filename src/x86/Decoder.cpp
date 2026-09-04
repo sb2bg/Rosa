@@ -7119,16 +7119,28 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
-        if (code[cursor] == 0xF0U) {
-            auto xaddCursor = cursor + 1;
+        {
+            // Prefix order on the wire: [66] F0 [REX].
+            auto xaddCursor = cursor;
+            const bool hasXaddSizePrefix =
+                xaddCursor < code.size() && code[xaddCursor] == 0x66U;
+            if (hasXaddSizePrefix) {
+                ++xaddCursor;
+            }
+            const bool hasXaddLock =
+                xaddCursor < code.size() && code[xaddCursor] == 0xF0U;
+            if (hasXaddLock) {
+                ++xaddCursor;
+            }
             const bool hasXaddRex =
                 xaddCursor < code.size() && code[xaddCursor] >= 0x40U &&
                 code[xaddCursor] <= 0x4FU;
             const auto xaddRex =
                 hasXaddRex ? code[xaddCursor++] : std::uint8_t{0};
-            const bool isXadd = code.size() - xaddCursor >= 2 &&
-                                code[xaddCursor] == 0x0FU &&
-                                code[xaddCursor + 1] == 0xC1U;
+            const bool isXadd =
+                hasXaddLock && code.size() - xaddCursor >= 2 &&
+                code[xaddCursor] == 0x0FU &&
+                code[xaddCursor + 1] == 0xC1U;
             if (isXadd) {
                 cursor = xaddCursor + 2;
                 if (cursor >= code.size()) {
@@ -7202,8 +7214,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     static_cast<void>(relativeTarget(
                         address, cursor - instructionStart, displacement));
                 }
-                const auto width =
-                    static_cast<std::uint8_t>(rexW ? 64U : 32U);
+                const auto width = static_cast<std::uint8_t>(
+                    hasXaddSizePrefix ? 16U : (rexW ? 64U : 32U));
                 instruction.opcode = Opcode::LockXaddMemReg;
                 instruction.operands.push_back(
                     ripRelative

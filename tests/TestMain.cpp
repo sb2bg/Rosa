@@ -21250,6 +21250,46 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testLockXaddWordMemory() {
+    // Observed in libsystem_trace under an AppKit fixture:
+    // LOCK XADD word [RIP+disp32], AX (66 F0 0F C1 /r).
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0xF0, 0x0F, 0xC1, 0x01, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802B83A40ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockXaddMemReg,
+           "word LOCK XADD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "word LOCK XADD length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rcx && memory.width == 16 &&
+               memory.displacement == 0,
+           "word LOCK XADD memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rax && source.width == 16,
+           "word LOCK XADD source differs");
+    expect(rosa::debug::dumpX86(decoded).find("lock xadd word [rcx], ax") !=
+               std::string::npos,
+           "word LOCK XADD dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> initialWord{0xE8, 0x03};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8100}, initialWord);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rcx = 0x8100;
+    state.rax = 0xFFFF000000000007ULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    // AX takes the old contents; memory gains the sum; upper RAX is preserved.
+    expectEqual(state.rax, std::uint64_t{0xFFFF0000000003E8ULL},
+                "word LOCK XADD did not exchange AX");
+    expectEqual(addressSpace.readU16(rosa::guest::GuestAddress{0x8100}),
+                std::uint16_t{1007}, "word LOCK XADD did not add");
+}
+
 void testLockXaddIndexedMemory() {
     // Observed in libsystem_trace under an AppKit fixture:
     // LOCK XADD dword [R15+RAX], ECX.
@@ -37790,6 +37830,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"LOCK XADD word memory", testLockXaddWordMemory},
         {"LOCK XADD indexed memory", testLockXaddIndexedMemory},
         {"MOVMSKPD registers execution", testMovmskpdRegisters},
         {"PMOVSXDQ registers execution", testPmovsxdqRegisters},

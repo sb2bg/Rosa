@@ -3452,6 +3452,46 @@ lockedAddGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+lockedExchangeAddGuest16(GuestExecutionContext *context, x86::X86State *state,
+                         std::uint64_t address, std::uint64_t sourceValue,
+                         std::uint64_t sourceEncoding) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated word LOCK XADD has no guest address space");
+        }
+        if (sourceEncoding > static_cast<std::uint64_t>(x86::Register::R15)) {
+            throw std::runtime_error("generated word LOCK XADD has an invalid source register");
+        }
+        constexpr auto width = sizeof(std::uint16_t);
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, width,
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU16(guest::GuestAddress{address});
+        const auto source = static_cast<std::uint16_t>(sourceValue);
+        const auto result = static_cast<std::uint16_t>(original + source);
+        const std::array bytes{
+            static_cast<std::uint8_t>(result),
+            static_cast<std::uint8_t>(result >> 8U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+        // A 16-bit XADD preserves the upper register bits, unlike the
+        // zero-extending 32-bit form. Flags come from the memory add.
+        const auto sourceRegister = static_cast<x86::Register>(sourceEncoding);
+        const auto parentOffset = x86::registerOffset(sourceRegister);
+        std::memcpy(reinterpret_cast<std::uint8_t *>(state) + parentOffset, &original,
+                    sizeof(original));
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return updateAddFlags16(state, original, source, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint16_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 lockedExchangeAddGuest32(GuestExecutionContext *context, x86::X86State *state,
                          std::uint64_t address, std::uint64_t sourceValue,
                          std::uint64_t sourceEncoding) noexcept {
@@ -6116,9 +6156,10 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
-            if (memory.width != source.width || (memory.width != 32 && memory.width != 64)) {
+            if (memory.width != source.width ||
+                (memory.width != 16 && memory.width != 32 && memory.width != 64)) {
                 throw std::runtime_error(
-                    "only LOCK XADD dword/qword [base/index+disp], r32/r64 is implemented");
+                    "only LOCK XADD word/dword/qword [base/index+disp], r16/r32/r64 is implemented");
             }
             auto address =
                 memory.ripRelative
@@ -6142,11 +6183,17 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 address = builder.add(address, displacement, ir::Width::I64, instruction.address);
             }
             const auto sourceValue = builder.readGuestRegister(
-                source.reg, source.width == 32 ? ir::Width::I32 : ir::Width::I64,
+                source.reg,
+                source.width == 16   ? ir::Width::I16
+                : source.width == 32 ? ir::Width::I32
+                                     : ir::Width::I64,
                 instruction.address);
             builder.lockedExchangeAddGuestMemory(
                 address, sourceValue, source.reg,
-                memory.width == 32 ? ir::Width::I32 : ir::Width::I64, instruction.address);
+                memory.width == 16   ? ir::Width::I16
+                : memory.width == 32 ? ir::Width::I32
+                                     : ir::Width::I64,
+                instruction.address);
             break;
         }
         case x86::Opcode::LockOrMemImm:
@@ -12048,10 +12095,11 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             break;
         }
         case ir::Opcode::LockedExchangeAddGuestMemory: {
-            if ((operation.width != ir::Width::I32 && operation.width != ir::Width::I64) ||
+            if ((operation.width != ir::Width::I16 && operation.width != ir::Width::I32 &&
+                 operation.width != ir::Width::I64) ||
                 !operation.guestRegister) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 32-bit and 64-bit guest-memory LOCK XADD");
+                    "ARM64 backend only implements 16-, 32-, and 64-bit guest-memory LOCK XADD");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -12060,7 +12108,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x3, hostRegister(*operation.rhs));
             assembler.movImmediate(arm64::x4, static_cast<std::uint64_t>(*operation.guestRegister));
             assembler.mov(arm64::x0, arm64::x19);
-            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I16
+                                                   ? pointerBits(&lockedExchangeAddGuest16)
+                                               : operation.width == ir::Width::I32
                                                    ? pointerBits(&lockedExchangeAddGuest32)
                                                    : pointerBits(&lockedExchangeAddGuest64));
             assembler.blr(arm64::x16);
