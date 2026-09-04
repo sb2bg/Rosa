@@ -6118,13 +6118,23 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
             if (memory.width != source.width || (memory.width != 32 && memory.width != 64)) {
                 throw std::runtime_error(
-                    "only LOCK XADD dword/qword [base+disp], r32/r64 is implemented");
+                    "only LOCK XADD dword/qword [base/index+disp], r32/r64 is implemented");
             }
             auto address =
                 memory.ripRelative
                     ? builder.constant(instruction.address.value + instruction.length,
                                        ir::Width::I64, instruction.address)
                     : builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+            if (memory.index) {
+                auto index =
+                    builder.readGuestRegister(*memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64, instruction.address);
+            }
             if (memory.displacement != 0) {
                 const auto displacement =
                     builder.constant(static_cast<std::uint64_t>(memory.displacement),

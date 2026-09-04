@@ -21250,6 +21250,46 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testLockXaddIndexedMemory() {
+    // Observed in libsystem_trace under an AppKit fixture:
+    // LOCK XADD dword [R15+RAX], ECX.
+    constexpr std::array<std::uint8_t, 7> code{0xF0, 0x41, 0x0F, 0xC1, 0x0C, 0x07, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802B8655EULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockXaddMemReg,
+           "indexed LOCK XADD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6}, "indexed LOCK XADD length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::R15 && memory.index &&
+               *memory.index == rosa::x86::Register::Rax && memory.scale == 1 &&
+               memory.width == 32 && memory.displacement == 0,
+           "indexed LOCK XADD memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rcx && source.width == 32,
+           "indexed LOCK XADD source differs");
+    expect(rosa::debug::dumpX86(decoded).find("lock xadd dword [r15+rax], ecx") !=
+               std::string::npos,
+           "indexed LOCK XADD dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(rosa::guest::GuestAddress{0x8100}, 100);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.r15 = 0x80F0;
+    state.rax = 0x10;
+    state.rcx = 7;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    // ECX takes the old contents; memory gains the sum.
+    expectEqual(state.rcx, std::uint32_t{100}, "indexed LOCK XADD did not load the old value");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{0x8100}), std::uint32_t{107},
+                "indexed LOCK XADD did not add");
+}
+
 void testMovmskpdRegisters() {
     // Observed in libsystem_kernel under an AppKit fixture: MOVMSKPD eax, xmm1.
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x50, 0xC1, 0xC3};
@@ -37750,6 +37790,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"LOCK XADD indexed memory", testLockXaddIndexedMemory},
         {"MOVMSKPD registers execution", testMovmskpdRegisters},
         {"PMOVSXDQ registers execution", testPmovsxdqRegisters},
         {"LOCK AND dword memory immediate", testLockAndDwordMemoryImmediate},

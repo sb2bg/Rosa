@@ -433,6 +433,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "lock xadd "
                    << (memory.width == 32 ? "dword" : "qword") << " ["
                    << (memory.ripRelative ? "rip" : x86::registerName(memory.base));
+            if (memory.index) {
+                stream << '+' << x86::registerName(*memory.index);
+                if (memory.scale != 1) {
+                    stream << '*' << static_cast<unsigned>(memory.scale);
+                }
+            }
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {

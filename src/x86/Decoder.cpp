@@ -7147,11 +7147,40 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const bool rexX = (xaddRex & 0x2U) != 0;
                 const bool rexB = (xaddRex & 0x1U) != 0;
                 const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
-                if (mode == 0x3U || rmEncoding == 0x4U || rexX ||
+                if (mode == 0x3U ||
                     (mode == 0 && rmEncoding == 0x5U && rexB)) {
                     throw DecodeError(
                         address, remaining,
-                        "only LOCK XADD dword/qword [base/RIP+disp8/disp32], r32/r64 is supported");
+                        "only LOCK XADD dword/qword [base/index*scale/RIP+disp8/disp32], r32/r64 is supported");
+                }
+                auto xaddBase = decodeRegister(rmEncoding, rexB);
+                std::optional<Register> xaddIndex;
+                std::uint8_t xaddScale = 1;
+                if (!ripRelative && rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated LOCK XADD SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    const auto baseEncoding =
+                        static_cast<std::uint8_t>(sib & 0x7U);
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(
+                            address, remaining,
+                            "no-base LOCK XADD SIB is not supported");
+                    }
+                    xaddBase = decodeRegister(baseEncoding, rexB);
+                    if (indexEncoding != 0x4U) {
+                        xaddIndex = decodeRegister(indexEncoding, rexX);
+                        xaddScale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                } else if (rexX) {
+                    throw DecodeError(address, remaining,
+                                      "REX.X requires a LOCK XADD SIB");
                 }
                 std::int64_t displacement = 0;
                 if (ripRelative || mode == 0x2U) {
@@ -7180,8 +7209,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     ripRelative
                         ? MemoryOperand{Register::Rax, displacement, width,
                                         std::nullopt, 1, false, true}
-                        : MemoryOperand{decodeRegister(rmEncoding, rexB),
-                                        displacement, width});
+                        : MemoryOperand{xaddBase, displacement, width,
+                                        xaddIndex, xaddScale});
                 instruction.operands.push_back(RegisterOperand{
                     decodeRegister(regEncoding, rexR), width});
                 const auto length = cursor - instructionStart;
