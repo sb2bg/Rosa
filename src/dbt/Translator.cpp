@@ -4918,7 +4918,11 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 throw std::runtime_error("CMPXCHG16B requires a 128-bit memory operand");
             }
             const auto base =
-                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                instruction.address);
             auto address = base;
             if (memory.displacement != 0) {
                 const auto displacement =

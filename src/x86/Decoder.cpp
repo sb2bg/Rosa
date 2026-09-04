@@ -5648,11 +5648,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
             if (mode > 0x2U || extension != 0x1U || rmEncoding == 0x4U ||
-                (mode == 0 && rmEncoding == 0x5U)) {
+                (mode == 0 && rmEncoding == 0x5U && rexB)) {
                 throw DecodeError(
                     address, remaining,
-                    "only LOCK CMPXCHG16B [base+disp8/disp32] is supported");
+                    "only LOCK CMPXCHG16B [base+disp8/disp32/RIP] is supported");
             }
             cursor += 5;
             std::int64_t displacement = 0;
@@ -5662,7 +5663,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                       "truncated LOCK CMPXCHG16B disp8");
                 }
                 displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-            } else if (mode == 0x2U) {
+            } else if (mode == 0x2U || ripRelative) {
                 if (code.size() - cursor < 4) {
                     throw DecodeError(address, remaining,
                                       "truncated LOCK CMPXCHG16B disp32");
@@ -5670,9 +5671,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 displacement = readI32(code.subspan(cursor, 4));
                 cursor += 4;
             }
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+            }
             instruction.opcode = Opcode::Cmpxchg16bMem;
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, rexB), displacement, 128});
+            instruction.operands.push_back(
+                ripRelative
+                    ? MemoryOperand{Register::Rax, displacement, 128,
+                                    std::nullopt, 1, false, true}
+                    : MemoryOperand{decodeRegister(rmEncoding, rexB),
+                                    displacement, 128});
             const auto length = cursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(

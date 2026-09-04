@@ -7268,6 +7268,53 @@ void testLockedCompareExchangeGuestPair() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted CMPXCHG16B changed flags");
 }
 
+void testLockedCompareExchangeGuestPairRipRelative() {
+    // Observed in libswiftCore under an Objective-C fixture.
+    constexpr std::array<std::uint8_t, 10> code{0xF0, 0x48, 0x0F, 0xC7, 0x0D,
+                                                0x29, 0x10, 0x66, 0x2C, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF81713FBBEULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::Cmpxchg16bMem,
+           "RIP-relative LOCK CMPXCHG16B opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{9}, "RIP-relative LOCK CMPXCHG16B length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(memory.ripRelative && !memory.hasBase && !memory.index &&
+               memory.displacement == 0x2C661029 && memory.width == 128,
+           "RIP-relative LOCK CMPXCHG16B memory operand differs");
+    expectEqual(observedRip.value + decoded[0].length + memory.displacement,
+                std::uint64_t{0x7FF8437A0BF0ULL}, "RIP-relative LOCK CMPXCHG16B target differs");
+    expect(rosa::debug::dumpX86(decoded).find("lock cmpxchg16b [rip+0x2c661029]") !=
+               std::string::npos,
+           "RIP-relative LOCK CMPXCHG16B dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    constexpr std::array<std::uint8_t, 10> executeCode{0xF0, 0x48, 0x0F, 0xC7, 0x0D,
+                                                       0xF7, 0x70, 0x00, 0x00, 0xC3};
+    const auto block = translator.translate(executeCode, rosa::guest::GuestAddress{0x1000});
+    constexpr std::uint64_t memoryLow = 0x1111222233334444ULL;
+    constexpr std::uint64_t memoryHigh = 0x5555666677778888ULL;
+    addressSpace.writeU64(target, memoryLow);
+    addressSpace.writeU64(rosa::guest::GuestAddress{target.value + 8}, memoryHigh);
+    rosa::x86::X86State equalState;
+    equalState.rax = memoryLow;
+    equalState.rdx = memoryHigh;
+    equalState.rbx = 0xAAAABBBBCCCCDDDDULL;
+    equalState.rcx = 0xEEEEFFFF00001111ULL;
+    equalState.rflags = 0x897;
+    static_cast<void>(block.execute(equalState, &addressSpace));
+    expectEqual(addressSpace.readU64(target), equalState.rbx,
+                "RIP-relative CMPXCHG16B stored the wrong low lane");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{target.value + 8}), equalState.rcx,
+                "RIP-relative CMPXCHG16B stored the wrong high lane");
+    expect((equalState.rflags & (1U << 6U)) != 0, "RIP-relative CMPXCHG16B did not set ZF");
+}
+
 void testExchangeGuestDwordWithRegister() {
     constexpr std::array<std::uint8_t, 3> code{0x87, 0x17, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -35343,6 +35390,7 @@ int main() {
         {"LOCK CMPXCHG guest dword", testLockedCompareExchangeGuestDword},
         {"LOCK CMPXCHG guest qword", testLockedCompareExchangeGuestQword},
         {"LOCK CMPXCHG16B guest pair", testLockedCompareExchangeGuestPair},
+        {"LOCK CMPXCHG16B RIP-relative pair", testLockedCompareExchangeGuestPairRipRelative},
         {"XCHG guest dword with register", testExchangeGuestDwordWithRegister},
         {"XCHG guest qword with register", testExchangeGuestQwordWithRegister},
         {"XCHG guest qword with index", testExchangeGuestQwordWithIndex},
