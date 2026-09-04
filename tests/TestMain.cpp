@@ -21249,6 +21249,36 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testMovddupRegisters() {
+    // Observed in ColorSync under an Objective-C fixture: MOVDDUP xmm1, xmm1 (F2 0F 12 /r).
+    constexpr std::array<std::uint8_t, 5> code{0xF2, 0x0F, 0x12, 0xC9, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4E2CULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovddupRegReg,
+           "MOVDDUP opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "MOVDDUP length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "MOVDDUP xmm1, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("movddup xmm1, xmm1") != std::string::npos,
+           "MOVDDUP dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.xmm[1] = {.low = 0x0123456789ABCDEFULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[1].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVDDUP changed the low lane");
+    expectEqual(state.xmm[1].high, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVDDUP did not duplicate into the high lane");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVDDUP changed flags");
+}
+
 void testPcmpeqqRegisterGeneratedExecution() {
     // Observed in CoreGraphics under an Objective-C fixture: PCMPEQQ xmm0, xmm1
     // (66 0F 38 29 /r; previously mislabeled as MOVDDUP).
@@ -36607,6 +36637,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"MOVDDUP registers execution", testMovddupRegisters},
         {"PCMPEQQ registers execution", testPcmpeqqRegisterGeneratedExecution},
         {"PCMPEQQ guest memory execution", testPcmpeqqGuestMemoryGeneratedExecution},
         {"BLENDVPD registers execution", testBlendvpdRegisters},

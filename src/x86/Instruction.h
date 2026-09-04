@@ -188,6 +188,8 @@ enum class Opcode {
     MovdquMemReg,
     MovlhpsRegReg,
     MovlhpsRegMem,
+    MovddupRegReg,
+    MovddupRegMem,
     PcmpeqqRegReg,
     PcmpeqqRegMem,
     BlendvpdRegReg,
