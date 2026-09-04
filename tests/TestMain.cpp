@@ -33280,6 +33280,64 @@ void testOverflowParityShortConditionals() {
     }
 }
 
+void testOverflowParityLongConditionals() {
+    // Observed in Foundation under an Objective-C fixture: JNO rel32.
+    struct LongJumpCase {
+        std::uint8_t opcode;
+        rosa::x86::Condition condition;
+        std::string_view name;
+        std::uint64_t takenFlags;
+        std::uint64_t notTakenFlags;
+    };
+    constexpr std::uint64_t overflowSet = 0x8D7;
+    constexpr std::uint64_t overflowClear = 0x8D7 & ~std::uint64_t{1U << 11U};
+    constexpr std::uint64_t parityClear = 0x8D7 & ~std::uint64_t{1U << 2U};
+    constexpr LongJumpCase cases[] = {
+        {0x81, rosa::x86::Condition::NotOverflow, "jno", overflowClear, overflowSet},
+        {0x8A, rosa::x86::Condition::ParityEven, "jp", overflowSet, parityClear},
+        {0x8B, rosa::x86::Condition::ParityOdd, "jnp", parityClear, overflowSet},
+    };
+    const rosa::x86::Decoder decoder;
+    const rosa::dbt::Translator translator;
+    for (const auto &jump : cases) {
+        const std::array<std::uint8_t, 6> code{0x0F, jump.opcode, 0xAB, 0xFC, 0xFF, 0xFF};
+        const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+        expect(decoded[0].opcode == rosa::x86::Opcode::JccRelative,
+               std::string(jump.name) + " rel32 opcode differs");
+        expect(decoded[0].condition == jump.condition,
+               std::string(jump.name) + " rel32 condition differs");
+        // 0x1006 - 853 == 0xCB1.
+        expectEqual(decoded[0].branchTarget->value, std::uint64_t{0xCB1},
+                    std::string(jump.name) + " rel32 target differs");
+        expect(rosa::debug::dumpX86(decoded).find(std::string(jump.name) + " 0xcb1") !=
+                   std::string::npos,
+               std::string(jump.name) + " rel32 dump differs");
+
+        const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+        rosa::x86::X86State taken;
+        taken.rflags = jump.takenFlags;
+        static_cast<void>(block.execute(taken));
+        expectEqual(taken.rip, std::uint64_t{0xCB1},
+                    std::string(jump.name) + " rel32 did not take its branch");
+        expectEqual(taken.rflags, jump.takenFlags,
+                    std::string(jump.name) + " rel32 changed guest flags");
+
+        rosa::x86::X86State notTaken;
+        notTaken.rflags = jump.notTakenFlags;
+        static_cast<void>(block.execute(notTaken));
+        expectEqual(notTaken.rip, std::uint64_t{0x1006},
+                    std::string(jump.name) + " rel32 took its branch");
+    }
+
+    constexpr std::array<std::uint8_t, 6> observed{0x0F, 0x81, 0xAB, 0xFC, 0xFF, 0xFF};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF80493763FULL};
+    const auto observedDecoded = decoder.decodeBlock(observed, observedRip);
+    expect(observedDecoded[0].condition == rosa::x86::Condition::NotOverflow,
+           "observed JNO rel32 condition differs");
+    expectEqual(observedDecoded[0].branchTarget->value, std::uint64_t{0x7FF8049372F0ULL},
+                "observed JNO rel32 target differs");
+}
+
 void testUnsignedBelowLongConditional() {
     constexpr std::array<std::uint8_t, 6> code{0x0F, 0x82, 0x02, 0, 0, 0};
     const rosa::x86::Decoder decoder;
@@ -36003,6 +36061,7 @@ int main() {
         {"indirect guest-register call", testIndirectGuestRegisterCall},
         {"unsigned-below conditional", testUnsignedBelowConditional},
         {"overflow/parity short conditionals", testOverflowParityShortConditionals},
+        {"overflow/parity long conditionals", testOverflowParityLongConditionals},
         {"unsigned-below long conditional", testUnsignedBelowLongConditional},
         {"register-indirect jump", testRegisterIndirectJump},
         {"RIP-relative memory-indirect jump", testRipRelativeMemoryIndirectJump},

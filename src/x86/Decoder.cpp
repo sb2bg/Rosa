@@ -6359,23 +6359,25 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 continue;
             }
             if (code.size() - cursor < 6 ||
-                (code[cursor + 1] != 0x80U &&
+                (code[cursor + 1] != 0x80U && code[cursor + 1] != 0x81U &&
                  code[cursor + 1] != 0x82U && code[cursor + 1] != 0x83U &&
                  code[cursor + 1] != 0x84U &&
                  code[cursor + 1] != 0x85U && code[cursor + 1] != 0x86U &&
                  code[cursor + 1] != 0x87U && code[cursor + 1] != 0x88U &&
-                 code[cursor + 1] != 0x89U &&
+                 code[cursor + 1] != 0x89U && code[cursor + 1] != 0x8AU &&
+                 code[cursor + 1] != 0x8BU &&
                  code[cursor + 1] != 0x8CU &&
                  code[cursor + 1] != 0x8DU &&
                  code[cursor + 1] != 0x8EU &&
                  code[cursor + 1] != 0x8FU)) {
                 throw DecodeError(address, remaining,
-                                  "only JO/JB/JAE/JE/JNE/JBE/JA/JS/JNS/JL/JGE/JLE/JG rel32 from opcode 0F is supported");
+                                  "only JO/JNO/JB/JAE/JE/JNE/JBE/JA/JS/JNS/JP/JNP/JL/JGE/JLE/JG rel32 from opcode 0F is supported");
             }
             const auto secondOpcode = code[cursor + 1];
             const auto displacement = readI32(code.subspan(cursor + 2, 4));
             instruction.opcode = Opcode::JccRelative;
             instruction.condition = secondOpcode == 0x80U   ? Condition::Overflow
+                                    : secondOpcode == 0x81U ? Condition::NotOverflow
                                     : secondOpcode == 0x82U ? Condition::Below
                                     : secondOpcode == 0x83U ? Condition::AboveOrEqual
                                     : secondOpcode == 0x84U ? Condition::Equal
@@ -6384,6 +6386,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                     : secondOpcode == 0x87U ? Condition::Above
                                     : secondOpcode == 0x88U ? Condition::Sign
                                     : secondOpcode == 0x89U ? Condition::NotSign
+                                    : secondOpcode == 0x8AU ? Condition::ParityEven
+                                    : secondOpcode == 0x8BU ? Condition::ParityOdd
                                     : secondOpcode == 0x8CU ? Condition::Less
                                     : secondOpcode == 0x8DU ? Condition::GreaterOrEqual
                                     : secondOpcode == 0x8EU ? Condition::LessOrEqual
