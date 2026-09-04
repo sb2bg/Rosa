@@ -4052,6 +4052,44 @@ void testSbbAccumulatorImmediateGeneratedExecution() {
     expectEqual(setState.rflags, std::uint64_t{0x57}, "SBB AL, 0xFF set-carry flags differ");
 }
 
+void testAdcByteRegisterImmediateGeneratedExecution() {
+    // Observed in libswiftCore under an Objective-C fixture: ADC dl, 1.
+    constexpr std::array<std::uint8_t, 4> code{0x80, 0xD2, 0x01, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8171A2B78ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AdcRegImm, "ADC dl, 1 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "ADC dl, 1 length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdx && destination.width == 8 &&
+               immediate.value == 1 && immediate.width == 8,
+           "ADC dl, 1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("adc dl, 0x1") != std::string::npos,
+           "ADC dl, 1 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State carryState;
+    carryState.rdx = 0x00000000000000FFULL;
+    carryState.rflags = 0x8D7;
+    static_cast<void>(block.execute(carryState));
+    // 0xFF + 1 + CF(1) wraps to 1 with CF set.
+    expectEqual(carryState.rdx, std::uint64_t{1}, "ADC dl, 1 carry result differs");
+    expectEqual(carryState.rflags, std::uint64_t{0x13}, "ADC dl, 1 carry flags differ");
+
+    rosa::x86::X86State plainState;
+    plainState.rdx = 0x1122334455667705ULL;
+    plainState.rsi = 0xDEADBEEFDEADBEEFULL;
+    plainState.rflags = 0x8D6;
+    static_cast<void>(block.execute(plainState));
+    expectEqual(plainState.rdx, std::uint64_t{0x1122334455667706ULL},
+                "ADC dl, 1 result differs or touched upper bytes");
+    expectEqual(plainState.rsi, std::uint64_t{0xDEADBEEFDEADBEEFULL},
+                "ADC dl, 1 changed an unrelated register");
+    expectEqual(plainState.rflags, std::uint64_t{0x6}, "ADC dl, 1 flags differ");
+}
+
 void testAdcRegisterRegisterGeneratedExecution() {
     // Observed in libswiftCore under an Objective-C fixture: ADC rax, rsi.
     constexpr std::array<std::uint8_t, 4> code{0x48, 0x11, 0xF0, 0xC3};
@@ -35412,6 +35450,8 @@ int main() {
          testSbbAccumulatorImmediateGeneratedExecution},
         {"ADC register zero generated execution", testAdcRegisterZeroGeneratedExecution},
         {"ADC register register generated execution", testAdcRegisterRegisterGeneratedExecution},
+        {"ADC byte register immediate generated execution",
+         testAdcByteRegisterImmediateGeneratedExecution},
         {"SUB register from register", testSubRegisterFromRegister},
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
         {"SUB 32-bit register from guest memory", testSub32BitRegisterFromGuestMemory},

@@ -1469,6 +1469,41 @@ extern "C" __attribute__((noinline)) x86::X86State *updateAddFlags32(x86::X86Sta
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *updateAdcFlags8(x86::X86State *state,
+                                                                    std::uint64_t lhsValue,
+                                                                    std::uint64_t rhsValue,
+                                                                    std::uint64_t carryValue) {
+    const auto lhs = static_cast<std::uint8_t>(lhsValue);
+    const auto rhs = static_cast<std::uint8_t>(rhsValue);
+    const auto carry = static_cast<std::uint8_t>(carryValue & 1U);
+    const auto wideResult =
+        static_cast<std::uint16_t>(lhs) + static_cast<std::uint16_t>(rhs) + carry;
+    const auto result = static_cast<std::uint8_t>(wideResult);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (wideResult > UINT8_MAX) {
+        flags |= flagCarry;
+    }
+    if ((std::popcount(static_cast<unsigned>(result)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if ((lhs & 0xFU) + (rhs & 0xFU) + carry > 0xFU) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result & 0x80U) != 0) {
+        flags |= flagSign;
+    }
+    const auto signedResult = static_cast<std::int16_t>(static_cast<std::int8_t>(lhs)) +
+                              static_cast<std::int16_t>(static_cast<std::int8_t>(rhs)) + carry;
+    if (signedResult > INT8_MAX || signedResult < INT8_MIN) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *updateAdcFlags32(x86::X86State *state,
                                                                      std::uint64_t lhsValue,
                                                                      std::uint64_t rhsValue,
@@ -4614,11 +4649,14 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            if ((reg.width != 32 && reg.width != 64) ||
+            if ((reg.width != 8 && reg.width != 32 && reg.width != 64) ||
+                reg.byteOffset != 0 ||
                 (immediate.width != 8 && immediate.width != 32)) {
-                throw std::runtime_error("only ADC r32/r64, imm8/imm32 is implemented");
+                throw std::runtime_error("only ADC r8/r32/r64, imm8/imm32 is implemented");
             }
-            const auto width = reg.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto width = reg.width == 8    ? ir::Width::I8
+                               : reg.width == 32 ? ir::Width::I32
+                                                 : ir::Width::I64;
             const auto lhs = builder.readGuestRegister(reg.reg, width, instruction.address);
             const auto rhs = builder.constant(immediate.value, width, instruction.address);
             const auto carry =
@@ -11332,9 +11370,11 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
             assembler.mov(arm64::x2, hostRegister(*operation.rhs));
             assembler.mov(arm64::x3, hostRegister(*operation.third));
-            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
-                                                   ? pointerBits(&updateAdcFlags32)
-                                                   : pointerBits(&updateAdcFlags64));
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I8
+                                                   ? pointerBits(&updateAdcFlags8)
+                                                   : operation.width == ir::Width::I32
+                                                         ? pointerBits(&updateAdcFlags32)
+                                                         : pointerBits(&updateAdcFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateSbbFlags:
