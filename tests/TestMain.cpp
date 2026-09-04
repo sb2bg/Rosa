@@ -21250,6 +21250,37 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testTestR16Immediate() {
+    // Observed in libdispatch under an AppKit fixture: TEST R15W, 0x3F00.
+    constexpr std::array<std::uint8_t, 7> code{0x66, 0x41, 0xF7, 0xC7, 0x00, 0x3F, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802CEA00AULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::TestRegImm,
+           "TEST r16 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6}, "TEST r16 length differs");
+    const auto reg = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(reg.reg == rosa::x86::Register::R15 && reg.width == 16,
+           "TEST R15W operand differs");
+    expect(immediate.width == 16 && immediate.value == 0x3F00,
+           "TEST r16 immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("test r15w, 0x3f00") != std::string::npos,
+           "TEST r16 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.r15 = 0xFFFF00000000FF00ULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // 0xFF00 & 0x3F00 == 0x3F00: nonzero, positive.
+    expectEqual(state.r15, std::uint64_t{0xFFFF00000000FF00ULL},
+                "TEST r16 changed its operand");
+    expect((state.rflags & 0x40U) == 0, "TEST r16 set ZF for a nonzero result");
+    expect((state.rflags & 0x80U) == 0, "TEST r16 set SF for a positive result");
+}
+
 void testLockOrByteMemoryImmediate() {
     // Observed in CoreFoundation under an AppKit fixture:
     // LOCK OR byte [RIP+0x407DEFE4], 0x02.
@@ -38122,6 +38153,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"TEST r16 immediate", testTestR16Immediate},
         {"LOCK OR byte memory immediate", testLockOrByteMemoryImmediate},
         {"LOCK OR qword memory immediate", testLockOrQwordMemoryImmediate},
         {"LOCK OR qword memory register", testLockOrQwordMemoryRegister},

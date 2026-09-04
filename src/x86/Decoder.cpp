@@ -11351,10 +11351,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding =
                 static_cast<std::uint8_t>(modrm & 0x7U);
-            if (hasOperandSizeOverride && !rexW && extension != 0x3U) {
+            if (hasOperandSizeOverride && !rexW && extension != 0x3U && extension != 0x0U) {
                 throw DecodeError(
                     address, remaining,
-                    "operand-size override is only supported for register NEG from opcode F7");
+                    "operand-size override is only supported for register TEST /0 and NEG /3 from opcode F7");
             }
             if (extension == 0x7U) {
                 if (mode != 0x3U || rexW || rexR || rexX) {
@@ -11503,17 +11503,30 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 static_cast<std::uint8_t>(
                     rexW ? 64U : hasOperandSizeOverride ? 16U : 32U)});
             if (extension == 0x0U) {
-                if (code.size() - cursor < 4) {
-                    throw DecodeError(address, remaining,
-                                      "truncated TEST r32/r64, imm32");
+                const auto testWidth = static_cast<std::uint8_t>(
+                    rexW ? 64U : hasOperandSizeOverride ? 16U : 32U);
+                if (testWidth == 16U) {
+                    if (code.size() - cursor < 2) {
+                        throw DecodeError(address, remaining,
+                                          "truncated TEST r16, imm16");
+                    }
+                    const auto immediate =
+                        static_cast<std::uint16_t>(code[cursor] | (code[cursor + 1] << 8U));
+                    cursor += 2;
+                    instruction.operands.push_back(ImmediateOperand{immediate, 16});
+                } else {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated TEST r32/r64, imm32");
+                    }
+                    const auto immediate = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                    instruction.operands.push_back(ImmediateOperand{
+                        rexW ? static_cast<std::uint64_t>(
+                                   static_cast<std::int64_t>(immediate))
+                             : static_cast<std::uint32_t>(immediate),
+                        32});
                 }
-                const auto immediate = readI32(code.subspan(cursor, 4));
-                cursor += 4;
-                instruction.operands.push_back(ImmediateOperand{
-                    rexW ? static_cast<std::uint64_t>(
-                               static_cast<std::int64_t>(immediate))
-                         : static_cast<std::uint32_t>(immediate),
-                    32});
             }
             }
         } else if (opcode == 0xC6U) {

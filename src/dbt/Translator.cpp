@@ -9081,12 +9081,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
             if ((reg.width == 8 && immediate.width != 8) ||
+                (reg.width == 16 && immediate.width != 16) ||
                 (reg.width == 32 && immediate.width != 32) ||
                 (reg.width == 64 && immediate.width != 32) ||
-                (reg.width != 8 && reg.width != 32 && reg.width != 64)) {
+                (reg.width != 8 && reg.width != 16 && reg.width != 32 &&
+                 reg.width != 64)) {
                 throw std::runtime_error("unsupported internal TEST immediate width");
             }
             const auto width = reg.width == 8    ? ir::Width::I8
+                               : reg.width == 16 ? ir::Width::I16
                                : reg.width == 32 ? ir::Width::I32
                                                  : ir::Width::I64;
             const auto value = builder.readGuestRegister(
