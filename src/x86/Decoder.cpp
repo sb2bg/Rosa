@@ -5123,7 +5123,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (code.size() - scalarCursor >= 3 && code[scalarCursor] == 0x0FU &&
                 (code[scalarCursor + 1] == 0x51U || code[scalarCursor + 1] == 0x58U ||
                  code[scalarCursor + 1] == 0x59U || code[scalarCursor + 1] == 0x5CU ||
-                 code[scalarCursor + 1] == 0x5EU)) {
+                 code[scalarCursor + 1] == 0x5DU || code[scalarCursor + 1] == 0x5EU ||
+                 code[scalarCursor + 1] == 0x5FU)) {
                 const auto scalarOpcode = code[scalarCursor + 1];
                 const auto modrm = code[scalarCursor + 2];
                 const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
@@ -5139,6 +5140,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                          : scalarOpcode == 0x58U ? Opcode::AddsdXmmReg
                                          : scalarOpcode == 0x59U ? Opcode::MulsdXmmReg
                                          : scalarOpcode == 0x5CU ? Opcode::SubsdXmmReg
+                                         : scalarOpcode == 0x5DU ? Opcode::MinsdXmmReg
+                                         : scalarOpcode == 0x5FU ? Opcode::MaxsdXmmReg
                                                                  : Opcode::DivsdXmmReg;
                     instruction.operands.push_back(destination);
                     instruction.operands.push_back(XmmRegisterOperand{
@@ -5178,6 +5181,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                          : scalarOpcode == 0x58U ? Opcode::AddsdXmmMem
                                          : scalarOpcode == 0x59U ? Opcode::MulsdXmmMem
                                          : scalarOpcode == 0x5CU ? Opcode::SubsdXmmMem
+                                         : scalarOpcode == 0x5DU ? Opcode::MinsdXmmMem
+                                         : scalarOpcode == 0x5FU ? Opcode::MaxsdXmmMem
                                                                  : Opcode::DivsdXmmMem;
                     instruction.operands.push_back(destination);
                     instruction.operands.push_back(

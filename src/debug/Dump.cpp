@@ -3352,7 +3352,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::DivsdXmmReg:
         case x86::Opcode::DivsdXmmMem:
         case x86::Opcode::SqrtsdXmmReg:
-        case x86::Opcode::SqrtsdXmmMem: {
+        case x86::Opcode::SqrtsdXmmMem:
+        case x86::Opcode::MinsdXmmReg:
+        case x86::Opcode::MinsdXmmMem:
+        case x86::Opcode::MaxsdXmmReg:
+        case x86::Opcode::MaxsdXmmMem: {
             const auto mnemonic = instruction.opcode == x86::Opcode::AddsdXmmReg ||
                                           instruction.opcode == x86::Opcode::AddsdXmmMem
                                       ? "addsd "
@@ -3365,13 +3369,21 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                                   : instruction.opcode == x86::Opcode::SqrtsdXmmReg ||
                                           instruction.opcode == x86::Opcode::SqrtsdXmmMem
                                       ? "sqrtsd "
+                                  : instruction.opcode == x86::Opcode::MinsdXmmReg ||
+                                          instruction.opcode == x86::Opcode::MinsdXmmMem
+                                      ? "minsd "
+                                  : instruction.opcode == x86::Opcode::MaxsdXmmReg ||
+                                          instruction.opcode == x86::Opcode::MaxsdXmmMem
+                                      ? "maxsd "
                                       : "divsd ";
             const bool fromMemory =
                 instruction.opcode == x86::Opcode::AddsdXmmMem ||
                 instruction.opcode == x86::Opcode::SubsdXmmMem ||
                 instruction.opcode == x86::Opcode::MulsdXmmMem ||
                 instruction.opcode == x86::Opcode::DivsdXmmMem ||
-                instruction.opcode == x86::Opcode::SqrtsdXmmMem;
+                instruction.opcode == x86::Opcode::SqrtsdXmmMem ||
+                instruction.opcode == x86::Opcode::MinsdXmmMem ||
+                instruction.opcode == x86::Opcode::MaxsdXmmMem;
             stream << mnemonic
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
@@ -4061,7 +4073,9 @@ std::string dumpIr(const ir::Block &block) {
                                        : operation.immediate == 1U ? "scalar_subtract_double_xmm"
                                        : operation.immediate == 2U ? "scalar_multiply_double_xmm"
                                        : operation.immediate == 3U ? "scalar_divide_double_xmm"
-                                                                   : "scalar_sqrt_double_xmm";
+                                       : operation.immediate == 4U ? "scalar_sqrt_double_xmm"
+                                       : operation.immediate == 5U ? "scalar_minimum_double_xmm"
+                                                                   : "scalar_maximum_double_xmm";
             stream << operationName << ' ' << valueName(*operation.lhs) << ", "
                    << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;

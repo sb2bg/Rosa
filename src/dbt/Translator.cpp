@@ -1092,11 +1092,21 @@ scalarDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
     const auto destination =
         std::bit_cast<double>(state->xmm[destinationIndex].low);
     const auto source = std::bit_cast<double>(sourceBits);
+    // MINSD/MAXSD write the source when either input is NaN or the
+    // values compare equal (which folds -0.0/+0.0 to the source lane).
     const auto result = operation == 0U   ? destination + source
                         : operation == 1U ? destination - source
                         : operation == 2U ? destination * source
                         : operation == 3U ? destination / source
-                                          : std::sqrt(source);
+                        : operation == 4U ? std::sqrt(source)
+                        : operation == 5U ? (std::isnan(destination) || std::isnan(source) ||
+                                             destination == source
+                                                 ? source
+                                                 : std::min(destination, source))
+                                          : (std::isnan(destination) || std::isnan(source) ||
+                                             destination == source
+                                                 ? source
+                                                 : std::max(destination, source));
     state->xmm[destinationIndex].low = std::bit_cast<std::uint64_t>(result);
     return state;
 }
@@ -5213,7 +5223,11 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
         case x86::Opcode::DivsdXmmReg:
         case x86::Opcode::DivsdXmmMem:
         case x86::Opcode::SqrtsdXmmReg:
-        case x86::Opcode::SqrtsdXmmMem: {
+        case x86::Opcode::SqrtsdXmmMem:
+        case x86::Opcode::MinsdXmmReg:
+        case x86::Opcode::MinsdXmmMem:
+        case x86::Opcode::MaxsdXmmReg:
+        case x86::Opcode::MaxsdXmmMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
                     "internal decoder error: scalar-double operand count");
@@ -5230,6 +5244,12 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                    : instruction.opcode == x86::Opcode::SqrtsdXmmReg ||
                                            instruction.opcode == x86::Opcode::SqrtsdXmmMem
                                        ? std::uint8_t{4}
+                                   : instruction.opcode == x86::Opcode::MinsdXmmReg ||
+                                           instruction.opcode == x86::Opcode::MinsdXmmMem
+                                       ? std::uint8_t{5}
+                                   : instruction.opcode == x86::Opcode::MaxsdXmmReg ||
+                                           instruction.opcode == x86::Opcode::MaxsdXmmMem
+                                       ? std::uint8_t{6}
                                        : std::uint8_t{3};
             const auto destination =
                 std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
@@ -5238,7 +5258,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.opcode == x86::Opcode::SubsdXmmMem ||
                 instruction.opcode == x86::Opcode::MulsdXmmMem ||
                 instruction.opcode == x86::Opcode::DivsdXmmMem ||
-                instruction.opcode == x86::Opcode::SqrtsdXmmMem;
+                instruction.opcode == x86::Opcode::SqrtsdXmmMem ||
+                instruction.opcode == x86::Opcode::MinsdXmmMem ||
+                instruction.opcode == x86::Opcode::MaxsdXmmMem;
             ir::ValueId sourceBits{};
             if (!fromMemory) {
                 const auto source =

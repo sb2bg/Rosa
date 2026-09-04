@@ -320,7 +320,8 @@ class Builder {
     void convertInt32x2ToDoubleXmm(ValueId lowBits,
                                        x86::XmmRegister destination,
                                        guest::GuestAddress rip);
-    // Selector: 0 = add, 1 = subtract, 2 = multiply, 3 = divide, 4 = sqrt.
+    // Selector: 0 = add, 1 = subtract, 2 = multiply, 3 = divide, 4 = sqrt,
+    // 5 = minimum, 6 = maximum.
     // The source is a raw double bit pattern; the destination high lane is preserved.
     void scalarDoubleXmm(ValueId sourceBits, x86::XmmRegister destination,
                          std::uint8_t operation, guest::GuestAddress rip);

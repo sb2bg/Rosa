@@ -21250,6 +21250,73 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testMinsdRegisters() {
+    // Observed in CoreFoundation under an AppKit fixture: MINSD xmm1, xmm0.
+    constexpr std::array<std::uint8_t, 5> code{0xF2, 0x0F, 0x5D, 0xC8, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802ED113FULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MinsdXmmReg,
+           "MINSD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "MINSD length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0,
+           "MINSD xmm1, xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("minsd xmm1, xmm0") != std::string::npos,
+           "MINSD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("scalar_minimum_double_xmm") != std::string::npos,
+           "MINSD did not lower through scalar-double IR");
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x4008000000000000ULL, .high = 0xAAAAAAAAAAAAAAAAULL}; // 3.0.
+    state.xmm[1] = {.low = 0x4014000000000000ULL, .high = 0xBBBBBBBBBBBBBBBBULL}; // 5.0.
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // min(5.0, 3.0) == 3.0; the high lane is preserved, unlike CVTSI2SD.
+    expectEqual(state.xmm[1].low, std::uint64_t{0x4008000000000000ULL},
+                "MINSD produced the wrong minimum");
+    expectEqual(state.xmm[1].high, std::uint64_t{0xBBBBBBBBBBBBBBBBULL},
+                "MINSD did not preserve the high lane");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MINSD changed flags");
+
+    // NaN inputs select the source lane.
+    rosa::x86::X86State nanState;
+    nanState.xmm[0] = {.low = 0x4008000000000000ULL, .high = 0};
+    nanState.xmm[1] = {.low = 0x7FF8000000000000ULL, .high = 0};
+    static_cast<void>(block.execute(nanState));
+    expectEqual(nanState.xmm[1].low, std::uint64_t{0x4008000000000000ULL},
+                "MINSD NaN destination missed the source");
+}
+
+void testMaxsdRegisters() {
+    constexpr std::array<std::uint8_t, 5> code{0xF2, 0x0F, 0x5F, 0xC8, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MaxsdXmmReg,
+           "MAXSD opcode differs");
+    expect(rosa::debug::dumpX86(decoded).find("maxsd xmm1, xmm0") != std::string::npos,
+           "MAXSD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("scalar_maximum_double_xmm") != std::string::npos,
+           "MAXSD did not lower through scalar-double IR");
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x4008000000000000ULL, .high = 0};
+    state.xmm[1] = {.low = 0x4014000000000000ULL, .high = 0};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[1].low, std::uint64_t{0x4014000000000000ULL},
+                "MAXSD produced the wrong maximum");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MAXSD changed flags");
+}
+
 void testCvttsd2siRegisters() {
     // Observed in CoreFoundation under an AppKit fixture: CVTTSD2SI r12, xmm0.
     constexpr std::array<std::uint8_t, 6> code{0xF2, 0x4C, 0x0F, 0x2C, 0xE0, 0xC3};
@@ -38347,6 +38414,8 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"MINSD registers execution", testMinsdRegisters},
+        {"MAXSD registers execution", testMaxsdRegisters},
         {"CVTTSD2SI registers execution", testCvttsd2siRegisters},
         {"LOCK CMPXCHG byte memory register", testCmpxchgByteMemoryRegister},
         {"TEST r16 immediate", testTestR16Immediate},
