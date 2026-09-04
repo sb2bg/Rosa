@@ -8836,14 +8836,36 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (reg.byteOffset > 1 || (reg.byteOffset == 1 && reg.width != 8)) {
+                throw std::runtime_error("invalid byte-lane CMP register");
+            }
             const auto width = reg.width == 8    ? ir::Width::I8
                                : reg.width == 16 ? ir::Width::I16
                                : reg.width == 32 ? ir::Width::I32
                                                  : ir::Width::I64;
-            const auto lhs = builder.readGuestRegister(reg.reg, width, instruction.address);
-            const auto rhs = builder.constant(immediate.value, width, instruction.address);
-            const auto result = builder.sub(lhs, rhs, width, instruction.address);
-            builder.updateSubFlags(lhs, rhs, result, width, instruction.address);
+            ir::ValueId lhs{};
+            if (reg.byteOffset == 0) {
+                lhs = builder.readGuestRegister(reg.reg, width, instruction.address);
+            } else {
+                // High-byte lane (AH/CH/DH/BH): compare bits[15:8].
+                const auto parent =
+                    builder.readGuestRegister(reg.reg, ir::Width::I64, instruction.address);
+                const auto shifted = builder.shiftRightLogical(
+                    parent, 8, ir::Width::I64, instruction.address);
+                const auto laneMask =
+                    builder.constant(0xFF, ir::Width::I64, instruction.address);
+                lhs = builder.bitAnd(shifted, laneMask, ir::Width::I64, instruction.address);
+            }
+            const auto rhs = reg.byteOffset == 0
+                                 ? builder.constant(immediate.value, width, instruction.address)
+                                 : builder.constant(immediate.value, ir::Width::I64,
+                                                    instruction.address);
+            const auto result = reg.byteOffset == 0
+                                    ? builder.sub(lhs, rhs, width, instruction.address)
+                                    : builder.sub(lhs, rhs, ir::Width::I64, instruction.address);
+            builder.updateSubFlags(lhs, rhs, result,
+                                   reg.byteOffset == 0 ? width : ir::Width::I8,
+                                   instruction.address);
             break;
         }
         case x86::Opcode::CmpRegReg: {

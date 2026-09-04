@@ -11679,8 +11679,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             // an R13 base.
             const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             if (extension != 0x7U || rexW || rexR ||
-                (rexX && rmEncoding != 0x4U) ||
-                (mode == 0x3U && !hasRex && rmEncoding >= 0x4U)) {
+                (rexX && rmEncoding != 0x4U)) {
                 throw DecodeError(
                     address, remaining,
                     "only CMP representable-byte-register/[base/RIP+disp8/disp32], imm8 from opcode 80 /7 is supported");
@@ -11740,8 +11739,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = Opcode::CmpMemImm;
             if (mode == 0x3U) {
                 instruction.opcode = Opcode::CmpRegImm;
+                // Without REX, encodings 4-7 name AH/CH/DH/BH (byte lane 1).
+                const bool highByte = !hasRex && rmEncoding >= 0x4U;
+                const auto reg = highByte ? decodeRegister(
+                                                static_cast<std::uint8_t>(rmEncoding - 0x4U),
+                                                false)
+                                          : decodeRegister(rmEncoding, rexB);
                 instruction.operands.push_back(RegisterOperand{
-                    decodeRegister(rmEncoding, rexB), 8});
+                    reg, 8, static_cast<std::uint8_t>(highByte ? 1U : 0U)});
             } else {
                 instruction.operands.push_back(
                     ripRelative

@@ -9377,13 +9377,14 @@ void testCompare8BitRegisterWithImmediate() {
     expectEqual(state.rflags, std::uint64_t{0x812}, "overflow CMP CL, imm8 flags differ");
 
     constexpr std::array<std::uint8_t, 4> highByteCode{0x80, 0xFC, 0x01, 0xC3};
-    bool rejected = false;
-    try {
-        static_cast<void>(decoder.decodeBlock(highByteCode, rosa::guest::GuestAddress{0x2000}));
-    } catch (const rosa::x86::DecodeError &) {
-        rejected = true;
-    }
-    expect(rejected, "CMP AH, imm8 was silently treated as a low-byte register");
+    const auto highByteDecoded =
+        decoder.decodeBlock(highByteCode, rosa::guest::GuestAddress{0x2000});
+    const auto highByteReg =
+        std::get<rosa::x86::RegisterOperand>(highByteDecoded[0].operands[0]);
+    expect(highByteDecoded[0].opcode == rosa::x86::Opcode::CmpRegImm &&
+               highByteReg.reg == rosa::x86::Register::Rax && highByteReg.width == 8 &&
+               highByteReg.byteOffset == 1,
+           "CMP AH, imm8 did not decode to the high-byte lane");
 
     constexpr std::array<std::uint8_t, 9> rexBMemoryCode{0x41, 0x80, 0x3D, 0x01, 0x00,
                                                          0x00, 0x00, 0x01, 0xC3};
@@ -21247,6 +21248,34 @@ void testBlendvpdRegisters() {
     expectEqual(state.xmm[3].low, std::uint64_t{0xCCCCCCCCCCCCCCCCULL},
                 "BLENDVPD changed its source");
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
+}
+
+void testCmpHighByteRegisterImmediate() {
+    // Observed in libcrypto under an Objective-C fixture: CMP AH, 0x0F.
+    constexpr std::array<std::uint8_t, 4> code{0x80, 0xFC, 0x0F, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FFE06E5ED69ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpRegImm,
+           "CMP AH opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "CMP AH length differs");
+    const auto reg = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(reg.reg == rosa::x86::Register::Rax && reg.width == 8 && reg.byteOffset == 1,
+           "CMP AH operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("cmp ah, 0xf") != std::string::npos,
+           "CMP AH dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rax = 0x106A5;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // AH == 0x06: 0x06 - 0x0F borrows and goes negative.
+    expectEqual(state.rax, std::uint64_t{0x106A5}, "CMP AH changed its operand");
+    expect((state.rflags & 0x1U) != 0, "CMP AH missed the borrow");
+    expect((state.rflags & 0x40U) == 0, "CMP AH set ZF for a nonzero difference");
+    expect((state.rflags & 0x80U) != 0, "CMP AH missed the negative difference");
 }
 
 void testAndHighByteRegisterImmediate() {
@@ -37205,6 +37234,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"CMP AH register immediate", testCmpHighByteRegisterImmediate},
         {"AND AH register immediate", testAndHighByteRegisterImmediate},
         {"CPUID leaves", testCpuidLeaves},
         {"MOVAPS registers execution", testMovapsRegisters},
