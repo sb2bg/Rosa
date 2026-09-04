@@ -41,12 +41,10 @@ constexpr std::uint32_t machPortRightCount = 6;
 constexpr std::uint32_t machPortUrefsMaximum = 0xFFFF;
 constexpr std::uint32_t machPortQlimitDefault = 5;
 constexpr std::uint32_t mpoContextAsGuard = 0x01;
+constexpr std::uint32_t mpoQueueLimit = 0x02;
 constexpr std::uint32_t mpoInsertSendRight = 0x10;
 constexpr std::uint32_t mpoStrict = 0x20;
 constexpr std::uint32_t mpoReplyPort = 0x1000;
-constexpr std::uint32_t observedDyldPortOptions = mpoReplyPort;
-constexpr std::uint32_t observedTracePortOptions =
-    mpoContextAsGuard | mpoInsertSendRight | mpoStrict;
 constexpr std::uint64_t mach64SendMessage = 0x1U;
 constexpr std::uint64_t mach64ReceiveMessage = 0x2U;
 constexpr std::uint64_t mach64SendKobjectCall = 0x0000000200000000ULL;
@@ -1570,11 +1568,19 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             .outputPointer = guest::GuestAddress{state.r10},
         };
 
-        // These are the two combinations observed so far: dyld's reply port,
-        // and libsystem_trace's strictly guarded ordinary port with an
-        // inserted send right. Keep other policy-bearing combinations loud.
-        if (options.flags != observedDyldPortOptions &&
-            options.flags != observedTracePortOptions) {
+        // Only policy-free combinations are modeled: reply ports, and
+        // ordinary ports built from guard, queue-limit, send-right, and
+        // strict bits. Tempowner, importance, de-nap, immovable, filter, and
+        // other policy-bearing bits stay loud.
+        constexpr std::uint32_t modeledPortOptions =
+            mpoContextAsGuard | mpoQueueLimit | mpoInsertSendRight | mpoStrict |
+            mpoReplyPort;
+        const bool replyPort = (options.flags & mpoReplyPort) != 0;
+        if ((options.flags & ~modeledPortOptions) != 0 ||
+            (replyPort && (options.flags & ~mpoReplyPort) != 0)) {
+            // Unknown policy bits, and policy bits combined with a reply
+            // port (whose guard/send semantics Rosa does not model), stay
+            // loud rather than silently dropping policy.
             throw unsupported(state, syscallRip);
         }
 
@@ -1588,17 +1594,21 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         }
 
         GuestPort port;
-        port.type = options.flags == observedDyldPortOptions
-                        ? GuestPortType::Reply
-                        : GuestPortType::Ordinary;
+        port.type = replyPort ? GuestPortType::Reply : GuestPortType::Ordinary;
         port.context = state.rdx;
-        port.queueLimit = machPortQlimitDefault;
+        port.queueLimit = (options.flags & mpoQueueLimit) != 0
+                              ? options.queueLimit
+                              : machPortQlimitDefault;
         port.optionFlags = options.flags;
-        if (options.flags == observedTracePortOptions) {
-            port.sendUrefs = 1;
-            port.guarded = true;
-            port.guard = state.rdx;
-            port.strictGuard = true;
+        if (!replyPort) {
+            if ((options.flags & mpoInsertSendRight) != 0) {
+                port.sendUrefs = 1;
+            }
+            if ((options.flags & mpoContextAsGuard) != 0) {
+                port.guarded = true;
+                port.guard = state.rdx;
+            }
+            port.strictGuard = (options.flags & mpoStrict) != 0;
         }
         const auto name = portSpace_.allocateReceiveRight(port);
         if (!name) {

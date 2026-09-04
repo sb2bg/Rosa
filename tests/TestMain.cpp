@@ -29708,6 +29708,30 @@ void testMachPortConstructTrap() {
                guardedDispatcher.lastPortConstruct()->context == traceGuard,
            "guarded mach_port_construct observation differs");
 
+    // Observed under an AppKit fixture: guard + queue-limit + send +
+    // strict with an explicit queue limit of one.
+    constexpr std::uint32_t queueLimitOptions = 0x33;
+    constexpr std::uint64_t appGuard = 0x100812400ULL;
+    writeOptions(addressSpace, optionsAddress, queueLimitOptions, 1);
+    rosa::darwin::MachDispatcher queueLimitDispatcher;
+    const auto queueLimitState =
+        invoke(queueLimitDispatcher, addressSpace, optionsAddress, outputAddress, appGuard);
+    expectEqual(queueLimitState.rax, std::uint64_t{0},
+                "queue-limit mach_port_construct failed");
+    const rosa::darwin::GuestMachPortName queueLimitName{addressSpace.readU32(outputAddress)};
+    const auto *queueLimitPort = queueLimitDispatcher.portSpace().lookup(queueLimitName);
+    expect(queueLimitPort != nullptr && queueLimitPort->hasReceiveRight,
+           "queue-limit mach_port_construct omitted its receive right");
+    expectEqual(queueLimitPort->type, rosa::darwin::GuestPortType::Ordinary,
+                "queue-limit mach_port_construct created the wrong port type");
+    expectEqual(queueLimitPort->sendUrefs, std::uint32_t{1},
+                "queue-limit mach_port_construct omitted the send right");
+    expect(queueLimitPort->guarded && queueLimitPort->strictGuard &&
+               queueLimitPort->guard == appGuard,
+           "queue-limit mach_port_construct lost its guard");
+    expectEqual(queueLimitPort->queueLimit, std::uint32_t{1},
+                "queue-limit mach_port_construct ignored the queue-limit field");
+
     rosa::darwin::MachDispatcher invalidOptionsDispatcher;
     writeOptions(addressSpace, optionsAddress, 0x1001, 0);
     bool invalidOptionsRejected = false;
