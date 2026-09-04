@@ -21250,6 +21250,54 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testCvttsd2siRegisters() {
+    // Observed in CoreFoundation under an AppKit fixture: CVTTSD2SI r12, xmm0.
+    constexpr std::array<std::uint8_t, 6> code{0xF2, 0x4C, 0x0F, 0x2C, 0xE0, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802EBB41BULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::Cvttsd2siRegXmm,
+           "CVTTSD2SI opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "CVTTSD2SI length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R12 && destination.width == 64,
+           "CVTTSD2SI r12 operand differs");
+    expect(source.reg == rosa::x86::XmmRegister::Xmm0, "CVTTSD2SI xmm0 operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("cvttsd2si r12, xmm0") != std::string::npos,
+           "CVTTSD2SI dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("convert_double_to_int.i64") != std::string::npos,
+           "CVTTSD2SI did not lower through conversion IR");
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x402B59B3C0FE98E0ULL, .high = 0}; // ~13.726.
+    state.r12 = UINT64_MAX;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.r12, std::uint64_t{13}, "CVTTSD2SI truncation differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "CVTTSD2SI changed flags");
+
+    // Negative truncation and 32-bit indefinite saturation.
+    constexpr std::array<std::uint8_t, 5> code32{0xF2, 0x0F, 0x2C, 0xC1, 0xC3};
+    const auto block32 = translator.translate(code32, observedRip);
+    rosa::x86::X86State state32;
+    state32.xmm[1] = {.low = 0xC0253CA3C8B43958ULL, .high = 0}; // ~-10.9.
+    state32.rflags = 0xAD7;
+    static_cast<void>(block32.execute(state32));
+    expectEqual(state32.rax, std::uint64_t{0xFFFFFFF6ULL},
+                "CVTTSD2SI negative truncation differs");
+    rosa::x86::X86State nanState;
+    nanState.xmm[1] = {.low = 0x7FF8000000000000ULL, .high = 0};
+    const auto nanBlock = translator.translate(
+        std::array<std::uint8_t, 5>{0xF2, 0x0F, 0x2C, 0xC9, 0xC3}, observedRip);
+    static_cast<void>(nanBlock.execute(nanState));
+    expectEqual(nanState.rcx, std::uint64_t{0x80000000ULL},
+                "CVTTSD2SI NaN did not saturate");
+}
+
 void testCmpxchgByteMemoryRegister() {
     // Observed in libdispatch under an AppKit fixture: LOCK CMPXCHG [RCX], DL.
     constexpr std::array<std::uint8_t, 5> code{0xF0, 0x0F, 0xB0, 0x11, 0xC3};
@@ -38299,6 +38347,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"CVTTSD2SI registers execution", testCvttsd2siRegisters},
         {"LOCK CMPXCHG byte memory register", testCmpxchgByteMemoryRegister},
         {"TEST r16 immediate", testTestR16Immediate},
         {"LOCK OR byte memory immediate", testLockOrByteMemoryImmediate},

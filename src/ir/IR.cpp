@@ -772,6 +772,17 @@ void Builder::convertIntToDoubleXmm(ValueId value, x86::XmmRegister destination,
     });
 }
 
+void Builder::convertDoubleToInt(ValueId bits, x86::Register destination,
+                                    Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ConvertDoubleToInt,
+        .width = width,
+        .guestRip = rip,
+        .lhs = bits,
+        .guestRegister = destination,
+    });
+}
+
 void Builder::convertFloatToDoubleXmm(ValueId value, x86::XmmRegister destination,
                                       guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -2032,6 +2043,15 @@ std::vector<std::string> verify(const Block &block) {
                  operation.width != Width::I64)) {
                 errors.emplace_back(
                     "convert_int_to_double_xmm requires an XMM register and i32 or i64");
+            }
+            break;
+        case Opcode::ConvertDoubleToInt:
+            checkUse(operation.lhs, "double bits");
+            if (!operation.guestRegister ||
+                (operation.width != Width::I32 &&
+                 operation.width != Width::I64)) {
+                errors.emplace_back(
+                    "convert_double_to_int requires a register and i32 or i64");
             }
             break;
         case Opcode::ConvertFloatToDoubleXmm:

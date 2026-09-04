@@ -1000,6 +1000,46 @@ convertInt32ToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+convertDoubleToInt64(x86::X86State *state, std::uint64_t destinationIndex,
+                     std::uint64_t doubleBits) noexcept {
+    if (destinationIndex > static_cast<std::uint64_t>(x86::Register::R15)) {
+        return state;
+    }
+    // Truncation toward zero matches CVTTSD2SI; out-of-range inputs
+    // produce the integer-indefinite value. The range checks make the
+    // host cast well-defined.
+    const auto value = std::bit_cast<double>(doubleBits);
+    std::int64_t result = std::numeric_limits<std::int64_t>::min();
+    if (!std::isnan(value) && value < 9.223372036854776e18 &&
+        value >= -9.223372036854776e18) {
+        result = static_cast<std::int64_t>(value);
+    }
+    const auto destination = static_cast<x86::Register>(destinationIndex);
+    std::memcpy(reinterpret_cast<std::uint8_t *>(state) + x86::registerOffset(destination),
+                &result, sizeof(result));
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+convertDoubleToInt32(x86::X86State *state, std::uint64_t destinationIndex,
+                     std::uint64_t doubleBits) noexcept {
+    if (destinationIndex > static_cast<std::uint64_t>(x86::Register::R15)) {
+        return state;
+    }
+    const auto value = std::bit_cast<double>(doubleBits);
+    std::int32_t result = std::numeric_limits<std::int32_t>::min();
+    if (!std::isnan(value) && value < 2147483648.0 && value >= -2147483648.0) {
+        result = static_cast<std::int32_t>(value);
+    }
+    // A 32-bit destination zero-extends into the full register.
+    const auto zeroExtended = static_cast<std::uint64_t>(static_cast<std::uint32_t>(result));
+    const auto destination = static_cast<x86::Register>(destinationIndex);
+    std::memcpy(reinterpret_cast<std::uint8_t *>(state) + x86::registerOffset(destination),
+                &zeroExtended, sizeof(zeroExtended));
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 convertInt64ToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
                         std::uint64_t intValue) noexcept {
     if (destinationIndex >= state->xmm.size()) {
@@ -4929,6 +4969,61 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 const auto value = builder.readGuestXmmLane(xmm, false, instruction.address);
                 builder.storeGuest(address, value, ir::Width::I64, instruction.address);
             }
+            break;
+        }
+        case x86::Opcode::Cvttsd2siRegXmm:
+        case x86::Opcode::Cvttsd2siRegMem: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::Cvttsd2siRegMem;
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: CVTTSD2SI operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            if (destination.width != 32 && destination.width != 64) {
+                throw std::runtime_error(
+                    "only CVTTSD2SI r32/r64 is implemented");
+            }
+            const auto width =
+                destination.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            ir::ValueId bits{};
+            if (!fromMemory) {
+                const auto source =
+                    std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+                bits = builder.readGuestXmmLane(source, false,
+                                                instruction.address);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                if (memory.width != 64 ||
+                    (memory.ripRelative
+                         ? memory.hasBase || memory.index.has_value()
+                         : !memory.hasBase) ||
+                    memory.segment != x86::Segment::None) {
+                    throw std::runtime_error(
+                        "unsupported CVTTSD2SI memory addressing");
+                }
+                auto address =
+                    memory.ripRelative
+                        ? builder.constant(instruction.address.value + instruction.length,
+                                           ir::Width::I64, instruction.address)
+                        : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                    instruction.address);
+                if (memory.displacement != 0) {
+                    const auto displacement = builder.constant(
+                        static_cast<std::uint64_t>(memory.displacement),
+                        ir::Width::I64, instruction.address);
+                    address = builder.add(address, displacement, ir::Width::I64,
+                                          instruction.address);
+                }
+                bits = builder.loadGuest(address, ir::Width::I64,
+                                         instruction.address);
+            }
+            // The conversion helper is pure: the bits are consumed here, so
+            // no IR value stays live across its call.
+            builder.convertDoubleToInt(bits, destination.reg, width,
+                                       instruction.address);
             break;
         }
         case x86::Opcode::Cvtsi2sdXmmReg:
@@ -10967,6 +11062,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::UpdateUnorderedDoubleFlags ||
             operation.opcode == ir::Opcode::UpdateUnorderedFloatFlags ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
+            operation.opcode == ir::Opcode::ConvertDoubleToInt ||
             operation.opcode == ir::Opcode::ConvertFloatToDoubleXmm ||
             operation.opcode == ir::Opcode::ConvertInt32x2ToDoubleXmm ||
             operation.opcode == ir::Opcode::ScalarDoubleXmm ||
@@ -12919,6 +13015,21 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                                    operation.width == ir::Width::I32
                                        ? pointerBits(&convertInt32ToDoubleXmm)
                                        : pointerBits(&convertInt64ToDoubleXmm));
+            assembler.blr(arm64::x16);
+            break;
+        }
+        case ir::Opcode::ConvertDoubleToInt: {
+            if (operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 32- and 64-bit double to integer conversion");
+            }
+            const auto destination = static_cast<std::uint64_t>(*operation.guestRegister);
+            assembler.movImmediate(arm64::x1, destination);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x16,
+                                   operation.width == ir::Width::I32
+                                       ? pointerBits(&convertDoubleToInt32)
+                                       : pointerBits(&convertDoubleToInt64));
             assembler.blr(arm64::x16);
             break;
         }

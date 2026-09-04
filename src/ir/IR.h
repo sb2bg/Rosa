@@ -81,6 +81,7 @@ enum class Opcode {
     UpdateUnorderedDoubleFlags,
     UpdateUnorderedFloatFlags,
     ConvertIntToDoubleXmm,
+    ConvertDoubleToInt,
     ConvertFloatToDoubleXmm,
     ConvertInt32x2ToDoubleXmm,
     ScalarDoubleXmm,
@@ -309,6 +310,11 @@ class Builder {
                                        guest::GuestAddress rip);
     void convertIntToDoubleXmm(ValueId value, x86::XmmRegister destination,
                                Width width, guest::GuestAddress rip);
+    // Converts a double bit pattern to a truncated integer in a general
+    // register; width selects the 32- or 64-bit destination. Out-of-range
+    // inputs produce the integer-indefinite value, matching CVTTSD2SI.
+    void convertDoubleToInt(ValueId bits, x86::Register destination,
+                            Width width, guest::GuestAddress rip);
     void convertFloatToDoubleXmm(ValueId value, x86::XmmRegister destination,
                                  guest::GuestAddress rip);
     void convertInt32x2ToDoubleXmm(ValueId lowBits,
