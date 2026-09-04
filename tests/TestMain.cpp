@@ -21250,6 +21250,44 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testLockOrByteMemoryImmediate() {
+    // Observed in CoreFoundation under an AppKit fixture:
+    // LOCK OR byte [RIP+0x407DEFE4], 0x02.
+    constexpr std::array<std::uint8_t, 9> code{0xF0, 0x80, 0x0D, 0xE4,
+                                               0xEF, 0x7D, 0x40, 0x02, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802EE39FEULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockOrMemImm,
+           "LOCK OR byte opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{8}, "LOCK OR byte length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && memory.width == 8 &&
+               memory.displacement == 0x407DEFE4,
+           "LOCK OR byte RIP memory operand differs");
+    expectEqual(immediate.value, std::uint64_t{2}, "LOCK OR byte immediate differs");
+    expect(rosa::debug::dumpX86(decoded).find("lock or byte [rip+0x407defe4], 0x2") !=
+               std::string::npos,
+           "LOCK OR byte dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    constexpr std::array<std::uint8_t, 1> initial{0xF0};
+    addressSpace.writeBytes(target, initial);
+    const rosa::dbt::Translator translator;
+    constexpr std::array<std::uint8_t, 6> executeCode{0xF0, 0x80, 0x49, 0x08, 0x02, 0xC3};
+    const auto block = translator.translate(executeCode, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rcx = target.value - 8;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU8(target), std::uint8_t{0xF2},
+                "LOCK OR byte did not set the bits");
+}
+
 void testLockOrQwordMemoryImmediate() {
     // Observed in Foundation under an AppKit fixture: LOCK OR [RBX+8], 0x08.
     constexpr std::array<std::uint8_t, 7> code{0xF0, 0x48, 0x83, 0x4B, 0x08, 0x08, 0xC3};
@@ -38007,6 +38045,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"LOCK OR byte memory immediate", testLockOrByteMemoryImmediate},
         {"LOCK OR qword memory immediate", testLockOrQwordMemoryImmediate},
         {"LOCK OR qword memory register", testLockOrQwordMemoryRegister},
         {"SUB scaled-index memory", testSubScaledIndexMemory},

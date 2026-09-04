@@ -6908,18 +6908,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto lockImmOpcodeOffset = cursor + (hasLockImmRex ? 2U : 1U);
             const bool isLockImmOrAnd =
                 code[cursor] == 0xF0U && code.size() - lockImmOpcodeOffset >= 1 &&
-                (code[lockImmOpcodeOffset] == 0x81U ||
+                (code[lockImmOpcodeOffset] == 0x80U ||
+                 code[lockImmOpcodeOffset] == 0x81U ||
                  code[lockImmOpcodeOffset] == 0x83U);
             if (isLockImmOrAnd) {
+            const auto immediateOpcode = code[lockImmOpcodeOffset];
             const auto lockImmRex = hasLockImmRex ? code[cursor + 1] : std::uint8_t{0};
             const bool lockImmRexW = (lockImmRex & 0x8U) != 0;
             const bool lockImmRexB = (lockImmRex & 0x1U) != 0;
-            if ((lockImmRex & 0x6U) != 0) {
+            if ((lockImmRex & 0x6U) != 0 ||
+                (immediateOpcode == 0x80U && lockImmRexW)) {
                 throw DecodeError(
                     address, remaining,
                     "LOCK OR/AND immediate does not support REX.R/X");
             }
-            const auto immediateOpcode = code[lockImmOpcodeOffset];
             cursor = lockImmOpcodeOffset + 1;
             if (cursor >= code.size()) {
                 throw DecodeError(address, remaining,
@@ -6930,13 +6932,15 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
             if (mode == 0x3U || (extension != 0x1U && extension != 0x4U) ||
-                (mode == 0 && rmEncoding == 0x5U)) {
+                (ripRelative && lockImmRexB)) {
                 throw DecodeError(
                     address, remaining,
-                    "only LOCK OR/AND dword/qword [base+disp8/disp32], imm8/imm32 is supported");
+                    "only LOCK OR/AND byte/dword/qword [base/RIP+disp8/disp32], imm8/imm32 is supported");
             }
-            const auto lockImmWidth = static_cast<std::uint8_t>(lockImmRexW ? 64U : 32U);
+            const auto lockImmWidth = static_cast<std::uint8_t>(
+                immediateOpcode == 0x80U ? 8U : (lockImmRexW ? 64U : 32U));
             auto base = decodeRegister(rmEncoding, lockImmRexB);
             if (rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
@@ -6956,23 +6960,27 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 base = decodeRegister(baseEncoding, lockImmRexB);
             }
             std::int64_t displacement = 0;
-            if (mode == 0x1U) {
-                if (cursor >= code.size()) {
-                    throw DecodeError(address, remaining,
-                                      "truncated LOCK OR disp8");
-                }
-                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-            } else if (mode == 0x2U) {
+            if (ripRelative || mode == 0x2U) {
                 if (code.size() - cursor < 4) {
                     throw DecodeError(address, remaining,
                                       "truncated LOCK OR disp32");
                 }
                 displacement = readI32(code.subspan(cursor, 4));
                 cursor += 4;
+            } else if (mode == 0x1U) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated LOCK OR disp8");
+                }
+                displacement = std::bit_cast<std::int8_t>(code[cursor++]);
+            }
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
             }
             std::uint64_t immediate = 0;
             std::uint8_t immediateWidth = 0;
-            if (immediateOpcode == 0x83U) {
+            if (immediateOpcode == 0x83U || immediateOpcode == 0x80U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining,
                                       "truncated LOCK OR imm8");
@@ -6997,7 +7005,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = extension == 0x1U ? Opcode::LockOrMemImm
                                                        : Opcode::LockAndMemImm;
             instruction.operands.push_back(
-                MemoryOperand{base, displacement, lockImmWidth});
+                ripRelative
+                    ? MemoryOperand{Register::Rax, displacement, lockImmWidth,
+                                    std::nullopt, 1, false, true}
+                    : MemoryOperand{base, displacement, lockImmWidth});
             instruction.operands.push_back(
                 ImmediateOperand{immediate, immediateWidth});
             const auto length = cursor - instructionStart;

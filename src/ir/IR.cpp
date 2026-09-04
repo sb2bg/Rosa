@@ -1806,11 +1806,11 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::LockedOrGuestMemory:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "immediate");
-            if (operation.width != Width::I16 &&
+            if (operation.width != Width::I8 && operation.width != Width::I16 &&
                 operation.width != Width::I32 &&
                 operation.width != Width::I64) {
                 errors.emplace_back(
-                    "locked_or_guest_memory currently requires i16, i32, or i64");
+                    "locked_or_guest_memory currently requires i8, i16, i32, or i64");
             }
             break;
         case Opcode::LockedAndGuestMemory:
