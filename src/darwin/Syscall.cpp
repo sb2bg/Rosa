@@ -2094,9 +2094,9 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             setError(state, errno);
             return {};
         }
-        if (!S_ISREG(hostMetadata.st_mode)) {
+        if (!S_ISREG(hostMetadata.st_mode) && !S_ISDIR(hostMetadata.st_mode)) {
             std::ostringstream reason;
-            reason << "only mapped regular-file stat64 is implemented; got path=\""
+            reason << "only mapped regular-file and directory stat64 is implemented; got path=\""
                    << *path << '"';
             throw unsupported(state, syscallRip, reason.str());
         }

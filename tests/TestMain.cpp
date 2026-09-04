@@ -26290,6 +26290,46 @@ void testDarwinStat64RelativePath() {
                 "relative present-path stat64 did not clear BSD carry");
 }
 
+void testDarwinStat64MappedDirectory() {
+    // Observed under an AppKit fixture: stat64(appDir, buf).
+    constexpr auto stat64Number = UINT64_C(0x02000152);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress statAddress{0x8300};
+    const auto directoryString = std::filesystem::current_path().string();
+    std::vector<std::uint8_t> directoryBytes(directoryString.begin(), directoryString.end());
+    directoryBytes.push_back(0);
+
+    struct stat hostMetadata{};
+    expect(::stat(directoryString.c_str(), &hostMetadata) == 0,
+           "could not stat the mapped-directory fixture");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, directoryBytes);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = stat64Number;
+    state.rdi = pathAddress.value;
+    state.rsi = statAddress.value;
+    state.rflags = 0xAD7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E310E4ULL});
+    expect(!outcome.exited, "stat64 mapped directory terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0}, "stat64 mapped directory did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "stat64 mapped directory did not clear BSD carry");
+
+    const auto metadata = addressSpace.readBytes(statAddress, 144);
+    std::uint16_t mode = 0;
+    std::memcpy(&mode, metadata.data() + 4, sizeof(mode));
+    expectEqual(mode, static_cast<std::uint16_t>(hostMetadata.st_mode),
+                "stat64 mapped directory returned the wrong mode");
+    expect((mode & S_IFMT) == S_IFDIR, "stat64 mapped directory is not a directory");
+}
+
 void testDarwinStat64MappedFile() {
     constexpr auto stat64Number = UINT64_C(0x02000152);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -37607,6 +37647,7 @@ int main() {
         {"Darwin openat guest cryptex directory", testDarwinOpenatGuestCryptexDirectory},
         {"Darwin duplicate guest descriptor", testDarwinDuplicateGuestDescriptor},
         {"Darwin stat64 mapped file", testDarwinStat64MappedFile},
+        {"Darwin stat64 mapped directory", testDarwinStat64MappedDirectory},
         {"Darwin stat64 absent system databases", testDarwinStat64SystemDatabasesAbsent},
         {"Darwin stat64 relative path", testDarwinStat64RelativePath},
         {"Darwin fstat64 standard descriptor", testDarwinFstat64StandardDescriptor},
