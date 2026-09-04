@@ -1495,6 +1495,17 @@ void Builder::updateBitTestFlags(ValueId value, std::uint8_t bitIndex,
     });
 }
 
+void Builder::lockedBitSetGuestMemory(ValueId address, std::uint8_t bitIndex, Width width,
+                                      guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::LockedBitSetGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+        .immediate = bitIndex,
+    });
+}
+
 void Builder::exitBlock(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::ExitBlock,
@@ -2255,6 +2266,13 @@ std::vector<std::string> verify(const Block &block) {
                 operation.width != Width::I64) {
                 errors.emplace_back(
                     "update_bit_test_flags requires i32 or i64");
+            }
+            break;
+        case Opcode::LockedBitSetGuestMemory:
+            checkUse(operation.lhs, "guest address");
+            if (operation.width != Width::I32 && operation.width != Width::I64) {
+                errors.emplace_back(
+                    "locked_bit_set_guest_memory currently requires i32 or i64");
             }
             break;
         case Opcode::UpdateShiftLeftFlags:

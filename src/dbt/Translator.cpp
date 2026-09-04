@@ -4258,6 +4258,66 @@ updateBitTestFlags64(x86::X86State *state, std::uint64_t value, std::uint64_t un
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+lockedBitSetGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                    std::uint64_t bitIndex) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated LOCK BTS has no guest address space");
+        }
+        const auto unitAddress = address + (bitIndex >> 5U) * sizeof(std::uint32_t);
+        const auto bit = static_cast<std::uint32_t>(bitIndex & 0x1FU);
+        context->addressSpace->validateAccess(guest::GuestAddress{unitAddress},
+                                              sizeof(std::uint32_t),
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU32(guest::GuestAddress{unitAddress});
+        const auto result = original | (1U << bit);
+        const std::array bytes{
+            static_cast<std::uint8_t>(result),
+            static_cast<std::uint8_t>(result >> 8U),
+            static_cast<std::uint8_t>(result >> 16U),
+            static_cast<std::uint8_t>(result >> 24U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{unitAddress}, bytes);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return updateBitTestFlags32(state, original, bit);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+lockedBitSetGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                    std::uint64_t bitIndex) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated qword LOCK BTS has no guest address space");
+        }
+        const auto unitAddress = address + (bitIndex >> 6U) * sizeof(std::uint64_t);
+        const auto bit = static_cast<std::uint32_t>(bitIndex & 0x3FU);
+        context->addressSpace->validateAccess(guest::GuestAddress{unitAddress},
+                                              sizeof(std::uint64_t),
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU64(guest::GuestAddress{unitAddress});
+        const auto result = original | (1ULL << bit);
+        context->addressSpace->writeU64(guest::GuestAddress{unitAddress}, result);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return updateBitTestFlags64(state, original, bit);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint64_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateShiftRightDoubleFlags64(x86::X86State *state, std::uint64_t original, std::uint64_t result,
                               std::uint64_t unmaskedCount) {
     const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x3FU);
@@ -6279,6 +6339,47 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                          : memory.width == 32 ? ir::Width::I32
                                                               : ir::Width::I64,
                                          instruction.address);
+            break;
+        }
+        case x86::Opcode::LockBtsMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: LOCK BTS operand count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto bitIndex = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if ((memory.width != 32 && memory.width != 64) || bitIndex.width != 8) {
+                throw std::runtime_error(
+                    "only LOCK BTS dword/qword [base/index+disp], imm8 is implemented");
+            }
+            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : memory.hasBase
+                      ? builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                  instruction.address)
+                      : builder.constant(0, ir::Width::I64, instruction.address);
+            if (memory.index) {
+                auto index =
+                    builder.readGuestRegister(*memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64, instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement =
+                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                     ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            builder.lockedBitSetGuestMemory(address,
+                                            static_cast<std::uint8_t>(bitIndex.value),
+                                            width, instruction.address);
             break;
         }
         case x86::Opcode::CmpxchgMemReg: {
@@ -11098,6 +11199,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::LockedIncrementGuestMemory ||
             operation.opcode == ir::Opcode::LockedDecrementGuestMemory ||
             operation.opcode == ir::Opcode::LockedOrGuestMemory ||
+            operation.opcode == ir::Opcode::LockedBitSetGuestMemory ||
             operation.opcode == ir::Opcode::LockedAndGuestMemory ||
             operation.opcode == ir::Opcode::StoreGuestIdtr ||
             operation.opcode == ir::Opcode::StoreGuest ||
@@ -11176,6 +11278,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::LockedIncrementGuestMemory ||
             operation.opcode == ir::Opcode::LockedDecrementGuestMemory ||
             operation.opcode == ir::Opcode::LockedOrGuestMemory ||
+            operation.opcode == ir::Opcode::LockedBitSetGuestMemory ||
             operation.opcode == ir::Opcode::LockedAndGuestMemory ||
             operation.opcode == ir::Opcode::StoreGuestIdtr ||
             operation.opcode == ir::Opcode::StoreGuest ||
@@ -12512,6 +12615,30 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                                                : operation.width == ir::Width::I32
                                                    ? pointerBits(&lockedOrGuest32)
                                                    : pointerBits(&lockedOrGuest64));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(committed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0, static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(committed);
+            break;
+        }
+        case ir::Opcode::LockedBitSetGuestMemory: {
+            if (operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
+                throw std::runtime_error(
+                    "ARM64 backend only implements 32- and 64-bit guest-memory LOCK BTS");
+            }
+            const auto fault = assembler.makeLabel();
+            const auto committed = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x3, operation.immediate);
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
+                                                   ? pointerBits(&lockedBitSetGuest32)
+                                                   : pointerBits(&lockedBitSetGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

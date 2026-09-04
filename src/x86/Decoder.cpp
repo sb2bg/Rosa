@@ -7512,10 +7512,101 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             if (code.size() - operandCursor < 3 ||
                 code[operandCursor] != 0x0FU ||
                 (code[operandCursor + 1] != 0xB0U &&
-                 code[operandCursor + 1] != 0xB1U)) {
+                 code[operandCursor + 1] != 0xB1U &&
+                 code[operandCursor + 1] != 0xBAU)) {
                 throw DecodeError(
                     address, remaining,
-                    "only LOCK CMPXCHG r/m8/r/m32/r/m64 or LOCK XADD r/m32, r32 is supported from prefix F0");
+                    "only LOCK CMPXCHG r/m8/r/m32/r/m64, LOCK BTS r/m32/r/m64, or LOCK XADD r/m32, r32 is supported from prefix F0");
+            }
+            if (code[operandCursor + 1] == 0xBAU) {
+                cursor = operandCursor + 2;
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated LOCK BTS memory operand");
+                }
+                const auto modrm = code[cursor++];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto extension =
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+                const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+                const bool rexW = (lockRex & 0x8U) != 0;
+                const bool rexR = (lockRex & 0x4U) != 0;
+                const bool rexX = (lockRex & 0x2U) != 0;
+                const bool rexB = (lockRex & 0x1U) != 0;
+                const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
+                if (mode == 0x3U || extension != 0x5U || rexR || rexX ||
+                    (mode == 0 && rmEncoding == 0x5U && rexB)) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only LOCK BTS dword/qword [base/index*scale/RIP+disp8/disp32], imm8 is supported");
+                }
+                auto baseEncoding = rmEncoding;
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
+                if (!ripRelative && rmEncoding == 0x4U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated LOCK BTS SIB");
+                    }
+                    const auto sib = code[cursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(address, remaining,
+                                          "no-base LOCK BTS SIB is not supported");
+                    }
+                    if (indexEncoding != 0x4U) {
+                        index = decodeRegister(indexEncoding, rexX);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                }
+                std::int64_t displacement = 0;
+                if (ripRelative || mode == 0x2U) {
+                    if (code.size() - cursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated LOCK BTS disp32");
+                    }
+                    displacement = readI32(code.subspan(cursor, 4));
+                    cursor += 4;
+                } else if (mode == 0x1U) {
+                    if (cursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated LOCK BTS disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[cursor++]);
+                }
+                if (ripRelative) {
+                    static_cast<void>(relativeTarget(
+                        address, cursor - instructionStart, displacement));
+                }
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated LOCK BTS bit index");
+                }
+                const auto bitIndex = code[cursor++];
+                const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+                instruction.opcode = Opcode::LockBtsMemImm;
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement, width,
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{decodeRegister(baseEncoding, rexB),
+                                        displacement, width, index, scale});
+                instruction.operands.push_back(ImmediateOperand{bitIndex, 8});
+                const auto length = cursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() +
+                                static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
             }
             const bool isByteCmpxchg = code[operandCursor + 1] == 0xB0U;
             if (isByteCmpxchg && (lockRex & 0x8U) != 0) {
