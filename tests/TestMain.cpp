@@ -21728,6 +21728,48 @@ void testPinsrdGuestMemoryToXmm() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted PINSRD changed flags");
 }
 
+void testPextrwRegisterFromXmm() {
+    // Observed in libswiftCore under an Objective-C fixture: PEXTRW edi, xmm0, 3.
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0xC5, 0xF8, 0x03, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF817193A81ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PextrwRegXmmImm,
+           "PEXTRW opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "PEXTRW length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    const auto count = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::Register::Rdi && destination.width == 32 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0 && count.value == 3 &&
+               count.width == 8,
+           "PEXTRW edi, xmm0, 3 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("pextrw edi, xmm0, 0x3") != std::string::npos,
+           "PEXTRW dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rdi = 0xFFFFFFFFFFFFFFFFULL;
+    state.xmm[0] = {.low = 0xABCD1234DEADBEEFULL, .high = 0x0123456789ABCDEFULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // Word 3 of the low lane is 0xABCD, zero-extended.
+    expectEqual(state.rdi, std::uint64_t{0xABCDULL}, "PEXTRW extracted the wrong word");
+    expectEqual(state.xmm[0].low, std::uint64_t{0xABCD1234DEADBEEFULL},
+                "PEXTRW changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "PEXTRW changed flags");
+
+    // Word 0 needs no shift: low word of the low lane.
+    constexpr std::array<std::uint8_t, 6> lowCode{0x66, 0x0F, 0xC5, 0xF8, 0x00, 0xC3};
+    const auto lowBlock = translator.translate(lowCode, observedRip);
+    rosa::x86::X86State lowState;
+    lowState.rdi = 0;
+    lowState.xmm[0] = {.low = 0xABCD1234DEADBEEFULL, .high = 0};
+    static_cast<void>(lowBlock.execute(lowState));
+    expectEqual(lowState.rdi, std::uint64_t{0xBEEFULL}, "PEXTRW word 0 differs");
+}
+
 void testPinsrdRegisterToXmm() {
     constexpr rosa::guest::GuestAddress instructionAddress{0x7FF802A9044AULL};
     constexpr std::array<std::uint8_t, 14> code{0x66, 0x0F, 0x3A, 0x22, 0xC0, 0x02, 0x66,
@@ -35528,6 +35570,7 @@ int main() {
         {"EXTRACTPS XMM to guest memory", testExtractpsXmmToGuestMemory},
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},
         {"PINSRD register to XMM", testPinsrdRegisterToXmm},
+        {"PEXTRW register from XMM", testPextrwRegisterFromXmm},
         {"PINSRQ register to XMM", testPinsrqRegisterToXmm},
         {"PINSRB register to XMM", testPinsrbRegisterToXmm},
         {"PINSRB guest memory to XMM", testPinsrbGuestMemoryToXmm},

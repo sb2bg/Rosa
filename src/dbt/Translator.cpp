@@ -7013,6 +7013,37 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             break;
         }
+        case x86::Opcode::PextrwRegXmmImm: {
+            if (instruction.operands.size() != 3) {
+                throw std::runtime_error("internal decoder error: PEXTRW operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto count =
+                std::get<x86::ImmediateOperand>(instruction.operands[2]);
+            if (destination.width != 32 || count.width != 8 || count.value > 7) {
+                throw std::runtime_error(
+                    "only PEXTRW r32, xmm, word-index is implemented");
+            }
+            const auto lane = builder.readGuestXmmLane(
+                source, (count.value & 4U) != 0, instruction.address);
+            const std::uint8_t shift =
+                static_cast<std::uint8_t>((count.value & 3U) * 16U);
+            auto word = lane;
+            if (shift != 0) {
+                word = builder.shiftRightLogical(word, shift, ir::Width::I64,
+                                                 instruction.address);
+            }
+            word = builder.bitAnd(word,
+                                  builder.constant(0xFFFFU, ir::Width::I64,
+                                                   instruction.address),
+                                  ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(destination.reg, word, ir::Width::I32,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::ExtractpsMemXmmImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error("internal decoder error: EXTRACTPS operand count");

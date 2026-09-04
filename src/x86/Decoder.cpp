@@ -2743,6 +2743,55 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
         }
 
+        if (code[cursor] == 0x66U && code.size() - cursor >= 4) {
+            auto pextrwCursor = cursor + 1;
+            std::uint8_t pextrwRex = 0;
+            if (code[pextrwCursor] >= 0x40U && code[pextrwCursor] <= 0x4FU &&
+                code.size() - pextrwCursor >= 4) {
+                pextrwRex = code[pextrwCursor++];
+            }
+            if (code.size() - pextrwCursor >= 3 && code[pextrwCursor] == 0x0FU &&
+                code[pextrwCursor + 1] == 0xC5U) {
+                if (code.size() - pextrwCursor < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated PEXTRW r32, xmm, imm8");
+                }
+                if ((pextrwRex & 0x8U) != 0) {
+                    throw DecodeError(address, remaining,
+                                      "REX.W is invalid for PEXTRW");
+                }
+                const auto modrm = code[pextrwCursor + 2];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto regEncoding =
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+                const auto rmEncoding =
+                    static_cast<std::uint8_t>(modrm & 0x7U);
+                if (mode != 0x3U) {
+                    throw DecodeError(address, remaining,
+                                      "only register-direct PEXTRW r32, xmm, imm8 is supported");
+                }
+                const auto count =
+                    static_cast<std::uint8_t>(code[pextrwCursor + 3] & 0x7U);
+                instruction.opcode = Opcode::PextrwRegXmmImm;
+                instruction.operands.push_back(RegisterOperand{
+                    decodeRegister(regEncoding, (pextrwRex & 0x4U) != 0), 32});
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        rmEncoding | ((pextrwRex & 0x1U) != 0 ? 8U : 0U)))});
+                instruction.operands.push_back(ImmediateOperand{count, 8});
+                const auto length = pextrwCursor + 4 - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = pextrwCursor + 4;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
         if (code[cursor] == 0x66U && code.size() - cursor >= 4 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x3AU &&
             code[cursor + 3] == 0x17U) {
