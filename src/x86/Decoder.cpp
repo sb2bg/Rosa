@@ -1705,6 +1705,100 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         if (code[cursor] == 0x66U && code.size() - cursor >= 2) {
             const auto afterPrefix = cursor + 1;
+            const bool hasDivpdRex =
+                code[afterPrefix] >= 0x40U && code[afterPrefix] <= 0x4FU;
+            const auto divpdOpcodeOffset =
+                afterPrefix + (hasDivpdRex ? 1U : 0U);
+            if (code.size() - divpdOpcodeOffset >= 2 &&
+                code[divpdOpcodeOffset] == 0x0FU &&
+                code[divpdOpcodeOffset + 1] == 0x5EU) {
+                if (code.size() - divpdOpcodeOffset < 3) {
+                    throw DecodeError(address, remaining,
+                                      "truncated divpd xmm, xmm/m128");
+                }
+                const auto rex =
+                    hasDivpdRex ? code[afterPrefix] : 0U;
+                const auto modrm = code[divpdOpcodeOffset + 2];
+                const auto mode =
+                    static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto rmEncoding =
+                    static_cast<std::uint8_t>(modrm & 0x7U);
+                if ((rex & 0xAU) != 0) {
+                    throw DecodeError(
+                        address, remaining,
+                        "DIVPD does not support REX.W/X");
+                }
+                const auto destination = XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        ((modrm >> 3U) & 0x7U) |
+                        ((rex & 0x4U) != 0 ? 8U : 0U)))};
+                auto operandCursor = divpdOpcodeOffset + 3;
+                if (mode == 0x3U) {
+                    instruction.opcode = Opcode::DivpdRegReg;
+                    instruction.operands.push_back(destination);
+                    instruction.operands.push_back(XmmRegisterOperand{
+                        static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                            rmEncoding | ((rex & 0x1U) != 0 ? 8U : 0U)))});
+                } else {
+                    const bool ripRelative =
+                        mode == 0 && rmEncoding == 0x5U && (rex & 0x1U) == 0;
+                    if (rmEncoding == 0x4U ||
+                        (mode == 0 && rmEncoding == 0x5U &&
+                         (rex & 0x1U) != 0)) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only RIP-relative or based DIVPD xmm, m128 is supported");
+                    }
+                    std::int64_t displacement = 0;
+                    if (mode == 0x1U) {
+                        if (operandCursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated DIVPD m128 disp8");
+                        }
+                        displacement =
+                            std::bit_cast<std::int8_t>(code[operandCursor++]);
+                    } else if (mode == 0x2U || ripRelative) {
+                        if (code.size() - operandCursor < 4) {
+                            throw DecodeError(address, remaining,
+                                              "truncated DIVPD m128 disp32");
+                        }
+                        displacement =
+                            readI32(code.subspan(operandCursor, 4));
+                        operandCursor += 4;
+                    }
+                    if (ripRelative) {
+                        static_cast<void>(relativeTarget(
+                            address, operandCursor - instructionStart,
+                            displacement));
+                    }
+                    instruction.opcode = Opcode::DivpdRegMem;
+                    instruction.operands.push_back(destination);
+                    instruction.operands.push_back(
+                        ripRelative
+                            ? MemoryOperand{Register::Rax, displacement, 128,
+                                            std::nullopt, 1, false, true}
+                            : MemoryOperand{
+                                  decodeRegister(rmEncoding,
+                                                 (rex & 0x1U) != 0),
+                                  displacement, 128});
+                }
+                const auto length = operandCursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(
+                    code.begin() +
+                        static_cast<std::ptrdiff_t>(instructionStart),
+                    length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = operandCursor;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
+        if (code[cursor] == 0x66U && code.size() - cursor >= 2) {
+            const auto afterPrefix = cursor + 1;
             const bool hasXorpdRex =
                 code[afterPrefix] >= 0x40U && code[afterPrefix] <= 0x4FU;
             const auto xorpdOpcodeOffset =

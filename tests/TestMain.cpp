@@ -21249,6 +21249,84 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testDivpdRegisters() {
+    // Observed in ColorSync under an Objective-C fixture: DIVPD xmm0, xmm1.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x5E, 0xC1, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4E30ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::DivpdRegReg,
+           "DIVPD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "DIVPD length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "DIVPD xmm0, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("divpd xmm0, xmm1") != std::string::npos,
+           "DIVPD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("divide_packed_double_xmm.i64") != std::string::npos,
+           "DIVPD did not lower through packed-divide IR");
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x3FF0000000000000ULL, .high = 0x401C000000000000ULL};
+    state.xmm[1] = {.low = 0x4000000000000000ULL, .high = 0x4000000000000000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // 1.0 / 2.0 = 0.5, 7.0 / 2.0 = 3.5.
+    expectEqual(state.xmm[0].low, std::uint64_t{0x3FE0000000000000ULL},
+                "DIVPD low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x400C000000000000ULL},
+                "DIVPD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "DIVPD changed flags");
+}
+
+void testDivpdGuestMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0x5E, 0x07, 0xC3, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::DivpdRegMem,
+           "DIVPD xmm, [memory] opcode differs");
+    expect(rosa::debug::dumpX86(decoded).find("divpd xmm0, xmmword [rdi]") !=
+               std::string::npos,
+           "DIVPD xmm, [memory] dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 16> bytes{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+                                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x40};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8000}, bytes);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = 0x8000;
+    state.xmm[0] = {.low = 0x3FF0000000000000ULL, .high = 0x4020000000000000ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    // 1.0 / 2.0 = 0.5, 8.0 / 4.0 = 2.0.
+    expectEqual(state.xmm[0].low, std::uint64_t{0x3FE0000000000000ULL},
+                "DIVPD memory low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x4000000000000000ULL},
+                "DIVPD memory high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "DIVPD changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rdi = 0x8000;
+    faultState.xmm[0] = {.low = 1, .high = 2};
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") != std::string_view::npos;
+    }
+    expect(rejected, "DIVPD from unmapped guest memory did not fail");
+}
+
 void testMovddupRegisters() {
     // Observed in ColorSync under an Objective-C fixture: MOVDDUP xmm1, xmm1 (F2 0F 12 /r).
     constexpr std::array<std::uint8_t, 5> code{0xF2, 0x0F, 0x12, 0xC9, 0xC3};
@@ -36637,6 +36715,8 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"DIVPD registers execution", testDivpdRegisters},
+        {"DIVPD guest memory execution", testDivpdGuestMemoryGeneratedExecution},
         {"MOVDDUP registers execution", testMovddupRegisters},
         {"PCMPEQQ registers execution", testPcmpeqqRegisterGeneratedExecution},
         {"PCMPEQQ guest memory execution", testPcmpeqqGuestMemoryGeneratedExecution},

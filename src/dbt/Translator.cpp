@@ -709,6 +709,42 @@ compareEqualGuestQwordsXmm128(GuestExecutionContext *context, x86::X86State *sta
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+divideGuestMemoryPackedDoubleXmm128(GuestExecutionContext *context, x86::X86State *state,
+                                    std::uint64_t address,
+                                    std::uint64_t registerIndex) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated DIVPD has no address space");
+        }
+        if (registerIndex >= state->xmm.size()) {
+            throw std::runtime_error("generated DIVPD has an invalid register");
+        }
+        const auto bytes = context->addressSpace->readBytes(guest::GuestAddress{address}, 16);
+        std::uint64_t sourceLow = 0;
+        std::uint64_t sourceHigh = 0;
+        std::memcpy(&sourceLow, bytes.data(), sizeof(sourceLow));
+        std::memcpy(&sourceHigh, bytes.data() + sizeof(sourceLow), sizeof(sourceHigh));
+        // Host IEEE-754 arithmetic matches the guest default MXCSR behavior
+        // (round to nearest, no denormal flushing on either side).
+        const auto original = state->xmm[registerIndex];
+        state->xmm[registerIndex] = {
+            .low = std::bit_cast<std::uint64_t>(std::bit_cast<double>(original.low) /
+                                                std::bit_cast<double>(sourceLow)),
+            .high = std::bit_cast<std::uint64_t>(std::bit_cast<double>(original.high) /
+                                                 std::bit_cast<double>(sourceHigh)),
+        };
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = 16;
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 xorGuestMemoryXmm128(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
                      std::uint64_t registerIndex) noexcept {
     try {
@@ -960,6 +996,25 @@ comparePackedDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
     state->xmm[destinationIndex] = {
         .low = compareLane(destination.low, source.low),
         .high = compareLane(destination.high, source.high),
+    };
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+dividePackedDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
+                      std::uint64_t sourceIndex) noexcept {
+    if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    // Host IEEE-754 arithmetic matches the guest default MXCSR behavior
+    // (round to nearest, no denormal flushing on either side).
+    const auto destination = state->xmm[destinationIndex];
+    const auto source = state->xmm[sourceIndex];
+    state->xmm[destinationIndex] = {
+        .low = std::bit_cast<std::uint64_t>(std::bit_cast<double>(destination.low) /
+                                            std::bit_cast<double>(source.low)),
+        .high = std::bit_cast<std::uint64_t>(std::bit_cast<double>(destination.high) /
+                                             std::bit_cast<double>(source.high)),
     };
     return state;
 }
@@ -4706,6 +4761,53 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             // here, so no IR value stays live across its call.
             builder.scalarDoubleXmm(sourceBits, destination, operation,
                                      instruction.address);
+            break;
+        }
+        case x86::Opcode::DivpdRegReg:
+        case x86::Opcode::DivpdRegMem: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::DivpdRegMem;
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: DIVPD operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            if (!fromMemory) {
+                const auto source =
+                    std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+                builder.dividePackedDoubleXmm(destination, source,
+                                              instruction.address);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                if (memory.width != 128 ||
+                    (memory.ripRelative
+                         ? memory.hasBase || memory.index.has_value()
+                         : !memory.hasBase || memory.index.has_value()) ||
+                    memory.segment != x86::Segment::None) {
+                    throw std::runtime_error(
+                        "only RIP-relative or based DIVPD xmm, m128 is implemented");
+                }
+                auto address =
+                    memory.ripRelative
+                        ? builder.constant(instruction.address.value + instruction.length,
+                                           ir::Width::I64, instruction.address)
+                        : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                    instruction.address);
+                if (memory.displacement != 0) {
+                    const auto displacement =
+                        builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                         ir::Width::I64, instruction.address);
+                    address = builder.add(address, displacement, ir::Width::I64,
+                                          instruction.address);
+                }
+                // A single guest-memory helper performs the whole
+                // read-and-divide: no IR value may stay live in a
+                // caller-saved host register across the call.
+                builder.divideGuestMemoryPackedDoubleXmm(address, destination,
+                                                         instruction.address);
+            }
             break;
         }
         case x86::Opcode::MovlpsRegMem:
@@ -10017,12 +10119,14 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::TestXmmBits ||
             operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
             operation.opcode == ir::Opcode::CompareEqualGuestQwordsXmm ||
+            operation.opcode == ir::Opcode::DivideGuestMemoryPackedDoubleXmm ||
             operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
             operation.opcode == ir::Opcode::CompareEqualXmmDwords ||
             operation.opcode == ir::Opcode::CompareEqualXmmQwords ||
             operation.opcode == ir::Opcode::ShiftLeftXmmDwords ||
             operation.opcode == ir::Opcode::AddXmmWords ||
             operation.opcode == ir::Opcode::ComparePackedDoubleXmm ||
+            operation.opcode == ir::Opcode::DividePackedDoubleXmm ||
             operation.opcode == ir::Opcode::UpdateUnorderedDoubleFlags ||
             operation.opcode == ir::Opcode::UpdateUnorderedFloatFlags ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
@@ -10083,6 +10187,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::AddGuestMemoryXmm ||
             operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
             operation.opcode == ir::Opcode::CompareEqualGuestQwordsXmm ||
+            operation.opcode == ir::Opcode::DivideGuestMemoryPackedDoubleXmm ||
             (operation.opcode == ir::Opcode::ShuffleXmmBytes && operation.lhs.has_value()) ||
             operation.opcode == ir::Opcode::RepeatMoveByte ||
             operation.opcode == ir::Opcode::LoadGuest ||
@@ -11707,6 +11812,25 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.bind(compared);
             break;
         }
+        case ir::Opcode::DivideGuestMemoryPackedDoubleXmm: {
+            const auto fault = assembler.makeLabel();
+            const auto divided = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x3,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&divideGuestMemoryPackedDoubleXmm128));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(divided);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0, static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(divided);
+            break;
+        }
         case ir::Opcode::XorGuestMemoryXmm: {
             const auto fault = assembler.makeLabel();
             const auto completed = assembler.makeLabel();
@@ -11818,6 +11942,14 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                                    static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
             assembler.movImmediate(arm64::x3, operation.immediate);
             assembler.movImmediate(arm64::x16, pointerBits(&comparePackedDoubleXmm));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::DividePackedDoubleXmm:
+            assembler.movImmediate(arm64::x1,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(arm64::x2,
+                                   static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x16, pointerBits(&dividePackedDoubleXmm));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateUnorderedDoubleFlags: {

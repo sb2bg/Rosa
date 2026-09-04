@@ -637,6 +637,30 @@ void Builder::comparePackedDoubleXmm(x86::XmmRegister destination,
     });
 }
 
+void Builder::dividePackedDoubleXmm(x86::XmmRegister destination,
+                                    x86::XmmRegister source,
+                                    guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::DividePackedDoubleXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+    });
+}
+
+void Builder::divideGuestMemoryPackedDoubleXmm(ValueId address,
+                                               x86::XmmRegister destination,
+                                               guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::DivideGuestMemoryPackedDoubleXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = destination,
+    });
+}
+
 void Builder::updateUnorderedDoubleFlags(ValueId destinationBits,
                                               ValueId sourceBits,
                                               guest::GuestAddress rip) {
@@ -1835,6 +1859,21 @@ std::vector<std::string> verify(const Block &block) {
                 operation.width != Width::I64) {
                 errors.emplace_back(
                     "compare_packed_double_xmm has incomplete registers");
+            }
+            break;
+        case Opcode::DividePackedDoubleXmm:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister ||
+                operation.width != Width::I64) {
+                errors.emplace_back(
+                    "divide_packed_double_xmm has incomplete registers");
+            }
+            break;
+        case Opcode::DivideGuestMemoryPackedDoubleXmm:
+            checkUse(operation.lhs, "guest address");
+            if (!operation.guestXmmRegister || operation.width != Width::I64) {
+                errors.emplace_back(
+                    "divide_guest_memory_packed_double_xmm has incomplete operands");
             }
             break;
         case Opcode::UpdateUnorderedDoubleFlags:
