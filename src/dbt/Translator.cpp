@@ -3620,6 +3620,38 @@ lockedAndGuest16(GuestExecutionContext *context, x86::X86State *state, std::uint
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+lockedAddGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                 std::uint64_t sourceValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated dword LOCK ADD has no guest address space");
+        }
+        constexpr auto width = sizeof(std::uint32_t);
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, width,
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU32(guest::GuestAddress{address});
+        const auto source = static_cast<std::uint32_t>(sourceValue);
+        const auto result = original + source;
+        const std::array bytes{
+            static_cast<std::uint8_t>(result),
+            static_cast<std::uint8_t>(result >> 8U),
+            static_cast<std::uint8_t>(result >> 16U),
+            static_cast<std::uint8_t>(result >> 24U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return updateAddFlags32(state, original, source, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 lockedAddGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
                  std::uint64_t source) noexcept {
     try {
@@ -6515,9 +6547,12 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
             const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
-            if (memory.width != 64 || source.width != 64) {
-                throw std::runtime_error("only LOCK ADD qword [base/RIP+disp], r64 is implemented");
+            if (memory.width != source.width ||
+                (memory.width != 32 && memory.width != 64)) {
+                throw std::runtime_error(
+                    "only LOCK ADD dword/qword [base/RIP+disp], r32/r64 is implemented");
             }
+            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
             auto address =
                 memory.ripRelative
                     ? builder.constant(instruction.address.value + instruction.length,
@@ -6530,8 +6565,8 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 address = builder.add(address, displacement, ir::Width::I64, instruction.address);
             }
             const auto sourceValue =
-                builder.readGuestRegister(source.reg, ir::Width::I64, instruction.address);
-            builder.lockedAddGuestMemory(address, sourceValue, ir::Width::I64, instruction.address);
+                builder.readGuestRegister(source.reg, width, instruction.address);
+            builder.lockedAddGuestMemory(address, sourceValue, width, instruction.address);
             break;
         }
         case x86::Opcode::LockXaddMemReg: {
@@ -12544,9 +12579,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             break;
         }
         case ir::Opcode::LockedAddGuestMemory: {
-            if (operation.width != ir::Width::I64) {
+            if (operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 64-bit guest-memory LOCK ADD");
+                    "ARM64 backend only implements 32- and 64-bit guest-memory LOCK ADD");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -12555,7 +12590,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x2, hostRegister(*operation.lhs));
             assembler.mov(arm64::x3, hostRegister(*operation.rhs));
             assembler.mov(arm64::x0, arm64::x19);
-            assembler.movImmediate(arm64::x16, pointerBits(&lockedAddGuest64));
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
+                                                   ? pointerBits(&lockedAddGuest32)
+                                                   : pointerBits(&lockedAddGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

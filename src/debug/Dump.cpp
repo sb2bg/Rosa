@@ -439,7 +439,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::LockAddMemReg: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "lock add qword [";
+            stream << "lock add "
+                   << (memory.width == 32 ? "dword [" : "qword [");
             if (memory.ripRelative) {
                 stream << "rip";
             } else {

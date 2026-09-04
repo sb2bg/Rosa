@@ -7468,7 +7468,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 continue;
             }
-            if (code.size() - operandCursor >= 2 && code[operandCursor] == 0x09U) {
+            if (code.size() - operandCursor >= 2 &&
+                (code[operandCursor] == 0x01U || code[operandCursor] == 0x09U)) {
+                const bool isLockAdd = code[operandCursor] == 0x01U;
                 const auto modrm = code[operandCursor + 1];
                 const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
                 const auto regEncoding =
@@ -7504,7 +7506,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 const auto lockOrWidth =
                     static_cast<std::uint8_t>(lockRexW ? 64U : 32U);
-                instruction.opcode = Opcode::LockOrMemReg;
+                instruction.opcode = isLockAdd ? Opcode::LockAddMemReg
+                                                       : Opcode::LockOrMemReg;
                 instruction.operands.push_back(
                     ripRelative
                         ? MemoryOperand{Register::Rax, displacement, lockOrWidth,

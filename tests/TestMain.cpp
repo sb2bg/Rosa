@@ -21250,6 +21250,42 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testLockAddDwordMemoryRegister() {
+    // Observed in libdispatch under an AppKit fixture: LOCK ADD [RBX+8], ECX.
+    constexpr std::array<std::uint8_t, 5> code{0xF0, 0x01, 0x4B, 0x08, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802CD265BULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockAddMemReg,
+           "LOCK ADD dword opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "LOCK ADD dword length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbx && memory.width == 32 &&
+               memory.displacement == 8,
+           "LOCK ADD [RBX+8] memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rcx && source.width == 32,
+           "LOCK ADD source differs");
+    expect(rosa::debug::dumpX86(decoded).find("lock add dword [rbx+0x8], ecx") !=
+               std::string::npos,
+           "LOCK ADD dword dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    addressSpace.writeU32(target, 100);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rbx = target.value - 8;
+    state.rcx = 7;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU32(target), std::uint32_t{107},
+                "LOCK ADD dword did not add");
+}
+
 void testLockIncSibMemory() {
     // Observed in libdispatch under an AppKit fixture: LOCK INC [R12+0x58].
     constexpr std::array<std::uint8_t, 7> code{0xF0, 0x41, 0xFF, 0x44, 0x24, 0x58, 0xC3};
@@ -38693,6 +38729,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"LOCK ADD dword memory register", testLockAddDwordMemoryRegister},
         {"LOCK INC SIB memory", testLockIncSibMemory},
         {"LOCK BTS dword memory immediate", testLockBtsDwordMemoryImmediate},
         {"REP STOSD store", testRepStosdStore},
