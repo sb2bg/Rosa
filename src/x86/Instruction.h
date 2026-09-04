@@ -172,6 +172,7 @@ enum class Opcode {
     PinsrwXmmMem,
     PinsrwXmmReg,
     MovmskpsRegXmm,
+    MovmskpdRegXmm,
     UcomisdRegReg,
     UcomissRegReg,
     UcomissRegMem,

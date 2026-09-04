@@ -8435,6 +8435,34 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::MovmskpdRegXmm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: MOVMSKPD operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            if (destination.width != 32) {
+                throw std::runtime_error("only MOVMSKPD r32, xmm is implemented");
+            }
+            const auto low = builder.readGuestXmmLane(source, false,
+                                                      instruction.address);
+            const auto high = builder.readGuestXmmLane(source, true,
+                                                       instruction.address);
+            // Sign bits of the two packed doubles: bit 63 of each lane.
+            const auto bit0 = builder.shiftRightLogical(low, 63, ir::Width::I64,
+                                                        instruction.address);
+            const auto bit1 = builder.shiftRightLogical(high, 63, ir::Width::I64,
+                                                        instruction.address);
+            const auto bit1Shifted = builder.shiftLeft(bit1, 1, ir::Width::I64,
+                                                       instruction.address);
+            const auto mask = builder.bitOr(bit0, bit1Shifted, ir::Width::I64,
+                                            instruction.address);
+            builder.writeGuestRegister(destination.reg, mask, ir::Width::I32,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::PextrdRegXmmImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error("internal decoder error: PEXTRD operand count");

@@ -21250,6 +21250,35 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testMovmskpdRegisters() {
+    // Observed in libsystem_kernel under an AppKit fixture: MOVMSKPD eax, xmm1.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x50, 0xC1, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802E2FE7AULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovmskpdRegXmm,
+           "MOVMSKPD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "MOVMSKPD length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 32 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "MOVMSKPD eax, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("movmskpd eax, xmm1") != std::string::npos,
+           "MOVMSKPD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rax = UINT64_MAX;
+    state.xmm[1] = {.low = 0xBFF0000000000000ULL, .high = 0x3FF0000000000000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // Low double negative, high double positive: mask 0b01.
+    expectEqual(state.rax, std::uint64_t{1}, "MOVMSKPD mask differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVMSKPD changed flags");
+}
+
 void testPmovsxdqRegisters() {
     // Observed in libsystem_kernel under an AppKit fixture: PMOVSXDQ xmm1, xmm1.
     constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0x38, 0x25, 0xC9, 0xC3};
@@ -37623,6 +37652,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"MOVMSKPD registers execution", testMovmskpdRegisters},
         {"PMOVSXDQ registers execution", testPmovsxdqRegisters},
         {"LOCK AND dword memory immediate", testLockAndDwordMemoryImmediate},
         {"ADC r64 m64", testAdcRegMem},
