@@ -109,6 +109,7 @@ enum class Opcode {
     XchgMemReg,
     LockAddMemReg,
     LockXaddMemReg,
+    LockOrMemReg,
     LockIncMem,
     LockDecMem,
     LockOrMemImm,

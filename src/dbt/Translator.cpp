@@ -3295,6 +3295,31 @@ extern "C" __attribute__((noinline)) x86::X86State *updateLogicFlags32(x86::X86S
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+lockedOrGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                std::uint64_t sourceValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated qword LOCK OR has no guest address space");
+        }
+        constexpr auto width = sizeof(std::uint64_t);
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, width,
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU64(guest::GuestAddress{address});
+        const auto result = original | sourceValue;
+        context->addressSpace->writeU64(guest::GuestAddress{address}, result);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return updateLogicFlags64(state, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint64_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 lockedOrGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
                 std::uint64_t immediateValue) noexcept {
     try {
@@ -6194,6 +6219,36 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 : memory.width == 32 ? ir::Width::I32
                                      : ir::Width::I64,
                 instruction.address);
+            break;
+        }
+        case x86::Opcode::LockOrMemReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: LOCK OR operand count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
+            if (memory.width != source.width ||
+                (memory.width != 32 && memory.width != 64)) {
+                throw std::runtime_error(
+                    "only LOCK OR dword/qword [base/RIP+disp], r32/r64 is implemented");
+            }
+            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement =
+                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                     ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto sourceValue =
+                builder.readGuestRegister(source.reg, width, instruction.address);
+            builder.lockedOrGuestMemory(address, sourceValue, width, instruction.address);
             break;
         }
         case x86::Opcode::LockOrMemImm:
@@ -12129,9 +12184,10 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             break;
         }
         case ir::Opcode::LockedOrGuestMemory: {
-            if (operation.width != ir::Width::I16 && operation.width != ir::Width::I32) {
+            if (operation.width != ir::Width::I16 && operation.width != ir::Width::I32 &&
+                operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 16- and 32-bit guest-memory LOCK OR");
+                    "ARM64 backend only implements 16-, 32-, and 64-bit guest-memory LOCK OR");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -12142,7 +12198,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(arm64::x16, operation.width == ir::Width::I16
                                                    ? pointerBits(&lockedOrGuest16)
-                                                   : pointerBits(&lockedOrGuest32));
+                                               : operation.width == ir::Width::I32
+                                                   ? pointerBits(&lockedOrGuest32)
+                                                   : pointerBits(&lockedOrGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);

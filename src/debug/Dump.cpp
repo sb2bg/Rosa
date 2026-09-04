@@ -459,6 +459,24 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             }
             break;
         }
+        case x86::Opcode::LockOrMemReg: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[0]);
+            stream << "lock or "
+                   << (memory.width == 32 ? "dword [" : "qword [")
+                   << (memory.ripRelative ? "rip"
+                                          : x86::registerName(memory.base));
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << "], "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[1]));
+            break;
+        }
         case x86::Opcode::LockOrMemImm:
         case x86::Opcode::LockAndMemImm: {
             const auto memory =

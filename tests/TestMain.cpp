@@ -21250,6 +21250,43 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testLockOrQwordMemoryRegister() {
+    // Observed in Foundation under an AppKit fixture: LOCK OR [RBX+8], RCX.
+    constexpr std::array<std::uint8_t, 6> code{0xF0, 0x48, 0x09, 0x4B, 0x08, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8040AD32FULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::LockOrMemReg,
+           "LOCK OR opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "LOCK OR length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rbx && memory.width == 64 &&
+               memory.displacement == 8,
+           "LOCK OR [RBX+8] memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rcx && source.width == 64,
+           "LOCK OR source differs");
+    expect(rosa::debug::dumpX86(decoded).find("lock or qword [rbx+0x8], rcx") !=
+               std::string::npos,
+           "LOCK OR dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8100}, 0x0F0F0F0F0F0F0F0FULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rbx = 0x80F8;
+    state.rcx = 0xF0F0F0F0F0F0F0F0ULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8100}),
+                UINT64_MAX, "LOCK OR did not set the bits");
+    expectEqual(state.rcx, std::uint64_t{0xF0F0F0F0F0F0F0F0ULL},
+                "LOCK OR changed its source");
+}
+
 void testSubScaledIndexMemory() {
     // Observed in CoreFoundation under an AppKit fixture: SUB EBX, [RDX+RCX*4].
     constexpr std::array<std::uint8_t, 4> code{0x2B, 0x1C, 0x8A, 0xC3};
@@ -37937,6 +37974,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"LOCK OR qword memory register", testLockOrQwordMemoryRegister},
         {"SUB scaled-index memory", testSubScaledIndexMemory},
         {"LOCK XADD word memory", testLockXaddWordMemory},
         {"LOCK XADD indexed memory", testLockXaddIndexedMemory},
