@@ -24946,6 +24946,81 @@ void testDarwinIoctlStandardDescriptorType() {
     expect(unsupportedRequest, "unobserved guest ioctl request did not fail loudly");
 }
 
+void testDarwinSandboxMachLookupCheck() {
+    // Observed under an AppKit fixture: Sandbox mach-lookup for a bootstrap
+    // service name. No profile is installed, so well-formed self lookups
+    // are allowed.
+    constexpr auto macSyscallNumber = UINT64_C(0x0200017D);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress policyAddress{0x8000};
+    constexpr rosa::guest::GuestAddress operationAddress{0x8020};
+    constexpr rosa::guest::GuestAddress serviceAddress{0x8040};
+    constexpr rosa::guest::GuestAddress requestAddress{0x8100};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8180};
+    constexpr std::array<std::uint8_t, 8> policy{'S', 'a', 'n', 'd', 'b', 'o', 'x', 0};
+    constexpr std::array<std::uint8_t, 12> operation{'m', 'a', 'c', 'h', '-', 'l', 'o', 'o',
+                                                     'k', 'u', 'p', 0};
+    constexpr std::array<std::uint8_t, 26> service{'c', 'o', 'm', '.', 'a', 'p', 'p', 'l', 'e',
+                                                   '.', 'w', 'i', 'n', 'd', 'o', 'w', 's', 'e',
+                                                   'r', 'v', 'e', 'r', '.', 'x', 'p', 0};
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(policyAddress, policy);
+    addressSpace.writeBytes(operationAddress, operation);
+    addressSpace.writeBytes(serviceAddress, service);
+    const std::array<std::uint64_t, 6> fields{
+        outputAddress.value, static_cast<std::uint64_t>(::getpid()), operationAddress.value,
+        0x6, serviceAddress.value, 1,
+    };
+    std::array<std::uint8_t, sizeof(fields)> bytes{};
+    std::memcpy(bytes.data(), fields.data(), sizeof(fields));
+    addressSpace.writeBytes(requestAddress, bytes);
+    addressSpace.writeU64(outputAddress, UINT64_MAX);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 2;
+    state.rdx = requestAddress.value;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E310B4ULL});
+    expect(!outcome.exited, "Sandbox mach-lookup terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0}, "unsandboxed mach-lookup did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "Sandbox mach-lookup did not clear BSD carry");
+    expectEqual(addressSpace.readU64(outputAddress), std::uint64_t{0},
+                "Sandbox mach-lookup did not report allowed");
+
+    // A foreign pid stays loud.
+    std::array<std::uint8_t, sizeof(fields)> foreignBytes{};
+    const std::array<std::uint64_t, 6> foreignFields{
+        outputAddress.value, static_cast<std::uint64_t>(::getpid()) + 1, operationAddress.value,
+        0x6, serviceAddress.value, 1,
+    };
+    std::memcpy(foreignBytes.data(), foreignFields.data(), sizeof(foreignBytes));
+    addressSpace.writeBytes(requestAddress, foreignBytes);
+    addressSpace.writeU64(outputAddress, UINT64_MAX);
+    state.rax = macSyscallNumber;
+    state.rdi = policyAddress.value;
+    state.rsi = 2;
+    state.rdx = requestAddress.value;
+    bool rejectedPid = false;
+    try {
+        static_cast<void>(
+            dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        rejectedPid =
+            std::string_view(error.what()).find("mach-lookup") != std::string_view::npos;
+    }
+    expect(rejectedPid, "foreign-pid mach-lookup did not fail diagnostically");
+    expectEqual(addressSpace.readU64(outputAddress), UINT64_MAX,
+                "unsupported Sandbox check changed its output");
+}
+
 void testDarwinSandboxSyscallCheck() {
     constexpr auto macSyscallNumber = UINT64_C(0x0200017D);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -38497,6 +38572,7 @@ int main() {
         {"Darwin gettimeofday", testDarwinGettimeofday},
         {"Darwin issetugid", testDarwinIssetugid},
         {"Darwin ioctl standard descriptor type", testDarwinIoctlStandardDescriptorType},
+        {"Darwin Sandbox mach-lookup check", testDarwinSandboxMachLookupCheck},
         {"Darwin Sandbox syscall check", testDarwinSandboxSyscallCheck},
         {"Darwin AMFI dyld policy", testDarwinAmfiDyldPolicy},
         {"Darwin lockdown-mode sysctl", testDarwinLockdownModeSysctl},

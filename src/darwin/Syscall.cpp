@@ -164,6 +164,7 @@ constexpr std::uint32_t guestCsOpsDerEntitlementsBlob = 16;
 constexpr std::uint32_t guestUnsignedCodeSigningStatus = 0;
 constexpr std::uint64_t observedGuestDerEntitlementsBufferSize = 0x408;
 constexpr std::uint64_t guestSandboxSyscallFilterType = 0x41;
+constexpr std::uint64_t guestSandboxMachLookupFilterType = 0x6;
 constexpr std::uint64_t guestSandboxObservedFlags = 1;
 constexpr std::uint64_t guestMapWithLinkingSyscall = 550;
 constexpr std::uint32_t guestAmfiDyldPolicyCall = 90;
@@ -1159,10 +1160,30 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         }
 
         const auto guestPid = static_cast<std::uint64_t>(::getpid());
-        if (request.pid != guestPid || *operation != "syscall-unix" ||
-            request.filterType != guestSandboxSyscallFilterType ||
-            request.value != guestMapWithLinkingSyscall ||
-            request.flags != guestSandboxObservedFlags) {
+        const bool syscallUnixCheck =
+            request.pid == guestPid && *operation == "syscall-unix" &&
+            request.filterType == guestSandboxSyscallFilterType &&
+            request.value == guestMapWithLinkingSyscall &&
+            request.flags == guestSandboxObservedFlags;
+        // Mach-lookup checks name a bootstrap service through the value
+        // pointer. Rosa installs no sandbox profile, so any well-formed
+        // self lookup is allowed; the subsequent bootstrap send still goes
+        // through the (unprovisioned) guest port namespace.
+        bool machLookupCheck = false;
+        if (request.pid == guestPid && *operation == "mach-lookup" &&
+            request.filterType == guestSandboxMachLookupFilterType &&
+            request.flags == guestSandboxObservedFlags) {
+            try {
+                static_cast<void>(readGuestCString(
+                    addressSpace, guest::GuestAddress{request.value},
+                    guestPathMaximum));
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            machLookupCheck = true;
+        }
+        if (!syscallUnixCheck && !machLookupCheck) {
             std::ostringstream reason;
             reason << "unsupported Sandbox check: pid=0x" << std::hex
                    << request.pid << " operation=\"" << *operation
@@ -1173,8 +1194,8 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         }
 
         // Rosa has not installed a sandbox profile for this controlled guest,
-        // so the exact observed syscall check is allowed. The x86 policy ABI
-        // writes a 64-bit zero decision and returns success.
+        // so the observed checks are allowed. The x86 policy ABI writes a
+        // 64-bit zero decision and returns success.
         addressSpace.writeU64(guest::GuestAddress{request.resultAddress}, 0);
         setSuccess(state, 0);
         return {};
