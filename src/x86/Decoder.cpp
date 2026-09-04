@@ -6414,6 +6414,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             code[cursor] != 0x34U &&
             code[cursor] != 0x00U && code[cursor] != 0x01U &&
             code[cursor] != 0x02U && code[cursor] != 0x03U &&
+            code[cursor] != 0x10U && code[cursor] != 0x11U &&
             code[cursor] != 0x19U && code[cursor] != 0x1CU &&
             code[cursor] != 0x0CU &&
             code[cursor] != 0x88U &&
@@ -6479,7 +6480,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         if (!rexW && opcode != 0x05U && opcode != 0x0DU && opcode != 0x24U &&
             opcode != 0x25U && opcode != 0x34U &&
             opcode != 0x00U && opcode != 0x01U && opcode != 0x02U &&
-            opcode != 0x03U &&
+            opcode != 0x03U && opcode != 0x11U &&
             opcode != 0x19U && opcode != 0x1CU && opcode != 0x0CU &&
             opcode != 0x88U && opcode != 0x89U &&
             opcode != 0x8AU &&
@@ -7255,6 +7256,23 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 decodeRegister(destinationEncoding, rexR), 8});
             instruction.operands.push_back(
                 MemoryOperand{base, displacement, 8, index, scale});
+        } else if (opcode == 0x11U) {
+            if (code.size() - cursor < 1) {
+                throw DecodeError(address, remaining, "truncated adc r64, r64");
+            }
+            const auto modrm = code[cursor++];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U) {
+                throw DecodeError(address, remaining,
+                                  "only register-direct ADC r32/r64, r32/r64 is supported");
+            }
+            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+            instruction.opcode = Opcode::AdcRegReg;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB), width});
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR),
+                width});
         } else if (opcode == 0x01U) {
             if (code.size() - cursor < 1) {
                 throw DecodeError(address, remaining, "truncated add r/m64, r64");

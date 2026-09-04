@@ -29,6 +29,7 @@ enum class Opcode {
     LeaRegMem,
     AddRegImm,
     AdcRegImm,
+    AdcRegReg,
     AddRegReg,
     AddRegMem,
     AddMemReg,

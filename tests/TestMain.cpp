@@ -4052,6 +4052,44 @@ void testSbbAccumulatorImmediateGeneratedExecution() {
     expectEqual(setState.rflags, std::uint64_t{0x57}, "SBB AL, 0xFF set-carry flags differ");
 }
 
+void testAdcRegisterRegisterGeneratedExecution() {
+    // Observed in libswiftCore under an Objective-C fixture: ADC rax, rsi.
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0x11, 0xF0, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8171A3134ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AdcRegReg, "ADC rax, rsi opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "ADC rax, rsi length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 64 &&
+               source.reg == rosa::x86::Register::Rsi && source.width == 64,
+           "ADC rax, rsi operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("adc rax, rsi") != std::string::npos,
+           "ADC rax, rsi dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State carryState;
+    carryState.rax = 0xFFFFFFFFFFFFFFFFULL;
+    carryState.rsi = 1;
+    carryState.rflags = 0x8D7;
+    static_cast<void>(block.execute(carryState));
+    // 0xFF..FF + 1 + CF(1) wraps to 1 with CF set.
+    expectEqual(carryState.rax, std::uint64_t{1}, "ADC rax, rsi carry result differs");
+    expectEqual(carryState.rsi, std::uint64_t{1}, "ADC rax, rsi changed its source");
+    expectEqual(carryState.rflags, std::uint64_t{0x13},
+                "ADC rax, rsi carry flags differ");
+
+    rosa::x86::X86State plainState;
+    plainState.rax = 5;
+    plainState.rsi = 3;
+    plainState.rflags = 0x8D6;
+    static_cast<void>(block.execute(plainState));
+    expectEqual(plainState.rax, std::uint64_t{8}, "ADC rax, rsi result differs");
+    expectEqual(plainState.rflags, std::uint64_t{0x2}, "ADC rax, rsi flags differ");
+}
+
 void testAdcRegisterZeroGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> code{0x41, 0x83, 0xD4, 0x00, 0xC3};
     constexpr rosa::guest::GuestAddress observedRip{0x7FF802C71B79ULL};
@@ -35253,6 +35291,7 @@ int main() {
         {"SBB accumulator immediate generated execution",
          testSbbAccumulatorImmediateGeneratedExecution},
         {"ADC register zero generated execution", testAdcRegisterZeroGeneratedExecution},
+        {"ADC register register generated execution", testAdcRegisterRegisterGeneratedExecution},
         {"SUB register from register", testSubRegisterFromRegister},
         {"SUB register from guest memory", testSubRegisterFromGuestMemory},
         {"SUB 32-bit register from guest memory", testSub32BitRegisterFromGuestMemory},

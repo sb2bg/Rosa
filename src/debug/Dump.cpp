@@ -801,6 +801,16 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           instruction.operands[1])
                           .value;
             break;
+        case x86::Opcode::AdcRegReg:
+            stream << "adc "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]))
+                   << ", "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[1]));
+            break;
         case x86::Opcode::SbbRegImm:
             stream << "sbb "
                    << registerOperandName(

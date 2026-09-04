@@ -4561,6 +4561,30 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateAddFlags(lhs, rhs, result, width, instruction.address);
             break;
         }
+        case x86::Opcode::AdcRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: adc operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source = std::get<x86::RegisterOperand>(instruction.operands[1]);
+            if (destination.width != source.width ||
+                (destination.width != 32 && destination.width != 64)) {
+                throw std::runtime_error("only ADC r32/r64, r32/r64 is implemented");
+            }
+            const auto width = destination.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto lhs =
+                builder.readGuestRegister(destination.reg, width, instruction.address);
+            const auto rhs =
+                builder.readGuestRegister(source.reg, width, instruction.address);
+            const auto carry =
+                builder.evaluateCondition(x86::Condition::Below, instruction.address);
+            const auto sum = builder.add(lhs, rhs, width, instruction.address);
+            const auto result = builder.add(sum, carry, width, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, width, instruction.address);
+            builder.updateAdcFlags(lhs, rhs, carry, width, instruction.address);
+            break;
+        }
         case x86::Opcode::AdcRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: adc operand count");
