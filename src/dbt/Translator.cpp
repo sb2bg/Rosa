@@ -7019,6 +7019,54 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.addXmmWords(destination, source, instruction.address);
             break;
         }
+        case x86::Opcode::BlendvpdRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: BLENDVPD operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            // XMM0 supplies the per-lane mask MSB; arithmetic shift expands
+            // each mask bit to a full lane selector without any helper call.
+            const auto destinationLow =
+                builder.readGuestXmmLane(destination, false, instruction.address);
+            const auto destinationHigh =
+                builder.readGuestXmmLane(destination, true, instruction.address);
+            const auto sourceLow =
+                builder.readGuestXmmLane(source, false, instruction.address);
+            const auto sourceHigh =
+                builder.readGuestXmmLane(source, true, instruction.address);
+            const auto maskLow =
+                builder.readGuestXmmLane(x86::XmmRegister::Xmm0, false,
+                                         instruction.address);
+            const auto maskHigh =
+                builder.readGuestXmmLane(x86::XmmRegister::Xmm0, true,
+                                         instruction.address);
+            const auto selectLane = [&](ir::ValueId destinationLane,
+                                        ir::ValueId sourceLane,
+                                        ir::ValueId maskLane) {
+                const auto selector = builder.shiftRightArithmetic(
+                    maskLane, 63, ir::Width::I64, instruction.address);
+                const auto allOnes = builder.constant(
+                    UINT64_MAX, ir::Width::I64, instruction.address);
+                const auto inverted = builder.bitXor(
+                    selector, allOnes, ir::Width::I64, instruction.address);
+                const auto kept = builder.bitAnd(destinationLane, inverted,
+                                                 ir::Width::I64, instruction.address);
+                const auto taken = builder.bitAnd(sourceLane, selector,
+                                                  ir::Width::I64, instruction.address);
+                return builder.bitOr(kept, taken, ir::Width::I64,
+                                     instruction.address);
+            };
+            builder.writeGuestXmmLane(
+                destination, false,
+                selectLane(destinationLow, sourceLow, maskLow), instruction.address);
+            builder.writeGuestXmmLane(
+                destination, true,
+                selectLane(destinationHigh, sourceHigh, maskHigh), instruction.address);
+            break;
+        }
         case x86::Opcode::CmppdRegRegImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error("internal decoder error: CMPPD operand count");
