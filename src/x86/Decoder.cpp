@@ -7403,13 +7403,31 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
                 const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !lockRexB;
                 if ((extension != 0x0U && extension != 0x1U) || mode > 0x2U || lockRexR ||
-                    lockRexX || (mode == 0 && rmEncoding == 0x5U && lockRexB) ||
-                    rmEncoding == 0x4U) {
+                    lockRexX || (mode == 0 && rmEncoding == 0x5U && lockRexB)) {
                     throw DecodeError(
                         address, remaining,
-                        "only LOCK INC/DEC dword/qword [base/RIP+disp8/disp32] is supported from prefix F0 FF /0/1");
+                        "only LOCK INC/DEC dword/qword [base/SIB/RIP+disp8/disp32] is supported from prefix F0 FF /0/1");
                 }
                 operandCursor += 2;
+                auto lockBase = decodeRegister(rmEncoding, lockRexB);
+                if (!ripRelative && rmEncoding == 0x4U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated LOCK INC/DEC SIB");
+                    }
+                    const auto sib = code[operandCursor++];
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    const auto baseEncoding =
+                        static_cast<std::uint8_t>(sib & 0x7U);
+                    if (indexEncoding != 0x4U ||
+                        (mode == 0 && baseEncoding == 0x5U)) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only no-index, based SIB is supported for LOCK INC/DEC");
+                    }
+                    lockBase = decodeRegister(baseEncoding, lockRexB);
+                }
                 std::int64_t displacement = 0;
                 if (ripRelative || mode == 0x2U) {
                     if (code.size() - operandCursor < 4) {
@@ -7437,8 +7455,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     ripRelative
                         ? MemoryOperand{Register::Rax, displacement, width,
                                         std::nullopt, 1, false, true}
-                        : MemoryOperand{decodeRegister(rmEncoding, lockRexB),
-                                        displacement, width});
+                        : MemoryOperand{lockBase, displacement, width});
                 const auto length = operandCursor - instructionStart;
                 instruction.length = static_cast<std::uint8_t>(length);
                 std::copy_n(
