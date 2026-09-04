@@ -28874,6 +28874,38 @@ void testMachThreadSelfTrap() {
            "repeated thread_self_trap did not add another send uref");
 }
 
+void testMachTimebaseInfoTrap() {
+    // Observed in libsystem_kernel under an AppKit fixture: trap 89 fills
+    // mach_timebase_info { numer, denom } for the virtual TSC rate.
+    rosa::guest::AddressSpace addressSpace;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress info{0x8100};
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::timebaseInfoTrapNumber;
+    state.rdi = info.value;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2FC18ULL});
+    expect(!outcome.exited, "mach_timebase_info_trap terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0}, "mach_timebase_info_trap did not succeed");
+    expectEqual(addressSpace.readU32(info), std::uint32_t{1},
+                "mach_timebase_info_trap numer differs");
+    expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{info.value + 4}),
+                std::uint32_t{2}, "mach_timebase_info_trap denom differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_timebase_info_trap applied BSD carry-flag semantics");
+
+    state.rax = rosa::darwin::MachDispatcher::timebaseInfoTrapNumber;
+    state.rdi = 0x9000;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{1},
+                "mach_timebase_info_trap on a bad address returned the wrong code");
+}
+
 void testMachTaskSelfTrap() {
     rosa::guest::AddressSpace addressSpace;
     rosa::darwin::SyscallDispatcher dispatcher;
@@ -37794,6 +37826,7 @@ int main() {
         {"generated Darwin thread_fast_set_cthread_self",
          testGeneratedDarwinThreadFastSetCthreadSelf},
         {"Mach thread-self trap", testMachThreadSelfTrap},
+        {"Mach timebase-info trap", testMachTimebaseInfoTrap},
         {"Mach task-self trap", testMachTaskSelfTrap},
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},
         {"Mach host-self trap", testMachHostSelfTrap},

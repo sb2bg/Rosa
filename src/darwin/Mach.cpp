@@ -2021,6 +2021,25 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = kernSuccess;
         return;
     }
+    case 89U: {
+        // XNU trap 89 is mach_timebase_info_trap: it fills one
+        // mach_timebase_info struct { uint32 numer, denom }. Rosa's virtual
+        // x86 timestamp counter ticks at twice the nanosecond rate
+        // (sampleX86TimestampCounter), so the coherent ratio is 1/2.
+        try {
+            addressSpace.validateAccess(guest::GuestAddress{state.rdi},
+                                        2U * sizeof(std::uint32_t),
+                                        guest::Permission::Write);
+            addressSpace.writeU32(guest::GuestAddress{state.rdi}, 1);
+            addressSpace.writeU32(
+                guest::GuestAddress{state.rdi + sizeof(std::uint32_t)}, 2);
+        } catch (const std::runtime_error &) {
+            state.rax = kernInvalidAddress;
+            return;
+        }
+        state.rax = kernSuccess;
+        return;
+    }
     default:
         throw unsupported(state, syscallRip);
     }
