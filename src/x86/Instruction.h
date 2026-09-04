@@ -55,6 +55,7 @@ enum class Opcode {
     RolRegImm,
     RolRegCl,
     RorRegImm,
+    RorRegCl,
     BswapReg,
     NotReg,
     NegReg,

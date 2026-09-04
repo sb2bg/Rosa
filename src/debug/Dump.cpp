@@ -989,6 +989,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << ", 0x"
                    << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
             break;
+        case x86::Opcode::RorRegCl:
+            stream << "ror "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(instruction.operands[0]))
+                   << ", cl";
+            break;
         case x86::Opcode::BswapReg:
             stream << "bswap "
                    << registerOperandName(

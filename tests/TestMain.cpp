@@ -14319,6 +14319,45 @@ void testRotateLeft32ClGeneratedExecution() {
                 "ROL R14D, masked-zero count changed flags");
 }
 
+void testRotateRight64ByClGeneratedExecution() {
+    // Observed in libswiftCore under an Objective-C fixture: ROR rax, cl.
+    constexpr std::array<std::uint8_t, 4> code{0x48, 0xD3, 0xC8, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8171A50DFULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::RorRegCl, "ROR rax, cl opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "ROR rax, cl length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 64,
+           "ROR rax, cl destination differs");
+    expect(rosa::debug::dumpX86(decoded).find("ror rax, cl") != std::string::npos,
+           "ROR rax, cl dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rax = 0x8000000000000001ULL;
+    state.rcx = 1;
+    state.rflags = 0x8D6;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0xC000000000000000ULL}, "ROR rax, cl result differs");
+    expectEqual(state.rcx, std::uint64_t{1}, "ROR rax, cl changed CL");
+    // Only CF and (for count 1) OF are replaced: the rotated-out MSB sets
+    // CF, and OF reflects MSB xor bit 62 of the result (both set here, so
+    // OF clears). PF/SF/ZF/AF are preserved.
+    expectEqual(state.rflags, std::uint64_t{0xD7}, "ROR rax, cl flags differ");
+
+    rosa::x86::X86State zeroState;
+    zeroState.rax = 0x8000000000000001ULL;
+    zeroState.rcx = 64;
+    zeroState.rflags = 0x8D7;
+    static_cast<void>(block.execute(zeroState));
+    expectEqual(zeroState.rax, std::uint64_t{0x8000000000000001ULL},
+                "ROR rax, masked-zero count changed RAX");
+    expectEqual(zeroState.rflags, std::uint64_t{0x8D7},
+                "ROR rax, masked-zero count changed flags");
+}
+
 void testRotateRight64ImmediateGeneratedExecution() {
     constexpr std::array<std::uint8_t, 5> observedCode{0x48, 0xC1, 0xC8, 0x03, 0xC3};
     constexpr rosa::guest::GuestAddress observedRip{0x7FF802A729DCULL};
@@ -35646,6 +35685,7 @@ int main() {
         {"ROL 64-bit immediate generated execution", testRotateLeft64ImmediateGeneratedExecution},
         {"ROL 32-bit CL generated execution", testRotateLeft32ClGeneratedExecution},
         {"ROR 64-bit immediate generated execution", testRotateRight64ImmediateGeneratedExecution},
+        {"ROR 64-bit by CL generated execution", testRotateRight64ByClGeneratedExecution},
         {"SHR CL generated execution", testShiftRightClGeneratedExecution},
         {"SAR CL generated execution", testShiftRightArithmeticClGeneratedExecution},
         {"NOT 32-bit generated execution", testNot32GeneratedExecution},

@@ -9714,13 +9714,18 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             if (mode != 0x3U ||
-                (extension != 0x0U && extension != 0x4U &&
+                (extension != 0x0U && extension != 0x1U && extension != 0x4U &&
                  extension != 0x5U && extension != 0x7U) ||
                 (extension == 0x0U && rexW) || rexR || rexX) {
                 throw DecodeError(address, remaining,
-                                  "only register-direct ROL r32 /0 and SHL/SHR/SAR r32/r64 /4,/5,/7 from opcode D3 are supported");
+                                  "only register-direct ROL r32 /0, ROR r64 /1 and SHL/SHR/SAR r32/r64 /4,/5,/7 from opcode D3 are supported");
+            }
+            if (extension == 0x1U && !rexW) {
+                throw DecodeError(address, remaining,
+                                  "only 64-bit ROR by CL is supported from opcode D3 /1");
             }
             instruction.opcode = extension == 0x0U   ? Opcode::RolRegCl
+                                 : extension == 0x1U ? Opcode::RorRegCl
                                  : extension == 0x4U ? Opcode::ShlRegCl
                                  : extension == 0x5U ? Opcode::ShrRegCl
                                                      : Opcode::SarRegCl;

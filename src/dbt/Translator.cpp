@@ -5563,6 +5563,40 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateRotateRightFlags(result, count, ir::Width::I64, instruction.address);
             break;
         }
+        case x86::Opcode::RorRegCl: {
+            if (instruction.operands.size() != 1) {
+                throw std::runtime_error("internal decoder error: ror cl operand count");
+            }
+            const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            if (reg.width != 64) {
+                throw std::runtime_error("only 64-bit ROR by CL is implemented");
+            }
+            const auto original =
+                builder.readGuestRegister(reg.reg, ir::Width::I64, instruction.address);
+            const auto rawCount =
+                builder.readGuestRegister(x86::Register::Rcx, ir::Width::I64,
+                                          instruction.address);
+            const auto countMask =
+                builder.constant(0x3F, ir::Width::I64, instruction.address);
+            const auto count =
+                builder.bitAnd(rawCount, countMask, ir::Width::I64, instruction.address);
+            const auto right =
+                builder.shiftRightLogical(original, count, ir::Width::I64,
+                                          instruction.address);
+            // Register-form shifts mask the count to six bits, so a zero
+            // count also zeroes the complement: the result is the identity,
+            // and the flag helper independently skips count zero.
+            const auto complement = builder.sub(
+                builder.constant(64, ir::Width::I64, instruction.address), count,
+                ir::Width::I64, instruction.address);
+            const auto left = builder.shiftLeft(original, complement, ir::Width::I64,
+                                                instruction.address);
+            const auto result = builder.bitOr(right, left, ir::Width::I64,
+                                              instruction.address);
+            builder.writeGuestRegister(reg.reg, result, ir::Width::I64, instruction.address);
+            builder.updateRotateRightFlags(result, count, ir::Width::I64, instruction.address);
+            break;
+        }
         case x86::Opcode::BswapReg: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: bswap operand");
@@ -11516,7 +11550,11 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             break;
         case ir::Opcode::UpdateRotateRightFlags:
             assembler.mov(arm64::x1, hostRegister(*operation.lhs));
-            assembler.movImmediate(arm64::x2, operation.immediate);
+            if (operation.rhs) {
+                assembler.mov(arm64::x2, hostRegister(*operation.rhs));
+            } else {
+                assembler.movImmediate(arm64::x2, operation.immediate);
+            }
             assembler.movImmediate(arm64::x16, pointerBits(&updateRotateRightFlags64));
             assembler.blr(arm64::x16);
             break;

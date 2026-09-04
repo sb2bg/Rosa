@@ -1229,6 +1229,17 @@ void Builder::updateRotateRightFlags(ValueId result, std::uint8_t count,
     });
 }
 
+void Builder::updateRotateRightFlags(ValueId result, ValueId count,
+                                     Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateRotateRightFlags,
+        .width = width,
+        .guestRip = rip,
+        .lhs = result,
+        .rhs = count,
+    });
+}
+
 void Builder::updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::UpdateMultiplyFlags,

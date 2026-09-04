@@ -363,6 +363,8 @@ class Builder {
                                guest::GuestAddress rip);
     void updateRotateRightFlags(ValueId result, std::uint8_t count,
                                 Width width, guest::GuestAddress rip);
+    void updateRotateRightFlags(ValueId result, ValueId count,
+                                Width width, guest::GuestAddress rip);
     void updateMultiplyFlags(ValueId high, Width width, guest::GuestAddress rip);
     void updateSignedMultiplyFlags(ValueId lhs, ValueId rhs, Width width,
                                    guest::GuestAddress rip);
