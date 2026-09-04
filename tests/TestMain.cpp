@@ -34492,6 +34492,33 @@ void testX86Commpage() {
             rosa::darwin::x86CommpageAtmDiagnosticConfigOffset}),
         std::uint32_t{0}, "x86 commpage ATM diagnostic config is not disabled");
 
+    // Exact mach_approximate_time gate: movabs rax, commpage+0x80;
+    // cmp byte [rax+0x8], 0; the unsupported state takes the fallback.
+    expectEqual(
+        addressSpace.readU64(rosa::guest::GuestAddress{
+            rosa::darwin::x86CommpageBase.value +
+            rosa::darwin::x86CommpageApproximateTimeOffset}),
+        std::uint64_t{0}, "x86 commpage approximate time is not disabled");
+    expectEqual(
+        addressSpace
+            .readBytes(rosa::guest::GuestAddress{rosa::darwin::x86CommpageBase.value +
+                                                 rosa::darwin::x86CommpageApproximateTimeSupportedOffset},
+                       1)
+            .front(),
+        std::uint8_t{0}, "x86 commpage approximate time is not unsupported");
+    constexpr std::array<std::uint8_t, 15> probeApproximateTime{
+        0x48, 0xB8, 0x80, 0x00, 0xE0, 0xFF, 0xFF, 0x7F, 0x00, 0x00,
+        0x80, 0x78, 0x08, 0x00, 0xC3};
+    const auto approximateBlock = translator.translate(
+        probeApproximateTime, rosa::guest::GuestAddress{0x7FF802E30EF9ULL});
+    rosa::x86::X86State approximateState;
+    approximateState.rflags = 0x13;
+    static_cast<void>(approximateBlock.execute(approximateState, &addressSpace));
+    expectEqual(approximateState.rax, std::uint64_t{0x00007FFFFFE00080ULL},
+                "generated approximate-time probe clobbered its address");
+    expectEqual(approximateState.rflags, std::uint64_t{0x46},
+                "unsupported approximate time did not set ZF");
+
     // Exact os_log probe: movabs rax, commpage+0x48; bt dword [rax], 8.
     // The disabled config leaves CF clear without touching other flags.
     constexpr std::array<std::uint8_t, 15> probeAtmDiagnostic{

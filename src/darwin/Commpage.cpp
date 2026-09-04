@@ -171,6 +171,18 @@ void mapX86Commpage(guest::AddressSpace &addressSpace,
         guest::GuestAddress{x86CommpageBase.value +
                             x86CommpageNewTimeOfDayDataOffset},
         disabledTimeOfDayData);
+    // A zero approximate time with a clear supported byte is XNU's defined
+    // "mach_approximate_time unavailable" state. libsystem takes its syscall
+    // fallback while reads from genuinely unsupported slots still fault.
+    constexpr std::array<std::uint8_t, sizeof(std::uint64_t)> disabledApproximateTime{};
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value + x86CommpageApproximateTimeOffset},
+        disabledApproximateTime);
+    constexpr std::array<std::uint8_t, 1> approximateTimeUnsupported{};
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value +
+                            x86CommpageApproximateTimeSupportedOffset},
+        approximateTimeUnsupported);
     // XNU publishes the opaque kern.dyld_flags value here. The compatible
     // guest cache should observe the current system-wide value, not an arm64
     // commpage pointer or a guessed interpretation of its bits.
