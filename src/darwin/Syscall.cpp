@@ -2084,13 +2084,10 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             setError(state, error.value());
             return {};
         }
-        if (!isWithinDirectory(fileSpace_.currentDirectory(), canonicalPath)) {
-            std::ostringstream reason;
-            reason << "guest VFS has no mapping for " << callName << " path \""
-                   << *path << '"';
-            throw unsupported(state, syscallRip, reason.str());
-        }
-
+        // Bundle-path ancestor walks stat containers outside the working
+        // directory (for example /Users above the fixture tree). Metadata is
+        // disclosure-only: open and read stay confined, but stat answers real
+        // host metadata for any absolute path that canonicalizes.
         struct stat hostMetadata {};
         // Sandbox canonicalization resolves intermediate symlinks, matching
         // the stat64 policy; only the final component keeps link identity.

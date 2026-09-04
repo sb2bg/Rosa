@@ -26430,6 +26430,37 @@ void testDarwinStat64RelativePath() {
                 "relative present-path stat64 did not clear BSD carry");
 }
 
+void testDarwinStat64OutsideSandboxDirectory() {
+    // Bundle-path ancestor walks stat containers outside the working
+    // directory; metadata stays honest while open/read stay confined.
+    constexpr auto stat64Number = UINT64_C(0x02000152);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress statAddress{0x8300};
+    constexpr std::array<std::uint8_t, 2> rootPath{'/', 0};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, rootPath);
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = stat64Number;
+    state.rdi = pathAddress.value;
+    state.rsi = statAddress.value;
+    state.rflags = 0xAD7;
+    const auto outcome = dispatcher.dispatch(
+        addressSpace, state, rosa::guest::GuestAddress{0x7FF802E36DE4ULL});
+    expect(!outcome.exited, "out-of-sandbox stat64 terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0}, "out-of-sandbox stat64 did not return success");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "out-of-sandbox stat64 did not clear BSD carry");
+    const auto metadata = addressSpace.readBytes(statAddress, 144);
+    std::uint16_t mode = 0;
+    std::memcpy(&mode, metadata.data() + 4, sizeof(mode));
+    expect((mode & S_IFMT) == S_IFDIR, "out-of-sandbox stat64 root is not a directory");
+}
+
 void testDarwinLstat64MappedDirectory() {
     // Observed under an AppKit fixture: lstat64(appDir, buf).
     constexpr auto lstat64Number = UINT64_C(0x02000154);
@@ -37968,6 +37999,7 @@ int main() {
         {"Darwin openat guest cryptex directory", testDarwinOpenatGuestCryptexDirectory},
         {"Darwin duplicate guest descriptor", testDarwinDuplicateGuestDescriptor},
         {"Darwin stat64 mapped file", testDarwinStat64MappedFile},
+        {"Darwin stat64 outside-sandbox directory", testDarwinStat64OutsideSandboxDirectory},
         {"Darwin lstat64 mapped directory", testDarwinLstat64MappedDirectory},
         {"Darwin stat64 mapped directory", testDarwinStat64MappedDirectory},
         {"Darwin stat64 absent system databases", testDarwinStat64SystemDatabasesAbsent},
