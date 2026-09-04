@@ -6901,11 +6901,26 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
-        if (code[cursor] == 0xF0U && code.size() - cursor >= 2 &&
-            (code[cursor + 1] == 0x81U ||
-             code[cursor + 1] == 0x83U)) {
-            const auto immediateOpcode = code[cursor + 1];
-            cursor += 2;
+        {
+            const bool hasLockImmRex =
+                code.size() - cursor >= 3 && code[cursor] == 0xF0U &&
+                code[cursor + 1] >= 0x40U && code[cursor + 1] <= 0x4FU;
+            const auto lockImmOpcodeOffset = cursor + (hasLockImmRex ? 2U : 1U);
+            const bool isLockImmOrAnd =
+                code[cursor] == 0xF0U && code.size() - lockImmOpcodeOffset >= 1 &&
+                (code[lockImmOpcodeOffset] == 0x81U ||
+                 code[lockImmOpcodeOffset] == 0x83U);
+            if (isLockImmOrAnd) {
+            const auto lockImmRex = hasLockImmRex ? code[cursor + 1] : std::uint8_t{0};
+            const bool lockImmRexW = (lockImmRex & 0x8U) != 0;
+            const bool lockImmRexB = (lockImmRex & 0x1U) != 0;
+            if ((lockImmRex & 0x6U) != 0) {
+                throw DecodeError(
+                    address, remaining,
+                    "LOCK OR/AND immediate does not support REX.R/X");
+            }
+            const auto immediateOpcode = code[lockImmOpcodeOffset];
+            cursor = lockImmOpcodeOffset + 1;
             if (cursor >= code.size()) {
                 throw DecodeError(address, remaining,
                                   "truncated LOCK OR memory operand");
@@ -6919,9 +6934,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only LOCK OR/AND dword [base+disp8/disp32], imm8/imm32 is supported");
+                    "only LOCK OR/AND dword/qword [base+disp8/disp32], imm8/imm32 is supported");
             }
-            auto base = decodeRegister(rmEncoding, false);
+            const auto lockImmWidth = static_cast<std::uint8_t>(lockImmRexW ? 64U : 32U);
+            auto base = decodeRegister(rmEncoding, lockImmRexB);
             if (rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining,
@@ -6937,7 +6953,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         address, remaining,
                         "only no-index, based SIB is supported for LOCK OR");
                 }
-                base = decodeRegister(baseEncoding, false);
+                base = decodeRegister(baseEncoding, lockImmRexB);
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -6981,7 +6997,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             instruction.opcode = extension == 0x1U ? Opcode::LockOrMemImm
                                                        : Opcode::LockAndMemImm;
             instruction.operands.push_back(
-                MemoryOperand{base, displacement, 32});
+                MemoryOperand{base, displacement, lockImmWidth});
             instruction.operands.push_back(
                 ImmediateOperand{immediate, immediateWidth});
             const auto length = cursor - instructionStart;
@@ -6994,6 +7010,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 return result;
             }
             continue;
+            }
         }
 
         if (code[cursor] == 0xF0U && code.size() - cursor >= 2 &&
