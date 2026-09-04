@@ -9657,6 +9657,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::ComparePackedDoubleXmm ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
             operation.opcode == ir::Opcode::ConvertFloatToDoubleXmm ||
+            operation.opcode == ir::Opcode::ScalarDoubleXmm ||
             operation.opcode == ir::Opcode::AddXmmDwords ||
             operation.opcode == ir::Opcode::HorizontalAddXmmDwords ||
             operation.opcode == ir::Opcode::AndNotXmm ||
