@@ -745,6 +745,42 @@ divideGuestMemoryPackedDoubleXmm128(GuestExecutionContext *context, x86::X86Stat
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+unpackHighGuestPackedSingleXmm128(GuestExecutionContext *context, x86::X86State *state,
+                                  std::uint64_t address,
+                                  std::uint64_t registerIndex) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated UNPCKHPS has no address space");
+        }
+        if (registerIndex >= state->xmm.size()) {
+            throw std::runtime_error("generated UNPCKHPS has an invalid register");
+        }
+        const auto bytes = context->addressSpace->readBytes(guest::GuestAddress{address}, 16);
+        std::uint64_t sourceHigh = 0;
+        std::memcpy(&sourceHigh, bytes.data() + sizeof(sourceHigh), sizeof(sourceHigh));
+        const auto original = state->xmm[registerIndex];
+        const auto destDword2 = static_cast<std::uint32_t>(original.high);
+        const auto destDword3 = static_cast<std::uint32_t>(original.high >> 32U);
+        const auto srcDword2 = static_cast<std::uint32_t>(sourceHigh);
+        const auto srcDword3 = static_cast<std::uint32_t>(sourceHigh >> 32U);
+        state->xmm[registerIndex] = {
+            .low = static_cast<std::uint64_t>(destDword2) |
+                   (static_cast<std::uint64_t>(srcDword2) << 32U),
+            .high = static_cast<std::uint64_t>(destDword3) |
+                    (static_cast<std::uint64_t>(srcDword3) << 32U),
+        };
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = 16;
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 xorGuestMemoryXmm128(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
                      std::uint64_t registerIndex) noexcept {
     try {
@@ -1015,6 +1051,28 @@ dividePackedDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
                                             std::bit_cast<double>(source.low)),
         .high = std::bit_cast<std::uint64_t>(std::bit_cast<double>(destination.high) /
                                              std::bit_cast<double>(source.high)),
+    };
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+unpackHighPackedSingleXmm(x86::X86State *state, std::uint64_t destinationIndex,
+                          std::uint64_t sourceIndex) noexcept {
+    if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    // Copies first: interleaving is well-defined when both operands alias.
+    const auto destination = state->xmm[destinationIndex];
+    const auto source = state->xmm[sourceIndex];
+    const auto destDword2 = static_cast<std::uint32_t>(destination.high);
+    const auto destDword3 = static_cast<std::uint32_t>(destination.high >> 32U);
+    const auto srcDword2 = static_cast<std::uint32_t>(source.high);
+    const auto srcDword3 = static_cast<std::uint32_t>(source.high >> 32U);
+    state->xmm[destinationIndex] = {
+        .low = static_cast<std::uint64_t>(destDword2) |
+               (static_cast<std::uint64_t>(srcDword2) << 32U),
+        .high = static_cast<std::uint64_t>(destDword3) |
+                (static_cast<std::uint64_t>(srcDword3) << 32U),
     };
     return state;
 }
@@ -4807,6 +4865,53 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 // caller-saved host register across the call.
                 builder.divideGuestMemoryPackedDoubleXmm(address, destination,
                                                          instruction.address);
+            }
+            break;
+        }
+        case x86::Opcode::UnpckhpsRegReg:
+        case x86::Opcode::UnpckhpsRegMem: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::UnpckhpsRegMem;
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: UNPCKHPS operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            if (!fromMemory) {
+                const auto source =
+                    std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+                builder.unpackHighPackedSingleXmm(destination, source,
+                                                  instruction.address);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                if (memory.width != 128 ||
+                    (memory.ripRelative
+                         ? memory.hasBase || memory.index.has_value()
+                         : !memory.hasBase || memory.index.has_value()) ||
+                    memory.segment != x86::Segment::None) {
+                    throw std::runtime_error(
+                        "only RIP-relative or based UNPCKHPS xmm, m128 is implemented");
+                }
+                auto address =
+                    memory.ripRelative
+                        ? builder.constant(instruction.address.value + instruction.length,
+                                           ir::Width::I64, instruction.address)
+                        : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                    instruction.address);
+                if (memory.displacement != 0) {
+                    const auto displacement =
+                        builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                         ir::Width::I64, instruction.address);
+                    address = builder.add(address, displacement, ir::Width::I64,
+                                          instruction.address);
+                }
+                // A single guest-memory helper performs the whole
+                // read-and-interleave: no IR value may stay live in a
+                // caller-saved host register across the call.
+                builder.unpackHighGuestPackedSingleXmm(address, destination,
+                                                       instruction.address);
             }
             break;
         }
@@ -10120,6 +10225,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
             operation.opcode == ir::Opcode::CompareEqualGuestQwordsXmm ||
             operation.opcode == ir::Opcode::DivideGuestMemoryPackedDoubleXmm ||
+            operation.opcode == ir::Opcode::UnpackHighGuestPackedSingleXmm ||
             operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
             operation.opcode == ir::Opcode::CompareEqualXmmDwords ||
             operation.opcode == ir::Opcode::CompareEqualXmmQwords ||
@@ -10127,6 +10233,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::AddXmmWords ||
             operation.opcode == ir::Opcode::ComparePackedDoubleXmm ||
             operation.opcode == ir::Opcode::DividePackedDoubleXmm ||
+            operation.opcode == ir::Opcode::UnpackHighPackedSingleXmm ||
             operation.opcode == ir::Opcode::UpdateUnorderedDoubleFlags ||
             operation.opcode == ir::Opcode::UpdateUnorderedFloatFlags ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
@@ -10188,6 +10295,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
             operation.opcode == ir::Opcode::CompareEqualGuestQwordsXmm ||
             operation.opcode == ir::Opcode::DivideGuestMemoryPackedDoubleXmm ||
+            operation.opcode == ir::Opcode::UnpackHighGuestPackedSingleXmm ||
             (operation.opcode == ir::Opcode::ShuffleXmmBytes && operation.lhs.has_value()) ||
             operation.opcode == ir::Opcode::RepeatMoveByte ||
             operation.opcode == ir::Opcode::LoadGuest ||
@@ -11831,6 +11939,25 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.bind(divided);
             break;
         }
+        case ir::Opcode::UnpackHighGuestPackedSingleXmm: {
+            const auto fault = assembler.makeLabel();
+            const auto unpacked = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x3,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&unpackHighGuestPackedSingleXmm128));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(unpacked);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0, static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(unpacked);
+            break;
+        }
         case ir::Opcode::XorGuestMemoryXmm: {
             const auto fault = assembler.makeLabel();
             const auto completed = assembler.makeLabel();
@@ -11950,6 +12077,14 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.movImmediate(arm64::x2,
                                    static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
             assembler.movImmediate(arm64::x16, pointerBits(&dividePackedDoubleXmm));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::UnpackHighPackedSingleXmm:
+            assembler.movImmediate(arm64::x1,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(arm64::x2,
+                                   static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x16, pointerBits(&unpackHighPackedSingleXmm));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateUnorderedDoubleFlags: {

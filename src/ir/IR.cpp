@@ -661,6 +661,30 @@ void Builder::divideGuestMemoryPackedDoubleXmm(ValueId address,
     });
 }
 
+void Builder::unpackHighPackedSingleXmm(x86::XmmRegister destination,
+                                        x86::XmmRegister source,
+                                        guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UnpackHighPackedSingleXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+    });
+}
+
+void Builder::unpackHighGuestPackedSingleXmm(ValueId address,
+                                             x86::XmmRegister destination,
+                                             guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UnpackHighGuestPackedSingleXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = destination,
+    });
+}
+
 void Builder::updateUnorderedDoubleFlags(ValueId destinationBits,
                                               ValueId sourceBits,
                                               guest::GuestAddress rip) {
@@ -1874,6 +1898,21 @@ std::vector<std::string> verify(const Block &block) {
             if (!operation.guestXmmRegister || operation.width != Width::I64) {
                 errors.emplace_back(
                     "divide_guest_memory_packed_double_xmm has incomplete operands");
+            }
+            break;
+        case Opcode::UnpackHighPackedSingleXmm:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister ||
+                operation.width != Width::I64) {
+                errors.emplace_back(
+                    "unpack_high_packed_single_xmm has incomplete registers");
+            }
+            break;
+        case Opcode::UnpackHighGuestPackedSingleXmm:
+            checkUse(operation.lhs, "guest address");
+            if (!operation.guestXmmRegister || operation.width != Width::I64) {
+                errors.emplace_back(
+                    "unpack_high_guest_packed_single_xmm has incomplete operands");
             }
             break;
         case Opcode::UpdateUnorderedDoubleFlags:
