@@ -4314,6 +4314,105 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if (code[cursor] == 0xF2U && code.size() - cursor >= 4) {
+            auto cvtfCursor = cursor + 1;
+            std::uint8_t cvtfRex = 0;
+            if (code[cvtfCursor] >= 0x40U && code[cvtfCursor] <= 0x4FU &&
+                code.size() - cvtfCursor >= 4) {
+                cvtfRex = code[cvtfCursor++];
+            }
+            if (code.size() - cvtfCursor >= 3 && code[cvtfCursor] == 0x0FU &&
+                code[cvtfCursor + 1] == 0x5AU) {
+                const auto modrm = code[cvtfCursor + 2];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto regEncoding =
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+                const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+                const auto destination = XmmRegisterOperand{static_cast<XmmRegister>(
+                    static_cast<std::uint8_t>(regEncoding |
+                                              ((cvtfRex & 0x4U) != 0 ? 8U : 0U)))};
+                auto operandCursor = cvtfCursor + 3;
+                if (mode == 0x3U) {
+                    instruction.opcode = Opcode::Cvtss2sdXmmReg;
+                    instruction.operands.push_back(destination);
+                    instruction.operands.push_back(XmmRegisterOperand{
+                        static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                            rmEncoding | ((cvtfRex & 0x1U) != 0 ? 8U : 0U)))});
+                } else {
+                    const bool ripRelative =
+                        mode == 0 && rmEncoding == 0x5U && (cvtfRex & 0x1U) == 0;
+                    auto baseEncoding = rmEncoding;
+                    std::optional<Register> index;
+                    std::uint8_t scale = 1;
+                    if (!ripRelative && rmEncoding == 0x4U) {
+                        if (operandCursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated CVTSS2SD SIB");
+                        }
+                        const auto sib = code[operandCursor++];
+                        const auto scaleBits =
+                            static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                        const auto indexEncoding =
+                            static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                        baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                        if (mode == 0 && baseEncoding == 0x5U) {
+                            throw DecodeError(address, remaining,
+                                              "no-base CVTSS2SD SIB is not supported");
+                        }
+                        if (indexEncoding != 0x4U || (cvtfRex & 0x2U) != 0) {
+                            index = decodeRegister(indexEncoding,
+                                                   (cvtfRex & 0x2U) != 0);
+                            scale = static_cast<std::uint8_t>(1U << scaleBits);
+                        }
+                    } else if (!ripRelative && ((cvtfRex & 0x2U) != 0)) {
+                        throw DecodeError(address, remaining,
+                                          "REX.X requires a CVTSS2SD SIB");
+                    }
+                    std::int64_t displacement = 0;
+                    if (mode == 0x1U) {
+                        if (operandCursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated CVTSS2SD disp8");
+                        }
+                        displacement =
+                            std::bit_cast<std::int8_t>(code[operandCursor++]);
+                    } else if (mode == 0x2U || ripRelative) {
+                        if (code.size() - operandCursor < 4) {
+                            throw DecodeError(address, remaining,
+                                              "truncated CVTSS2SD disp32");
+                        }
+                        displacement = readI32(code.subspan(operandCursor, 4));
+                        operandCursor += 4;
+                    }
+                    if (ripRelative) {
+                        static_cast<void>(relativeTarget(
+                            address, operandCursor - instructionStart,
+                            displacement));
+                    }
+                    instruction.opcode = Opcode::Cvtss2sdXmmMem;
+                    instruction.operands.push_back(destination);
+                    instruction.operands.push_back(
+                        ripRelative
+                            ? MemoryOperand{Register::Rax, displacement, 32,
+                                            std::nullopt, 1, false, true}
+                            : MemoryOperand{
+                                  decodeRegister(baseEncoding,
+                                                 (cvtfRex & 0x1U) != 0),
+                                  displacement, 32, index, scale});
+                }
+                const auto length = operandCursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = operandCursor;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
+        if (code[cursor] == 0xF2U && code.size() - cursor >= 4) {
             auto scalarCursor = cursor + 1;
             std::uint8_t scalarRex = 0;
             if (code[scalarCursor] >= 0x40U && code[scalarCursor] <= 0x4FU &&

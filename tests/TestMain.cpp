@@ -20740,6 +20740,72 @@ void testMovqXmmToGuestMemory() {
     expectEqual(ripState.rflags, std::uint64_t{0x8D7}, "RIP-relative MOVQ changed flags");
 }
 
+void testConvertFloat32ToDoubleXmm() {
+    // Observed in CoreGraphics under an Objective-C fixture:
+    // CVTSS2SD xmm0, dword [rax+r15*8].
+    constexpr std::array<std::uint8_t, 7> code{0xF2, 0x42, 0x0F, 0x5A, 0x04, 0xF8, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8099AB301ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::Cvtss2sdXmmMem,
+           "CVTSS2SD xmm, m32 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6}, "CVTSS2SD xmm, m32 length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0,
+           "CVTSS2SD xmm, m32 destination differs");
+    expect(!memory.ripRelative && memory.hasBase &&
+               memory.base == rosa::x86::Register::Rax && memory.index &&
+               *memory.index == rosa::x86::Register::R15 && memory.scale == 8 &&
+               memory.displacement == 0 && memory.width == 32,
+           "CVTSS2SD xmm0, dword [rax+r15*8] memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("cvtss2sd xmm0, dword [rax+r15*8]") !=
+               std::string::npos,
+           "CVTSS2SD xmm, m32 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress sourceAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    // 3.14f.
+    addressSpace.writeU32(sourceAddress, 0x4048F5C3);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("convert_float_to_double_xmm.i32") != std::string::npos,
+           "CVTSS2SD did not lower through conversion IR");
+    rosa::x86::X86State state;
+    state.rax = sourceAddress.value - 0x20;
+    state.r15 = 4;
+    state.xmm[0] = {.low = 0xAAAAAAAAAAAAAAAAULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x40091EB860000000ULL},
+                "CVTSS2SD converted the wrong double bits");
+    expectEqual(state.xmm[0].high, std::uint64_t{0},
+                "CVTSS2SD did not zero the high lane");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "CVTSS2SD changed flags");
+
+    // Register form: CVTSS2SD xmm0, xmm1 with -0.5f.
+    constexpr std::array<std::uint8_t, 5> regCode{0xF2, 0x0F, 0x5A, 0xC1, 0xC3};
+    const auto regDecoded = decoder.decodeBlock(regCode, observedRip);
+    expect(regDecoded[0].opcode == rosa::x86::Opcode::Cvtss2sdXmmReg,
+           "CVTSS2SD xmm, xmm opcode differs");
+    expect(rosa::debug::dumpX86(regDecoded).find("cvtss2sd xmm0, xmm1") != std::string::npos,
+           "CVTSS2SD xmm, xmm dump differs");
+    const auto regBlock = translator.translate(regCode, observedRip);
+    rosa::x86::X86State regState;
+    regState.xmm[0] = {.low = 0xAAAAAAAAAAAAAAAAULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    regState.xmm[1] = {.low = 0x12345678BF000000ULL, .high = 0};
+    regState.rflags = 0xAD7;
+    static_cast<void>(regBlock.execute(regState));
+    expectEqual(regState.xmm[0].low, std::uint64_t{0xBFE0000000000000ULL},
+                "CVTSS2SD register form converted the wrong double bits");
+    expectEqual(regState.xmm[0].high, std::uint64_t{0},
+                "CVTSS2SD register form did not zero the high lane");
+}
+
 void testConvertInt32ToDoubleXmm() {
     // Observed in Foundation under an Objective-C fixture: CVTSI2SD xmm0, [rbp-0x30].
     constexpr std::array<std::uint8_t, 6> code{0xF2, 0x0F, 0x2A, 0x45, 0xD0, 0xC3};
@@ -36198,6 +36264,7 @@ int main() {
         {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
         {"CVTSI2SD int32 to XMM", testConvertInt32ToDoubleXmm},
+        {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
         {"MOVDDUP registers execution", testMovddupRegisters},

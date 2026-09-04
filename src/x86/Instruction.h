@@ -196,6 +196,8 @@ enum class Opcode {
     MovsdMemXmm,
     Cvtsi2sdXmmReg,
     Cvtsi2sdXmmMem,
+    Cvtss2sdXmmReg,
+    Cvtss2sdXmmMem,
     AddsdXmmReg,
     AddsdXmmMem,
     SubsdXmmReg,

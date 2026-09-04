@@ -827,6 +827,21 @@ convertInt64ToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+convertFloatToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
+                        std::uint64_t floatBits) noexcept {
+    if (destinationIndex >= state->xmm.size()) {
+        return state;
+    }
+    // float-to-double is always exact; the host conversion matches the
+    // guest default MXCSR rounding mode (round to nearest).
+    const auto bits = std::bit_cast<std::uint64_t>(
+        static_cast<double>(std::bit_cast<float>(
+            static_cast<std::uint32_t>(floatBits))));
+    state->xmm[destinationIndex] = {.low = bits, .high = 0};
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 scalarDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
                 std::uint64_t sourceBits, std::uint64_t operation) noexcept {
     if (destinationIndex >= state->xmm.size()) {
@@ -4351,6 +4366,68 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             // no IR value stays live across its call.
             builder.convertIntToDoubleXmm(integer, destination, width,
                                           instruction.address);
+            break;
+        }
+        case x86::Opcode::Cvtss2sdXmmReg:
+        case x86::Opcode::Cvtss2sdXmmMem: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::Cvtss2sdXmmMem;
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: CVTSS2SD operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            ir::ValueId floatBits{};
+            if (!fromMemory) {
+                const auto source =
+                    std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+                floatBits = builder.readGuestXmmLane(source, false,
+                                                     instruction.address);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                if (memory.width != 32 ||
+                    (memory.ripRelative
+                         ? memory.hasBase || memory.index.has_value()
+                         : !memory.hasBase) ||
+                    memory.segment != x86::Segment::None) {
+                    throw std::runtime_error(
+                        "unsupported CVTSS2SD memory addressing");
+                }
+                auto address =
+                    memory.ripRelative
+                        ? builder.constant(instruction.address.value + instruction.length,
+                                           ir::Width::I64, instruction.address)
+                        : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                    instruction.address);
+                if (memory.index) {
+                    auto index = builder.readGuestRegister(
+                        *memory.index, ir::Width::I64, instruction.address);
+                    if (memory.scale != 1) {
+                        index = builder.shiftLeft(
+                            index,
+                            static_cast<std::uint8_t>(
+                                std::countr_zero(memory.scale)),
+                            ir::Width::I64, instruction.address);
+                    }
+                    address = builder.add(address, index, ir::Width::I64,
+                                          instruction.address);
+                }
+                if (memory.displacement != 0) {
+                    const auto displacement = builder.constant(
+                        static_cast<std::uint64_t>(memory.displacement),
+                        ir::Width::I64, instruction.address);
+                    address = builder.add(address, displacement, ir::Width::I64,
+                                          instruction.address);
+                }
+                floatBits = builder.loadGuest(address, ir::Width::I32,
+                                              instruction.address);
+            }
+            // The conversion helper is pure: the float bits are consumed
+            // here, so no IR value stays live across its call.
+            builder.convertFloatToDoubleXmm(floatBits, destination,
+                                            instruction.address);
             break;
         }
         case x86::Opcode::AddsdXmmReg:
@@ -9579,7 +9656,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::AddXmmWords ||
             operation.opcode == ir::Opcode::ComparePackedDoubleXmm ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
-            operation.opcode == ir::Opcode::ScalarDoubleXmm ||
+            operation.opcode == ir::Opcode::ConvertFloatToDoubleXmm ||
             operation.opcode == ir::Opcode::AddXmmDwords ||
             operation.opcode == ir::Opcode::HorizontalAddXmmDwords ||
             operation.opcode == ir::Opcode::AndNotXmm ||
@@ -11355,6 +11432,14 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                                    operation.width == ir::Width::I32
                                        ? pointerBits(&convertInt32ToDoubleXmm)
                                        : pointerBits(&convertInt64ToDoubleXmm));
+            assembler.blr(arm64::x16);
+            break;
+        }
+        case ir::Opcode::ConvertFloatToDoubleXmm: {
+            assembler.movImmediate(arm64::x1,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x16, pointerBits(&convertFloatToDoubleXmm));
             assembler.blr(arm64::x16);
             break;
         }
