@@ -7341,6 +7341,52 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::MovmskpsRegXmm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: MOVMSKPS operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            if (destination.width != 32) {
+                throw std::runtime_error("only MOVMSKPS r32, xmm is implemented");
+            }
+            const auto low = builder.readGuestXmmLane(source, false,
+                                                      instruction.address);
+            const auto high = builder.readGuestXmmLane(source, true,
+                                                       instruction.address);
+            // Sign bits of the four packed singles: bit 31/63 of each
+            // lane, assembled low dword first.
+            const auto one = builder.constant(1, ir::Width::I64, instruction.address);
+            const auto bit0 = builder.bitAnd(
+                builder.shiftRightLogical(low, 31, ir::Width::I64,
+                                          instruction.address),
+                one, ir::Width::I64, instruction.address);
+            const auto bit1 = builder.shiftRightLogical(low, 63, ir::Width::I64,
+                                                        instruction.address);
+            const auto bit1Shifted = builder.shiftLeft(bit1, 1, ir::Width::I64,
+                                                       instruction.address);
+            const auto bit2 = builder.bitAnd(
+                builder.shiftRightLogical(high, 31, ir::Width::I64,
+                                          instruction.address),
+                one, ir::Width::I64, instruction.address);
+            const auto bit2Shifted = builder.shiftLeft(bit2, 2, ir::Width::I64,
+                                                       instruction.address);
+            const auto bit3 = builder.shiftRightLogical(high, 63, ir::Width::I64,
+                                                        instruction.address);
+            const auto bit3Shifted = builder.shiftLeft(bit3, 3, ir::Width::I64,
+                                                       instruction.address);
+            auto mask = builder.bitOr(bit0, bit1Shifted, ir::Width::I64,
+                                      instruction.address);
+            mask = builder.bitOr(mask, bit2Shifted, ir::Width::I64,
+                                 instruction.address);
+            mask = builder.bitOr(mask, bit3Shifted, ir::Width::I64,
+                                 instruction.address);
+            builder.writeGuestRegister(destination.reg, mask, ir::Width::I32,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::ExtractpsMemXmmImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error("internal decoder error: EXTRACTPS operand count");

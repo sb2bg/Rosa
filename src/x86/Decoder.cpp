@@ -3606,6 +3606,40 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (((code[cursor] == 0x0FU && code.size() - cursor >= 3) ||
+             (code.size() - cursor >= 4 && code[cursor] >= 0x40U &&
+              code[cursor] <= 0x4FU && code[cursor + 1] == 0x0FU)) &&
+            code[cursor + (code[cursor] == 0x0FU ? 1U : 2U)] == 0x50U) {
+            const bool hasMovmskpsRex = code[cursor] != 0x0FU;
+            const auto rex = hasMovmskpsRex ? code[cursor] : 0U;
+            const auto modrmOffset = cursor + (hasMovmskpsRex ? 3U : 2U);
+            const auto modrm = code[modrmOffset];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U || (rex & 0xAU) != 0) {
+                throw DecodeError(
+                    address, remaining,
+                    "only register-direct MOVMSKPS r32, xmm is supported");
+            }
+            instruction.opcode = Opcode::MovmskpsRegXmm;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U),
+                               (rex & 0x4U) != 0),
+                32});
+            instruction.operands.push_back(XmmRegisterOperand{
+                static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                    (modrm & 0x7U) | ((rex & 0x1U) != 0 ? 8U : 0U)))});
+            const auto length = modrmOffset + 1 - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            cursor = modrmOffset + 1;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x66U) {
             const auto afterPrefix = cursor + 1U;
             const bool hasShufpdRex =

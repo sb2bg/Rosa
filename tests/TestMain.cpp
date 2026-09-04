@@ -22116,6 +22116,37 @@ void testPinsrdGuestMemoryToXmm() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted PINSRD changed flags");
 }
 
+void testMovmskpsRegisterFromXmm() {
+    // Observed in ColorSync under an Objective-C fixture: MOVMSKPS ecx, xmm2.
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x50, 0xCA, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4EBEULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovmskpsRegXmm,
+           "MOVMSKPS opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "MOVMSKPS length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rcx && destination.width == 32 &&
+               source.reg == rosa::x86::XmmRegister::Xmm2,
+           "MOVMSKPS ecx, xmm2 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("movmskps ecx, xmm2") != std::string::npos,
+           "MOVMSKPS dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rcx = 0xFFFFFFFFFFFFFFFFULL;
+    state.xmm[2] = {.low = 0x8000000000000000ULL, .high = 0x0000000080000000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // Sign bits set in dwords 1 and 2 only.
+    expectEqual(state.rcx, std::uint64_t{0x6ULL}, "MOVMSKPS produced the wrong mask");
+    expectEqual(state.xmm[2].low, std::uint64_t{0x8000000000000000ULL},
+                "MOVMSKPS changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVMSKPS changed flags");
+}
+
 void testPextrwRegisterFromXmm() {
     // Observed in libswiftCore under an Objective-C fixture: PEXTRW edi, xmm0, 3.
     constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0xC5, 0xF8, 0x03, 0xC3};
@@ -36028,6 +36059,7 @@ int main() {
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},
         {"PINSRD register to XMM", testPinsrdRegisterToXmm},
         {"PEXTRW register from XMM", testPextrwRegisterFromXmm},
+        {"MOVMSKPS register from XMM", testMovmskpsRegisterFromXmm},
         {"PINSRQ register to XMM", testPinsrqRegisterToXmm},
         {"PINSRB register to XMM", testPinsrbRegisterToXmm},
         {"PINSRB guest memory to XMM", testPinsrbGuestMemoryToXmm},
