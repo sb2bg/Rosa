@@ -1825,10 +1825,29 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             break;
         }
         case x86::Opcode::DivpdRegReg:
-        case x86::Opcode::DivpdRegMem: {
+        case x86::Opcode::DivpdRegMem:
+        case x86::Opcode::SubpdRegReg:
+        case x86::Opcode::SubpdRegMem:
+        case x86::Opcode::MulpdRegReg:
+        case x86::Opcode::MulpdRegMem:
+        case x86::Opcode::AddpdRegReg:
+        case x86::Opcode::AddpdRegMem: {
             const bool fromMemory =
-                instruction.opcode == x86::Opcode::DivpdRegMem;
-            stream << "divpd "
+                instruction.opcode == x86::Opcode::DivpdRegMem ||
+                instruction.opcode == x86::Opcode::SubpdRegMem ||
+                instruction.opcode == x86::Opcode::MulpdRegMem ||
+                instruction.opcode == x86::Opcode::AddpdRegMem;
+            const char *mnemonic = instruction.opcode == x86::Opcode::AddpdRegReg ||
+                                           instruction.opcode == x86::Opcode::AddpdRegMem
+                                       ? "addpd"
+                                   : instruction.opcode == x86::Opcode::SubpdRegReg ||
+                                           instruction.opcode == x86::Opcode::SubpdRegMem
+                                       ? "subpd"
+                                   : instruction.opcode == x86::Opcode::MulpdRegReg ||
+                                           instruction.opcode == x86::Opcode::MulpdRegMem
+                                       ? "mulpd"
+                                       : "divpd";
+            stream << mnemonic << " "
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0])
@@ -3758,16 +3777,28 @@ std::string dumpIr(const ir::Block &block) {
                    << x86::xmmRegisterName(
                           *operation.sourceGuestXmmRegister);
             break;
-        case ir::Opcode::DividePackedDoubleXmm:
-            stream << "divide_packed_double_xmm.i64 "
+        case ir::Opcode::ArithmeticPackedDoubleXmm: {
+            const auto operationName =
+                operation.immediate == 0U   ? "packed_add_double_xmm"
+                : operation.immediate == 1U ? "packed_subtract_double_xmm"
+                : operation.immediate == 2U ? "packed_multiply_double_xmm"
+                                            : "packed_divide_double_xmm";
+            stream << operationName << ' '
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
                    << x86::xmmRegisterName(
                           *operation.sourceGuestXmmRegister);
             break;
-        case ir::Opcode::DivideGuestMemoryPackedDoubleXmm:
-            stream << "divide_guest_memory_packed_double_xmm " << valueName(*operation.lhs)
+        }
+        case ir::Opcode::ArithmeticGuestMemoryPackedDoubleXmm: {
+            const auto operationName =
+                operation.immediate == 0U   ? "packed_add_guest_double_xmm"
+                : operation.immediate == 1U ? "packed_subtract_guest_double_xmm"
+                : operation.immediate == 2U ? "packed_multiply_guest_double_xmm"
+                                            : "packed_divide_guest_double_xmm";
+            stream << operationName << ' ' << valueName(*operation.lhs)
                    << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;
+        }
         case ir::Opcode::UnpackHighPackedSingleXmm:
             stream << "unpack_high_packed_single_xmm.i64 "
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "

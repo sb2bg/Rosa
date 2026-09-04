@@ -70,8 +70,8 @@ enum class Opcode {
     ShiftLeftXmmDwords,
     AddXmmWords,
     ComparePackedDoubleXmm,
-    DividePackedDoubleXmm,
-    DivideGuestMemoryPackedDoubleXmm,
+    ArithmeticPackedDoubleXmm,
+    ArithmeticGuestMemoryPackedDoubleXmm,
     UnpackHighPackedSingleXmm,
     UnpackHighGuestPackedSingleXmm,
     UpdateUnorderedDoubleFlags,
@@ -269,12 +269,15 @@ class Builder {
                                 x86::XmmRegister source,
                                 std::uint8_t predicate,
                                 guest::GuestAddress rip);
-    void dividePackedDoubleXmm(x86::XmmRegister destination,
-                               x86::XmmRegister source,
-                               guest::GuestAddress rip);
-    void divideGuestMemoryPackedDoubleXmm(ValueId address,
-                                          x86::XmmRegister destination,
-                                          guest::GuestAddress rip);
+    // Selector: 0 = add, 1 = subtract, 2 = multiply, 3 = divide.
+    void arithmeticPackedDoubleXmm(x86::XmmRegister destination,
+                                   x86::XmmRegister source,
+                                   std::uint8_t operation,
+                                   guest::GuestAddress rip);
+    void arithmeticGuestMemoryPackedDoubleXmm(ValueId address,
+                                              x86::XmmRegister destination,
+                                              std::uint8_t operation,
+                                              guest::GuestAddress rip);
     void unpackHighPackedSingleXmm(x86::XmmRegister destination,
                                    x86::XmmRegister source,
                                    guest::GuestAddress rip);

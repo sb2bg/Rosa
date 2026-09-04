@@ -21326,6 +21326,98 @@ void testUnpckhpsGuestMemoryGeneratedExecution() {
     expect(rejected, "UNPCKHPS from unmapped guest memory did not fail");
 }
 
+void testSubpdRegisters() {
+    // Observed in ColorSync under an Objective-C fixture: SUBPD xmm4, xmm1.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x5C, 0xE1, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4EF7ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SubpdRegReg,
+           "SUBPD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "SUBPD length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm4 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "SUBPD xmm4, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("subpd xmm4, xmm1") != std::string::npos,
+           "SUBPD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("packed_subtract_double_xmm") != std::string::npos,
+           "SUBPD did not lower through packed-arithmetic IR");
+    rosa::x86::X86State state;
+    state.xmm[4] = {.low = 0x4014000000000000ULL, .high = 0x4008000000000000ULL};
+    state.xmm[1] = {.low = 0x4020000000000000ULL, .high = 0x3FF0000000000000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // 5.0 - 8.0 = -3.0, 3.0 - 1.0 = 2.0.
+    expectEqual(state.xmm[4].low, std::uint64_t{0xC008000000000000ULL},
+                "SUBPD low lane differs");
+    expectEqual(state.xmm[4].high, std::uint64_t{0x4000000000000000ULL},
+                "SUBPD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "SUBPD changed flags");
+}
+
+void testMulpdRegisters() {
+    // Observed in ColorSync under an Objective-C fixture: MULPD xmm4, xmm4.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x59, 0xE4, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4EFBULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MulpdRegReg,
+           "MULPD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "MULPD length differs");
+    expect(rosa::debug::dumpX86(decoded).find("mulpd xmm4, xmm4") != std::string::npos,
+           "MULPD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("packed_multiply_double_xmm") != std::string::npos,
+           "MULPD did not lower through packed-arithmetic IR");
+    rosa::x86::X86State state;
+    state.xmm[4] = {.low = 0x4004000000000000ULL, .high = 0x4010000000000000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // 2.5 * 2.5 = 6.25, 4.0 * 4.0 = 16.0.
+    expectEqual(state.xmm[4].low, std::uint64_t{0x4019000000000000ULL},
+                "MULPD low lane differs");
+    expectEqual(state.xmm[4].high, std::uint64_t{0x4030000000000000ULL},
+                "MULPD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MULPD changed flags");
+}
+
+void testAddpdRegisters() {
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x58, 0xC1, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::AddpdRegReg,
+           "ADDPD opcode differs");
+    expect(rosa::debug::dumpX86(decoded).find("addpd xmm0, xmm1") != std::string::npos,
+           "ADDPD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("packed_add_double_xmm") != std::string::npos,
+           "ADDPD did not lower through packed-arithmetic IR");
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x3FF8000000000000ULL, .high = 0x4008000000000000ULL};
+    state.xmm[1] = {.low = 0x4002000000000000ULL, .high = 0x4010000000000000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // 1.5 + 2.25 = 3.75, 3.0 + 4.0 = 7.0.
+    expectEqual(state.xmm[0].low, std::uint64_t{0x400E000000000000ULL},
+                "ADDPD low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x401C000000000000ULL},
+                "ADDPD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "ADDPD changed flags");
+}
+
+
 void testDivpdRegisters() {
     // Observed in ColorSync under an Objective-C fixture: DIVPD xmm0, xmm1.
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x5E, 0xC1, 0xC3};
@@ -21346,7 +21438,7 @@ void testDivpdRegisters() {
     const rosa::dbt::Translator translator;
     const auto block = translator.translate(code, observedRip);
     expect(rosa::debug::dumpIr(block.intermediateRepresentation())
-                   .find("divide_packed_double_xmm.i64") != std::string::npos,
+                   .find("packed_divide_double_xmm") != std::string::npos,
            "DIVPD did not lower through packed-divide IR");
     rosa::x86::X86State state;
     state.xmm[0] = {.low = 0x3FF0000000000000ULL, .high = 0x401C000000000000ULL};
@@ -36794,7 +36886,10 @@ int main() {
         {"MOVLHPS register execution", testMovlhpsRegister},
         {"UNPCKHPS registers execution", testUnpckhpsRegisters},
         {"UNPCKHPS guest memory execution", testUnpckhpsGuestMemoryGeneratedExecution},
-        {"DIVPD registers execution", testDivpdRegisters},
+                {"SUBPD registers execution", testSubpdRegisters},
+        {"MULPD registers execution", testMulpdRegisters},
+        {"ADDPD registers execution", testAddpdRegisters},
+{"DIVPD registers execution", testDivpdRegisters},
         {"DIVPD guest memory execution", testDivpdGuestMemoryGeneratedExecution},
         {"MOVDDUP registers execution", testMovddupRegisters},
         {"PCMPEQQ registers execution", testPcmpeqqRegisterGeneratedExecution},

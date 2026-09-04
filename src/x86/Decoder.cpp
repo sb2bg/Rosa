@@ -1805,10 +1805,19 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 afterPrefix + (hasDivpdRex ? 1U : 0U);
             if (code.size() - divpdOpcodeOffset >= 2 &&
                 code[divpdOpcodeOffset] == 0x0FU &&
-                code[divpdOpcodeOffset + 1] == 0x5EU) {
+                (code[divpdOpcodeOffset + 1] == 0x58U ||
+                 code[divpdOpcodeOffset + 1] == 0x59U ||
+                 code[divpdOpcodeOffset + 1] == 0x5CU ||
+                 code[divpdOpcodeOffset + 1] == 0x5EU)) {
+                const auto packedOpcode = code[divpdOpcodeOffset + 1];
+                const char *packedName = packedOpcode == 0x58U   ? "ADDPD"
+                                         : packedOpcode == 0x59U ? "MULPD"
+                                         : packedOpcode == 0x5CU ? "SUBPD"
+                                                                 : "DIVPD";
                 if (code.size() - divpdOpcodeOffset < 3) {
                     throw DecodeError(address, remaining,
-                                      "truncated divpd xmm, xmm/m128");
+                                      std::string("truncated ") + packedName +
+                                          " xmm, xmm/m128");
                 }
                 const auto rex =
                     hasDivpdRex ? code[afterPrefix] : 0U;
@@ -1820,7 +1829,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 if ((rex & 0xAU) != 0) {
                     throw DecodeError(
                         address, remaining,
-                        "DIVPD does not support REX.W/X");
+                        std::string(packedName) + " does not support REX.W/X");
                 }
                 const auto destination = XmmRegisterOperand{
                     static_cast<XmmRegister>(static_cast<std::uint8_t>(
@@ -1828,7 +1837,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         ((rex & 0x4U) != 0 ? 8U : 0U)))};
                 auto operandCursor = divpdOpcodeOffset + 3;
                 if (mode == 0x3U) {
-                    instruction.opcode = Opcode::DivpdRegReg;
+                    instruction.opcode = packedOpcode == 0x58U   ? Opcode::AddpdRegReg
+                                         : packedOpcode == 0x59U ? Opcode::MulpdRegReg
+                                         : packedOpcode == 0x5CU ? Opcode::SubpdRegReg
+                                                                 : Opcode::DivpdRegReg;
                     instruction.operands.push_back(destination);
                     instruction.operands.push_back(XmmRegisterOperand{
                         static_cast<XmmRegister>(static_cast<std::uint8_t>(
@@ -1841,20 +1853,23 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                          (rex & 0x1U) != 0)) {
                         throw DecodeError(
                             address, remaining,
-                            "only RIP-relative or based DIVPD xmm, m128 is supported");
+                            std::string("only RIP-relative or based ") + packedName +
+                                " xmm, m128 is supported");
                     }
                     std::int64_t displacement = 0;
                     if (mode == 0x1U) {
                         if (operandCursor >= code.size()) {
                             throw DecodeError(address, remaining,
-                                              "truncated DIVPD m128 disp8");
+                                              std::string("truncated ") + packedName +
+                                                  " m128 disp8");
                         }
                         displacement =
                             std::bit_cast<std::int8_t>(code[operandCursor++]);
                     } else if (mode == 0x2U || ripRelative) {
                         if (code.size() - operandCursor < 4) {
                             throw DecodeError(address, remaining,
-                                              "truncated DIVPD m128 disp32");
+                                              std::string("truncated ") + packedName +
+                                                  " m128 disp32");
                         }
                         displacement =
                             readI32(code.subspan(operandCursor, 4));
@@ -1865,7 +1880,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                             address, operandCursor - instructionStart,
                             displacement));
                     }
-                    instruction.opcode = Opcode::DivpdRegMem;
+                    instruction.opcode = packedOpcode == 0x58U   ? Opcode::AddpdRegMem
+                                                     : packedOpcode == 0x59U ? Opcode::MulpdRegMem
+                                                     : packedOpcode == 0x5CU ? Opcode::SubpdRegMem
+                                                                             : Opcode::DivpdRegMem;
                     instruction.operands.push_back(destination);
                     instruction.operands.push_back(
                         ripRelative

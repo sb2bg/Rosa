@@ -637,27 +637,31 @@ void Builder::comparePackedDoubleXmm(x86::XmmRegister destination,
     });
 }
 
-void Builder::dividePackedDoubleXmm(x86::XmmRegister destination,
-                                    x86::XmmRegister source,
-                                    guest::GuestAddress rip) {
+void Builder::arithmeticPackedDoubleXmm(x86::XmmRegister destination,
+                                        x86::XmmRegister source,
+                                        std::uint8_t operation,
+                                        guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
-        .opcode = Opcode::DividePackedDoubleXmm,
+        .opcode = Opcode::ArithmeticPackedDoubleXmm,
         .width = Width::I64,
         .guestRip = rip,
         .guestXmmRegister = destination,
         .sourceGuestXmmRegister = source,
+        .immediate = operation,
     });
 }
 
-void Builder::divideGuestMemoryPackedDoubleXmm(ValueId address,
-                                               x86::XmmRegister destination,
-                                               guest::GuestAddress rip) {
+void Builder::arithmeticGuestMemoryPackedDoubleXmm(ValueId address,
+                                                   x86::XmmRegister destination,
+                                                   std::uint8_t operation,
+                                                   guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
-        .opcode = Opcode::DivideGuestMemoryPackedDoubleXmm,
+        .opcode = Opcode::ArithmeticGuestMemoryPackedDoubleXmm,
         .width = Width::I64,
         .guestRip = rip,
         .lhs = address,
         .guestXmmRegister = destination,
+        .immediate = operation,
     });
 }
 
@@ -1885,19 +1889,20 @@ std::vector<std::string> verify(const Block &block) {
                     "compare_packed_double_xmm has incomplete registers");
             }
             break;
-        case Opcode::DividePackedDoubleXmm:
+        case Opcode::ArithmeticPackedDoubleXmm:
             if (!operation.guestXmmRegister ||
                 !operation.sourceGuestXmmRegister ||
-                operation.width != Width::I64) {
+                operation.width != Width::I64 || operation.immediate > 3) {
                 errors.emplace_back(
-                    "divide_packed_double_xmm has incomplete registers");
+                    "arithmetic_packed_double_xmm has incomplete operands");
             }
             break;
-        case Opcode::DivideGuestMemoryPackedDoubleXmm:
+        case Opcode::ArithmeticGuestMemoryPackedDoubleXmm:
             checkUse(operation.lhs, "guest address");
-            if (!operation.guestXmmRegister || operation.width != Width::I64) {
+            if (!operation.guestXmmRegister || operation.width != Width::I64 ||
+                operation.immediate > 3) {
                 errors.emplace_back(
-                    "divide_guest_memory_packed_double_xmm has incomplete operands");
+                    "arithmetic_guest_memory_packed_double_xmm has incomplete operands");
             }
             break;
         case Opcode::UnpackHighPackedSingleXmm:
