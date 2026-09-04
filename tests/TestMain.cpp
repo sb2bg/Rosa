@@ -18695,6 +18695,40 @@ void testPshufdRegisterExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "PSHUFD changed flags");
 }
 
+void testShufpsRegisterExecution() {
+    // Observed in ColorSync under an Objective-C fixture: SHUFPS xmm2, xmm4, 0x88.
+    constexpr std::array<std::uint8_t, 5> code{0x0F, 0xC6, 0xD4, 0x88, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4EBAULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::ShufpsRegRegImm, "SHUFPS opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "SHUFPS length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    const auto control = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm2 &&
+               source.reg == rosa::x86::XmmRegister::Xmm4 && control.value == 0x88,
+           "SHUFPS xmm2, xmm4, 0x88 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("shufps xmm2, xmm4, 0x88") != std::string::npos,
+           "SHUFPS dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.xmm[2] = {.low = 0x0000222200001111ULL, .high = 0x0000444400003333ULL};
+    state.xmm[4] = {.low = 0x0000666600005555ULL, .high = 0x0000888800007777ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // Control 0x88 selects dest[0], dest[2], src[0], src[2].
+    expectEqual(state.xmm[2].low, std::uint64_t{0x0000333300001111ULL},
+                "SHUFPS low lane differs");
+    expectEqual(state.xmm[2].high, std::uint64_t{0x0000777700005555ULL},
+                "SHUFPS high lane differs");
+    expectEqual(state.xmm[4].low, std::uint64_t{0x0000666600005555ULL},
+                "SHUFPS changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "SHUFPS changed flags");
+}
+
 void testShufpdRegisterExecution() {
     constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0xC6, 0xC1, 0x01, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -35954,6 +35988,7 @@ int main() {
         {"PADDQ register execution", testPaddqRegisterExecution},
         {"PSHUFD register execution", testPshufdRegisterExecution},
         {"SHUFPD register execution", testShufpdRegisterExecution},
+        {"SHUFPS register execution", testShufpsRegisterExecution},
         {"PALIGNR register execution", testPalignrRegisterExecution},
         {"MOVAPS register to guest memory", testMovapsRegisterToGuestMemory},
         {"MOVAPS register to RIP-relative guest memory",

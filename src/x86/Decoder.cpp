@@ -3567,6 +3567,45 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (((code[cursor] == 0x0FU && code.size() - cursor >= 4) ||
+             (code.size() - cursor >= 5 && code[cursor] >= 0x40U &&
+              code[cursor] <= 0x4FU && code[cursor + 1] == 0x0FU)) &&
+            code[cursor + (code[cursor] == 0x0FU ? 1U : 2U)] == 0xC6U) {
+            const bool hasShufpsRex = code[cursor] != 0x0FU;
+            const auto rex = hasShufpsRex ? code[cursor] : 0U;
+            const auto modrmOffset = cursor + (hasShufpsRex ? 3U : 2U);
+            const auto modrm = code[modrmOffset];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U || (rex & 0xAU) != 0) {
+                throw DecodeError(
+                    address, remaining,
+                    "only register-direct SHUFPS xmm, xmm, imm8 is supported");
+            }
+            if (code.size() - modrmOffset < 2) {
+                throw DecodeError(address, remaining,
+                                  "truncated SHUFPS xmm, xmm, imm8");
+            }
+            instruction.opcode = Opcode::ShufpsRegRegImm;
+            instruction.operands.push_back(XmmRegisterOperand{
+                static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                    ((modrm >> 3U) & 0x7U) | ((rex & 0x4U) != 0 ? 8U : 0U)))});
+            instruction.operands.push_back(XmmRegisterOperand{
+                static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                    (modrm & 0x7U) | ((rex & 0x1U) != 0 ? 8U : 0U)))});
+            instruction.operands.push_back(
+                ImmediateOperand{code[modrmOffset + 1], 8});
+            const auto length = modrmOffset + 2 - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            cursor = modrmOffset + 2;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
         if (code[cursor] == 0x66U) {
             const auto afterPrefix = cursor + 1U;
             const bool hasShufpdRex =

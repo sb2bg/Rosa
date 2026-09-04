@@ -2222,6 +2222,22 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           instruction.operands[2])
                           .value;
             break;
+        case x86::Opcode::ShufpsRegRegImm:
+            stream << "shufps "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg)
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[2])
+                          .value;
+            break;
         case x86::Opcode::PunpcklwdRegReg:
             stream << "punpcklwd "
                    << x86::xmmRegisterName(
