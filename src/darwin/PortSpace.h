@@ -25,6 +25,7 @@ enum class GuestPortType : std::uint8_t {
     Clock,
     Semaphore,
     PortSet,
+    Timer,
 };
 
 enum class GuestPortDeallocateResult : std::uint8_t {

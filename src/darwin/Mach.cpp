@@ -1572,18 +1572,19 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         return;
     }
     case 22U: {
-        // XNU trap 22 moves a receive right into a port set. Both names
-        // must be live; the set must be a set and the member an owned
-        // receive right that is not itself a set. Insertion is idempotent.
-        // Queues stay empty (no asynchronous senders), so membership only
-        // matters for receives addressed at the set itself.
+        // XNU trap 22 is (target, member, set): it moves a receive right
+        // into a port set. Both names must be live; the set must be a set
+        // and the member an owned receive right that is not itself a set.
+        // Insertion is idempotent. Queues stay empty (no asynchronous
+        // senders), so membership only matters for receives addressed at
+        // the set itself.
         if (state.rdi != taskSelfPortName().value) {
             state.rax = machSendInvalidDestination;
             return;
         }
-        auto *portSet = portSpace_.lookup(GuestMachPortName{
-            static_cast<std::uint32_t>(state.rsi)});
         const auto *member = portSpace_.lookup(GuestMachPortName{
+            static_cast<std::uint32_t>(state.rsi)});
+        auto *portSet = portSpace_.lookup(GuestMachPortName{
             static_cast<std::uint32_t>(state.rdx)});
         if (portSet == nullptr || member == nullptr) {
             state.rax = kernInvalidName;
@@ -2130,6 +2131,22 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             return;
         }
         state.rax = kernSuccess;
+        return;
+    }
+    case 91U: {
+        // XNU trap 91 creates a Mach timer object and returns its port
+        // name. Rosa models no timer expirations: the port carries a
+        // receive right so timer waits take the empty-queue timeout path,
+        // and arm/cancel/destroy stay loud until observed.
+        GuestPort port;
+        port.type = GuestPortType::Timer;
+        port.queueLimit = machPortQlimitDefault;
+        const auto name = portSpace_.allocateReceiveRight(port);
+        if (!name) {
+            state.rax = kernNoSpace;
+            return;
+        }
+        state.rax = name->value;
         return;
     }
     default:

@@ -29273,6 +29273,30 @@ void testMachThreadSelfTrap() {
            "repeated thread_self_trap did not add another send uref");
 }
 
+void testMachTimerCreateTrap() {
+    // Observed under an AppKit fixture: trap 91 mints a timer port.
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    const rosa::darwin::MachDispatcher mach;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::timerCreateTrapNumber;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2F900ULL});
+    expect(!outcome.exited, "mk_timer_create_trap terminated the guest");
+    const rosa::darwin::GuestMachPortName name{static_cast<std::uint32_t>(state.rax)};
+    expect(state.rax != 0, "mk_timer_create_trap returned a null port");
+    const auto *port = dispatcher.machDispatcher().portSpace().lookup(name);
+    expect(port != nullptr && port->hasReceiveRight,
+           "timer port is absent from its namespace");
+    expectEqual(port->type, rosa::darwin::GuestPortType::Timer,
+                "mk_timer_create_trap created the wrong port type");
+    expect(dispatcher.machDispatcher().ownsReceiveRight(name),
+           "timer port is not receivable");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mk_timer_create_trap applied BSD carry-flag semantics");
+}
+
 void testMachPortInsertMemberTrap() {
     // Observed under an AppKit fixture: trap 22 moves a receive right into
     // a freshly allocated port set.
@@ -29300,8 +29324,8 @@ void testMachPortInsertMemberTrap() {
     rosa::x86::X86State state;
     state.rax = rosa::darwin::MachDispatcher::portInsertMemberTrapNumber;
     state.rdi = mach.taskSelfPortName().value;
-    state.rsi = portSet.value;
-    state.rdx = member.value;
+    state.rsi = member.value;
+    state.rdx = portSet.value;
     state.rflags = 0x8D7;
     const auto outcome =
         dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2FA2CULL});
@@ -38427,6 +38451,7 @@ int main() {
         {"generated Darwin thread_fast_set_cthread_self",
          testGeneratedDarwinThreadFastSetCthreadSelf},
         {"Mach thread-self trap", testMachThreadSelfTrap},
+        {"Mach timer-create trap", testMachTimerCreateTrap},
         {"Mach port-insert-member trap", testMachPortInsertMemberTrap},
         {"Mach port-allocate trap", testMachPortAllocateTrap},
         {"Mach message2 receive timed out", testMachMessage2ReceiveTimedOut},
