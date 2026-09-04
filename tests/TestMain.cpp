@@ -28874,6 +28874,45 @@ void testMachThreadSelfTrap() {
            "repeated thread_self_trap did not add another send uref");
 }
 
+void testMachMessage2ReceiveTimedOut() {
+    // A receive-only mach_msg2 call on an owned but always-empty port
+    // times out instead of blocking forever.
+    rosa::guest::AddressSpace addressSpace;
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State allocateState;
+    allocateState.rax = UINT64_C(0x0100001A);
+    allocateState.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, allocateState, rosa::guest::GuestAddress{0x1000}));
+    const auto replyName = static_cast<std::uint32_t>(allocateState.rax);
+    expect(replyName != 0, "mach_reply_port did not allocate a receive right");
+
+    rosa::x86::X86State state;
+    state.rax = UINT64_C(0x0100002F);
+    state.rsi = 0x102; // MACH_RCV_MSG | MACH_RCV_TIMEOUT, no send.
+    state.rdx = 0;
+    state.r10 = 0;
+    state.r8 = 0;
+    state.r9 = static_cast<std::uint64_t>(replyName) << 32U;
+    state.rsp = 0x7000000FFF00ULL;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2FB4CULL});
+    expect(!outcome.exited, "receive-only mach_msg2 terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0x10004003},
+                "receive-only mach_msg2 did not time out");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "receive-only mach_msg2 applied BSD carry-flag semantics");
+
+    state.rax = UINT64_C(0x0100002F);
+    state.rsi = 0x102;
+    state.r9 = static_cast<std::uint64_t>(0xDEAD) << 32U;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0x10004002},
+                "receive-only mach_msg2 on a foreign port missed INVALID_NAME");
+}
+
 void testMachTimebaseInfoTrap() {
     // Observed in libsystem_kernel under an AppKit fixture: trap 89 fills
     // mach_timebase_info { numer, denom } for the virtual TSC rate.
@@ -37853,6 +37892,7 @@ int main() {
         {"generated Darwin thread_fast_set_cthread_self",
          testGeneratedDarwinThreadFastSetCthreadSelf},
         {"Mach thread-self trap", testMachThreadSelfTrap},
+        {"Mach message2 receive timed out", testMachMessage2ReceiveTimedOut},
         {"Mach timebase-info trap", testMachTimebaseInfoTrap},
         {"Mach task-self trap", testMachTaskSelfTrap},
         {"generated Mach task-self trap", testGeneratedMachTaskSelfTrap},

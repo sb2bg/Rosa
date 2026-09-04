@@ -27,6 +27,9 @@ constexpr std::uint64_t kernInvalidValue = 18;
 constexpr std::uint64_t kernUrefsOverflow = 19;
 constexpr std::uint64_t kernResourceShortage = 6;
 constexpr std::uint64_t machSendInvalidDestination = 0x10000003U;
+constexpr std::uint64_t machMsgOptionSend = 0x1U;
+constexpr std::uint64_t machReceiveInvalidName = 0x10004002U;
+constexpr std::uint64_t machReceiveTimedOut = 0x10004003U;
 constexpr std::uint64_t vmProtectionMask = 0x7U;
 constexpr std::uint64_t vmProtectionCopy = 0x10U;
 constexpr std::uint64_t vmFlagsAnywhere = 0x1U;
@@ -1660,6 +1663,22 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         return;
     }
     case 47U: {
+        // A receive-only call (no MACH_SEND_MSG bit) on an owned receive
+        // right can never observe a message: Rosa runs the single guest
+        // thread to completion and models no asynchronous senders, so the
+        // queue is always empty. Answer MACH_RCV_TIMED_OUT immediately
+        // instead of blocking forever; the result is identical, only the
+        // wait is skipped.
+        if ((static_cast<std::uint32_t>(state.rsi) & machMsgOptionSend) == 0) {
+            const auto receiveName = GuestMachPortName{
+                static_cast<std::uint32_t>(state.r9 >> 32U)};
+            if (!portSpace_.ownsReceiveRight(receiveName)) {
+                state.rax = machReceiveInvalidName;
+                return;
+            }
+            state.rax = machReceiveTimedOut;
+            return;
+        }
         // The first observed mach_msg2 call is the MIG mach_vm_map request
         // used by cached dyld to reserve its former standalone address range.
         // Keep this a narrow task-kobject path: there is no generic message
