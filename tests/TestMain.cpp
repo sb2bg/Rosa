@@ -21250,6 +21250,37 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testPmovsxdqRegisters() {
+    // Observed in libsystem_kernel under an AppKit fixture: PMOVSXDQ xmm1, xmm1.
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0x38, 0x25, 0xC9, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802E2FE75ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PmovsxdqRegReg,
+           "PMOVSXDQ opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "PMOVSXDQ length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "PMOVSXDQ xmm1, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("pmovsxdq xmm1, xmm1") != std::string::npos,
+           "PMOVSXDQ dump differs");
+
+    const rosa::dbt::Translator translator;
+    constexpr std::array<std::uint8_t, 6> executeCode{0x66, 0x0F, 0x38, 0x25, 0xC9, 0xC3};
+    const auto block = translator.translate(executeCode, observedRip);
+    rosa::x86::X86State state;
+    state.xmm[1] = {.low = 0x80000001FFFFFFFFULL, .high = 0xAAAAAAAAAAAAAAAAULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // d0 -1 sign-extends to all-ones; d1 0x80000001 sign-extends to 0xFFFFFFFF80000001.
+    expectEqual(state.xmm[1].low, UINT64_MAX, "PMOVSXDQ low lane differs");
+    expectEqual(state.xmm[1].high, std::uint64_t{0xFFFFFFFF80000001ULL},
+                "PMOVSXDQ high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "PMOVSXDQ changed flags");
+}
+
 void testLockAndDwordMemoryImmediate() {
     // Observed in libsystem_malloc under an AppKit fixture:
     // LOCK AND dword [RCX], 0x7FFFFFFF.
@@ -37592,6 +37623,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"PMOVSXDQ registers execution", testPmovsxdqRegisters},
         {"LOCK AND dword memory immediate", testLockAndDwordMemoryImmediate},
         {"ADC r64 m64", testAdcRegMem},
         {"CMP AH register immediate", testCmpHighByteRegisterImmediate},

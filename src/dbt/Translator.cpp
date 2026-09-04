@@ -8669,6 +8669,34 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.loadGuestSignExtendedBytesXmm(address, destination, instruction.address);
             break;
         }
+        case x86::Opcode::PmovsxdqRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: PMOVSXDQ operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto packed =
+                builder.readGuestXmmLane(source, false, instruction.address);
+            const auto dwordMask =
+                builder.constant(0xFFFFFFFFU, ir::Width::I64, instruction.address);
+            const auto lowDword =
+                builder.bitAnd(packed, dwordMask, ir::Width::I64, instruction.address);
+            const auto shifted = builder.shiftRightLogical(packed, 32, ir::Width::I64,
+                                                           instruction.address);
+            const auto highDword =
+                builder.bitAnd(shifted, dwordMask, ir::Width::I64, instruction.address);
+            // The lanes are consumed here, so no IR value stays live across
+            // any call; sign extension itself is pure.
+            builder.writeGuestXmmLane(
+                destination, false,
+                builder.signExtend32(lowDword, instruction.address), instruction.address);
+            builder.writeGuestXmmLane(
+                destination, true,
+                builder.signExtend32(highDword, instruction.address), instruction.address);
+            break;
+        }
         case x86::Opcode::PmovsxdqRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: PMOVSXDQ operand count");

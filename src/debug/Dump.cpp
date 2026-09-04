@@ -2321,6 +2321,18 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           static_cast<std::uint64_t>(memory.displacement);
             break;
         }
+        case x86::Opcode::PmovsxdqRegReg:
+            stream << "pmovsxdq "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
         case x86::Opcode::PmovsxdqRegMem: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);

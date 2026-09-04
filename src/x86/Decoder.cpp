@@ -3185,8 +3185,36 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
                     const auto rmEncoding =
                         static_cast<std::uint8_t>(modrm & 0x7U);
-                    if ((rex & 0xBU) != 0 || mode != 0 ||
-                        rmEncoding != 0x5U) {
+                    if ((rex & 0xAU) != 0) {
+                        throw DecodeError(
+                            address, remaining,
+                            "PMOVSXDQ does not support REX.W/X");
+                    }
+                    const auto destination = XmmRegisterOperand{
+                        static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                            ((modrm >> 3U) & 0x7U) |
+                            ((rex & 0x4U) != 0 ? 8U : 0U)))};
+                    if (mode == 0x3U) {
+                        instruction.opcode = Opcode::PmovsxdqRegReg;
+                        instruction.operands.push_back(destination);
+                        instruction.operands.push_back(XmmRegisterOperand{
+                            static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                                rmEncoding | ((rex & 0x1U) != 0 ? 8U : 0U)))});
+                        const auto operandCursor = opcodeOffset + 4;
+                        const auto length = operandCursor - instructionStart;
+                        instruction.length = static_cast<std::uint8_t>(length);
+                        std::copy_n(
+                            code.begin() +
+                                static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                        result.push_back(std::move(instruction));
+                        cursor = operandCursor;
+                        if (result.size() == maximumInstructions) {
+                            return result;
+                        }
+                        continue;
+                    }
+                    if (mode != 0 || rmEncoding != 0x5U || (rex & 0x1U) != 0) {
                         throw DecodeError(
                             address, remaining,
                             "only RIP-relative PMOVSXDQ xmm, qword memory is supported");
