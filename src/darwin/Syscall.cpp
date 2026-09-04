@@ -74,6 +74,7 @@ constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 constexpr std::uint64_t syscallIssetugid = unixSyscallClass | 327U;
 constexpr std::uint64_t syscallProcInfo = unixSyscallClass | 336U;
 constexpr std::uint64_t syscallStat64 = unixSyscallClass | 338U;
+constexpr std::uint64_t syscallLstat64 = unixSyscallClass | 340U;
 constexpr std::uint64_t syscallFstat64 = unixSyscallClass | 339U;
 constexpr std::uint64_t syscallGetfsstat64 = unixSyscallClass | 347U;
 constexpr std::uint64_t syscallFstatfs64 = unixSyscallClass | 346U;
@@ -2049,7 +2050,8 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
         return {};
     }
-    if (number == syscallStat64) {
+    if (number == syscallStat64 || number == syscallLstat64) {
+        const char *callName = number == syscallStat64 ? "stat64" : "lstat64";
         std::optional<std::string> path;
         try {
             path = readGuestCString(addressSpace,
@@ -2084,20 +2086,26 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         }
         if (!isWithinDirectory(fileSpace_.currentDirectory(), canonicalPath)) {
             std::ostringstream reason;
-            reason << "guest VFS has no mapping for stat64 path \""
+            reason << "guest VFS has no mapping for " << callName << " path \""
                    << *path << '"';
             throw unsupported(state, syscallRip, reason.str());
         }
 
         struct stat hostMetadata {};
-        if (::stat(canonicalPath.c_str(), &hostMetadata) != 0) {
+        // Sandbox canonicalization resolves intermediate symlinks, matching
+        // the stat64 policy; only the final component keeps link identity.
+        const int sampled =
+            number == syscallStat64
+                ? ::stat(canonicalPath.c_str(), &hostMetadata)
+                : ::lstat(canonicalPath.c_str(), &hostMetadata);
+        if (sampled != 0) {
             setError(state, errno);
             return {};
         }
         if (!S_ISREG(hostMetadata.st_mode) && !S_ISDIR(hostMetadata.st_mode)) {
             std::ostringstream reason;
-            reason << "only mapped regular-file and directory stat64 is implemented; got path=\""
-                   << *path << '"';
+            reason << "only mapped regular-file and directory " << callName
+                   << " is implemented; got path=\"" << *path << '"';
             throw unsupported(state, syscallRip, reason.str());
         }
         const auto metadata = guestStat64FromHost(hostMetadata);
