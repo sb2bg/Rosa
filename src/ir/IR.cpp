@@ -1814,9 +1814,9 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::LockedAndGuestMemory:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "immediate");
-            if (operation.width != Width::I16) {
+            if (operation.width != Width::I16 && operation.width != Width::I32) {
                 errors.emplace_back(
-                    "locked_and_guest_memory currently requires i16");
+                    "locked_and_guest_memory currently requires i16 or i32");
             }
             break;
         case Opcode::StoreGuestIdtr:

@@ -6846,11 +6846,11 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto extension =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (mode == 0x3U || extension != 0x1U ||
+            if (mode == 0x3U || (extension != 0x1U && extension != 0x4U) ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only LOCK OR dword [base+disp8/disp32], imm8/imm32 is supported");
+                    "only LOCK OR/AND dword [base+disp8/disp32], imm8/imm32 is supported");
             }
             auto base = decodeRegister(rmEncoding, false);
             if (rmEncoding == 0x4U) {
@@ -6909,7 +6909,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 cursor += 4;
                 immediateWidth = 32;
             }
-            instruction.opcode = Opcode::LockOrMemImm;
+            instruction.opcode = extension == 0x1U ? Opcode::LockOrMemImm
+                                                       : Opcode::LockAndMemImm;
             instruction.operands.push_back(
                 MemoryOperand{base, displacement, 32});
             instruction.operands.push_back(

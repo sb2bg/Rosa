@@ -3360,6 +3360,41 @@ lockedOrGuest16(GuestExecutionContext *context, x86::X86State *state, std::uint6
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+lockedAndGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                 std::uint64_t immediateValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated LOCK AND has no guest address space");
+        }
+        constexpr auto width = sizeof(std::uint32_t);
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, width,
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto original = context->addressSpace->readU32(guest::GuestAddress{address});
+        const auto result =
+            static_cast<std::uint32_t>(original & static_cast<std::uint32_t>(immediateValue));
+        const std::array bytes{
+            static_cast<std::uint8_t>(result),
+            static_cast<std::uint8_t>(result >> 8U),
+            static_cast<std::uint8_t>(result >> 16U),
+            static_cast<std::uint8_t>(result >> 24U),
+        };
+        context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+        // LOCK AND is also used as a full fence. Guest execution is currently
+        // single-threaded, while this host fence preserves ordering at the
+        // generated helper boundary.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return updateLogicFlags32(state, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint32_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 lockedAndGuest16(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
                  std::uint64_t immediateValue) noexcept {
     try {
@@ -6114,11 +6149,10 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             const bool wordForm =
                 memory.width == 16 && (immediate.width == 8 || immediate.width == 16);
             const bool dwordForm =
-                instruction.opcode == x86::Opcode::LockOrMemImm && memory.width == 32 &&
-                (immediate.width == 8 || immediate.width == 32);
+                memory.width == 32 && (immediate.width == 8 || immediate.width == 32);
             if (!wordForm && !dwordForm) {
-                throw std::runtime_error("only LOCK OR/AND word [base+disp], imm8/imm16 and LOCK OR "
-                                         "dword [base+disp], imm8/imm32 are implemented");
+                throw std::runtime_error("only LOCK OR/AND word [base+disp], imm8/imm16 and LOCK "
+                                         "OR/AND dword [base+disp], imm8/imm32 are implemented");
             }
             const auto base =
                 builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
@@ -11999,9 +12033,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             break;
         }
         case ir::Opcode::LockedAndGuestMemory: {
-            if (operation.width != ir::Width::I16) {
+            if (operation.width != ir::Width::I16 && operation.width != ir::Width::I32) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 16-bit guest-memory LOCK AND");
+                    "ARM64 backend only implements 16- and 32-bit guest-memory LOCK AND");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -12010,7 +12044,9 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x2, hostRegister(*operation.lhs));
             assembler.mov(arm64::x3, hostRegister(*operation.rhs));
             assembler.mov(arm64::x0, arm64::x19);
-            assembler.movImmediate(arm64::x16, pointerBits(&lockedAndGuest16));
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
+                                                   ? pointerBits(&lockedAndGuest32)
+                                                   : pointerBits(&lockedAndGuest16));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);
