@@ -22370,6 +22370,38 @@ void testMovmskpsRegisterFromXmm() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVMSKPS changed flags");
 }
 
+void testPextrdRegisterFromXmm() {
+    // Observed in CoreGraphics under an Objective-C fixture: PEXTRD eax, xmm0, 2.
+    constexpr std::array<std::uint8_t, 7> code{0x66, 0x0F, 0x3A, 0x16, 0xC0, 0x02, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8099AB146ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PextrdRegXmmImm,
+           "PEXTRD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6}, "PEXTRD length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    const auto count = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::Register::Rax && destination.width == 32 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0 && count.value == 2,
+           "PEXTRD eax, xmm0, 2 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("pextrd eax, xmm0, 0x2") != std::string::npos,
+           "PEXTRD dump differs");
+
+    const rosa::dbt::Translator translator;
+    constexpr std::array<std::uint8_t, 7> executeCode{0x66, 0x0F, 0x3A, 0x16, 0xC0, 0x02, 0xC3};
+    const auto block = translator.translate(executeCode, observedRip);
+    rosa::x86::X86State state;
+    state.rax = 0xFFFFFFFFFFFFFFFFULL;
+    state.xmm[0] = {.low = 0xDDDDBBBBCCCCAAAAULL, .high = 0x1111333322224444ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rax, std::uint64_t{0x22224444ULL}, "PEXTRD extracted the wrong dword");
+    expectEqual(state.xmm[0].low, std::uint64_t{0xDDDDBBBBCCCCAAAAULL},
+                "PEXTRD changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "PEXTRD changed flags");
+}
+
 void testPextrwRegisterFromXmm() {
     // Observed in libswiftCore under an Objective-C fixture: PEXTRW edi, xmm0, 3.
     constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0xC5, 0xF8, 0x03, 0xC3};
@@ -36287,6 +36319,7 @@ int main() {
         {"PINSRW guest memory to XMM", testPinsrwGuestMemoryToXmm},
         {"PINSRD register to XMM", testPinsrdRegisterToXmm},
         {"PEXTRW register from XMM", testPextrwRegisterFromXmm},
+        {"PEXTRD register from XMM", testPextrdRegisterFromXmm},
         {"MOVMSKPS register from XMM", testMovmskpsRegisterFromXmm},
         {"PINSRQ register to XMM", testPinsrqRegisterToXmm},
         {"PINSRB register to XMM", testPinsrbRegisterToXmm},

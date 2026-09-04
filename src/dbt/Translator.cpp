@@ -7594,6 +7594,35 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::PextrdRegXmmImm: {
+            if (instruction.operands.size() != 3) {
+                throw std::runtime_error("internal decoder error: PEXTRD operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto count =
+                std::get<x86::ImmediateOperand>(instruction.operands[2]);
+            if (destination.width != 32 || count.width != 8 || count.value > 3) {
+                throw std::runtime_error(
+                    "only PEXTRD r32, xmm, dword-index is implemented");
+            }
+            const auto lane = builder.readGuestXmmLane(
+                source, (count.value & 2U) != 0, instruction.address);
+            auto dword = lane;
+            if ((count.value & 1U) != 0) {
+                dword = builder.shiftRightLogical(lane, 32, ir::Width::I64,
+                                                  instruction.address);
+            }
+            dword = builder.bitAnd(dword,
+                                   builder.constant(0xFFFFFFFFU, ir::Width::I64,
+                                                    instruction.address),
+                                   ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(destination.reg, dword, ir::Width::I32,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::PinsrwXmmMem:
         case x86::Opcode::PinsrwXmmReg: {
             const bool fromMemory =

@@ -160,6 +160,7 @@ enum class Opcode {
     PinsrdXmmReg,
     ExtractpsMemXmmImm,
     PextrwRegXmmImm,
+    PextrdRegXmmImm,
     PinsrwXmmMem,
     PinsrwXmmReg,
     MovmskpsRegXmm,

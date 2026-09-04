@@ -5021,6 +5021,41 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         if (code[cursor] == 0x66U && code.size() - cursor >= 4 &&
             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x3AU &&
+            code[cursor + 3] == 0x16U) {
+            if (code.size() - cursor < 6) {
+                throw DecodeError(address, remaining,
+                                  "truncated PEXTRD r32, xmm, imm8");
+            }
+            const auto modrm = code[cursor + 4];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode != 0x3U) {
+                throw DecodeError(
+                    address, remaining,
+                    "only register-direct PEXTRD is supported");
+            }
+            instruction.opcode = Opcode::PextrdRegXmmImm;
+            instruction.length = 6;
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(cursor), 6,
+                        instruction.bytes.begin());
+            instruction.operands.push_back(
+                RegisterOperand{decodeRegister(
+                                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), false),
+                                32});
+            instruction.operands.push_back(
+                XmmRegisterOperand{static_cast<XmmRegister>(
+                    static_cast<std::uint8_t>(modrm & 0x7U))});
+            instruction.operands.push_back(
+                ImmediateOperand{static_cast<std::uint8_t>(code[cursor + 5] & 0x3U), 8});
+            result.push_back(std::move(instruction));
+            cursor += 6;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
+        if (code[cursor] == 0x66U && code.size() - cursor >= 4 &&
+            code[cursor + 1] == 0x0FU && code[cursor + 2] == 0x3AU &&
             code[cursor + 3] == 0x0EU) {
             if (code.size() - cursor < 6) {
                 throw DecodeError(address, remaining,

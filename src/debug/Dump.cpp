@@ -2370,6 +2370,21 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               instruction.operands[1])
                               .reg);
             break;
+        case x86::Opcode::PextrdRegXmmImm:
+            stream << "pextrd "
+                   << registerOperandName(
+                          std::get<x86::RegisterOperand>(
+                              instruction.operands[0]))
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg)
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[2])
+                          .value;
+            break;
         case x86::Opcode::PinsrwXmmMem:
         case x86::Opcode::PinsrwXmmReg: {
             const bool fromMemory =
