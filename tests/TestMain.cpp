@@ -22441,6 +22441,44 @@ void testUnorderedCompareScalarFloat() {
         expectEqual(state.rflags, testCase.expectedFlags,
                     std::string("UCOMISS ") + testCase.name + " flags differ");
     }
+
+    // Memory form: UCOMISS xmm1, dword [RIP+disp32].
+    constexpr std::array<std::uint8_t, 9> memCode{0x66, 0x0F, 0x2E, 0x0D, 0x25,
+                                                  0x1B, 0x8B, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress memRip{0x7FF80968BF33ULL};
+    const auto memDecoded = decoder.decodeBlock(memCode, memRip);
+    expect(memDecoded[0].opcode == rosa::x86::Opcode::UcomissRegMem,
+           "UCOMISS xmm, m32 opcode differs");
+    expectEqual(memDecoded[0].length, std::uint8_t{8}, "UCOMISS xmm, m32 length differs");
+    const auto memDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(memDecoded[0].operands[0]);
+    const auto memMemory = std::get<rosa::x86::MemoryOperand>(memDecoded[0].operands[1]);
+    expect(memDestination.reg == rosa::x86::XmmRegister::Xmm1,
+           "UCOMISS xmm1, m32 destination differs");
+    expect(memMemory.ripRelative && !memMemory.hasBase && !memMemory.index &&
+               memMemory.displacement == 0x8B1B25 && memMemory.width == 32,
+           "UCOMISS xmm1, dword [RIP+disp32] memory operand differs");
+    expectEqual(memRip.value + memDecoded[0].length + memMemory.displacement,
+                std::uint64_t{0x7FF809F3DA60ULL}, "UCOMISS xmm, m32 target differs");
+    expect(rosa::debug::dumpX86(memDecoded).find("ucomiss xmm1, dword [rip+0x8b1b25]") !=
+               std::string::npos,
+           "UCOMISS xmm, m32 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(target, 0x40000000);
+    constexpr std::array<std::uint8_t, 9> memExecuteCode{0x66, 0x0F, 0x2E, 0x0D, 0xF9,
+                                                         0x70, 0x00, 0x00, 0xC3};
+    const auto memBlock = translator.translate(memExecuteCode, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State memState;
+    memState.xmm[1] = {.low = 0x40800000ULL, .high = 0};
+    memState.rflags = 0x8D7;
+    static_cast<void>(memBlock.execute(memState, &addressSpace));
+    // 4.0 == 2.0 is false; 4.0 > 2.0 leaves only the reserved bit.
+    expectEqual(memState.rflags, std::uint64_t{0x2ULL}, "UCOMISS xmm, m32 flags differ");
 }
 
 void testUnorderedCompareScalarDouble() {

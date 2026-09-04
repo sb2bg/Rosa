@@ -7743,6 +7743,42 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                               instruction.address);
             break;
         }
+        case x86::Opcode::UcomissRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: UCOMISS memory operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            if (memory.width != 32 ||
+                (memory.ripRelative ? memory.hasBase || memory.index.has_value()
+                                    : !memory.hasBase) ||
+                memory.segment != x86::Segment::None) {
+                throw std::runtime_error("unsupported UCOMISS memory addressing");
+            }
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                instruction.address);
+            if (memory.displacement != 0) {
+                const auto displacement = builder.constant(
+                    static_cast<std::uint64_t>(memory.displacement),
+                    ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto sourceBits = builder.loadGuest(address, ir::Width::I32,
+                                                      instruction.address);
+            // The destination lane materializes after the load returns, so
+            // no IR value stays live across a helper call.
+            const auto destinationBits = builder.readGuestXmmLane(
+                destination, false, instruction.address);
+            builder.updateUnorderedFloatFlags(destinationBits, sourceBits,
+                                              instruction.address);
+            break;
+        }
         case x86::Opcode::PinsrwXmmMem:
         case x86::Opcode::PinsrwXmmReg: {
             const bool fromMemory =

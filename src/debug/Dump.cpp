@@ -2459,6 +2459,28 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               instruction.operands[1])
                               .reg);
             break;
+        case x86::Opcode::UcomissRegMem: {
+            const auto memory =
+                std::get<x86::MemoryOperand>(instruction.operands[1]);
+            stream << "ucomiss "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", dword [";
+            if (memory.ripRelative) {
+                stream << "rip";
+            } else {
+                stream << x86::registerName(memory.base);
+            }
+            if (memory.displacement < 0) {
+                stream << "-0x" << -memory.displacement;
+            } else if (memory.displacement > 0) {
+                stream << "+0x" << memory.displacement;
+            }
+            stream << ']';
+            break;
+        }
         case x86::Opcode::PblendwRegRegImm:
             stream << "pblendw "
                    << x86::xmmRegisterName(
