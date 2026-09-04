@@ -8353,15 +8353,16 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 instruction.operands.push_back(RegisterOperand{
                     decodeRegister(rmEncoding, rexB), operandWidth});
             } else {
-            if (mode == 0 && rmEncoding == 0x5U) {
+            const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
+            if (mode == 0 && rmEncoding == 0x5U && rexB) {
                 throw DecodeError(
                     address, remaining,
-                    "only XOR register, [base+index*scale+disp8/disp32] is supported");
+                    "R13-based XOR from opcode 33 is not supported");
             }
             auto baseEncoding = rmEncoding;
             std::optional<Register> index;
             std::uint8_t scale = 1;
-            if (rmEncoding == 0x4U) {
+            if (!ripRelative && rmEncoding == 0x4U) {
                 if (cursor >= code.size()) {
                     throw DecodeError(address, remaining, "truncated XOR memory SIB");
                 }
@@ -8377,6 +8378,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     index = decodeRegister(indexEncoding, rexX);
                     scale = static_cast<std::uint8_t>(1U << scaleBits);
                 }
+            } else if (!ripRelative && rexX) {
+                throw DecodeError(address, remaining,
+                                  "REX.X requires an XOR memory SIB");
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -8384,20 +8388,27 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     throw DecodeError(address, remaining, "truncated XOR memory disp8");
                 }
                 displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-            } else if (mode == 0x2U) {
+            } else if (mode == 0x2U || ripRelative) {
                 if (code.size() - cursor < 4) {
                     throw DecodeError(address, remaining, "truncated XOR memory disp32");
                 }
                 displacement = readI32(code.subspan(cursor, 4));
                 cursor += 4;
             }
+            if (ripRelative) {
+                static_cast<void>(relativeTarget(
+                    address, cursor - instructionStart, displacement));
+            }
             instruction.opcode = Opcode::XorRegMem;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR),
                 operandWidth});
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(baseEncoding, rexB), displacement, operandWidth,
-                index, scale});
+            instruction.operands.push_back(
+                ripRelative
+                    ? MemoryOperand{Register::Rax, displacement, operandWidth,
+                                    std::nullopt, 1, false, true}
+                    : MemoryOperand{decodeRegister(baseEncoding, rexB), displacement,
+                                    operandWidth, index, scale});
             }
         } else if (opcode == 0x38U) {
             if (cursor >= code.size()) {

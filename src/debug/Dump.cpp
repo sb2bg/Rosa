@@ -1283,7 +1283,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << "xor "
                    << registerOperandName(
                           std::get<x86::RegisterOperand>(instruction.operands[0]))
-                   << ", [" << x86::registerName(memory.base);
+                   << ", [" << (memory.ripRelative ? "rip"
+                                                   : x86::registerName(memory.base));
             if (memory.index) {
                 stream << '+' << x86::registerName(*memory.index);
                 if (memory.scale != 1) {

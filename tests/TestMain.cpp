@@ -17208,6 +17208,46 @@ void testXor64BitRegisterFromGuestMemory() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "failed XOR r64 changed flags");
 }
 
+void testXor64BitRegisterFromRipGuestMemory() {
+    // Observed in CoreFoundation under an Objective-C fixture: XOR r14, [RIP+disp32].
+    constexpr std::array<std::uint8_t, 8> code{0x4C, 0x33, 0x35, 0x41, 0xC6,
+                                               0x1D, 0x3D, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802EB7758ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegMem,
+           "RIP-relative XOR r64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7}, "RIP-relative XOR r64 length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::R14 && destination.width == 64,
+           "RIP-relative XOR r14 destination differs");
+    expect(memory.ripRelative && !memory.hasBase && !memory.index &&
+               memory.displacement == 0x3D1DC641 && memory.width == 64,
+           "RIP-relative XOR r64 memory operand differs");
+    expectEqual(observedRip.value + decoded[0].length + memory.displacement,
+                std::uint64_t{0x7FF840093DA0ULL}, "RIP-relative XOR r64 target differs");
+    expect(rosa::debug::dumpX86(decoded).find("xor r14, [rip+0x3d1dc641]") != std::string::npos,
+           "RIP-relative XOR r64 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0xFFFFFFFFFFFFFFFFULL);
+    const rosa::dbt::Translator translator;
+    constexpr std::array<std::uint8_t, 8> executeCode{0x4C, 0x33, 0x35, 0xF9, 0x70,
+                                                      0x00, 0x00, 0xC3};
+    const auto block = translator.translate(executeCode, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.r14 = 0xFFFFFFFFFFFFFFFFULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.r14, std::uint64_t{0}, "RIP-relative XOR r64 result differs");
+    expectEqual(state.rflags, std::uint64_t{0x46}, "RIP-relative XOR r64 flags differ");
+}
+
 void testXor64BitRegisterFromIndexedGuestMemoryWithDisplacement() {
     constexpr std::array<std::uint8_t, 6> code{0x48, 0x33, 0x74, 0x07, 0x06, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -35796,6 +35836,7 @@ int main() {
         {"XOR byte register from displaced guest memory",
          testXorByteRegisterFromDisplacedGuestMemory},
         {"XOR 64-bit register from guest memory", testXor64BitRegisterFromGuestMemory},
+        {"XOR 64-bit register from RIP memory", testXor64BitRegisterFromRipGuestMemory},
         {"XOR 64-bit register from indexed guest memory with displacement",
          testXor64BitRegisterFromIndexedGuestMemoryWithDisplacement},
         {"XOR 32-bit register immediate", testXor32BitRegisterImmediate},
