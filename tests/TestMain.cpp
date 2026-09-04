@@ -27858,6 +27858,25 @@ void testDarwinProcInfoUniqueIdentifier() {
                 std::vector<std::uint8_t>(sentinel.begin(), sentinel.end()),
                 "short unique-identifier proc_info changed its output");
 
+    // Observed under an AppKit fixture: the same query with arg 1 fills the
+    // identical unique-identifier record.
+    state.rax = procInfoNumber;
+    state.rdi = 2;
+    state.rsi = static_cast<std::uint64_t>(::getpid());
+    state.rdx = 0x11;
+    state.r10 = 1;
+    state.r8 = output.value;
+    state.r9 = 56;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state,
+                                          rosa::guest::GuestAddress{0x7FF802E30C08ULL}));
+    expectEqual(state.rax, std::uint64_t{56}, "arg-1 unique-identifier proc_info size differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD6},
+                "arg-1 unique-identifier proc_info did not clear BSD carry");
+    expectEqual(addressSpace.readBytes(output, executableUuid.size()),
+                std::vector<std::uint8_t>(executableUuid.begin(), executableUuid.end()),
+                "arg-1 unique-identifier proc_info used the wrong executable UUID");
+
     state.rax = procInfoNumber;
     state.r8 = readOnlyOutput.value;
     state.r9 = 56;

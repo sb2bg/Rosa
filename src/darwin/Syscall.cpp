@@ -3134,11 +3134,13 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
                 setError(state, ENOMEM);
                 return {};
             }
-            if (flavor == procPidUniqueIdentifierInfo && state.r10 != 0) {
+            if (flavor == procPidUniqueIdentifierInfo && state.r10 != 0 && state.r10 != 1) {
                 throw unsupported(
                     state, syscallRip,
                     "only active-process PROC_PIDUNIQIDENTIFIERINFO is implemented");
             }
+            // XNU fills the same unique-identifier record for arg 0 and 1;
+            // AppKit startup probes with arg 1. Other arguments stay loud.
             const auto writeResult = [&](const auto &result) {
                 addressSpace.validateAccess(
                     guest::GuestAddress{state.r8}, sizeof(result),
