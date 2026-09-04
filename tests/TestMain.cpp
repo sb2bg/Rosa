@@ -21111,6 +21111,40 @@ void testMovlhpsRipMemory() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVLHPS m64 changed flags");
 }
 
+void testMovddupRegisters() {
+    // Observed in CoreGraphics under an Objective-C fixture: MOVDDUP xmm0, xmm1.
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0x38, 0x29, 0xC1, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF80968A84DULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovddupRegReg,
+           "MOVDDUP opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "MOVDDUP length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "MOVDDUP xmm0, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("movddup xmm0, xmm1") != std::string::npos,
+           "MOVDDUP dump differs");
+
+    const rosa::dbt::Translator translator;
+    constexpr std::array<std::uint8_t, 6> executeCode{0x66, 0x0F, 0x38, 0x29, 0xC1, 0xC3};
+    const auto block = translator.translate(executeCode, observedRip);
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0xAAAAAAAAAAAAAAAAULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    state.xmm[1] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVDDUP did not duplicate the low lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVDDUP did not duplicate into the high lane");
+    expectEqual(state.xmm[1].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVDDUP changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVDDUP changed flags");
+}
+
 void testMovlhpsRegister() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x16, 0xC0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -36087,6 +36121,7 @@ int main() {
         {"CVTSI2SD int32 to XMM", testConvertInt32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"MOVDDUP registers execution", testMovddupRegisters},
         {"MOVLHPS RIP memory execution", testMovlhpsRipMemory},
         {"PSHUFB register execution", testPshufbRegisters},
         {"PSHUFB RIP-relative guest memory", testPshufbRipRelativeGuestMemory},

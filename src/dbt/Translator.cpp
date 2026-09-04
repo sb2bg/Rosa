@@ -4151,6 +4151,56 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.writeGuestXmmLane(destination, false, value, instruction.address);
             break;
         }
+        case x86::Opcode::MovddupRegReg:
+        case x86::Opcode::MovddupRegMem: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::MovddupRegMem;
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: MOVDDUP operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            ir::ValueId duplicated{};
+            if (!fromMemory) {
+                const auto source =
+                    std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+                duplicated = builder.readGuestXmmLane(source, false,
+                                                      instruction.address);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                if (memory.width != 64 ||
+                    (memory.ripRelative
+                         ? memory.hasBase || memory.index.has_value()
+                         : !memory.hasBase) ||
+                    memory.segment != x86::Segment::None) {
+                    throw std::runtime_error("unsupported qword MOVDDUP addressing");
+                }
+                auto address =
+                    memory.ripRelative
+                        ? builder.constant(instruction.address.value + instruction.length,
+                                           ir::Width::I64, instruction.address)
+                        : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                    instruction.address);
+                if (memory.displacement != 0) {
+                    const auto displacement = builder.constant(
+                        static_cast<std::uint64_t>(memory.displacement),
+                        ir::Width::I64, instruction.address);
+                    address = builder.add(address, displacement, ir::Width::I64,
+                                          instruction.address);
+                }
+                duplicated =
+                    builder.loadGuest(address, ir::Width::I64, instruction.address);
+            }
+            // A single load feeds both lanes; the value is consumed here, so
+            // no IR value stays live across its call.
+            builder.writeGuestXmmLane(destination, false, duplicated,
+                                      instruction.address);
+            builder.writeGuestXmmLane(destination, true, duplicated,
+                                      instruction.address);
+            break;
+        }
         case x86::Opcode::MovdXmmReg:
         case x86::Opcode::MovqXmmReg: {
             if (instruction.operands.size() != 2) {
