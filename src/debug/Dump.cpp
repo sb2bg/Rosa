@@ -2415,6 +2415,18 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           .value;
             break;
         }
+        case x86::Opcode::UcomisdRegReg:
+            stream << "ucomisd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
         case x86::Opcode::ExtractpsMemXmmImm: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
@@ -3609,6 +3621,10 @@ std::string dumpIr(const ir::Block &block) {
                    << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;
         }
+        case ir::Opcode::UpdateUnorderedDoubleFlags:
+            stream << "update_unordered_double_flags.i64 " << valueName(*operation.lhs)
+                   << ", " << valueName(*operation.rhs);
+            break;
         case ir::Opcode::AddXmmDwords:
             stream << "add_xmm_dwords.i32 "
                    << x86::xmmRegisterName(*operation.guestXmmRegister)

@@ -614,6 +614,18 @@ void Builder::comparePackedDoubleXmm(x86::XmmRegister destination,
     });
 }
 
+void Builder::updateUnorderedDoubleFlags(ValueId destinationBits,
+                                              ValueId sourceBits,
+                                              guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateUnorderedDoubleFlags,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = destinationBits,
+        .rhs = sourceBits,
+    });
+}
+
 void Builder::convertIntToDoubleXmm(ValueId value, x86::XmmRegister destination,
                                     Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -1762,6 +1774,14 @@ std::vector<std::string> verify(const Block &block) {
                 operation.width != Width::I64) {
                 errors.emplace_back(
                     "compare_packed_double_xmm has incomplete registers");
+            }
+            break;
+        case Opcode::UpdateUnorderedDoubleFlags:
+            checkUse(operation.lhs, "destination bits");
+            checkUse(operation.rhs, "source bits");
+            if (operation.width != Width::I64) {
+                errors.emplace_back(
+                    "update_unordered_double_flags currently requires i64");
             }
             break;
         case Opcode::ConvertIntToDoubleXmm:

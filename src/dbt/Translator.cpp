@@ -889,6 +889,7 @@ comparePackedDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
     if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
         return state;
     }
+
     // Host IEEE-754 comparison matches SSE scalar semantics for every
     // predicate, including unordered inputs (MXCSR exception flags, which
     // Rosa does not model, aside).
@@ -914,6 +915,28 @@ comparePackedDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
         .low = compareLane(destination.low, source.low),
         .high = compareLane(destination.high, source.high),
     };
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+updateUnorderedDoubleFlags(x86::X86State *state, std::uint64_t destinationBits,
+                           std::uint64_t sourceBits) noexcept {
+    const auto destination = std::bit_cast<double>(destinationBits);
+    const auto source = std::bit_cast<double>(sourceBits);
+    // UCOMISD zeroes OF, SF and AF; CF/PF/ZF follow the ordered result,
+    // and an unordered (NaN) comparison sets ZF, PF and CF together.
+    // Host IEEE-754 comparison matches exactly (MXCSR exception flags aside).
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (std::isnan(destination) || std::isnan(source)) {
+        flags |= flagCarry | flagParity | flagZero;
+    } else if (destination < source) {
+        flags |= flagCarry;
+    } else if (destination == source) {
+        // Equal, including -0.0 against +0.0. Greater-than
+        // leaves CF/PF/ZF all clear.
+        flags |= flagZero;
+    }
+    state->rflags = flags;
     return state;
 }
 
@@ -7669,6 +7692,22 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::UcomisdRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: UCOMISD operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto destinationBits = builder.readGuestXmmLane(
+                destination, false, instruction.address);
+            const auto sourceBits = builder.readGuestXmmLane(
+                source, false, instruction.address);
+            builder.updateUnorderedDoubleFlags(destinationBits, sourceBits,
+                                               instruction.address);
+            break;
+        }
         case x86::Opcode::PinsrwXmmMem:
         case x86::Opcode::PinsrwXmmReg: {
             const bool fromMemory =
@@ -9730,6 +9769,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::ShiftLeftXmmDwords ||
             operation.opcode == ir::Opcode::AddXmmWords ||
             operation.opcode == ir::Opcode::ComparePackedDoubleXmm ||
+            operation.opcode == ir::Opcode::UpdateUnorderedDoubleFlags ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
             operation.opcode == ir::Opcode::ConvertFloatToDoubleXmm ||
             operation.opcode == ir::Opcode::ScalarDoubleXmm ||
@@ -11496,6 +11536,13 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.movImmediate(arm64::x16, pointerBits(&comparePackedDoubleXmm));
             assembler.blr(arm64::x16);
             break;
+        case ir::Opcode::UpdateUnorderedDoubleFlags: {
+            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x2, hostRegister(*operation.rhs));
+            assembler.movImmediate(arm64::x16, pointerBits(&updateUnorderedDoubleFlags));
+            assembler.blr(arm64::x16);
+            break;
+        }
         case ir::Opcode::ConvertIntToDoubleXmm: {
             if (operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
                 throw std::runtime_error(

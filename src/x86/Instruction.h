@@ -164,6 +164,7 @@ enum class Opcode {
     PinsrwXmmMem,
     PinsrwXmmReg,
     MovmskpsRegXmm,
+    UcomisdRegReg,
     MovapsMemReg,
     MovapdMemReg,
     MovapsRegMem,

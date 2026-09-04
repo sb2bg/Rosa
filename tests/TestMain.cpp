@@ -22397,6 +22397,52 @@ void testPinsrdGuestMemoryToXmm() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted PINSRD changed flags");
 }
 
+void testUnorderedCompareScalarDouble() {
+    // Observed in CoreGraphics under an Objective-C fixture: UCOMISD xmm1, xmm0.
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x2E, 0xC8, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809C4ADD9ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::UcomisdRegReg,
+           "UCOMISD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "UCOMISD length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0,
+           "UCOMISD xmm1, xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("ucomisd xmm1, xmm0") != std::string::npos,
+           "UCOMISD dump differs");
+
+    struct UnorderedCase {
+        std::uint64_t destinationBits;
+        std::uint64_t sourceBits;
+        std::uint64_t expectedFlags;
+        const char *name;
+    };
+    constexpr UnorderedCase cases[] = {
+        {0x3FF0000000000000ULL, 0x4000000000000000ULL, 0x3ULL, "less"},
+        {0x4000000000000000ULL, 0x4000000000000000ULL, 0x42ULL, "equal"},
+        {0x4008000000000000ULL, 0x4000000000000000ULL, 0x2ULL, "greater"},
+        {0x7FF8000000000000ULL, 0x3FF0000000000000ULL, 0x47ULL, "unordered"},
+        {0x8000000000000000ULL, 0x0000000000000000ULL, 0x42ULL, "signed-zero"},
+    };
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("update_unordered_double_flags.i64") != std::string::npos,
+           "UCOMISD did not lower through unordered-compare IR");
+    for (const auto &testCase : cases) {
+        rosa::x86::X86State state;
+        state.xmm[1] = {.low = testCase.destinationBits, .high = 0};
+        state.xmm[0] = {.low = testCase.sourceBits, .high = 0};
+        state.rflags = 0x8D7;
+        static_cast<void>(block.execute(state));
+        expectEqual(state.rflags, testCase.expectedFlags,
+                    std::string("UCOMISD ") + testCase.name + " flags differ");
+    }
+}
+
 void testMovmskpsRegisterFromXmm() {
     // Observed in ColorSync under an Objective-C fixture: MOVMSKPS ecx, xmm2.
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x50, 0xCA, 0xC3};
@@ -36380,6 +36426,7 @@ int main() {
         {"PEXTRW register from XMM", testPextrwRegisterFromXmm},
         {"PEXTRD register from XMM", testPextrdRegisterFromXmm},
         {"MOVMSKPS register from XMM", testMovmskpsRegisterFromXmm},
+        {"UCOMISD registers unordered compare", testUnorderedCompareScalarDouble},
         {"PINSRQ register to XMM", testPinsrqRegisterToXmm},
         {"PINSRB register to XMM", testPinsrbRegisterToXmm},
         {"PINSRB guest memory to XMM", testPinsrbGuestMemoryToXmm},
