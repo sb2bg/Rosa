@@ -4863,8 +4863,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 scalarRex = code[scalarCursor++];
             }
             if (code.size() - scalarCursor >= 3 && code[scalarCursor] == 0x0FU &&
-                (code[scalarCursor + 1] == 0x58U || code[scalarCursor + 1] == 0x59U ||
-                 code[scalarCursor + 1] == 0x5CU || code[scalarCursor + 1] == 0x5EU)) {
+                (code[scalarCursor + 1] == 0x51U || code[scalarCursor + 1] == 0x58U ||
+                 code[scalarCursor + 1] == 0x59U || code[scalarCursor + 1] == 0x5CU ||
+                 code[scalarCursor + 1] == 0x5EU)) {
                 const auto scalarOpcode = code[scalarCursor + 1];
                 const auto modrm = code[scalarCursor + 2];
                 const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
@@ -4876,7 +4877,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                               ((scalarRex & 0x4U) != 0 ? 8U : 0U)))};
                 auto operandCursor = scalarCursor + 3;
                 if (mode == 0x3U) {
-                    instruction.opcode = scalarOpcode == 0x58U   ? Opcode::AddsdXmmReg
+                    instruction.opcode = scalarOpcode == 0x51U   ? Opcode::SqrtsdXmmReg
+                                         : scalarOpcode == 0x58U ? Opcode::AddsdXmmReg
                                          : scalarOpcode == 0x59U ? Opcode::MulsdXmmReg
                                          : scalarOpcode == 0x5CU ? Opcode::SubsdXmmReg
                                                                  : Opcode::DivsdXmmReg;
@@ -4914,7 +4916,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                             address, operandCursor - instructionStart,
                             displacement));
                     }
-                    instruction.opcode = scalarOpcode == 0x58U   ? Opcode::AddsdXmmMem
+                    instruction.opcode = scalarOpcode == 0x51U   ? Opcode::SqrtsdXmmMem
+                                         : scalarOpcode == 0x58U ? Opcode::AddsdXmmMem
                                          : scalarOpcode == 0x59U ? Opcode::MulsdXmmMem
                                          : scalarOpcode == 0x5CU ? Opcode::SubsdXmmMem
                                                                  : Opcode::DivsdXmmMem;

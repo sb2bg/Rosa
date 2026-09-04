@@ -21249,6 +21249,40 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testSqrtsdRegisters() {
+    // Observed in ColorSync under an Objective-C fixture: SQRTSD xmm4, xmm4.
+    constexpr std::array<std::uint8_t, 5> code{0xF2, 0x0F, 0x51, 0xE4, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4F03ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SqrtsdXmmReg,
+           "SQRTSD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "SQRTSD length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm4 &&
+               source.reg == rosa::x86::XmmRegister::Xmm4,
+           "SQRTSD xmm4, xmm4 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("sqrtsd xmm4, xmm4") != std::string::npos,
+           "SQRTSD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("scalar_sqrt_double_xmm") != std::string::npos,
+           "SQRTSD did not lower through scalar-double IR");
+    rosa::x86::X86State state;
+    state.xmm[4] = {.low = 0x4019000000000000ULL, .high = 0xAAAAAAAAAAAAAAAAULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // sqrt(6.25) == 2.5; the high lane is preserved.
+    expectEqual(state.xmm[4].low, std::uint64_t{0x4004000000000000ULL},
+                "SQRTSD produced the wrong root");
+    expectEqual(state.xmm[4].high, std::uint64_t{0xAAAAAAAAAAAAAAAAULL},
+                "SQRTSD did not preserve the high lane");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "SQRTSD changed flags");
+}
+
 void testHaddpdRegisters() {
     // Observed in ColorSync under an Objective-C fixture: HADDPD xmm4, xmm4.
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x7C, 0xE4, 0xC3};
@@ -36956,6 +36990,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"SQRTSD registers execution", testSqrtsdRegisters},
         {"HADDPD registers execution", testHaddpdRegisters},
         {"HADDPD guest memory execution", testHaddpdGuestMemoryGeneratedExecution},
         {"UNPCKHPS registers execution", testUnpckhpsRegisters},

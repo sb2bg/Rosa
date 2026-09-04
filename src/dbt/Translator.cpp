@@ -1018,7 +1018,8 @@ scalarDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
     const auto result = operation == 0U   ? destination + source
                         : operation == 1U ? destination - source
                         : operation == 2U ? destination * source
-                                          : destination / source;
+                        : operation == 3U ? destination / source
+                                          : std::sqrt(source);
     state->xmm[destinationIndex].low = std::bit_cast<std::uint64_t>(result);
     return state;
 }
@@ -4832,7 +4833,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
         case x86::Opcode::MulsdXmmReg:
         case x86::Opcode::MulsdXmmMem:
         case x86::Opcode::DivsdXmmReg:
-        case x86::Opcode::DivsdXmmMem: {
+        case x86::Opcode::DivsdXmmMem:
+        case x86::Opcode::SqrtsdXmmReg:
+        case x86::Opcode::SqrtsdXmmMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
                     "internal decoder error: scalar-double operand count");
@@ -4846,6 +4849,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                    : instruction.opcode == x86::Opcode::MulsdXmmReg ||
                                            instruction.opcode == x86::Opcode::MulsdXmmMem
                                        ? std::uint8_t{2}
+                                   : instruction.opcode == x86::Opcode::SqrtsdXmmReg ||
+                                           instruction.opcode == x86::Opcode::SqrtsdXmmMem
+                                       ? std::uint8_t{4}
                                        : std::uint8_t{3};
             const auto destination =
                 std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
@@ -4853,7 +4859,8 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                 instruction.opcode == x86::Opcode::AddsdXmmMem ||
                 instruction.opcode == x86::Opcode::SubsdXmmMem ||
                 instruction.opcode == x86::Opcode::MulsdXmmMem ||
-                instruction.opcode == x86::Opcode::DivsdXmmMem;
+                instruction.opcode == x86::Opcode::DivsdXmmMem ||
+                instruction.opcode == x86::Opcode::SqrtsdXmmMem;
             ir::ValueId sourceBits{};
             if (!fromMemory) {
                 const auto source =

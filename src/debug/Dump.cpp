@@ -3200,7 +3200,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::MulsdXmmReg:
         case x86::Opcode::MulsdXmmMem:
         case x86::Opcode::DivsdXmmReg:
-        case x86::Opcode::DivsdXmmMem: {
+        case x86::Opcode::DivsdXmmMem:
+        case x86::Opcode::SqrtsdXmmReg:
+        case x86::Opcode::SqrtsdXmmMem: {
             const auto mnemonic = instruction.opcode == x86::Opcode::AddsdXmmReg ||
                                           instruction.opcode == x86::Opcode::AddsdXmmMem
                                       ? "addsd "
@@ -3210,12 +3212,16 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                                   : instruction.opcode == x86::Opcode::MulsdXmmReg ||
                                           instruction.opcode == x86::Opcode::MulsdXmmMem
                                       ? "mulsd "
+                                  : instruction.opcode == x86::Opcode::SqrtsdXmmReg ||
+                                          instruction.opcode == x86::Opcode::SqrtsdXmmMem
+                                      ? "sqrtsd "
                                       : "divsd ";
             const bool fromMemory =
                 instruction.opcode == x86::Opcode::AddsdXmmMem ||
                 instruction.opcode == x86::Opcode::SubsdXmmMem ||
                 instruction.opcode == x86::Opcode::MulsdXmmMem ||
-                instruction.opcode == x86::Opcode::DivsdXmmMem;
+                instruction.opcode == x86::Opcode::DivsdXmmMem ||
+                instruction.opcode == x86::Opcode::SqrtsdXmmMem;
             stream << mnemonic
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
@@ -3884,7 +3890,8 @@ std::string dumpIr(const ir::Block &block) {
             const auto operationName = operation.immediate == 0U   ? "scalar_add_double_xmm"
                                        : operation.immediate == 1U ? "scalar_subtract_double_xmm"
                                        : operation.immediate == 2U ? "scalar_multiply_double_xmm"
-                                                                   : "scalar_divide_double_xmm";
+                                       : operation.immediate == 3U ? "scalar_divide_double_xmm"
+                                                                   : "scalar_sqrt_double_xmm";
             stream << operationName << ' ' << valueName(*operation.lhs) << ", "
                    << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;

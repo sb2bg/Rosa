@@ -2000,9 +2000,9 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::ScalarDoubleXmm:
             checkUse(operation.lhs, "source double bits");
-            if (!operation.guestXmmRegister || operation.immediate > 3U) {
+            if (!operation.guestXmmRegister || operation.immediate > 4U) {
                 errors.emplace_back(
-                    "scalar_double_xmm requires an XMM register and operation 0-3");
+                    "scalar_double_xmm requires an XMM register and operation 0-4");
             }
             break;
         case Opcode::AddXmmDwords:

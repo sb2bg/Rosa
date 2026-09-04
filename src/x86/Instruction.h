@@ -219,6 +219,8 @@ enum class Opcode {
     MulsdXmmMem,
     DivsdXmmReg,
     DivsdXmmMem,
+    SqrtsdXmmReg,
+    SqrtsdXmmMem,
     DivpdRegReg,
     DivpdRegMem,
     SubpdRegReg,
