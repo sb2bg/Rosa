@@ -10388,15 +10388,16 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     32});
             } else if (mode <= 0x2U && extension == 0x7U && !rexR) {
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-                if (mode == 0 && rmEncoding == 0x5U) {
+                const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB && !rexX;
+                if (mode == 0 && rmEncoding == 0x5U && !ripRelative) {
                     throw DecodeError(
                         address, remaining,
-                        "RIP-relative CMP [memory], imm32 is not supported");
+                        "RIP-relative CMP [memory], imm32 requires no REX.B/X");
                 }
                 auto base = decodeRegister(rmEncoding, rexB);
                 std::optional<Register> index;
                 std::uint8_t scale = 1;
-                if (rmEncoding == 0x4U) {
+                if (!ripRelative && rmEncoding == 0x4U) {
                     if (cursor >= code.size()) {
                         throw DecodeError(address, remaining,
                                           "truncated CMP memory SIB");
@@ -10426,7 +10427,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                           "truncated CMP memory disp8");
                     }
                     displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-                } else if (mode == 0x2U) {
+                } else if (mode == 0x2U || ripRelative) {
                     if (code.size() - cursor < 4) {
                         throw DecodeError(address, remaining,
                                           "truncated CMP memory disp32");
@@ -10439,11 +10440,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 }
                 const auto immediate = readI32(code.subspan(cursor, 4));
                 cursor += 4;
+                if (ripRelative) {
+                    static_cast<void>(relativeTarget(
+                        address, cursor - instructionStart, displacement));
+                }
                 instruction.opcode = Opcode::CmpMemImm;
-                instruction.operands.push_back(MemoryOperand{
-                    base, displacement,
-                    static_cast<std::uint8_t>(rexW ? 64U : 32U), index,
-                    scale});
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement,
+                                        static_cast<std::uint8_t>(rexW ? 64U : 32U),
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{
+                              base, displacement,
+                              static_cast<std::uint8_t>(rexW ? 64U : 32U), index,
+                              scale});
                 instruction.operands.push_back(ImmediateOperand{
                     rexW ? static_cast<std::uint64_t>(
                                static_cast<std::int64_t>(immediate))

@@ -8531,6 +8531,44 @@ void testCompareGuestMemoryWith32BitImmediate() {
                 "failed memory-immediate CMP changed flags");
 }
 
+void testCompareRipMemoryWith64BitImmediate() {
+    // Observed in libobjc under an Objective-C fixture: CMP qword [RIP+disp32], 0x8000.
+    constexpr std::array<std::uint8_t, 12> code{0x48, 0x81, 0x3D, 0x53, 0xBF,
+                                                0xC7, 0x40, 0x00, 0x80, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802A30F02ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpMemImm,
+           "RIP CMP qword opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{11}, "RIP CMP qword length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(memory.ripRelative && !memory.hasBase && !memory.index &&
+               memory.displacement == 0x40C7BF53 && memory.width == 64,
+           "RIP CMP qword memory operand differs");
+    expectEqual(immediate.value, std::uint64_t{0x8000}, "RIP CMP qword immediate differs");
+    expectEqual(observedRip.value + decoded[0].length + memory.displacement,
+                std::uint64_t{0x7FF8436ACE60ULL}, "RIP CMP qword target differs");
+    expect(rosa::debug::dumpX86(decoded).find("cmp qword [rip+0x40c7bf53], 0x8000") !=
+               std::string::npos,
+           "RIP CMP qword dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0x8000);
+    const rosa::dbt::Translator translator;
+    constexpr std::array<std::uint8_t, 12> executeCode{0x48, 0x81, 0x3D, 0xF5, 0x70,
+                                                       0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0xC3};
+    const auto block = translator.translate(executeCode, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rflags, std::uint64_t{0x46}, "RIP CMP qword equal flags differ");
+}
+
 void testCompareGuestSibMemoryWith32BitImmediate() {
     constexpr std::array<std::uint8_t, 10> code{
         0x41, 0x81, 0x7C, 0x24, 0x10, 0x05, 0x02, 0x00, 0x00, 0xC3,
@@ -35241,6 +35279,7 @@ int main() {
         {"LOCK INC guest qword", testLockedIncrementGuestQword},
         {"LOCK DEC RIP-relative guest qword", testLockedDecrementRipRelativeGuestQword},
         {"CMP guest memory with 32-bit immediate", testCompareGuestMemoryWith32BitImmediate},
+        {"CMP RIP memory with 64-bit immediate", testCompareRipMemoryWith64BitImmediate},
         {"CMP SIB guest memory with 32-bit immediate", testCompareGuestSibMemoryWith32BitImmediate},
         {"CMP guest qword with 32-bit immediate", testCompareGuestQwordWith32BitImmediate},
         {"CMP guest memory with short immediate", testCompareGuestMemoryWithShortImmediate},
