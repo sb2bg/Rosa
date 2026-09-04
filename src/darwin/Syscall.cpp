@@ -1912,6 +1912,39 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
             return {};
         }
+        if (mode == 0 && (flags == guestOpenDirectory ||
+                          flags == (guestOpenDirectory | guestOpenCloseOnExec))) {
+            // Read-only directory opens (NSBundle main-bundle probing opens
+            // the application directory). Resolve and confine exactly like
+            // regular files, but require a directory: the descriptors stay
+            // metadata-only and each operation reopens the host path.
+            const auto directPath = std::filesystem::path{*path};
+            const auto queryPath = directPath.is_absolute()
+                                       ? directPath
+                                       : fileSpace_.currentDirectory() / directPath;
+            std::error_code error;
+            const auto canonicalPath = std::filesystem::canonical(queryPath, error);
+            if (error) {
+                setError(state, error.value());
+                return {};
+            }
+            if (!isWithinDirectory(fileSpace_.currentDirectory(),
+                                   canonicalPath)) {
+                std::ostringstream reason;
+                reason << "guest VFS has no mapping for read-only directory path \""
+                       << *path << '"';
+                throw unsupported(state, syscallRip, reason.str());
+            }
+            if (!std::filesystem::is_directory(canonicalPath, error) ||
+                error) {
+                setError(state, error ? error.value() : ENOTDIR);
+                return {};
+            }
+            const auto descriptor =
+                fileSpace_.openReadOnlyFile(canonicalPath, flags);
+            setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
+            return {};
+        }
         if (flags == 0 && mode == 0) {
             // Resolve relative guest paths against the task's current
             // directory, mirroring the stat64 policy below. The sandbox

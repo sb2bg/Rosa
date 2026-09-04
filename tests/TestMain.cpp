@@ -25455,6 +25455,77 @@ void testDarwinOsVariantStatusSysctl() {
                 "faulted kern.osvariant_status changed its length");
 }
 
+void testDarwinOpenDirectoryWithinCurrentDirectory() {
+    // Observed under an AppKit fixture: open(appDir, O_RDONLY|O_DIRECTORY|O_CLOEXEC).
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr std::uint32_t openDirectory = 0x00100000;
+    constexpr std::uint32_t openCloseOnExec = 0x01000000;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    const auto directoryString = std::filesystem::current_path().string();
+    std::vector<std::uint8_t> directoryBytes(directoryString.begin(), directoryString.end());
+    directoryBytes.push_back(0);
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, directoryBytes);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State state;
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = openDirectory | openCloseOnExec;
+    state.rdx = 0;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E305E8ULL});
+    expect(!outcome.exited, "open application directory terminated the guest");
+    expectEqual(state.rax, std::uint64_t{3},
+                "open application directory returned the wrong guest descriptor");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "open application directory did not clear BSD carry");
+    const auto *opened = dispatcher.fileSpace().lookup(rosa::darwin::GuestFileDescriptor{3});
+    expect(opened != nullptr && opened->kind == rosa::darwin::GuestFileKind::CurrentDirectory &&
+               opened->guestPath == std::filesystem::current_path(),
+           "open application directory stored the wrong guest metadata");
+
+    // O_DIRECTORY against a regular file must fail like the host open.
+    const auto fixtureString =
+        std::filesystem::canonical(std::filesystem::path{ROSA_TEST_HELLO_MACHO_PATH}).string();
+    std::vector<std::uint8_t> fixtureBytes(fixtureString.begin(), fixtureString.end());
+    fixtureBytes.push_back(0);
+    addressSpace.writeBytes(pathAddress, fixtureBytes);
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = openDirectory;
+    state.rdx = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOTDIR),
+                "directory open of a regular file returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3},
+                "directory open of a regular file did not set BSD carry");
+    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+                "failed directory open allocated a descriptor");
+
+    // Directories outside the current directory stay loud.
+    constexpr std::array<std::uint8_t, 5> outsidePath{'/', 't', 'm', 'p', 0};
+    addressSpace.writeBytes(pathAddress, outsidePath);
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = openDirectory;
+    state.rdx = 0;
+    bool escaped = false;
+    try {
+        static_cast<void>(
+            dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    } catch (const std::runtime_error &error) {
+        escaped = std::string_view(error.what()).find("read-only directory path") !=
+                  std::string_view::npos;
+    }
+    expect(escaped, "out-of-sandbox directory open did not fail loudly");
+}
+
 void testDarwinOpenCurrentDirectory() {
     constexpr auto openNumber = UINT64_C(0x02000005);
     constexpr std::uint32_t openDirectory = 0x00100000;
@@ -25884,7 +25955,8 @@ void testDarwinOpenGuestRootDirectory() {
             dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     } catch (const std::runtime_error &error) {
         rejectedFlags =
-            std::string_view(error.what()).find("flags=0x100000") != std::string_view::npos;
+            std::string_view(error.what()).find("read-only directory path") !=
+            std::string_view::npos;
     }
     expect(rejectedFlags, "guest root open accepted an unobserved flag combination");
     expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
@@ -37390,6 +37462,7 @@ int main() {
         {"Darwin iOS-support-version sysctl", testDarwinIosSupportVersionSysctl},
         {"Darwin OS-variant-status sysctl", testDarwinOsVariantStatusSysctl},
         {"Darwin kern.proc.pid sysctl", testDarwinSysctlKernProcPid},
+        {"Darwin open directory within current directory", testDarwinOpenDirectoryWithinCurrentDirectory},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
         {"Darwin FeatureFlags shm_open probe", testDarwinFeatureFlagsShmOpenProbe},
         {"Darwin csops unsigned status", testDarwinCsopsUnsignedStatus},
