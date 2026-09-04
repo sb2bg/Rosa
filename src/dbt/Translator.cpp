@@ -1750,6 +1750,42 @@ extern "C" __attribute__((noinline)) x86::X86State *repeatMoveByte(GuestExecutio
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+repeatStore(GuestExecutionContext *context, x86::X86State *state,
+            std::uint64_t widthBytes) noexcept {
+    std::uint64_t currentAddress = state != nullptr ? state->rdi : 0;
+    try {
+        if (context == nullptr || context->addressSpace == nullptr || state == nullptr) {
+            throw std::runtime_error("generated REP STOS has no guest execution context");
+        }
+        if (widthBytes != 1 && widthBytes != 2 && widthBytes != 4 && widthBytes != 8) {
+            throw std::runtime_error("generated REP STOS has an invalid element width");
+        }
+        const auto value = state->rax & (widthBytes == 8 ? UINT64_MAX : ((1ULL << (widthBytes * 8U)) - 1U));
+        const auto decrement = (state->rflags & flagDirection) != 0;
+        const std::uint64_t step = decrement ? 0ULL - widthBytes : widthBytes;
+        while (state->rcx != 0) {
+            currentAddress = state->rdi;
+            std::array<std::uint8_t, sizeof(std::uint64_t)> bytes{};
+            std::memcpy(bytes.data(), &value, static_cast<std::size_t>(widthBytes));
+            context->addressSpace->writeBytes(
+                guest::GuestAddress{currentAddress},
+                std::span<const std::uint8_t>{bytes.data(),
+                                              static_cast<std::size_t>(widthBytes)});
+            state->rdi += step;
+            --state->rcx;
+        }
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{currentAddress};
+            context->faultSize = static_cast<std::size_t>(widthBytes);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 loadGuest16(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address) noexcept {
     try {
         if (context == nullptr || context->addressSpace == nullptr) {
@@ -9747,6 +9783,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
         case x86::Opcode::RepMovsb:
             builder.repeatMoveByte(instruction.address);
             break;
+        case x86::Opcode::RepStosb:
+        case x86::Opcode::RepStosd:
+        case x86::Opcode::RepStosq: {
+            const auto width = instruction.opcode == x86::Opcode::RepStosb   ? ir::Width::I8
+                               : instruction.opcode == x86::Opcode::RepStosd ? ir::Width::I32
+                                                                             : ir::Width::I64;
+            builder.repeatStore(width, instruction.address);
+            break;
+        }
         case x86::Opcode::Rdtsc:
             builder.readTimestampCounter(instruction.address);
             break;
@@ -10746,6 +10791,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             guestRegisterKnownZero[static_cast<std::size_t>(*operation.guestRegister)] = false;
         } else if (operation.opcode == ir::Opcode::Push ||
                    operation.opcode == ir::Opcode::RepeatMoveByte ||
+            operation.opcode == ir::Opcode::RepeatStore ||
                    operation.opcode == ir::Opcode::DivideUnsignedByte ||
                    operation.opcode == ir::Opcode::DivideUnsignedDword ||
                    operation.opcode == ir::Opcode::DivideUnsignedQword ||
@@ -11100,6 +11146,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::BitScanForward ||
             operation.opcode == ir::Opcode::BitScanReverse ||
             operation.opcode == ir::Opcode::RepeatMoveByte ||
+            operation.opcode == ir::Opcode::RepeatStore ||
             operation.opcode == ir::Opcode::DivideUnsignedByte ||
             operation.opcode == ir::Opcode::DivideUnsignedDword ||
             operation.opcode == ir::Opcode::DivideUnsignedQword ||
@@ -11149,6 +11196,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::UnpackLowGuestPackedSingleXmm ||
             (operation.opcode == ir::Opcode::ShuffleXmmBytes && operation.lhs.has_value()) ||
             operation.opcode == ir::Opcode::RepeatMoveByte ||
+            operation.opcode == ir::Opcode::RepeatStore ||
             operation.opcode == ir::Opcode::LoadGuest ||
             operation.opcode == ir::Opcode::ReadTimestampCounter;
     }
@@ -12007,6 +12055,26 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.mov(arm64::x1, arm64::x0);
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(arm64::x16, pointerBits(&repeatMoveByte));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(completed);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0, static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(completed);
+            break;
+        }
+        case ir::Opcode::RepeatStore: {
+            const auto fault = assembler.makeLabel();
+            const auto completed = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.movImmediate(arm64::x2, operation.width == ir::Width::I8     ? 1U
+                                                 : operation.width == ir::Width::I16 ? 2U
+                                                 : operation.width == ir::Width::I32 ? 4U
+                                                                                      : 8U);
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&repeatStore));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(completed);

@@ -21250,6 +21250,68 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testRepStosdStore() {
+    // Observed in libsystem_c under an AppKit fixture: REP STOSD.
+    constexpr std::array<std::uint8_t, 3> code{0xF3, 0xAB, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802D2BD80ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::RepStosd,
+           "REP STOSD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2}, "REP STOSD length differs");
+    expect(rosa::debug::dumpX86(decoded).find("rep stosd") != std::string::npos,
+           "REP STOSD dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("repeat_store.i32") != std::string::npos,
+           "REP STOSD did not lower through repeat-store IR");
+    rosa::x86::X86State state;
+    state.rdi = 0x8100;
+    state.rax = 0xA5A5A5A5;
+    state.rcx = 4;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    for (std::uint64_t offset = 0; offset < 4; ++offset) {
+        expectEqual(addressSpace.readU32(rosa::guest::GuestAddress{0x8100 + offset * 4}),
+                    std::uint32_t{0xA5A5A5A5}, "REP STOSD stored the wrong dword");
+    }
+    expectEqual(state.rdi, std::uint64_t{0x8110}, "REP STOSD advanced RDI wrongly");
+    expectEqual(state.rcx, std::uint64_t{0}, "REP STOSD did not exhaust RCX");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "REP STOSD changed flags");
+}
+
+void testRepStosqStore() {
+    constexpr std::array<std::uint8_t, 4> code{0xF3, 0x48, 0xAB, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::RepStosq,
+           "REP STOSQ opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "REP STOSQ length differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = 0x8100;
+    state.rax = 0x1122334455667788ULL;
+    state.rcx = 2;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8100}),
+                std::uint64_t{0x1122334455667788ULL}, "REP STOSQ stored the wrong qword");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{0x8108}),
+                std::uint64_t{0x1122334455667788ULL}, "REP STOSQ stored the wrong tail");
+    expectEqual(state.rdi, std::uint64_t{0x8110}, "REP STOSQ advanced RDI wrongly");
+    expectEqual(state.rcx, std::uint64_t{0}, "REP STOSQ did not exhaust RCX");
+}
+
 void testMinsdRegisters() {
     // Observed in CoreFoundation under an AppKit fixture: MINSD xmm1, xmm0.
     constexpr std::array<std::uint8_t, 5> code{0xF2, 0x0F, 0x5D, 0xC8, 0xC3};
@@ -38489,6 +38551,8 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"REP STOSD store", testRepStosdStore},
+        {"REP STOSQ store", testRepStosqStore},
         {"MINSD registers execution", testMinsdRegisters},
         {"MAXSD registers execution", testMaxsdRegisters},
         {"CVTTSD2SI registers execution", testCvttsd2siRegisters},

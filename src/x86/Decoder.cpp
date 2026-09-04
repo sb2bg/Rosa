@@ -6484,6 +6484,39 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0xF3U && code.size() - cursor >= 2) {
+            auto stosCursor = cursor + 1;
+            const bool hasStosRex =
+                stosCursor < code.size() && code[stosCursor] >= 0x40U &&
+                code[stosCursor] <= 0x4FU;
+            const auto stosRex = hasStosRex ? code[stosCursor++] : std::uint8_t{0};
+            const bool isStos =
+                code.size() - stosCursor >= 1 &&
+                (code[stosCursor] == 0xAAU || code[stosCursor] == 0xABU);
+            if (isStos) {
+                if ((stosRex & 0x7U) != 0) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only REX.W is supported for REP STOS");
+                }
+                const bool isByte = code[stosCursor] == 0xAAU;
+                instruction.opcode = isByte                 ? Opcode::RepStosb
+                                     : (stosRex & 0x8U) != 0 ? Opcode::RepStosq
+                                                            : Opcode::RepStosd;
+                const auto length = stosCursor + 1 - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() +
+                                static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = stosCursor + 1;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
         if (code[cursor] == 0xF3U && code.size() - cursor >= 5 &&
             code[cursor + 1] >= 0x40U && code[cursor + 1] <= 0x4FU &&
             code[cursor + 2] == 0x0FU && code[cursor + 3] == 0x7FU) {

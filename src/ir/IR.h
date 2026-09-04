@@ -97,6 +97,7 @@ enum class Opcode {
     BitScanForward,
     BitScanReverse,
     RepeatMoveByte,
+    RepeatStore,
     DivideUnsignedByte,
     DivideUnsignedDword,
     DivideUnsignedQword,
@@ -357,6 +358,7 @@ class Builder {
     void bitScanReverse(x86::Register destination, x86::Register source,
                         Width width, guest::GuestAddress rip);
     void repeatMoveByte(guest::GuestAddress rip);
+    void repeatStore(Width width, guest::GuestAddress rip);
     void divideUnsignedByte(ValueId divisor, guest::GuestAddress rip);
     void divideUnsignedDword(ValueId divisor, guest::GuestAddress rip);
     void divideUnsignedQword(ValueId divisor, guest::GuestAddress rip);

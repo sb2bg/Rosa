@@ -971,6 +971,14 @@ void Builder::repeatMoveByte(guest::GuestAddress rip) {
     });
 }
 
+void Builder::repeatStore(Width width, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::RepeatStore,
+        .width = width,
+        .guestRip = rip,
+    });
+}
+
 void Builder::divideUnsignedByte(ValueId divisor, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::DivideUnsignedByte,
@@ -1685,6 +1693,13 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::RepeatMoveByte:
             if (operation.width != Width::I8) {
                 errors.emplace_back("repeat_move_byte requires i8");
+            }
+            break;
+        case Opcode::RepeatStore:
+            if (operation.width != Width::I8 && operation.width != Width::I16 &&
+                operation.width != Width::I32 && operation.width != Width::I64) {
+                errors.emplace_back(
+                    "repeat_store requires i8, i16, i32, or i64");
             }
             break;
         case Opcode::Push:
