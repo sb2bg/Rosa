@@ -2985,6 +2985,43 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             }
             break;
         }
+        case x86::Opcode::Cvtdq2pdXmmReg:
+        case x86::Opcode::Cvtdq2pdXmmMem: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::Cvtdq2pdXmmMem;
+            stream << "cvtdq2pd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", ";
+            if (!fromMemory) {
+                stream << x86::xmmRegisterName(
+                    std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                stream << "qword [";
+                if (memory.ripRelative) {
+                    stream << "rip";
+                } else {
+                    stream << x86::registerName(memory.base);
+                }
+                if (memory.index) {
+                    stream << '+' << x86::registerName(*memory.index);
+                    if (memory.scale != 1) {
+                        stream << '*' << static_cast<unsigned>(memory.scale);
+                    }
+                }
+                if (memory.displacement < 0) {
+                    stream << "-0x" << -memory.displacement;
+                } else if (memory.displacement > 0) {
+                    stream << "+0x" << memory.displacement;
+                }
+                stream << ']';
+            }
+            break;
+        }
         case x86::Opcode::Cvtss2sdXmmReg:
         case x86::Opcode::Cvtss2sdXmmMem: {
             const bool fromMemory =
@@ -3650,6 +3687,10 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::ConvertFloatToDoubleXmm:
             stream << "convert_float_to_double_xmm.i32 " << valueName(*operation.lhs)
+                   << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::ConvertInt32x2ToDoubleXmm:
+            stream << "convert_int32x2_to_double_xmm.i64 " << valueName(*operation.lhs)
                    << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;
         case ir::Opcode::ScalarDoubleXmm: {

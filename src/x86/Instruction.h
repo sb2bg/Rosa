@@ -203,6 +203,8 @@ enum class Opcode {
     Cvtsi2sdXmmMem,
     Cvtss2sdXmmReg,
     Cvtss2sdXmmMem,
+    Cvtdq2pdXmmReg,
+    Cvtdq2pdXmmMem,
     AddsdXmmReg,
     AddsdXmmMem,
     SubsdXmmReg,

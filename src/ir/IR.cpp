@@ -659,6 +659,18 @@ void Builder::convertFloatToDoubleXmm(ValueId value, x86::XmmRegister destinatio
         .guestXmmRegister = destination,
     });
 }
+void Builder::convertInt32x2ToDoubleXmm(ValueId lowBits,
+                                              x86::XmmRegister destination,
+                                              guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ConvertInt32x2ToDoubleXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = lowBits,
+        .guestXmmRegister = destination,
+    });
+}
+
 
 void Builder::scalarDoubleXmm(ValueId sourceBits, x86::XmmRegister destination,
                               std::uint8_t operation, guest::GuestAddress rip) {
@@ -1818,6 +1830,13 @@ std::vector<std::string> verify(const Block &block) {
             if (!operation.guestXmmRegister || operation.width != Width::I32) {
                 errors.emplace_back(
                     "convert_float_to_double_xmm requires an XMM register and i32");
+            }
+            break;
+        case Opcode::ConvertInt32x2ToDoubleXmm:
+            checkUse(operation.lhs, "low qword bits");
+            if (!operation.guestXmmRegister || operation.width != Width::I64) {
+                errors.emplace_back(
+                    "convert_int32x2_to_double_xmm requires an XMM register and i64");
             }
             break;
         case Opcode::ScalarDoubleXmm:

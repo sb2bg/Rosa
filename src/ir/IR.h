@@ -72,6 +72,7 @@ enum class Opcode {
     UpdateUnorderedFloatFlags,
     ConvertIntToDoubleXmm,
     ConvertFloatToDoubleXmm,
+    ConvertInt32x2ToDoubleXmm,
     ScalarDoubleXmm,
     AddXmmDwords,
     HorizontalAddXmmDwords,
@@ -267,6 +268,9 @@ class Builder {
                                Width width, guest::GuestAddress rip);
     void convertFloatToDoubleXmm(ValueId value, x86::XmmRegister destination,
                                  guest::GuestAddress rip);
+    void convertInt32x2ToDoubleXmm(ValueId lowBits,
+                                       x86::XmmRegister destination,
+                                       guest::GuestAddress rip);
     // Selector: 0 = add, 1 = subtract, 2 = multiply, 3 = divide. The source
     // is a raw double bit pattern; the destination high lane is preserved.
     void scalarDoubleXmm(ValueId sourceBits, x86::XmmRegister destination,

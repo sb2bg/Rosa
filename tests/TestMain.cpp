@@ -20740,6 +20740,40 @@ void testMovqXmmToGuestMemory() {
     expectEqual(ripState.rflags, std::uint64_t{0x8D7}, "RIP-relative MOVQ changed flags");
 }
 
+void testConvertInt32x2ToDoubleXmm() {
+    // Observed in CoreGraphics under an Objective-C fixture: CVTDQ2PD xmm0, xmm0.
+    constexpr std::array<std::uint8_t, 5> code{0xF3, 0x0F, 0xE6, 0xC0, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4E28ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::Cvtdq2pdXmmReg,
+           "CVTDQ2PD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "CVTDQ2PD length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0,
+           "CVTDQ2PD xmm0, xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cvtdq2pd xmm0, xmm0") != std::string::npos,
+           "CVTDQ2PD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("convert_int32x2_to_double_xmm.i64") != std::string::npos,
+           "CVTDQ2PD did not lower through conversion IR");
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x0000002AFFFFFFFFULL, .high = 0xAAAAAAAAAAAAAAAAULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // d0 -1 becomes -1.0, d1 42 becomes 42.0.
+    expectEqual(state.xmm[0].low, std::uint64_t{0xBFF0000000000000ULL},
+                "CVTDQ2PD low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x4045000000000000ULL},
+                "CVTDQ2PD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "CVTDQ2PD changed flags");
+}
+
 void testConvertFloat32ToDoubleXmm() {
     // Observed in CoreGraphics under an Objective-C fixture:
     // CVTSS2SD xmm0, dword [rax+r15*8].
@@ -36525,6 +36559,7 @@ int main() {
         {"MOVQ XMM to guest memory", testMovqXmmToGuestMemory},
         {"MOVQ guest memory to XMM", testMovqGuestMemoryToXmm},
         {"CVTSI2SD int32 to XMM", testConvertInt32ToDoubleXmm},
+        {"CVTDQ2PD int32x2 to XMM", testConvertInt32x2ToDoubleXmm},
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},

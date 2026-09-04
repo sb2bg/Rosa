@@ -4642,6 +4642,104 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if ((code[cursor] == 0xF3U && code.size() - cursor >= 4 &&
+             code[cursor + 1] == 0x0FU && code[cursor + 2] == 0xE6U) ||
+            (code.size() - cursor >= 5 && code[cursor] == 0xF3U &&
+             code[cursor + 1] >= 0x40U && code[cursor + 1] <= 0x4FU &&
+             code[cursor + 2] == 0x0FU && code[cursor + 3] == 0xE6U)) {
+            const bool hasCvtdq2pdRex = code[cursor + 1] != 0x0FU;
+            const auto rex = hasCvtdq2pdRex ? code[cursor + 1] : 0U;
+            const auto rexR = (rex & 0x4U) != 0;
+            const auto rexX = (rex & 0x2U) != 0;
+            const auto rexB = (rex & 0x1U) != 0;
+            const auto opcodeOffset = cursor + (hasCvtdq2pdRex ? 2U : 1U);
+            const auto modrm = code[opcodeOffset + 2];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+            const auto destination = XmmRegisterOperand{static_cast<XmmRegister>(
+                static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) |
+                                          (rexR ? 8U : 0U)))};
+            auto operandCursor = opcodeOffset + 3;
+            if (mode == 0x3U) {
+                instruction.opcode = Opcode::Cvtdq2pdXmmReg;
+                instruction.operands.push_back(destination);
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        rmEncoding | (rexB ? 8U : 0U)))});
+            } else {
+                const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
+                if (mode == 0 && rmEncoding == 0x5U && rexB) {
+                    throw DecodeError(address, remaining,
+                                      "R13-based CVTDQ2PD is not supported");
+                }
+                auto baseEncoding = rmEncoding;
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
+                if (!ripRelative && rmEncoding == 0x4U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated CVTDQ2PD SIB byte");
+                    }
+                    const auto sib = code[operandCursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(address, remaining,
+                                          "no-base CVTDQ2PD SIB is not supported");
+                    }
+                    if (indexEncoding != 0x4U || rexX) {
+                        index = decodeRegister(indexEncoding, rexX);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                } else if (!ripRelative && rexX) {
+                    throw DecodeError(address, remaining,
+                                      "REX.X requires a CVTDQ2PD SIB");
+                }
+                std::int64_t displacement = 0;
+                if (mode == 0x1U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated CVTDQ2PD disp8");
+                    }
+                    displacement =
+                        std::bit_cast<std::int8_t>(code[operandCursor++]);
+                } else if (mode == 0x2U || ripRelative) {
+                    if (code.size() - operandCursor < 4) {
+                        throw DecodeError(address, remaining,
+                                          "truncated CVTDQ2PD disp32");
+                    }
+                    displacement = readI32(code.subspan(operandCursor, 4));
+                    operandCursor += 4;
+                }
+                if (ripRelative) {
+                    static_cast<void>(relativeTarget(
+                        address, operandCursor - instructionStart,
+                        displacement));
+                }
+                instruction.opcode = Opcode::Cvtdq2pdXmmMem;
+                instruction.operands.push_back(destination);
+                instruction.operands.push_back(
+                    ripRelative
+                        ? MemoryOperand{Register::Rax, displacement, 64,
+                                        std::nullopt, 1, false, true}
+                        : MemoryOperand{decodeRegister(baseEncoding, rexB),
+                                        displacement, 64, index, scale});
+            }
+            const auto length = operandCursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
+            result.push_back(std::move(instruction));
+            cursor = operandCursor;
+            if (result.size() == maximumInstructions) {
+                return result;
+            }
+            continue;
+        }
+
+        if ((code[cursor] == 0xF3U && code.size() - cursor >= 4 &&
              code[cursor + 1] == 0x0FU &&
              (code[cursor + 2] == 0x10U || code[cursor + 2] == 0x11U)) ||
             (code.size() - cursor >= 5 && code[cursor] == 0xF3U &&

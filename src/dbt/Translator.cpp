@@ -842,6 +842,21 @@ convertFloatToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+convertInt32x2ToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
+                          std::uint64_t lowBits) noexcept {
+    if (destinationIndex >= state->xmm.size()) {
+        return state;
+    }
+    // Both int32 lanes are always exactly representable as doubles.
+    const auto low = std::bit_cast<std::uint64_t>(
+        static_cast<double>(static_cast<std::int32_t>(lowBits)));
+    const auto high = std::bit_cast<std::uint64_t>(
+        static_cast<double>(static_cast<std::int32_t>(lowBits >> 32U)));
+    state->xmm[destinationIndex] = {.low = low, .high = high};
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 scalarDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
                 std::uint64_t sourceBits, std::uint64_t operation) noexcept {
     if (destinationIndex >= state->xmm.size()) {
@@ -4408,6 +4423,68 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             // no IR value stays live across its call.
             builder.convertIntToDoubleXmm(integer, destination, width,
                                           instruction.address);
+            break;
+        }
+        case x86::Opcode::Cvtdq2pdXmmReg:
+        case x86::Opcode::Cvtdq2pdXmmMem: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::Cvtdq2pdXmmMem;
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error(
+                    "internal decoder error: CVTDQ2PD operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            ir::ValueId lowBits{};
+            if (!fromMemory) {
+                const auto source =
+                    std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+                lowBits = builder.readGuestXmmLane(source, false,
+                                                   instruction.address);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                if (memory.width != 64 ||
+                    (memory.ripRelative
+                         ? memory.hasBase || memory.index.has_value()
+                         : !memory.hasBase) ||
+                    memory.segment != x86::Segment::None) {
+                    throw std::runtime_error(
+                        "unsupported CVTDQ2PD memory addressing");
+                }
+                auto address =
+                    memory.ripRelative
+                        ? builder.constant(instruction.address.value + instruction.length,
+                                           ir::Width::I64, instruction.address)
+                        : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                    instruction.address);
+                if (memory.index) {
+                    auto index = builder.readGuestRegister(
+                        *memory.index, ir::Width::I64, instruction.address);
+                    if (memory.scale != 1) {
+                        index = builder.shiftLeft(
+                            index,
+                            static_cast<std::uint8_t>(
+                                std::countr_zero(memory.scale)),
+                            ir::Width::I64, instruction.address);
+                    }
+                    address = builder.add(address, index, ir::Width::I64,
+                                          instruction.address);
+                }
+                if (memory.displacement != 0) {
+                    const auto displacement = builder.constant(
+                        static_cast<std::uint64_t>(memory.displacement),
+                        ir::Width::I64, instruction.address);
+                    address = builder.add(address, displacement, ir::Width::I64,
+                                          instruction.address);
+                }
+                lowBits = builder.loadGuest(address, ir::Width::I64,
+                                            instruction.address);
+            }
+            // The conversion helper is pure: the low bits are consumed here,
+            // so no IR value stays live across its call.
+            builder.convertInt32x2ToDoubleXmm(lowBits, destination,
+                                              instruction.address);
             break;
         }
         case x86::Opcode::Cvtss2sdXmmReg:
@@ -9857,6 +9934,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::UpdateUnorderedFloatFlags ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
             operation.opcode == ir::Opcode::ConvertFloatToDoubleXmm ||
+            operation.opcode == ir::Opcode::ConvertInt32x2ToDoubleXmm ||
             operation.opcode == ir::Opcode::ScalarDoubleXmm ||
             operation.opcode == ir::Opcode::AddXmmDwords ||
             operation.opcode == ir::Opcode::HorizontalAddXmmDwords ||
@@ -11655,6 +11733,14 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                                    static_cast<std::uint64_t>(*operation.guestXmmRegister));
             assembler.mov(arm64::x2, hostRegister(*operation.lhs));
             assembler.movImmediate(arm64::x16, pointerBits(&convertFloatToDoubleXmm));
+            assembler.blr(arm64::x16);
+            break;
+        }
+        case ir::Opcode::ConvertInt32x2ToDoubleXmm: {
+            assembler.movImmediate(arm64::x1,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x16, pointerBits(&convertInt32x2ToDoubleXmm));
             assembler.blr(arm64::x16);
             break;
         }
