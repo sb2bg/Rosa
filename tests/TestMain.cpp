@@ -25455,6 +25455,80 @@ void testDarwinOsVariantStatusSysctl() {
                 "faulted kern.osvariant_status changed its length");
 }
 
+void testDarwinGetdirentriesHostDirectory() {
+    // Observed under an AppKit fixture: getdirentries64(appDirFd, buf, count, &pos).
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto entriesNumber = UINT64_C(0x02000158);
+    constexpr std::uint32_t openDirectory = 0x00100000;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress bufferAddress{0x9000};
+    constexpr rosa::guest::GuestAddress positionAddress{0xB000};
+    constexpr std::array<std::uint8_t, 2> currentDirectoryPath{'.', 0};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize * 4,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, currentDirectoryPath);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State openState;
+    openState.rax = openNumber;
+    openState.rdi = pathAddress.value;
+    openState.rsi = openDirectory;
+    openState.rdx = 0;
+    openState.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, openState, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(openState.rax, std::uint64_t{3},
+                "entries fixture open returned the wrong descriptor");
+
+    rosa::x86::X86State state;
+    state.rax = entriesNumber;
+    state.rdi = 3;
+    state.rsi = bufferAddress.value;
+    state.rdx = 0x2000;
+    state.rcx = positionAddress.value;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E3128CULL});
+    expect(!outcome.exited, "getdirentries64 terminated the guest");
+    expect(state.rax > 0, "getdirentries64 returned no bytes");
+    expectEqual(state.rflags, std::uint64_t{0x8D6}, "getdirentries64 did not clear BSD carry");
+    const auto first = addressSpace.readBytes(bufferAddress, 24);
+    const std::uint16_t reclen = static_cast<std::uint16_t>(first[16]) |
+                                 (static_cast<std::uint16_t>(first[17]) << 8U);
+    const std::uint16_t namlen = static_cast<std::uint16_t>(first[18]) |
+                                 (static_cast<std::uint16_t>(first[19]) << 8U);
+    expect(reclen >= 24 && reclen <= state.rax, "getdirentries64 record length differs");
+    expect(namlen > 0 && namlen <= 255, "getdirentries64 name length differs");
+    const auto name = addressSpace.readBytes(
+        rosa::guest::GuestAddress{bufferAddress.value + 21}, namlen);
+    expect(std::string_view(reinterpret_cast<const char *>(name.data()), name.size()) == "." ||
+               std::string_view(reinterpret_cast<const char *>(name.data()), name.size()) == "..",
+           "getdirentries64 first entry is not a dot entry");
+
+    // A second call resumes past the entries already returned.
+    const auto firstCount = state.rax;
+    state.rax = entriesNumber;
+    state.rdi = 3;
+    state.rsi = bufferAddress.value;
+    state.rdx = 0x2000;
+    state.rcx = 0;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expect(state.rax < firstCount, "getdirentries64 did not resume the listing");
+
+    state.rax = entriesNumber;
+    state.rdi = 99;
+    state.rsi = bufferAddress.value;
+    state.rdx = 0x2000;
+    state.rcx = 0;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "getdirentries64 on a bad descriptor returned the wrong errno");
+}
+
 void testDarwinFstatfsHostDirectory() {
     // Observed under an AppKit fixture: fstatfs64(appDirFd, buf).
     constexpr auto openNumber = UINT64_C(0x02000005);
@@ -37520,6 +37594,7 @@ int main() {
         {"Darwin iOS-support-version sysctl", testDarwinIosSupportVersionSysctl},
         {"Darwin OS-variant-status sysctl", testDarwinOsVariantStatusSysctl},
         {"Darwin kern.proc.pid sysctl", testDarwinSysctlKernProcPid},
+        {"Darwin getdirentries host directory", testDarwinGetdirentriesHostDirectory},
         {"Darwin fstatfs host directory", testDarwinFstatfsHostDirectory},
         {"Darwin open directory within current directory", testDarwinOpenDirectoryWithinCurrentDirectory},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},

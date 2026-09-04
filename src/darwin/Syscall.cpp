@@ -7,6 +7,7 @@
 #include <libproc.h>
 #include <mach/mach.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/mount.h>
 #include <sys/random.h>
 #include <sys/resource.h>
@@ -76,6 +77,7 @@ constexpr std::uint64_t syscallStat64 = unixSyscallClass | 338U;
 constexpr std::uint64_t syscallFstat64 = unixSyscallClass | 339U;
 constexpr std::uint64_t syscallGetfsstat64 = unixSyscallClass | 347U;
 constexpr std::uint64_t syscallFstatfs64 = unixSyscallClass | 346U;
+constexpr std::uint64_t syscallGetdirentries64 = unixSyscallClass | 344U;
 constexpr std::uint64_t syscallBsdthreadRegister = unixSyscallClass | 366U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
 constexpr std::uint64_t syscallMac = unixSyscallClass | 381U;
@@ -2407,6 +2409,103 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
         setSuccess(state, 0);
         return {};
     }
+    if (number == syscallGetdirentries64) {
+        const auto descriptor = GuestFileDescriptor{
+            std::bit_cast<std::int32_t>(
+                static_cast<std::uint32_t>(state.rdi))};
+        auto *file = fileSpace_.lookupMutable(descriptor);
+        if (file == nullptr) {
+            setError(state, EBADF);
+            return {};
+        }
+        if ((file->kind != GuestFileKind::HostReadOnlyFile &&
+             file->kind != GuestFileKind::CurrentDirectory) ||
+            !std::filesystem::is_directory(file->guestPath)) {
+            std::ostringstream reason;
+            reason << "getdirentries64 is only implemented for hosted directory descriptors; got fd="
+                   << descriptor.value;
+            throw unsupported(state, syscallRip, reason.str());
+        }
+        const auto byteCount = static_cast<std::uint64_t>(state.rdx);
+        if (byteCount > maximumControlledWrite) {
+            setError(state, EINVAL);
+            return {};
+        }
+        try {
+            addressSpace.validateAccess(
+                guest::GuestAddress{state.rsi}, static_cast<std::size_t>(byteCount),
+                guest::Permission::Write);
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        // The descriptor offset doubles as the directory resume index:
+        // descriptors are metadata-only, so each call reopens the host
+        // directory and skips entries already returned.
+        const std::uint64_t startIndex = file->offset;
+        std::uint64_t resumeIndex = startIndex;
+        std::vector<std::uint8_t> output;
+        output.reserve(static_cast<std::size_t>(byteCount));
+        int hostError = 0;
+        if (DIR *directory = ::opendir(file->guestPath.c_str())) {
+            std::uint64_t entryIndex = 0;
+            for (const auto *entry = ::readdir(directory); entry != nullptr;
+                 entry = ::readdir(directory)) {
+                if (entryIndex < startIndex) {
+                    ++entryIndex;
+                    continue;
+                }
+                const std::string_view name{entry->d_name};
+                const auto recordLength =
+                    (21U + static_cast<std::uint32_t>(name.size()) + 1U + 7U) & ~7U;
+                if (output.size() + recordLength > byteCount) {
+                    break;
+                }
+                const auto recordOffset = output.size();
+                output.resize(recordOffset + recordLength, 0);
+                const auto ino = static_cast<std::uint64_t>(entry->d_ino);
+                std::memcpy(output.data() + recordOffset, &ino, sizeof(ino));
+                std::memcpy(output.data() + recordOffset + 8, &entryIndex,
+                            sizeof(entryIndex));
+                const auto reclen = static_cast<std::uint16_t>(recordLength);
+                std::memcpy(output.data() + recordOffset + 16, &reclen, sizeof(reclen));
+                const auto namlen = static_cast<std::uint16_t>(name.size());
+                std::memcpy(output.data() + recordOffset + 18, &namlen, sizeof(namlen));
+                output[recordOffset + 20] = static_cast<std::uint8_t>(entry->d_type);
+                std::memcpy(output.data() + recordOffset + 21, name.data(), name.size());
+                ++entryIndex;
+            }
+            resumeIndex = entryIndex;
+            ::closedir(directory);
+        } else {
+            hostError = errno;
+        }
+        if (hostError != 0) {
+            setError(state, hostError);
+            return {};
+        }
+        file->offset = resumeIndex;
+        if (!output.empty()) {
+            addressSpace.writeBytes(guest::GuestAddress{state.rsi}, output);
+        }
+        if (state.rcx != 0) {
+            try {
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.rcx}, sizeof(resumeIndex),
+                    guest::Permission::Write);
+                addressSpace.writeBytes(
+                    guest::GuestAddress{state.rcx},
+                    std::span<const std::uint8_t>{
+                        reinterpret_cast<const std::uint8_t *>(&resumeIndex),
+                        sizeof(resumeIndex)});
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+        }
+        setSuccess(state, static_cast<std::uint32_t>(output.size()));
+        return {};
+    }
     if (number == syscallFstatat64) {
         std::optional<std::string> path;
         try {
@@ -2578,9 +2677,9 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             }
             const auto count = static_cast<std::size_t>(state.rdx);
             if (count == 0) {
-                setSuccess(state, 0);
-                return {};
-            }
+        setSuccess(state, 0);
+        return {};
+    }
             try {
                 addressSpace.validateAccess(guest::GuestAddress{state.rsi},
                                             count,
