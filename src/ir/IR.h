@@ -74,6 +74,8 @@ enum class Opcode {
     ArithmeticGuestMemoryPackedDoubleXmm,
     UnpackHighPackedSingleXmm,
     UnpackHighGuestPackedSingleXmm,
+    HorizontalAddPackedDoubleXmm,
+    HorizontalAddGuestPackedDoubleXmm,
     UpdateUnorderedDoubleFlags,
     UpdateUnorderedFloatFlags,
     ConvertIntToDoubleXmm,
@@ -284,6 +286,12 @@ class Builder {
     void unpackHighGuestPackedSingleXmm(ValueId address,
                                         x86::XmmRegister destination,
                                         guest::GuestAddress rip);
+    void horizontalAddPackedDoubleXmm(x86::XmmRegister destination,
+                                      x86::XmmRegister source,
+                                      guest::GuestAddress rip);
+    void horizontalAddGuestPackedDoubleXmm(ValueId address,
+                                           x86::XmmRegister destination,
+                                           guest::GuestAddress rip);
     void updateUnorderedDoubleFlags(ValueId destinationBits,
                                         ValueId sourceBits,
                                         guest::GuestAddress rip);

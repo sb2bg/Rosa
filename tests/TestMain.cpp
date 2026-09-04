@@ -21249,6 +21249,78 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testHaddpdRegisters() {
+    // Observed in ColorSync under an Objective-C fixture: HADDPD xmm4, xmm4.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x7C, 0xE4, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4EFFULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::HaddpdRegReg,
+           "HADDPD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "HADDPD length differs");
+    expect(rosa::debug::dumpX86(decoded).find("haddpd xmm4, xmm4") != std::string::npos,
+           "HADDPD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("horizontal_add_packed_double_xmm.i64") != std::string::npos,
+           "HADDPD did not lower through horizontal-add IR");
+    rosa::x86::X86State state;
+    state.xmm[4] = {.low = 0x3FF8000000000000ULL, .high = 0x4002000000000000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // 1.5 + 2.25 = 3.75 in both lanes.
+    expectEqual(state.xmm[4].low, std::uint64_t{0x400E000000000000ULL},
+                "HADDPD low lane differs");
+    expectEqual(state.xmm[4].high, std::uint64_t{0x400E000000000000ULL},
+                "HADDPD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "HADDPD changed flags");
+}
+
+void testHaddpdGuestMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0x7C, 0x07, 0xC3, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::HaddpdRegMem,
+           "HADDPD xmm, [memory] opcode differs");
+    expect(rosa::debug::dumpX86(decoded).find("haddpd xmm0, xmmword [rdi]") !=
+               std::string::npos,
+           "HADDPD xmm, [memory] dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 16> bytes{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x3F,
+                                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8000}, bytes);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = 0x8000;
+    state.xmm[0] = {.low = 0x3FF8000000000000ULL, .high = 0x4002000000000000ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    // Dest: 1.5 + 2.25 = 3.75; source mem: 1.0 + 2.0 = 3.0.
+    expectEqual(state.xmm[0].low, std::uint64_t{0x400E000000000000ULL},
+                "HADDPD memory low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x4008000000000000ULL},
+                "HADDPD memory high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "HADDPD changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rdi = 0x8000;
+    faultState.xmm[0] = {.low = 1, .high = 2};
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") != std::string_view::npos;
+    }
+    expect(rejected, "HADDPD from unmapped guest memory did not fail");
+}
+
 void testUnpckhpsRegisters() {
     // Observed in ColorSync under an Objective-C fixture: UNPCKHPS xmm2, xmm3.
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x15, 0xD3, 0xC3};
@@ -36884,6 +36956,8 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"HADDPD registers execution", testHaddpdRegisters},
+        {"HADDPD guest memory execution", testHaddpdGuestMemoryGeneratedExecution},
         {"UNPCKHPS registers execution", testUnpckhpsRegisters},
         {"UNPCKHPS guest memory execution", testUnpckhpsGuestMemoryGeneratedExecution},
                 {"SUBPD registers execution", testSubpdRegisters},
