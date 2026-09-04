@@ -21249,6 +21249,50 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testCpuidLeaves() {
+    // Observed in libcrypto under an Objective-C fixture: CPUID vendor/feature dispatch.
+    constexpr std::array<std::uint8_t, 3> code{0x0F, 0xA2, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FFE06E5EC75ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::Cpuid, "CPUID opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{2}, "CPUID length differs");
+    expect(rosa::debug::dumpX86(decoded).find("cpuid") != std::string::npos,
+           "CPUID dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find("cpuid") !=
+               std::string::npos,
+           "CPUID did not lower through cpuid IR");
+
+    // Leaf 0 reports the vendor string and maximum basic leaf.
+    rosa::x86::X86State vendorState;
+    vendorState.rax = 0;
+    vendorState.rcx = 0;
+    vendorState.rflags = 0xAD7;
+    static_cast<void>(block.execute(vendorState));
+    expectEqual(vendorState.rax, std::uint64_t{7}, "CPUID leaf 0 max leaf differs");
+    expectEqual(vendorState.rbx, std::uint64_t{0x756E6547ULL}, "CPUID vendor EBX differs");
+    expectEqual(vendorState.rdx, std::uint64_t{0x49656E69ULL}, "CPUID vendor EDX differs");
+    expectEqual(vendorState.rcx, std::uint64_t{0x6C65746EULL}, "CPUID vendor ECX differs");
+    expectEqual(vendorState.rflags, std::uint64_t{0xAD7}, "CPUID changed flags");
+
+    // Leaf 1 reports version info and the SSE-through-SSE4.2 feature set.
+    rosa::x86::X86State featureState;
+    featureState.rax = 1;
+    featureState.rcx = 0;
+    static_cast<void>(block.execute(featureState));
+    expectEqual(featureState.rax, std::uint64_t{0x106A5ULL}, "CPUID leaf 1 version differs");
+    expect((featureState.rcx & ((1ULL << 0U) | (1ULL << 9U) | (1ULL << 19U) | (1ULL << 20U))) ==
+               ((1ULL << 0U) | (1ULL << 9U) | (1ULL << 19U) | (1ULL << 20U)),
+           "CPUID leaf 1 misses SSE4-era features");
+    expect((featureState.rcx & (1ULL << 28U)) == 0, "CPUID advertises unimplemented AVX");
+    expect((featureState.rdx & ((1ULL << 25U) | (1ULL << 26U))) ==
+               ((1ULL << 25U) | (1ULL << 26U)),
+           "CPUID leaf 1 misses SSE/SSE2");
+}
+
 void testMovapsRegisters() {
     // Observed in SkyLight under an Objective-C fixture: MOVAPS xmm1, xmm0.
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x28, 0xC8, 0xC3};
@@ -37133,6 +37177,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"CPUID leaves", testCpuidLeaves},
         {"MOVAPS registers execution", testMovapsRegisters},
         {"SQRTPD registers execution", testSqrtpdRegisters},
         {"UNPCKLPS registers execution", testUnpcklpsRegisters},

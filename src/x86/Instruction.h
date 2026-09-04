@@ -248,6 +248,7 @@ enum class Opcode {
     Lfence,
     Mfence,
     Rdtsc,
+    Cpuid,
     SidtMem,
     JmpRelative,
     JmpReg,

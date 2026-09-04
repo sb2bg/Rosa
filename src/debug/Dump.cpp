@@ -3444,6 +3444,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::Rdtsc:
             stream << "rdtsc";
             break;
+        case x86::Opcode::Cpuid:
+            stream << "cpuid";
+            break;
         case x86::Opcode::JmpRelative:
             stream << "jmp 0x" << instruction.branchTarget->value;
             break;
@@ -4048,6 +4051,9 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::ReadTimestampCounter:
             stream << "read_timestamp_counter";
+            break;
+        case ir::Opcode::Cpuid:
+            stream << "cpuid";
             break;
         case ir::Opcode::UpdateAddFlags:
             stream << "update_add_flags." << widthName(operation.width) << ' '

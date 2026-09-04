@@ -1228,6 +1228,14 @@ void Builder::readTimestampCounter(guest::GuestAddress rip) {
     });
 }
 
+void Builder::cpuid(guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::Cpuid,
+        .width = Width::I64,
+        .guestRip = rip,
+    });
+}
+
 void Builder::updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                              guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -2152,6 +2160,8 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::LoadFence:
         case Opcode::StoreFence:
         case Opcode::ReadTimestampCounter:
+            break;
+        case Opcode::Cpuid:
             break;
         case Opcode::UpdateAddFlags:
         case Opcode::UpdateSubFlags:

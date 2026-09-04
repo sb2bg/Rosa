@@ -122,6 +122,7 @@ enum class Opcode {
     LoadFence,
     StoreFence,
     ReadTimestampCounter,
+    Cpuid,
     UpdateAddFlags,
     UpdateAdcFlags,
     UpdateSbbFlags,
@@ -393,6 +394,7 @@ class Builder {
     void loadFence(guest::GuestAddress rip);
     void storeFence(guest::GuestAddress rip);
     void readTimestampCounter(guest::GuestAddress rip);
+    void cpuid(guest::GuestAddress rip);
     void updateAddFlags(ValueId lhs, ValueId rhs, ValueId result, Width width,
                         guest::GuestAddress rip);
     void updateAdcFlags(ValueId lhs, ValueId rhs, ValueId carry, Width width,

@@ -1754,6 +1754,44 @@ readTimestampCounter(GuestExecutionContext *context, x86::X86State *state) noexc
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+cpuidGuest(x86::X86State *state) noexcept {
+    // Reports a Nehalem-era Intel CPU: SSE4.2 is the newest advertised
+    // vector extension, so feature dispatchers stay on instruction paths
+    // Rosa implements (no AVX/AVX2/FMA/AES/PCLMULQDQ/RDRAND).
+    const auto leaf = static_cast<std::uint32_t>(state->rax);
+    const auto subleaf = static_cast<std::uint32_t>(state->rcx);
+    std::uint32_t eax = 0;
+    std::uint32_t ebx = 0;
+    std::uint32_t ecx = 0;
+    std::uint32_t edx = 0;
+    if (leaf == 0U) {
+        eax = 7U;                // Maximum basic leaf.
+        ebx = 0x756E6547U;       // "Genu"
+        edx = 0x49656E69U;       // "ineI"
+        ecx = 0x6C65746EU;       // "ntel"
+    } else if (leaf == 1U) {
+        eax = 0x106A5U;          // Family 6, model 26, stepping 5.
+        ebx = 0x800U;            // CLFLUSH line size 8.
+        ecx = (1U << 0U) | (1U << 9U) | (1U << 19U) | (1U << 20U);  // SSE3/SSSE3/SSE4.1/SSE4.2.
+        edx = (1U << 0U) | (1U << 4U) | (1U << 5U) | (1U << 6U) | (1U << 8U) |
+              (1U << 9U) | (1U << 11U) | (1U << 12U) | (1U << 13U) | (1U << 14U) |
+              (1U << 15U) | (1U << 16U) | (1U << 17U) | (1U << 19U) | (1U << 23U) |
+              (1U << 24U) | (1U << 25U) | (1U << 26U);  // FPU..SSE2 baseline.
+    } else if (leaf == 7U && subleaf == 0U) {
+        eax = 0U;  // Maximum subleaf; no extended features advertised.
+    } else if (leaf == 0x80000000U) {
+        eax = 0x80000008U;  // Maximum extended leaf.
+    } else if (leaf == 0x80000001U) {
+        edx = (1U << 11U) | (1U << 20U) | (1U << 29U);  // SYSCALL/NX/long mode.
+    }
+    state->rax = eax;
+    state->rbx = ebx;
+    state->rcx = ecx;
+    state->rdx = edx;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateAddFlags64(x86::X86State *state, std::uint64_t lhs, std::uint64_t rhs, std::uint64_t result) {
     auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
     if (result < lhs) {
@@ -9170,6 +9208,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
         case x86::Opcode::Rdtsc:
             builder.readTimestampCounter(instruction.address);
             break;
+        case x86::Opcode::Cpuid:
+            builder.cpuid(instruction.address);
+            break;
         case x86::Opcode::JmpRelative:
             builder.exitDirect(*instruction.branchTarget, instruction.address);
             break;
@@ -10521,7 +10562,8 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::DivideUnsignedQword ||
             operation.opcode == ir::Opcode::DivideSignedDword ||
             operation.opcode == ir::Opcode::LoadGuest ||
-            operation.opcode == ir::Opcode::ReadTimestampCounter;
+            operation.opcode == ir::Opcode::ReadTimestampCounter ||
+            operation.opcode == ir::Opcode::Cpuid;
         hasExecutionContextCall |=
             operation.opcode == ir::Opcode::Push ||
             operation.opcode == ir::Opcode::DivideUnsignedByte ||
@@ -12688,6 +12730,10 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             break;
         case ir::Opcode::StoreFence:
             assembler.dmbIsh();
+            break;
+        case ir::Opcode::Cpuid:
+            assembler.movImmediate(arm64::x16, pointerBits(&cpuidGuest));
+            assembler.blr(arm64::x16);
             break;
         case ir::Opcode::ReadTimestampCounter: {
             const auto fault = assembler.makeLabel();
