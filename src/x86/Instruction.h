@@ -178,6 +178,7 @@ enum class Opcode {
     MovapsRegMem,
     MovapdRegMem,
     MovapdRegReg,
+    MovapsRegReg,
     MovupsMemReg,
     MovupsRegMem,
     VmovupsMemReg,

@@ -5669,8 +5669,12 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             const auto modrm = code[movupsLoadOpcodeOffset + 2];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            if (movapdLoad && mode == 0x3U) {
-                instruction.opcode = Opcode::MovapdRegReg;
+            if (mode == 0x3U) {
+                // 0F 10/0F 28 and 66 0F 10/66 0F 28 with a register source
+                // are all full 128-bit copies; alignment only matters for
+                // memory operands.
+                instruction.opcode = movapdLoad ? Opcode::MovapdRegReg
+                                                : Opcode::MovapsRegReg;
                 instruction.operands.push_back(XmmRegisterOperand{
                     static_cast<XmmRegister>(static_cast<std::uint8_t>(
                         ((modrm >> 3U) & 0x7U) |
@@ -5693,11 +5697,6 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 continue;
             }
             const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
-            if (mode > 0x2U) {
-                throw DecodeError(
-                    address, remaining,
-                    "only MOVAPD/MOVAPS/MOVUPS xmm, [base+index*scale/RIP+disp] memory operands are supported");
-            }
             auto operandCursor = movupsLoadOpcodeOffset + 3;
             auto baseEncoding = rmEncoding;
             std::optional<Register> index;

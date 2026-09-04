@@ -21249,6 +21249,37 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testMovapsRegisters() {
+    // Observed in SkyLight under an Objective-C fixture: MOVAPS xmm1, xmm0.
+    constexpr std::array<std::uint8_t, 4> code{0x0F, 0x28, 0xC8, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8095B0C0AULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovapsRegReg,
+           "MOVAPS opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "MOVAPS length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0,
+           "MOVAPS xmm1, xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("movaps xmm1, xmm0") != std::string::npos,
+           "MOVAPS dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    state.xmm[1] = {.low = 0xAAAAAAAAAAAAAAAAULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[1].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVAPS did not copy the low lane");
+    expectEqual(state.xmm[1].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVAPS did not copy the high lane");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVAPS changed flags");
+}
+
 void testSqrtpdRegisters() {
     // Observed in ColorSync under an Objective-C fixture: SQRTPD xmm0, xmm1.
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x51, 0xC1, 0xC3};
@@ -37102,6 +37133,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"MOVAPS registers execution", testMovapsRegisters},
         {"SQRTPD registers execution", testSqrtpdRegisters},
         {"UNPCKLPS registers execution", testUnpcklpsRegisters},
         {"UNPCKLPS guest memory execution", testUnpcklpsGuestMemoryGeneratedExecution},

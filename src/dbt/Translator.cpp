@@ -4460,6 +4460,7 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             break;
         }
         case x86::Opcode::MovapdRegReg:
+        case x86::Opcode::MovapsRegReg:
         case x86::Opcode::MovdqaRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
