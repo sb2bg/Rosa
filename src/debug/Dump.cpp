@@ -1887,12 +1887,15 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::MulpdRegReg:
         case x86::Opcode::MulpdRegMem:
         case x86::Opcode::AddpdRegReg:
-        case x86::Opcode::AddpdRegMem: {
+        case x86::Opcode::AddpdRegMem:
+        case x86::Opcode::SqrtpdRegReg:
+        case x86::Opcode::SqrtpdRegMem: {
             const bool fromMemory =
                 instruction.opcode == x86::Opcode::DivpdRegMem ||
                 instruction.opcode == x86::Opcode::SubpdRegMem ||
                 instruction.opcode == x86::Opcode::MulpdRegMem ||
-                instruction.opcode == x86::Opcode::AddpdRegMem;
+                instruction.opcode == x86::Opcode::AddpdRegMem ||
+                instruction.opcode == x86::Opcode::SqrtpdRegMem;
             const char *mnemonic = instruction.opcode == x86::Opcode::AddpdRegReg ||
                                            instruction.opcode == x86::Opcode::AddpdRegMem
                                        ? "addpd"
@@ -1902,6 +1905,9 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                                    : instruction.opcode == x86::Opcode::MulpdRegReg ||
                                            instruction.opcode == x86::Opcode::MulpdRegMem
                                        ? "mulpd"
+                                   : instruction.opcode == x86::Opcode::SqrtpdRegReg ||
+                                           instruction.opcode == x86::Opcode::SqrtpdRegMem
+                                       ? "sqrtpd"
                                        : "divpd";
             stream << mnemonic << " "
                    << x86::xmmRegisterName(
@@ -3844,7 +3850,8 @@ std::string dumpIr(const ir::Block &block) {
                 operation.immediate == 0U   ? "packed_add_double_xmm"
                 : operation.immediate == 1U ? "packed_subtract_double_xmm"
                 : operation.immediate == 2U ? "packed_multiply_double_xmm"
-                                            : "packed_divide_double_xmm";
+                : operation.immediate == 3U ? "packed_divide_double_xmm"
+                                            : "packed_sqrt_double_xmm";
             stream << operationName << ' '
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
                    << x86::xmmRegisterName(
@@ -3856,7 +3863,8 @@ std::string dumpIr(const ir::Block &block) {
                 operation.immediate == 0U   ? "packed_add_guest_double_xmm"
                 : operation.immediate == 1U ? "packed_subtract_guest_double_xmm"
                 : operation.immediate == 2U ? "packed_multiply_guest_double_xmm"
-                                            : "packed_divide_guest_double_xmm";
+                : operation.immediate == 3U ? "packed_divide_guest_double_xmm"
+                                            : "packed_sqrt_guest_double_xmm";
             stream << operationName << ' ' << valueName(*operation.lhs)
                    << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;

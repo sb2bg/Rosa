@@ -1993,12 +1993,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 afterPrefix + (hasDivpdRex ? 1U : 0U);
             if (code.size() - divpdOpcodeOffset >= 2 &&
                 code[divpdOpcodeOffset] == 0x0FU &&
-                (code[divpdOpcodeOffset + 1] == 0x58U ||
+                (code[divpdOpcodeOffset + 1] == 0x51U ||
+                 code[divpdOpcodeOffset + 1] == 0x58U ||
                  code[divpdOpcodeOffset + 1] == 0x59U ||
                  code[divpdOpcodeOffset + 1] == 0x5CU ||
                  code[divpdOpcodeOffset + 1] == 0x5EU)) {
                 const auto packedOpcode = code[divpdOpcodeOffset + 1];
-                const char *packedName = packedOpcode == 0x58U   ? "ADDPD"
+                const char *packedName = packedOpcode == 0x51U   ? "SQRTPD"
+                                         : packedOpcode == 0x58U ? "ADDPD"
                                          : packedOpcode == 0x59U ? "MULPD"
                                          : packedOpcode == 0x5CU ? "SUBPD"
                                                                  : "DIVPD";
@@ -2025,7 +2027,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                         ((rex & 0x4U) != 0 ? 8U : 0U)))};
                 auto operandCursor = divpdOpcodeOffset + 3;
                 if (mode == 0x3U) {
-                    instruction.opcode = packedOpcode == 0x58U   ? Opcode::AddpdRegReg
+                    instruction.opcode = packedOpcode == 0x51U   ? Opcode::SqrtpdRegReg
+                                         : packedOpcode == 0x58U ? Opcode::AddpdRegReg
                                          : packedOpcode == 0x59U ? Opcode::MulpdRegReg
                                          : packedOpcode == 0x5CU ? Opcode::SubpdRegReg
                                                                  : Opcode::DivpdRegReg;
@@ -2068,7 +2071,8 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                             address, operandCursor - instructionStart,
                             displacement));
                     }
-                    instruction.opcode = packedOpcode == 0x58U   ? Opcode::AddpdRegMem
+                    instruction.opcode = packedOpcode == 0x51U   ? Opcode::SqrtpdRegMem
+                                                     : packedOpcode == 0x58U ? Opcode::AddpdRegMem
                                                      : packedOpcode == 0x59U ? Opcode::MulpdRegMem
                                                      : packedOpcode == 0x5CU ? Opcode::SubpdRegMem
                                                                              : Opcode::DivpdRegMem;

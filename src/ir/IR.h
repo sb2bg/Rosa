@@ -273,7 +273,7 @@ class Builder {
                                 x86::XmmRegister source,
                                 std::uint8_t predicate,
                                 guest::GuestAddress rip);
-    // Selector: 0 = add, 1 = subtract, 2 = multiply, 3 = divide.
+    // Selector: 0 = add, 1 = subtract, 2 = multiply, 3 = divide, 4 = sqrt.
     void arithmeticPackedDoubleXmm(x86::XmmRegister destination,
                                    x86::XmmRegister source,
                                    std::uint8_t operation,

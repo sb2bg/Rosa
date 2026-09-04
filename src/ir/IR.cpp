@@ -1940,7 +1940,7 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::ArithmeticPackedDoubleXmm:
             if (!operation.guestXmmRegister ||
                 !operation.sourceGuestXmmRegister ||
-                operation.width != Width::I64 || operation.immediate > 3) {
+                operation.width != Width::I64 || operation.immediate > 4) {
                 errors.emplace_back(
                     "arithmetic_packed_double_xmm has incomplete operands");
             }
@@ -1948,7 +1948,7 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::ArithmeticGuestMemoryPackedDoubleXmm:
             checkUse(operation.lhs, "guest address");
             if (!operation.guestXmmRegister || operation.width != Width::I64 ||
-                operation.immediate > 3) {
+                operation.immediate > 4) {
                 errors.emplace_back(
                     "arithmetic_guest_memory_packed_double_xmm has incomplete operands");
             }

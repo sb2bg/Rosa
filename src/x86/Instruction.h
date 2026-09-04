@@ -231,6 +231,8 @@ enum class Opcode {
     MulpdRegMem,
     AddpdRegReg,
     AddpdRegMem,
+    SqrtpdRegReg,
+    SqrtpdRegMem,
     MovlpsRegMem,
     MovlpsMemXmm,
     MovdRegXmm,

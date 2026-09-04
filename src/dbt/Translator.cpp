@@ -735,7 +735,8 @@ arithmeticGuestMemoryPackedDoubleXmm128(GuestExecutionContext *context, x86::X86
             const auto result = operation == 0U   ? destinationValue + sourceValue
                                 : operation == 1U ? destinationValue - sourceValue
                                 : operation == 2U ? destinationValue * sourceValue
-                                                  : destinationValue / sourceValue;
+                                : operation == 3U ? destinationValue / sourceValue
+                                                  : std::sqrt(sourceValue);
             return std::bit_cast<std::uint64_t>(result);
         };
         state->xmm[registerIndex] = {
@@ -1134,7 +1135,8 @@ arithmeticPackedDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
         const auto result = operation == 0U   ? destinationValue + sourceValue
                             : operation == 1U ? destinationValue - sourceValue
                             : operation == 2U ? destinationValue * sourceValue
-                                              : destinationValue / sourceValue;
+                            : operation == 3U ? destinationValue / sourceValue
+                                              : std::sqrt(sourceValue);
         return std::bit_cast<std::uint64_t>(result);
     };
     state->xmm[destinationIndex] = {
@@ -4965,12 +4967,15 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
         case x86::Opcode::MulpdRegReg:
         case x86::Opcode::MulpdRegMem:
         case x86::Opcode::AddpdRegReg:
-        case x86::Opcode::AddpdRegMem: {
+        case x86::Opcode::AddpdRegMem:
+        case x86::Opcode::SqrtpdRegReg:
+        case x86::Opcode::SqrtpdRegMem: {
             const bool fromMemory =
                 instruction.opcode == x86::Opcode::DivpdRegMem ||
                 instruction.opcode == x86::Opcode::SubpdRegMem ||
                 instruction.opcode == x86::Opcode::MulpdRegMem ||
-                instruction.opcode == x86::Opcode::AddpdRegMem;
+                instruction.opcode == x86::Opcode::AddpdRegMem ||
+                instruction.opcode == x86::Opcode::SqrtpdRegMem;
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
                     "internal decoder error: packed-double operand count");
@@ -4984,6 +4989,9 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                    : instruction.opcode == x86::Opcode::MulpdRegReg ||
                                            instruction.opcode == x86::Opcode::MulpdRegMem
                                        ? std::uint8_t{2}
+                                   : instruction.opcode == x86::Opcode::SqrtpdRegReg ||
+                                           instruction.opcode == x86::Opcode::SqrtpdRegMem
+                                       ? std::uint8_t{4}
                                        : std::uint8_t{3};
             const auto destination =
                 std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;

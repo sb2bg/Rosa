@@ -21249,6 +21249,41 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testSqrtpdRegisters() {
+    // Observed in ColorSync under an Objective-C fixture: SQRTPD xmm0, xmm1.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x51, 0xC1, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4F2BULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::SqrtpdRegReg,
+           "SQRTPD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "SQRTPD length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "SQRTPD xmm0, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("sqrtpd xmm0, xmm1") != std::string::npos,
+           "SQRTPD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("packed_sqrt_double_xmm") != std::string::npos,
+           "SQRTPD did not lower through packed-arithmetic IR");
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0xAAAAAAAAAAAAAAAAULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    state.xmm[1] = {.low = 0x4019000000000000ULL, .high = 0x4030000000000000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // sqrt(6.25) == 2.5, sqrt(16.0) == 4.0.
+    expectEqual(state.xmm[0].low, std::uint64_t{0x4004000000000000ULL},
+                "SQRTPD low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x4010000000000000ULL},
+                "SQRTPD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "SQRTPD changed flags");
+}
+
 void testUnpcklpsRegisters() {
     // Observed in ColorSync under an Objective-C fixture: UNPCKLPS xmm5, xmm0.
     constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x14, 0xE8, 0xC3};
@@ -37067,6 +37102,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"SQRTPD registers execution", testSqrtpdRegisters},
         {"UNPCKLPS registers execution", testUnpcklpsRegisters},
         {"UNPCKLPS guest memory execution", testUnpcklpsGuestMemoryGeneratedExecution},
         {"SQRTSD registers execution", testSqrtsdRegisters},
