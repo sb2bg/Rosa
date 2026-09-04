@@ -25008,6 +25008,68 @@ void testDarwinIoctlStandardDescriptorType() {
     expect(unsupportedRequest, "unobserved guest ioctl request did not fail loudly");
 }
 
+void testDarwinSysctlOsversion() {
+    // Observed under an AppKit fixture: sysctl({CTL_KERN, 65}) reads the
+    // kernel build string; stale newp/newlen registers are ignored.
+    constexpr auto sysctlNumber = UINT64_C(0x020000CA);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress nameAddress{0x8100};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8200};
+    constexpr rosa::guest::GuestAddress sizeAddress{0x8300};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const std::array<std::uint32_t, 2> name{1, 65};
+    std::array<std::uint8_t, sizeof(name)> nameBytes{};
+    std::memcpy(nameBytes.data(), name.data(), sizeof(nameBytes));
+    addressSpace.writeBytes(nameAddress, nameBytes);
+    addressSpace.writeU64(sizeAddress, 256);
+
+    char hostBuild[256]{};
+    std::size_t hostBuildSize = sizeof(hostBuild);
+    expect(::sysctlbyname("kern.osversion", hostBuild, &hostBuildSize, nullptr, 0) == 0,
+           "could not sample the host build string");
+
+    rosa::darwin::SyscallDispatcher dispatcher;
+    rosa::x86::X86State state;
+    state.rax = sysctlNumber;
+    state.rdi = nameAddress.value;
+    state.rsi = name.size();
+    state.rdx = outputAddress.value;
+    state.r10 = sizeAddress.value;
+    state.r8 = 0x69; // Stale caller registers, not a set payload.
+    state.r9 = 0x7FF8438A6268ULL;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E310B4ULL});
+    expect(!outcome.exited, "kern.osversion sysctl terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0}, "kern.osversion sysctl did not succeed");
+    expectEqual(state.rflags, std::uint64_t{0x8D6},
+                "kern.osversion sysctl did not clear BSD carry");
+    expectEqual(addressSpace.readU64(sizeAddress), hostBuildSize,
+                "kern.osversion sysctl reported the wrong size");
+    const auto reported = addressSpace.readBytes(outputAddress, hostBuildSize);
+    expectEqual(reported,
+                std::vector<std::uint8_t>(hostBuild, hostBuild + hostBuildSize),
+                "kern.osversion sysctl reported the wrong build");
+
+    // A short buffer reports ENOMEM and the required size.
+    addressSpace.writeU64(sizeAddress, 2);
+    state.rax = sysctlNumber;
+    state.rdi = nameAddress.value;
+    state.rsi = name.size();
+    state.rdx = outputAddress.value;
+    state.r10 = sizeAddress.value;
+    state.r8 = 0;
+    state.r9 = 0;
+    state.rflags = 0xAD7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "short kern.osversion read returned the wrong errno");
+    expectEqual(addressSpace.readU64(sizeAddress), hostBuildSize,
+                "short kern.osversion read did not report its size");
+}
+
 void testDarwinSandboxMachLookupCheck() {
     // Observed under an AppKit fixture: Sandbox mach-lookup for a bootstrap
     // service name. No profile is installed, so well-formed self lookups
@@ -38636,6 +38698,7 @@ int main() {
         {"Darwin gettimeofday", testDarwinGettimeofday},
         {"Darwin issetugid", testDarwinIssetugid},
         {"Darwin ioctl standard descriptor type", testDarwinIoctlStandardDescriptorType},
+        {"Darwin sysctl kern.osversion", testDarwinSysctlOsversion},
         {"Darwin Sandbox mach-lookup check", testDarwinSandboxMachLookupCheck},
         {"Darwin Sandbox syscall check", testDarwinSandboxSyscallCheck},
         {"Darwin AMFI dyld policy", testDarwinAmfiDyldPolicy},

@@ -172,6 +172,7 @@ constexpr std::uint64_t guestAmfiUnrestrictedDyldPolicy = 0x1DF;
 constexpr std::array<std::uint32_t, 2> guestSysctlNameToOid{0, 3};
 constexpr std::array<std::uint32_t, 3> guestLockdownModeOid{103, 101, 101};
 constexpr std::array<std::uint32_t, 2> guestBootArgsOid{1, 143};
+constexpr std::array<std::uint32_t, 2> guestOsversionOid{1, 65};
 constexpr std::array<std::uint32_t, 2> guestKernelVersionOid{1, 4};
 constexpr std::array<std::uint32_t, 2> guestProductVersionOid{1, 138};
 constexpr std::array<std::uint32_t, 2> guestIosSupportVersionOid{1, 140};
@@ -1590,6 +1591,57 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
                                     valueBytes);
             addressSpace.writeU64(guest::GuestAddress{state.r10},
                                   sizeof(guestLockdownModeState));
+            setSuccess(state, 0);
+            return {};
+        }
+
+        if (std::ranges::equal(name, guestOsversionOid)) {
+            // kern.osversion: the human-facing build string. Answer the
+            // host build verbatim: the guest runs on this macOS release,
+            // and version gates compare against it. The trailing registers
+            // are stale caller values, not a set payload: read-only nodes
+            // ignore newp/newlen.
+            if (state.r10 == 0) {
+                throw unsupported(
+                    state, syscallRip,
+                    "only a read or size query of guest kern.osversion is implemented");
+            }
+            std::array<char, 256> hostBuild{};
+            std::size_t hostBuildSize = hostBuild.size();
+            if (::sysctlbyname("kern.osversion", hostBuild.data(), &hostBuildSize, nullptr,
+                               0) != 0) {
+                setError(state, errno);
+                return {};
+            }
+            std::uint64_t outputCapacity = 0;
+            try {
+                outputCapacity = addressSpace.readU64(
+                    guest::GuestAddress{state.r10});
+                addressSpace.validateAccess(
+                    guest::GuestAddress{state.r10}, sizeof(std::uint64_t),
+                    guest::Permission::Write);
+                if (state.rdx != 0) {
+                    addressSpace.validateAccess(
+                        guest::GuestAddress{state.rdx}, hostBuildSize,
+                        guest::Permission::Write);
+                }
+            } catch (const std::runtime_error &) {
+                setError(state, EFAULT);
+                return {};
+            }
+            if (state.rdx != 0 && outputCapacity < hostBuildSize) {
+                addressSpace.writeU64(guest::GuestAddress{state.r10}, hostBuildSize);
+                setError(state, ENOMEM);
+                return {};
+            }
+            if (state.rdx != 0) {
+                addressSpace.writeBytes(
+                    guest::GuestAddress{state.rdx},
+                    std::span<const std::uint8_t>{
+                        reinterpret_cast<const std::uint8_t *>(hostBuild.data()),
+                        hostBuildSize});
+            }
+            addressSpace.writeU64(guest::GuestAddress{state.r10}, hostBuildSize);
             setSuccess(state, 0);
             return {};
         }
