@@ -21249,6 +21249,83 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testUnpcklpsRegisters() {
+    // Observed in ColorSync under an Objective-C fixture: UNPCKLPS xmm5, xmm0.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x14, 0xE8, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4F0BULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::UnpcklpsRegReg,
+           "UNPCKLPS opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "UNPCKLPS length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm5 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0,
+           "UNPCKLPS xmm5, xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("unpcklps xmm5, xmm0") != std::string::npos,
+           "UNPCKLPS dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("unpack_low_packed_single_xmm.i64") != std::string::npos,
+           "UNPCKLPS did not lower through unpack IR");
+    rosa::x86::X86State state;
+    state.xmm[5] = {.low = 0x2222222211111111ULL, .high = 0xAAAAAAAAAAAAAAAAULL};
+    state.xmm[0] = {.low = 0x6666666655555555ULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // Low dwords interleave: {d0, e0, d1, e1}.
+    expectEqual(state.xmm[5].low, std::uint64_t{0x5555555511111111ULL},
+                "UNPCKLPS low lane differs");
+    expectEqual(state.xmm[5].high, std::uint64_t{0x6666666622222222ULL},
+                "UNPCKLPS high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "UNPCKLPS changed flags");
+}
+
+void testUnpcklpsGuestMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0x14, 0x07, 0xC3, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::UnpcklpsRegMem,
+           "UNPCKLPS xmm, [memory] opcode differs");
+    expect(rosa::debug::dumpX86(decoded).find("unpcklps xmm0, xmmword [rdi]") !=
+               std::string::npos,
+           "UNPCKLPS xmm, [memory] dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 16> bytes{0x55, 0x55, 0x55, 0x55, 0x66, 0x66, 0x66, 0x66,
+                                                 0x77, 0x77, 0x77, 0x77, 0x88, 0x88, 0x88, 0x88};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8000}, bytes);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = 0x8000;
+    state.xmm[0] = {.low = 0x2222222211111111ULL, .high = 0xAAAAAAAAAAAAAAAAULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x5555555511111111ULL},
+                "UNPCKLPS memory low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x6666666622222222ULL},
+                "UNPCKLPS memory high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "UNPCKLPS changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rdi = 0x8000;
+    faultState.xmm[0] = {.low = 1, .high = 2};
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") != std::string_view::npos;
+    }
+    expect(rejected, "UNPCKLPS from unmapped guest memory did not fail");
+}
+
 void testSqrtsdRegisters() {
     // Observed in ColorSync under an Objective-C fixture: SQRTSD xmm4, xmm4.
     constexpr std::array<std::uint8_t, 5> code{0xF2, 0x0F, 0x51, 0xE4, 0xC3};
@@ -36990,6 +37067,8 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"UNPCKLPS registers execution", testUnpcklpsRegisters},
+        {"UNPCKLPS guest memory execution", testUnpcklpsGuestMemoryGeneratedExecution},
         {"SQRTSD registers execution", testSqrtsdRegisters},
         {"HADDPD registers execution", testHaddpdRegisters},
         {"HADDPD guest memory execution", testHaddpdGuestMemoryGeneratedExecution},

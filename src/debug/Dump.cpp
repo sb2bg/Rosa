@@ -1796,6 +1796,34 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
+        case x86::Opcode::UnpcklpsRegReg:
+        case x86::Opcode::UnpcklpsRegMem: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::UnpcklpsRegMem;
+            stream << "unpcklps "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", ";
+            if (!fromMemory) {
+                stream << x86::xmmRegisterName(
+                    std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                stream << "xmmword ["
+                       << (memory.ripRelative ? "rip"
+                                              : x86::registerName(memory.base));
+                if (memory.displacement < 0) {
+                    stream << "-0x" << -memory.displacement;
+                } else if (memory.displacement > 0) {
+                    stream << "+0x" << memory.displacement;
+                }
+                stream << ']';
+            }
+            break;
+        }
         case x86::Opcode::HaddpdRegReg:
         case x86::Opcode::HaddpdRegMem: {
             const bool fromMemory =
@@ -3851,6 +3879,16 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::HorizontalAddGuestPackedDoubleXmm:
             stream << "horizontal_add_guest_packed_double_xmm " << valueName(*operation.lhs)
+                   << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
+        case ir::Opcode::UnpackLowPackedSingleXmm:
+            stream << "unpack_low_packed_single_xmm.i64 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
+                   << x86::xmmRegisterName(
+                          *operation.sourceGuestXmmRegister);
+            break;
+        case ir::Opcode::UnpackLowGuestPackedSingleXmm:
+            stream << "unpack_low_guest_packed_single_xmm " << valueName(*operation.lhs)
                    << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;
         case ir::Opcode::ShiftLeftXmmDwords:

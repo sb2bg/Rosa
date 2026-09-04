@@ -156,6 +156,8 @@ enum class Opcode {
     UnpckhpsRegMem,
     HaddpdRegReg,
     HaddpdRegMem,
+    UnpcklpsRegReg,
+    UnpcklpsRegMem,
     PalignrRegRegImm,
     PblendwRegRegImm,
     PinsrbXmmReg,
