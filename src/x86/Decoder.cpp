@@ -3881,10 +3881,10 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto rex = hasUcomissRex ? code[afterUcomissPrefix] : 0U;
                 const auto modrm = code[ucomissOpcodeOffset + 2];
                 const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-                if ((rex & 0xAU) != 0) {
+                if ((rex & 0x8U) != 0) {
                     throw DecodeError(
                         address, remaining,
-                        "UCOMISS does not support REX.W/X");
+                        "UCOMISS does not support REX.W");
                 }
                 const auto destination = XmmRegisterOperand{
                     static_cast<XmmRegister>(static_cast<std::uint8_t>(
@@ -3909,13 +3909,33 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
                 const bool ripRelative =
                     mode == 0 && rmEncoding == 0x5U && (rex & 0x1U) == 0;
-                if (rmEncoding == 0x4U ||
-                    (mode == 0 && rmEncoding == 0x5U && (rex & 0x1U) != 0)) {
-                    throw DecodeError(
-                        address, remaining,
-                        "only RIP-relative or based UCOMISS xmm, m32 is supported");
-                }
+                auto baseEncoding = rmEncoding;
+                std::optional<Register> index;
+                std::uint8_t scale = 1;
                 auto operandCursor = ucomissOpcodeOffset + 3;
+                if (!ripRelative && rmEncoding == 0x4U) {
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated UCOMISS m32 SIB");
+                    }
+                    const auto sib = code[operandCursor++];
+                    const auto scaleBits =
+                        static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
+                    const auto indexEncoding =
+                        static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
+                    baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
+                    if (mode == 0 && baseEncoding == 0x5U) {
+                        throw DecodeError(address, remaining,
+                                          "no-base UCOMISS m32 SIB is not supported");
+                    }
+                    if (indexEncoding != 0x4U || (rex & 0x2U) != 0) {
+                        index = decodeRegister(indexEncoding, (rex & 0x2U) != 0);
+                        scale = static_cast<std::uint8_t>(1U << scaleBits);
+                    }
+                } else if (!ripRelative && ((rex & 0x2U) != 0)) {
+                    throw DecodeError(address, remaining,
+                                      "REX.X requires a UCOMISS m32 SIB");
+                }
                 std::int64_t displacement = 0;
                 if (mode == 0x1U) {
                     if (operandCursor >= code.size()) {
@@ -3943,9 +3963,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     ripRelative
                         ? MemoryOperand{Register::Rax, displacement, 32,
                                         std::nullopt, 1, false, true}
-                        : MemoryOperand{decodeRegister(rmEncoding,
+                        : MemoryOperand{decodeRegister(baseEncoding,
                                                        (rex & 0x1U) != 0),
-                                        displacement, 32});
+                                        displacement, 32, index, scale});
                 const auto length = operandCursor - instructionStart;
                 instruction.length = static_cast<std::uint8_t>(length);
                 std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),

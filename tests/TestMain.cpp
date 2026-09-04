@@ -22442,6 +22442,47 @@ void testUnorderedCompareScalarFloat() {
                     std::string("UCOMISS ") + testCase.name + " flags differ");
     }
 
+    // REX.X-indexed form: UCOMISS xmm0, dword [rbx+r12*8].
+    constexpr std::array<std::uint8_t, 7> indexedCode{0x66, 0x42, 0x0F, 0x2E,
+                                                      0x04, 0xE3, 0xC3};
+    constexpr rosa::guest::GuestAddress indexedRip{0x7FF80968BF49ULL};
+    const auto indexedDecoded = decoder.decodeBlock(indexedCode, indexedRip);
+    expect(indexedDecoded[0].opcode == rosa::x86::Opcode::UcomissRegMem,
+           "indexed UCOMISS xmm, m32 opcode differs");
+    expectEqual(indexedDecoded[0].length, std::uint8_t{6},
+                "indexed UCOMISS xmm, m32 length differs");
+    const auto indexedDestination =
+        std::get<rosa::x86::XmmRegisterOperand>(indexedDecoded[0].operands[0]);
+    const auto indexedMemory =
+        std::get<rosa::x86::MemoryOperand>(indexedDecoded[0].operands[1]);
+    expect(indexedDestination.reg == rosa::x86::XmmRegister::Xmm0,
+           "indexed UCOMISS destination differs");
+    expect(!indexedMemory.ripRelative && indexedMemory.hasBase &&
+               indexedMemory.base == rosa::x86::Register::Rbx && indexedMemory.index &&
+               *indexedMemory.index == rosa::x86::Register::R12 &&
+               indexedMemory.scale == 8 && indexedMemory.displacement == 0,
+           "UCOMISS xmm0, dword [rbx+r12*8] memory operand differs");
+    expect(rosa::debug::dumpX86(indexedDecoded).find("ucomiss xmm0, dword [rbx+r12*8]") !=
+               std::string::npos,
+           "indexed UCOMISS xmm, m32 dump differs");
+    const auto indexedBlock = translator.translate(indexedCode, indexedRip);
+    constexpr rosa::guest::GuestAddress indexedPage{0x9000};
+    constexpr rosa::guest::GuestAddress indexedTarget{0x9100};
+    rosa::guest::AddressSpace indexedAddressSpace;
+    indexedAddressSpace.mapAnonymous(indexedPage, rosa::guest::guestPageSize,
+                                     rosa::guest::Permission::Read |
+                                         rosa::guest::Permission::Write);
+    indexedAddressSpace.writeU32(indexedTarget, 0x40000000);
+    rosa::x86::X86State indexedState;
+    indexedState.rbx = indexedTarget.value;
+    indexedState.r12 = 0;
+    indexedState.xmm[0] = {.low = 0x3F800000ULL, .high = 0};
+    indexedState.rflags = 0x8D7;
+    static_cast<void>(indexedBlock.execute(indexedState, &indexedAddressSpace));
+    // 1.0f < 2.0f sets CF only.
+    expectEqual(indexedState.rflags, std::uint64_t{0x3ULL},
+                "indexed UCOMISS xmm, m32 flags differ");
+
     // Memory form: UCOMISS xmm1, dword [RIP+disp32].
     constexpr std::array<std::uint8_t, 9> memCode{0x66, 0x0F, 0x2E, 0x0D, 0x25,
                                                   0x1B, 0x8B, 0x00, 0xC3};
