@@ -21067,6 +21067,50 @@ void testMovqGuestMemoryToXmm() {
                 "faulted extended-index MOVQ changed flags");
 }
 
+void testMovlhpsRipMemory() {
+    // Observed in CoreGraphics under an Objective-C fixture: MOVLHPS xmm1, [RIP+disp32].
+    constexpr std::array<std::uint8_t, 8> code{0x0F, 0x16, 0x0D, 0x71, 0x08,
+                                               0x8B, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF80968D1E8ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovlhpsRegMem,
+           "MOVLHPS xmm, m64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7}, "MOVLHPS xmm, m64 length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1,
+           "MOVLHPS xmm1, m64 destination differs");
+    expect(memory.ripRelative && !memory.hasBase && !memory.index &&
+               memory.displacement == 0x8B0871 && memory.width == 64,
+           "MOVLHPS xmm, m64 memory operand differs");
+    expectEqual(observedRip.value + decoded[0].length + memory.displacement,
+                std::uint64_t{0x7FF809F3DA60ULL}, "MOVLHPS xmm, m64 target differs");
+    expect(rosa::debug::dumpX86(decoded).find("movlhps xmm1, qword [rip+0x8b0871]") !=
+               std::string::npos,
+           "MOVLHPS xmm, m64 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(target, 0x0123456789ABCDEFULL);
+    const rosa::dbt::Translator translator;
+    constexpr std::array<std::uint8_t, 8> executeCode{0x0F, 0x16, 0x0D, 0xF9, 0x70,
+                                                      0x00, 0x00, 0xC3};
+    const auto block = translator.translate(executeCode, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.xmm[1] = {.low = 0xAAAAAAAAAAAAAAAAULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[1].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVLHPS m64 did not replace the low lane");
+    expectEqual(state.xmm[1].high, std::uint64_t{0xBBBBBBBBBBBBBBBBULL},
+                "MOVLHPS m64 did not preserve the high lane");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVLHPS m64 changed flags");
+}
+
 void testMovlhpsRegister() {
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x16, 0xC0, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -36043,6 +36087,7 @@ int main() {
         {"CVTSI2SD int32 to XMM", testConvertInt32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"MOVLHPS RIP memory execution", testMovlhpsRipMemory},
         {"PSHUFB register execution", testPshufbRegisters},
         {"PSHUFB RIP-relative guest memory", testPshufbRipRelativeGuestMemory},
         {"PUNPCKLWD register execution", testPunpcklwdRegisters},
