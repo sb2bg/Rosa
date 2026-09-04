@@ -4400,6 +4400,20 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.writeGuestRegister(destination.reg, value, ir::Width::I32, instruction.address);
             break;
         }
+        case x86::Opcode::MovqRegXmm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: MOVQ register-XMM operand count");
+            }
+            const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto source = std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            if (destination.width != 64) {
+                throw std::runtime_error("only MOVQ r64, xmm is implemented");
+            }
+            const auto value = builder.readGuestXmmLane(source, false, instruction.address);
+            builder.writeGuestRegister(destination.reg, value, ir::Width::I64,
+                                       instruction.address);
+            break;
+        }
         case x86::Opcode::VmovupsYmmRegMem:
         case x86::Opcode::VmovapsYmmRegMem: {
             if (instruction.operands.size() != 2) {

@@ -1829,10 +1829,31 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
                 const bool ripRelative =
                     mode == 0 && rmEncoding == 0x5U;
-                if (rexW) {
+                if (rexW && mode != 0x3U) {
                     throw DecodeError(
                         address, remaining,
-                        "MOVQ XMM qword store is not yet supported");
+                        "only register-direct MOVQ r64, xmm is supported with REX.W");
+                }
+                if (rexW) {
+                    instruction.opcode = Opcode::MovqRegXmm;
+                    instruction.operands.push_back(RegisterOperand{
+                        decodeRegister(rmEncoding, rexB), 64});
+                    instruction.operands.push_back(XmmRegisterOperand{
+                        static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                            ((modrm >> 3U) & 0x7U) |
+                            (rexR ? 8U : 0U)))});
+                    const auto length = testOpcodeOffset + 3 - instructionStart;
+                    instruction.length = static_cast<std::uint8_t>(length);
+                    std::copy_n(
+                        code.begin() +
+                            static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
+                    result.push_back(std::move(instruction));
+                    cursor = testOpcodeOffset + 3;
+                    if (result.size() == maximumInstructions) {
+                        return result;
+                    }
+                    continue;
                 }
                 auto operandCursor = testOpcodeOffset + 3;
                 if (mode == 0x3U) {

@@ -21315,6 +21315,39 @@ void testMovdRegisterToXmm() {
     expectEqual(movqState.rflags, std::uint64_t{0xAD7}, "MOVQ changed flags");
 }
 
+void testMovqRegisterFromXmm() {
+    // Observed in CoreFoundation under an Objective-C fixture: MOVQ rsi, xmm0.
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x48, 0x0F, 0x7E, 0xC6, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802EB5515ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovqRegXmm, "MOVQ r64, xmm opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "MOVQ r64, xmm length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rsi && destination.width == 64 &&
+               source.reg == rosa::x86::XmmRegister::Xmm0,
+           "MOVQ rsi, xmm0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("movq rsi, xmm0") != std::string::npos,
+           "MOVQ rsi, xmm0 dump differs");
+
+    const rosa::dbt::Translator translator;
+    constexpr std::array<std::uint8_t, 6> executeCode{0x66, 0x48, 0x0F, 0x7E, 0xC6, 0xC3};
+    const auto block = translator.translate(executeCode, observedRip);
+    rosa::x86::X86State state;
+    state.rsi = 0xAAAAAAAAAAAAAAAAULL;
+    state.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.rsi, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVQ r64, xmm copied the wrong lane");
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
+                "MOVQ r64, xmm changed its low source lane");
+    expectEqual(state.xmm[0].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVQ r64, xmm changed its high source lane");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "MOVQ r64, xmm changed flags");
+}
+
 void testMovdGuestMemoryToXmm() {
     constexpr rosa::guest::GuestAddress instructionAddress{0x7FF802A90439ULL};
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -35903,6 +35936,7 @@ int main() {
         {"PUNPCKLQDQ register execution", testPunpcklqdqRegisters},
         {"POR register execution", testPorRegisters},
         {"MOVD register to XMM", testMovdRegisterToXmm},
+        {"MOVQ register from XMM", testMovqRegisterFromXmm},
         {"MOVD guest memory to XMM", testMovdGuestMemoryToXmm},
         {"MOVD XMM to guest memory", testMovdXmmToGuestMemory},
         {"MOVSS XMM to guest memory", testMovssXmmToGuestMemory},
