@@ -11528,11 +11528,22 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 continue;
             }
             if (extension == 0x4U && mode == 0x3U && !rexW && !rexR &&
-                !rexX && (hasRex || rmEncoding < 0x4U)) {
+                !rexX) {
+                if (cursor >= code.size()) {
+                    throw DecodeError(address, remaining,
+                                      "truncated byte AND immediate");
+                }
                 const auto immediate = code[cursor++];
+                // Without REX, encodings 4-7 name AH/CH/DH/BH (byte lane 1)
+                // instead of SPL/BPL/SIL/DIL.
+                const bool highByte = !hasRex && rmEncoding >= 0x4U;
+                const auto reg = highByte ? decodeRegister(
+                                                static_cast<std::uint8_t>(rmEncoding - 0x4U),
+                                                false)
+                                          : decodeRegister(rmEncoding, rexB);
                 instruction.opcode = Opcode::AndRegImm;
                 instruction.operands.push_back(RegisterOperand{
-                    decodeRegister(rmEncoding, rexB), 8});
+                    reg, 8, static_cast<std::uint8_t>(highByte ? 1U : 0U)});
                 instruction.operands.push_back(
                     ImmediateOperand{immediate, 8});
                 const auto length = cursor - instructionStart;

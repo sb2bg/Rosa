@@ -8637,15 +8637,45 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (reg.byteOffset > 1 || (reg.byteOffset == 1 && reg.width != 8)) {
+                throw std::runtime_error("invalid byte-lane AND register");
+            }
             const auto width = reg.width == 8    ? ir::Width::I8
                                : reg.width == 16 ? ir::Width::I16
                                : reg.width == 32 ? ir::Width::I32
                                                  : ir::Width::I64;
-            const auto lhs = builder.readGuestRegister(reg.reg, width, instruction.address);
-            const auto rhs = builder.constant(immediate.value, width, instruction.address);
-            const auto result = builder.bitAnd(lhs, rhs, width, instruction.address);
-            builder.writeGuestRegister(reg.reg, result, width, instruction.address);
-            builder.updateLogicFlags(result, width, instruction.address);
+            if (reg.byteOffset == 0) {
+                const auto lhs = builder.readGuestRegister(reg.reg, width, instruction.address);
+                const auto rhs = builder.constant(immediate.value, width, instruction.address);
+                const auto result = builder.bitAnd(lhs, rhs, width, instruction.address);
+                builder.writeGuestRegister(reg.reg, result, width, instruction.address);
+                builder.updateLogicFlags(result, width, instruction.address);
+                break;
+            }
+            // High-byte lane (AH/CH/DH/BH): extract bits[15:8], combine, and
+            // merge back into the parent register.
+            const auto parent =
+                builder.readGuestRegister(reg.reg, ir::Width::I64, instruction.address);
+            const auto shifted = builder.shiftRightLogical(parent, 8, ir::Width::I64,
+                                                           instruction.address);
+            const auto laneMask =
+                builder.constant(0xFF, ir::Width::I64, instruction.address);
+            const auto lhs = builder.bitAnd(shifted, laneMask, ir::Width::I64,
+                                            instruction.address);
+            const auto rhs =
+                builder.constant(immediate.value, ir::Width::I64, instruction.address);
+            const auto result =
+                builder.bitAnd(lhs, rhs, ir::Width::I64, instruction.address);
+            const auto clearMask =
+                builder.constant(~std::uint64_t{0xFF00}, ir::Width::I64, instruction.address);
+            const auto cleared =
+                builder.bitAnd(parent, clearMask, ir::Width::I64, instruction.address);
+            const auto placed = builder.shiftLeft(
+                result, static_cast<std::uint8_t>(8), ir::Width::I64, instruction.address);
+            const auto merged =
+                builder.bitOr(cleared, placed, ir::Width::I64, instruction.address);
+            builder.writeGuestRegister(reg.reg, merged, ir::Width::I64, instruction.address);
+            builder.updateLogicFlags(result, ir::Width::I8, instruction.address);
             break;
         }
         case x86::Opcode::TestRegReg: {

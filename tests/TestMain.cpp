@@ -21249,6 +21249,34 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testAndHighByteRegisterImmediate() {
+    // Observed in libcrypto under an Objective-C fixture: AND AH, 0x0F.
+    constexpr std::array<std::uint8_t, 4> code{0x80, 0xE4, 0x0F, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FFE06E5ED66ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndRegImm,
+           "AND AH opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{3}, "AND AH length differs");
+    const auto reg = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    expect(reg.reg == rosa::x86::Register::Rax && reg.width == 8 && reg.byteOffset == 1,
+           "AND AH operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("and ah, 0xf") != std::string::npos,
+           "AND AH dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rax = 0x123456789ABCDEF0ULL;
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // Only bits[15:8] combine: 0xDE & 0x0F == 0x0E.
+    expectEqual(state.rax, std::uint64_t{0x123456789ABC0EF0ULL},
+                "AND AH merged the wrong lane");
+    expect((state.rflags & 0x40U) == 0, "AND AH set ZF for a nonzero result");
+    expect((state.rflags & 0x80U) == 0, "AND AH set SF for a positive result");
+}
+
 void testCpuidLeaves() {
     // Observed in libcrypto under an Objective-C fixture: CPUID vendor/feature dispatch.
     constexpr std::array<std::uint8_t, 3> code{0x0F, 0xA2, 0xC3};
@@ -37177,6 +37205,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"AND AH register immediate", testAndHighByteRegisterImmediate},
         {"CPUID leaves", testCpuidLeaves},
         {"MOVAPS registers execution", testMovapsRegisters},
         {"SQRTPD registers execution", testSqrtpdRegisters},
