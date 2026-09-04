@@ -133,6 +133,13 @@ void mapX86Commpage(guest::AddressSpace &addressSpace,
     addressSpace.populateSparseReadOnly(
         guest::GuestAddress{x86CommpageBase.value + x86CommpageKdebugEnableOffset},
         kdebugDisabled);
+    // Rosa publishes no Apple Type Merge diagnostic configuration. XNU
+    // specifies zero as the disabled state; os_log probes this slot while
+    // initializing and skips its diagnostic path when no bit is set.
+    constexpr std::array<std::uint8_t, sizeof(std::uint32_t)> atmDiagnosticDisabled{};
+    addressSpace.populateSparseReadOnly(
+        guest::GuestAddress{x86CommpageBase.value + x86CommpageAtmDiagnosticConfigOffset},
+        atmDiagnosticDisabled);
     // Rosa does not register guest DTrace DOF sections with the host kernel.
     // XNU publishes a defined zero byte here when userspace DOF registration
     // is disabled; dyld uses it to avoid /dev/dtracehelper entirely.

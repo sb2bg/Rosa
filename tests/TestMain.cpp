@@ -34376,6 +34376,26 @@ void testX86Commpage() {
             rosa::darwin::x86CommpageBase.value + rosa::darwin::x86CommpageKdebugEnableOffset}),
         std::uint32_t{0}, "x86 commpage kdebug state is not disabled");
     expectEqual(
+        addressSpace.readU32(rosa::guest::GuestAddress{
+            rosa::darwin::x86CommpageBase.value +
+            rosa::darwin::x86CommpageAtmDiagnosticConfigOffset}),
+        std::uint32_t{0}, "x86 commpage ATM diagnostic config is not disabled");
+
+    // Exact os_log probe: movabs rax, commpage+0x48; bt dword [rax], 8.
+    // The disabled config leaves CF clear without touching other flags.
+    constexpr std::array<std::uint8_t, 15> probeAtmDiagnostic{
+        0x48, 0xB8, 0x48, 0x00, 0xE0, 0xFF, 0xFF, 0x7F, 0x00, 0x00,
+        0x0F, 0xBA, 0x20, 0x08, 0xC3};
+    const auto atmBlock = translator.translate(
+        probeAtmDiagnostic, rosa::guest::GuestAddress{0x7FF802B81ABFULL});
+    rosa::x86::X86State atmState;
+    atmState.rflags = 0x46;
+    static_cast<void>(atmBlock.execute(atmState, &addressSpace));
+    expectEqual(atmState.rax, std::uint64_t{0x00007FFFFFE00048ULL},
+                "generated ATM diagnostic probe clobbered its address");
+    expectEqual(atmState.rflags, std::uint64_t{0x46},
+                "disabled ATM diagnostic config set CF");
+    expectEqual(
         addressSpace
             .readBytes(rosa::guest::GuestAddress{rosa::darwin::x86CommpageBase.value +
                                                  rosa::darwin::x86CommpageDtraceDofEnabledOffset},

@@ -36,6 +36,7 @@ inline constexpr std::uint8_t x86CommpageUserPageShift = 12;
 inline constexpr std::size_t x86CommpageCpuFamilyOffset = 0x40;
 inline constexpr std::uint32_t x86CommpageCpuFamily = 0;
 inline constexpr std::size_t x86CommpageKdebugEnableOffset = 0x44;
+inline constexpr std::size_t x86CommpageAtmDiagnosticConfigOffset = 0x48;
 inline constexpr std::size_t x86CommpageDtraceDofEnabledOffset = 0x4C;
 inline constexpr std::size_t x86CommpageContinuousTimebaseOffset = 0xC0;
 inline constexpr std::size_t x86CommpageBootTimeUsecOffset = 0xC8;
