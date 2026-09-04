@@ -1571,6 +1571,37 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = kernSuccess;
         return;
     }
+    case 22U: {
+        // XNU trap 22 moves a receive right into a port set. Both names
+        // must be live; the set must be a set and the member an owned
+        // receive right that is not itself a set. Insertion is idempotent.
+        // Queues stay empty (no asynchronous senders), so membership only
+        // matters for receives addressed at the set itself.
+        if (state.rdi != taskSelfPortName().value) {
+            state.rax = machSendInvalidDestination;
+            return;
+        }
+        auto *portSet = portSpace_.lookup(GuestMachPortName{
+            static_cast<std::uint32_t>(state.rsi)});
+        const auto *member = portSpace_.lookup(GuestMachPortName{
+            static_cast<std::uint32_t>(state.rdx)});
+        if (portSet == nullptr || member == nullptr) {
+            state.rax = kernInvalidName;
+            return;
+        }
+        if (portSet->type != GuestPortType::PortSet ||
+            !member->hasReceiveRight || member->type == GuestPortType::PortSet) {
+            state.rax = kernInvalidRight;
+            return;
+        }
+        const auto memberName = member->name;
+        if (std::find(portSet->members.begin(), portSet->members.end(), memberName) ==
+            portSet->members.end()) {
+            portSet->members.push_back(memberName);
+        }
+        state.rax = kernSuccess;
+        return;
+    }
     case 24U: {
         // XNU's x86_64 trap ABI is target, options pointer, 64-bit context,
         // and output-name pointer in RDI, RSI, RDX, and R10 respectively.

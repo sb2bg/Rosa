@@ -6,6 +6,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace rosa::darwin {
 
@@ -45,6 +46,7 @@ struct GuestPort {
     bool strictGuard{};
     bool importanceReceiver{};
     std::uint32_t optionFlags{};
+    std::vector<GuestMachPortName> members{};
 };
 
 class GuestPortSpace {

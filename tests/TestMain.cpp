@@ -29273,6 +29273,70 @@ void testMachThreadSelfTrap() {
            "repeated thread_self_trap did not add another send uref");
 }
 
+void testMachPortInsertMemberTrap() {
+    // Observed under an AppKit fixture: trap 22 moves a receive right into
+    // a freshly allocated port set.
+    rosa::guest::AddressSpace addressSpace;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress output{0x8100};
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    const rosa::darwin::MachDispatcher mach;
+    const auto allocate = [&](std::uint32_t right) {
+        rosa::x86::X86State state;
+        state.rax = rosa::darwin::MachDispatcher::portAllocateTrapNumber;
+        state.rdi = mach.taskSelfPortName().value;
+        state.rsi = right;
+        state.rdx = output.value;
+        state.rflags = 0x8D7;
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});
+        expectEqual(state.rax, std::uint64_t{0}, "member fixture allocate failed");
+        return rosa::darwin::GuestMachPortName{addressSpace.readU32(output)};
+    };
+    const auto portSet = allocate(3);
+    const auto member = allocate(1);
+
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::portInsertMemberTrapNumber;
+    state.rdi = mach.taskSelfPortName().value;
+    state.rsi = portSet.value;
+    state.rdx = member.value;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2FA2CULL});
+    expect(!outcome.exited, "mach_port_insert_member terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0}, "mach_port_insert_member did not succeed");
+    const auto *set = dispatcher.machDispatcher().portSpace().lookup(portSet);
+    expect(set != nullptr && set->members.size() == 1 && set->members.front() == member,
+           "port set membership differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_port_insert_member applied BSD carry-flag semantics");
+
+    // Idempotent re-insertion keeps one entry.
+    state.rax = rosa::darwin::MachDispatcher::portInsertMemberTrapNumber;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{0}, "repeated insert_member failed");
+    expectEqual(dispatcher.machDispatcher().portSpace().lookup(portSet)->members.size(),
+                std::size_t{1}, "repeated insert_member duplicated the member");
+
+    // A set cannot join a set.
+    state.rax = rosa::darwin::MachDispatcher::portInsertMemberTrapNumber;
+    state.rsi = portSet.value;
+    state.rdx = portSet.value;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{17},
+                "set-into-set insert returned the wrong code");
+
+    // Unknown names miss.
+    state.rax = rosa::darwin::MachDispatcher::portInsertMemberTrapNumber;
+    state.rsi = 0xDEAD;
+    state.rdx = member.value;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{15},
+                "insert_member with a bad set returned the wrong code");
+}
+
 void testMachPortAllocateTrap() {
     // Observed under an AppKit fixture: trap 16 allocates a port set.
     rosa::guest::AddressSpace addressSpace;
@@ -38363,6 +38427,7 @@ int main() {
         {"generated Darwin thread_fast_set_cthread_self",
          testGeneratedDarwinThreadFastSetCthreadSelf},
         {"Mach thread-self trap", testMachThreadSelfTrap},
+        {"Mach port-insert-member trap", testMachPortInsertMemberTrap},
         {"Mach port-allocate trap", testMachPortAllocateTrap},
         {"Mach message2 receive timed out", testMachMessage2ReceiveTimedOut},
         {"Mach timebase-info trap", testMachTimebaseInfoTrap},
