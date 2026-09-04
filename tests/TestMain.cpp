@@ -21250,6 +21250,43 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testAdcRegMem() {
+    // Observed in CoreFoundation under an Objective-C fixture: ADC RDI, [RBP-0x460].
+    constexpr std::array<std::uint8_t, 8> code{0x48, 0x13, 0xBD, 0xA0,
+                                               0xFB, 0xFF, 0xFF, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802EE1F04ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AdcRegMem,
+           "ADC r64, m64 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{7}, "ADC r64, m64 length differs");
+    const auto destination = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::Register::Rdi && destination.width == 64,
+           "ADC RDI destination differs");
+    expect(!memory.ripRelative && memory.base == rosa::x86::Register::Rbp &&
+               memory.width == 64 && memory.displacement == -0x460,
+           "ADC [RBP-0x460] memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("adc rdi, qword [rbp-0x460]") !=
+               std::string::npos,
+           "ADC r64, m64 dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8100}, 5);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rbp = 0x8560;
+    state.rdi = 10;
+    state.rflags = 0xAD7;  // CF set.
+    static_cast<void>(block.execute(state, &addressSpace));
+    // 10 + 5 + CF(1) == 16.
+    expectEqual(state.rdi, std::uint64_t{16}, "ADC r64, m64 result differs");
+    expect((state.rflags & 0x1U) == 0, "ADC r64, m64 left CF set");
+}
+
 void testCmpHighByteRegisterImmediate() {
     // Observed in libcrypto under an Objective-C fixture: CMP AH, 0x0F.
     constexpr std::array<std::uint8_t, 4> code{0x80, 0xFC, 0x0F, 0xC3};
@@ -37234,6 +37271,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"ADC r64 m64", testAdcRegMem},
         {"CMP AH register immediate", testCmpHighByteRegisterImmediate},
         {"AND AH register immediate", testAndHighByteRegisterImmediate},
         {"CPUID leaves", testCpuidLeaves},

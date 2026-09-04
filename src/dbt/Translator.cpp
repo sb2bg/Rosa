@@ -5612,6 +5612,52 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.updateAdcFlags(lhs, rhs, carry, width, instruction.address);
             break;
         }
+        case x86::Opcode::AdcRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: adc memory operand count");
+            }
+            const auto destination =
+                std::get<x86::RegisterOperand>(instruction.operands[0]);
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            if (destination.width != memory.width ||
+                (destination.width != 32 && destination.width != 64)) {
+                throw std::runtime_error("only ADC r32/r64, m32/m64 is implemented");
+            }
+            const auto width = destination.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                instruction.address);
+            if (memory.index) {
+                auto index =
+                    builder.readGuestRegister(*memory.index, ir::Width::I64, instruction.address);
+                if (memory.scale != 1) {
+                    index = builder.shiftLeft(
+                        index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                        ir::Width::I64, instruction.address);
+                }
+                address = builder.add(address, index, ir::Width::I64, instruction.address);
+            }
+            if (memory.displacement != 0) {
+                const auto displacement =
+                    builder.constant(static_cast<std::uint64_t>(memory.displacement),
+                                     ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
+            }
+            const auto rhs = builder.loadGuest(address, width, instruction.address);
+            const auto lhs =
+                builder.readGuestRegister(destination.reg, width, instruction.address);
+            const auto carry =
+                builder.evaluateCondition(x86::Condition::Below, instruction.address);
+            const auto sum = builder.add(lhs, rhs, width, instruction.address);
+            const auto result = builder.add(sum, carry, width, instruction.address);
+            builder.writeGuestRegister(destination.reg, result, width, instruction.address);
+            builder.updateAdcFlags(lhs, rhs, carry, width, instruction.address);
+            break;
+        }
         case x86::Opcode::AdcRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: adc operand count");
