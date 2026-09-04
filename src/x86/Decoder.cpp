@@ -7396,10 +7396,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             }
             if (code.size() - operandCursor < 3 ||
                 code[operandCursor] != 0x0FU ||
-                code[operandCursor + 1] != 0xB1U) {
+                (code[operandCursor + 1] != 0xB0U &&
+                 code[operandCursor + 1] != 0xB1U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only LOCK CMPXCHG r/m32/r64 or LOCK XADD r/m32, r32 is supported from prefix F0");
+                    "only LOCK CMPXCHG r/m8/r/m32/r/m64 or LOCK XADD r/m32, r32 is supported from prefix F0");
+            }
+            const bool isByteCmpxchg = code[operandCursor + 1] == 0xB0U;
+            if (isByteCmpxchg && (lockRex & 0x8U) != 0) {
+                throw DecodeError(
+                    address, remaining,
+                    "REX.W is not supported for byte LOCK CMPXCHG");
             }
             cursor = operandCursor + 2;
             const auto modrm = code[cursor++];
@@ -7464,13 +7471,20 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                 displacement = readI32(code.subspan(cursor, 4));
                 cursor += 4;
             }
-            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+            const auto width = static_cast<std::uint8_t>(
+                isByteCmpxchg ? 8U : (rexW ? 64U : 32U));
+            const bool highByteSource =
+                isByteCmpxchg && !hasLockRex && regEncoding >= 0x4U;
             instruction.opcode = Opcode::CmpxchgMemReg;
             instruction.operands.push_back(MemoryOperand{
                 decodeRegister(baseEncoding, rexB), displacement, width,
                 index, scale, hasBase, ripRelative});
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(regEncoding, rexR), width});
+                highByteSource
+                    ? decodeRegister(static_cast<std::uint8_t>(regEncoding - 0x4U),
+                                     false)
+                    : decodeRegister(regEncoding, rexR),
+                width, static_cast<std::uint8_t>(highByteSource ? 1U : 0U)});
             const auto length = cursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(

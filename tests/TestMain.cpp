@@ -21250,6 +21250,64 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
+void testCmpxchgByteMemoryRegister() {
+    // Observed in libdispatch under an AppKit fixture: LOCK CMPXCHG [RCX], DL.
+    constexpr std::array<std::uint8_t, 5> code{0xF0, 0x0F, 0xB0, 0x11, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802CC710BULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmpxchgMemReg,
+           "byte CMPXCHG opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "byte CMPXCHG length differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::RegisterOperand>(decoded[0].operands[1]);
+    expect(memory.base == rosa::x86::Register::Rcx && memory.width == 8 &&
+               memory.displacement == 0,
+           "byte CMPXCHG memory operand differs");
+    expect(source.reg == rosa::x86::Register::Rdx && source.width == 8 &&
+               source.byteOffset == 0,
+           "byte CMPXCHG source differs");
+    expect(rosa::debug::dumpX86(decoded).find("lock cmpxchg byte [rcx], dl") !=
+               std::string::npos,
+           "byte CMPXCHG dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr rosa::guest::GuestAddress target{0x8100};
+    constexpr std::array<std::uint8_t, 1> initial{0x42};
+    addressSpace.writeBytes(target, initial);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+
+    // Equal path: memory takes DL, ZF set, AL unchanged.
+    rosa::x86::X86State equalState;
+    equalState.rcx = target.value;
+    equalState.rdx = 0x99;
+    equalState.rax = 0xFFFFFFFFFF000042ULL;
+    equalState.rflags = 0xAD7;
+    static_cast<void>(block.execute(equalState, &addressSpace));
+    expectEqual(addressSpace.readU8(target), std::uint8_t{0x99},
+                "byte CMPXCHG equal path did not store");
+    expectEqual(equalState.rax, std::uint64_t{0xFFFFFFFFFF000042ULL},
+                "byte CMPXCHG equal path changed AL");
+    expect((equalState.rflags & 0x40U) != 0, "byte CMPXCHG equal path missed ZF");
+
+    // Unequal path: AL takes memory, upper RAX preserved, ZF clear.
+    addressSpace.writeBytes(target, initial);
+    rosa::x86::X86State unequalState;
+    unequalState.rcx = target.value;
+    unequalState.rdx = 0x99;
+    unequalState.rax = 0xFFFFFFFFFF000000ULL;
+    unequalState.rflags = 0xAD7;
+    static_cast<void>(block.execute(unequalState, &addressSpace));
+    expectEqual(addressSpace.readU8(target), std::uint8_t{0x42},
+                "byte CMPXCHG unequal path stored");
+    expectEqual(unequalState.rax, std::uint64_t{0xFFFFFFFFFF000042ULL},
+                "byte CMPXCHG unequal path clobbered upper RAX");
+    expect((unequalState.rflags & 0x40U) == 0, "byte CMPXCHG unequal path set ZF");
+}
+
 void testTestR16Immediate() {
     // Observed in libdispatch under an AppKit fixture: TEST R15W, 0x3F00.
     constexpr std::array<std::uint8_t, 7> code{0x66, 0x41, 0xF7, 0xC7, 0x00, 0x3F, 0xC3};
@@ -38153,6 +38211,7 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
+        {"LOCK CMPXCHG byte memory register", testCmpxchgByteMemoryRegister},
         {"TEST r16 immediate", testTestR16Immediate},
         {"LOCK OR byte memory immediate", testLockOrByteMemoryImmediate},
         {"LOCK OR qword memory immediate", testLockOrQwordMemoryImmediate},

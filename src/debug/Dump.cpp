@@ -316,7 +316,10 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
             stream << "lock cmpxchg "
-                   << (memory.width == 32 ? "dword" : "qword") << " [";
+                   << (memory.width == 8    ? "byte"
+                       : memory.width == 32 ? "dword"
+                                            : "qword")
+                   << " [";
             if (memory.ripRelative) {
                 stream << "rip";
             } else if (memory.hasBase) {
