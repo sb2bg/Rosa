@@ -7,6 +7,7 @@
 #include <libproc.h>
 #include <mach/mach.h>
 #include <fcntl.h>
+#include <sys/mount.h>
 #include <sys/random.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -74,6 +75,7 @@ constexpr std::uint64_t syscallProcInfo = unixSyscallClass | 336U;
 constexpr std::uint64_t syscallStat64 = unixSyscallClass | 338U;
 constexpr std::uint64_t syscallFstat64 = unixSyscallClass | 339U;
 constexpr std::uint64_t syscallGetfsstat64 = unixSyscallClass | 347U;
+constexpr std::uint64_t syscallFstatfs64 = unixSyscallClass | 346U;
 constexpr std::uint64_t syscallBsdthreadRegister = unixSyscallClass | 366U;
 constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
 constexpr std::uint64_t syscallMac = unixSyscallClass | 381U;
@@ -527,6 +529,28 @@ GuestStatfs64 guestRootFilesystem() {
     std::copy(mountedFrom.begin(), mountedFrom.end(),
               filesystem.mountedFrom);
     return filesystem;
+}
+
+GuestStatfs64 guestStatfs64FromHost(const struct statfs &host) {
+    GuestStatfs64 guest{};
+    guest.blockSize = static_cast<std::uint32_t>(host.f_bsize);
+    guest.ioSize = static_cast<std::int32_t>(host.f_iosize);
+    guest.blocks = static_cast<std::uint64_t>(host.f_blocks);
+    guest.blocksFree = static_cast<std::uint64_t>(host.f_bfree);
+    guest.blocksAvailable = static_cast<std::uint64_t>(host.f_bavail);
+    guest.files = static_cast<std::uint64_t>(host.f_files);
+    guest.filesFree = static_cast<std::uint64_t>(host.f_ffree);
+    guest.fsid = {{host.f_fsid.val[0], host.f_fsid.val[1]}};
+    guest.owner = static_cast<std::uint32_t>(host.f_owner);
+    guest.type = static_cast<std::uint32_t>(host.f_type);
+    guest.flags = static_cast<std::uint32_t>(host.f_flags);
+    std::strncpy(guest.filesystemType, host.f_fstypename,
+                 sizeof(guest.filesystemType) - 1);
+    std::strncpy(guest.mountedOn, host.f_mntonname,
+                 sizeof(guest.mountedOn) - 1);
+    std::strncpy(guest.mountedFrom, host.f_mntfromname,
+                 sizeof(guest.mountedFrom) - 1);
+    return guest;
 }
 
 GuestStat64 guestStat64FromHost(const struct stat &host) {
@@ -2338,6 +2362,49 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
             return {};
         }
         setSuccess(state, filesystemCount);
+        return {};
+    }
+    if (number == syscallFstatfs64) {
+        const auto descriptor = GuestFileDescriptor{
+            std::bit_cast<std::int32_t>(
+                static_cast<std::uint32_t>(state.rdi))};
+        const auto *file = fileSpace_.lookup(descriptor);
+        if (file == nullptr) {
+            setError(state, EBADF);
+            return {};
+        }
+        GuestStatfs64 filesystem{};
+        if (file->kind == GuestFileKind::HostReadOnlyFile ||
+            file->kind == GuestFileKind::CurrentDirectory) {
+            struct statfs host {};
+            if (::statfs(file->guestPath.c_str(), &host) != 0) {
+                setError(state, errno);
+                return {};
+            }
+            filesystem = guestStatfs64FromHost(host);
+        } else if (file->kind == GuestFileKind::RootDirectory ||
+                   file->kind == GuestFileKind::SyntheticDirectory) {
+            filesystem = guestRootFilesystem();
+        } else {
+            std::ostringstream reason;
+            reason << "fstatfs64 is not implemented for this guest descriptor kind; got fd="
+                   << descriptor.value;
+            throw unsupported(state, syscallRip, reason.str());
+        }
+        try {
+            addressSpace.validateAccess(
+                guest::GuestAddress{state.rsi}, sizeof(filesystem),
+                guest::Permission::Write);
+            addressSpace.writeBytes(
+                guest::GuestAddress{state.rsi},
+                std::span<const std::uint8_t>{
+                    reinterpret_cast<const std::uint8_t *>(&filesystem),
+                    sizeof(filesystem)});
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        setSuccess(state, 0);
         return {};
     }
     if (number == syscallFstatat64) {

@@ -25455,6 +25455,64 @@ void testDarwinOsVariantStatusSysctl() {
                 "faulted kern.osvariant_status changed its length");
 }
 
+void testDarwinFstatfsHostDirectory() {
+    // Observed under an AppKit fixture: fstatfs64(appDirFd, buf).
+    constexpr auto openNumber = UINT64_C(0x02000005);
+    constexpr auto fstatfsNumber = UINT64_C(0x0200015A);
+    constexpr std::uint32_t openDirectory = 0x00100000;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress pathAddress{0x8100};
+    constexpr rosa::guest::GuestAddress statAddress{0x9000};
+    constexpr std::array<std::uint8_t, 2> currentDirectoryPath{'.', 0};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize * 2,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(pathAddress, currentDirectoryPath);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    rosa::x86::X86State openState;
+    openState.rax = openNumber;
+    openState.rdi = pathAddress.value;
+    openState.rsi = openDirectory;
+    openState.rdx = 0;
+    openState.rflags = 0x8D7;
+    static_cast<void>(
+        dispatcher.dispatch(addressSpace, openState, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(openState.rax, std::uint64_t{3},
+                "fstatfs fixture open returned the wrong descriptor");
+
+    rosa::x86::X86State state;
+    state.rax = fstatfsNumber;
+    state.rdi = 3;
+    state.rsi = statAddress.value;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E31274ULL});
+    expect(!outcome.exited, "fstatfs64 terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0}, "fstatfs64 returned an error");
+    expectEqual(state.rflags, std::uint64_t{0x8D6}, "fstatfs64 did not clear BSD carry");
+    const auto filesystem = addressSpace.readBytes(statAddress, 2168);
+    const std::uint32_t blockSize =
+        static_cast<std::uint32_t>(filesystem[0]) |
+        (static_cast<std::uint32_t>(filesystem[1]) << 8U) |
+        (static_cast<std::uint32_t>(filesystem[2]) << 16U) |
+        (static_cast<std::uint32_t>(filesystem[3]) << 24U);
+    expect(blockSize != 0, "fstatfs64 reported a zero block size");
+    const std::string_view filesystemType(
+        reinterpret_cast<const char *>(filesystem.data() + 72), 16);
+    expect(filesystemType.find("apfs") != std::string_view::npos,
+           "fstatfs64 reported an unexpected filesystem type");
+
+    state.rax = fstatfsNumber;
+    state.rdi = 99;
+    state.rsi = statAddress.value;
+    state.rflags = 0x2;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
+                "fstatfs64 on a bad descriptor returned the wrong errno");
+    expectEqual(state.rflags, std::uint64_t{0x3}, "fstatfs64 on a bad descriptor did not set carry");
+}
+
 void testDarwinOpenDirectoryWithinCurrentDirectory() {
     // Observed under an AppKit fixture: open(appDir, O_RDONLY|O_DIRECTORY|O_CLOEXEC).
     constexpr auto openNumber = UINT64_C(0x02000005);
@@ -37462,6 +37520,7 @@ int main() {
         {"Darwin iOS-support-version sysctl", testDarwinIosSupportVersionSysctl},
         {"Darwin OS-variant-status sysctl", testDarwinOsVariantStatusSysctl},
         {"Darwin kern.proc.pid sysctl", testDarwinSysctlKernProcPid},
+        {"Darwin fstatfs host directory", testDarwinFstatfsHostDirectory},
         {"Darwin open directory within current directory", testDarwinOpenDirectoryWithinCurrentDirectory},
         {"Darwin open current directory", testDarwinOpenCurrentDirectory},
         {"Darwin FeatureFlags shm_open probe", testDarwinFeatureFlagsShmOpenProbe},
