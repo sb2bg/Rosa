@@ -2822,7 +2822,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     if ((rex & 0xAU) != 0) {
                         throw DecodeError(
                             address, remaining,
-                            "MOVDDUP does not support REX.W/X");
+                            "PCMPEQQ does not support REX.W/X");
                     }
                     const auto destination = XmmRegisterOperand{
                         static_cast<XmmRegister>(static_cast<std::uint8_t>(
@@ -2830,7 +2830,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                             ((rex & 0x4U) != 0 ? 8U : 0U)))};
                     auto operandCursor = opcodeOffset + 4;
                     if (mode == 0x3U) {
-                        instruction.opcode = Opcode::MovddupRegReg;
+                        instruction.opcode = Opcode::PcmpeqqRegReg;
                         instruction.operands.push_back(destination);
                         instruction.operands.push_back(XmmRegisterOperand{
                             static_cast<XmmRegister>(
@@ -2845,14 +2845,14 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                              (rex & 0x1U) != 0)) {
                             throw DecodeError(
                                 address, remaining,
-                                "only RIP-relative or based MOVDDUP xmm, m64 is supported");
+                                "only RIP-relative or based PCMPEQQ xmm, m128 is supported");
                         }
                         std::int64_t displacement = 0;
                         if (mode == 0x1U) {
                             if (operandCursor >= code.size()) {
                                 throw DecodeError(
                                     address, remaining,
-                                    "truncated MOVDDUP m64 disp8");
+                                    "truncated PCMPEQQ m128 disp8");
                             }
                             displacement = std::bit_cast<std::int8_t>(
                                 code[operandCursor++]);
@@ -2860,7 +2860,7 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                             if (code.size() - operandCursor < 4) {
                                 throw DecodeError(
                                     address, remaining,
-                                    "truncated MOVDDUP m64 disp32");
+                                    "truncated PCMPEQQ m128 disp32");
                             }
                             displacement =
                                 readI32(code.subspan(operandCursor, 4));
@@ -2871,17 +2871,17 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                                 address, operandCursor - instructionStart,
                                 displacement));
                         }
-                        instruction.opcode = Opcode::MovddupRegMem;
+                        instruction.opcode = Opcode::PcmpeqqRegMem;
                         instruction.operands.push_back(destination);
                         instruction.operands.push_back(
                             ripRelative
                                 ? MemoryOperand{Register::Rax, displacement,
-                                                64, std::nullopt, 1, false,
+                                                128, std::nullopt, 1, false,
                                                 true}
                                 : MemoryOperand{
                                       decodeRegister(rmEncoding,
                                                      (rex & 0x1U) != 0),
-                                      displacement, 64});
+                                      displacement, 128});
                     }
                     const auto length = operandCursor - instructionStart;
                     instruction.length = static_cast<std::uint8_t>(length);

@@ -552,6 +552,17 @@ void Builder::compareEqualGuestBytesXmm(ValueId address, x86::XmmRegister reg,
     });
 }
 
+void Builder::compareEqualGuestQwordsXmm(ValueId address, x86::XmmRegister reg,
+                                         guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::CompareEqualGuestQwordsXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .lhs = address,
+        .guestXmmRegister = reg,
+    });
+}
+
 void Builder::compareEqualXmmBytes(x86::XmmRegister destination,
                                    x86::XmmRegister source,
                                    guest::GuestAddress rip) {
@@ -570,6 +581,18 @@ void Builder::compareEqualXmmDwords(x86::XmmRegister destination,
     block_.operations.push_back(Operation{
         .opcode = Opcode::CompareEqualXmmDwords,
         .width = Width::I32,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+    });
+}
+
+void Builder::compareEqualXmmQwords(x86::XmmRegister destination,
+                                    x86::XmmRegister source,
+                                    guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::CompareEqualXmmQwords,
+        .width = Width::I64,
         .guestRip = rip,
         .guestXmmRegister = destination,
         .sourceGuestXmmRegister = source,
@@ -1763,6 +1786,12 @@ std::vector<std::string> verify(const Block &block) {
                 errors.emplace_back("compare_equal_guest_bytes_xmm has no register");
             }
             break;
+        case Opcode::CompareEqualGuestQwordsXmm:
+            checkUse(operation.lhs, "guest address");
+            if (!operation.guestXmmRegister) {
+                errors.emplace_back("compare_equal_guest_qwords_xmm has no register");
+            }
+            break;
         case Opcode::CompareEqualXmmBytes:
             if (!operation.guestXmmRegister ||
                 !operation.sourceGuestXmmRegister) {
@@ -1775,6 +1804,14 @@ std::vector<std::string> verify(const Block &block) {
                 operation.width != Width::I32) {
                 errors.emplace_back(
                     "compare_equal_xmm_dwords has incomplete registers");
+            }
+            break;
+        case Opcode::CompareEqualXmmQwords:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister ||
+                operation.width != Width::I64) {
+                errors.emplace_back(
+                    "compare_equal_xmm_qwords has incomplete registers");
             }
             break;
         case Opcode::ShiftLeftXmmDwords:

@@ -2690,11 +2690,11 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             stream << ']';
             break;
         }
-        case x86::Opcode::MovddupRegReg:
-        case x86::Opcode::MovddupRegMem: {
+        case x86::Opcode::PcmpeqqRegReg:
+        case x86::Opcode::PcmpeqqRegMem: {
             const bool fromMemory =
-                instruction.opcode == x86::Opcode::MovddupRegMem;
-            stream << "movddup "
+                instruction.opcode == x86::Opcode::PcmpeqqRegMem;
+            stream << "pcmpeqq "
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0])
@@ -2706,7 +2706,7 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
             } else {
                 const auto memory =
                     std::get<x86::MemoryOperand>(instruction.operands[1]);
-                stream << "qword [";
+                stream << "xmmword [";
                 if (memory.ripRelative) {
                     stream << "rip";
                 } else {
@@ -3650,6 +3650,10 @@ std::string dumpIr(const ir::Block &block) {
             stream << "compare_equal_guest_bytes_xmm " << valueName(*operation.lhs)
                    << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
             break;
+        case ir::Opcode::CompareEqualGuestQwordsXmm:
+            stream << "compare_equal_guest_qwords_xmm " << valueName(*operation.lhs)
+                   << ", " << x86::xmmRegisterName(*operation.guestXmmRegister);
+            break;
         case ir::Opcode::CompareEqualXmmBytes:
             stream << "compare_equal_xmm_bytes "
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
@@ -3658,7 +3662,14 @@ std::string dumpIr(const ir::Block &block) {
         case ir::Opcode::CompareEqualXmmDwords:
             stream << "compare_equal_xmm_dwords.i32 "
                    << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
-                   << x86::xmmRegisterName(*operation.sourceGuestXmmRegister);
+                   << x86::xmmRegisterName(
+                          *operation.sourceGuestXmmRegister);
+            break;
+        case ir::Opcode::CompareEqualXmmQwords:
+            stream << "compare_equal_xmm_qwords.i64 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister) << ", "
+                   << x86::xmmRegisterName(
+                          *operation.sourceGuestXmmRegister);
             break;
         case ir::Opcode::ShiftLeftXmmDwords:
             stream << "shift_left_xmm_dwords.i32 "

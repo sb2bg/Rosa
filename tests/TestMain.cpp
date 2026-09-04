@@ -21249,38 +21249,82 @@ void testBlendvpdRegisters() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "BLENDVPD changed flags");
 }
 
-void testMovddupRegisters() {
-    // Observed in CoreGraphics under an Objective-C fixture: MOVDDUP xmm0, xmm1.
+void testPcmpeqqRegisterGeneratedExecution() {
+    // Observed in CoreGraphics under an Objective-C fixture: PCMPEQQ xmm0, xmm1
+    // (66 0F 38 29 /r; previously mislabeled as MOVDDUP).
     constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0x38, 0x29, 0xC1, 0xC3};
     constexpr rosa::guest::GuestAddress observedRip{0x7FF80968A84DULL};
     const rosa::x86::Decoder decoder;
     const auto decoded = decoder.decodeBlock(code, observedRip);
-    expect(decoded[0].opcode == rosa::x86::Opcode::MovddupRegReg,
-           "MOVDDUP opcode differs");
-    expectEqual(decoded[0].length, std::uint8_t{5}, "MOVDDUP length differs");
+    expect(decoded[0].opcode == rosa::x86::Opcode::PcmpeqqRegReg,
+           "PCMPEQQ opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "PCMPEQQ length differs");
     const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
     const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
     expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
                source.reg == rosa::x86::XmmRegister::Xmm1,
-           "MOVDDUP xmm0, xmm1 operands differ");
-    expect(rosa::debug::dumpX86(decoded).find("movddup xmm0, xmm1") != std::string::npos,
-           "MOVDDUP dump differs");
+           "PCMPEQQ xmm0, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("pcmpeqq xmm0, xmm1") != std::string::npos,
+           "PCMPEQQ dump differs");
 
     const rosa::dbt::Translator translator;
     constexpr std::array<std::uint8_t, 6> executeCode{0x66, 0x0F, 0x38, 0x29, 0xC1, 0xC3};
     const auto block = translator.translate(executeCode, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("compare_equal_xmm_qwords.i64") != std::string::npos,
+           "PCMPEQQ did not lower through qword-compare IR");
     rosa::x86::X86State state;
-    state.xmm[0] = {.low = 0xAAAAAAAAAAAAAAAAULL, .high = 0xBBBBBBBBBBBBBBBBULL};
-    state.xmm[1] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    state.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = 0xAAAAAAAAAAAAAAAAULL};
+    state.xmm[1] = {.low = 0x0123456789ABCDEFULL, .high = 0xBBBBBBBBBBBBBBBBULL};
     state.rflags = 0xAD7;
     static_cast<void>(block.execute(state));
-    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456789ABCDEFULL},
-                "MOVDDUP did not duplicate the low lane");
-    expectEqual(state.xmm[0].high, std::uint64_t{0x0123456789ABCDEFULL},
-                "MOVDDUP did not duplicate into the high lane");
+    expectEqual(state.xmm[0].low, UINT64_MAX, "PCMPEQQ equal low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0}, "PCMPEQQ unequal high lane differs");
     expectEqual(state.xmm[1].low, std::uint64_t{0x0123456789ABCDEFULL},
-                "MOVDDUP changed its source");
-    expectEqual(state.rflags, std::uint64_t{0xAD7}, "MOVDDUP changed flags");
+                "PCMPEQQ changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "PCMPEQQ changed flags");
+}
+
+void testPcmpeqqGuestMemoryGeneratedExecution() {
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0x38, 0x29, 0x07, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::PcmpeqqRegMem,
+           "PCMPEQQ xmm, [memory] opcode differs");
+    expect(rosa::debug::dumpX86(decoded).find("pcmpeqq xmm0, xmmword [rdi]") !=
+               std::string::npos,
+           "PCMPEQQ xmm, [memory] dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 16> bytes{0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01,
+                                                 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8000}, bytes);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rdi = 0x8000;
+    state.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = 0xAAAAAAAAAAAAAAAAULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[0].low, UINT64_MAX, "PCMPEQQ memory low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0}, "PCMPEQQ memory high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "PCMPEQQ changed flags");
+
+    rosa::guest::AddressSpace unmappedAddressSpace;
+    rosa::x86::X86State faultState;
+    faultState.rdi = 0x8000;
+    faultState.xmm[0] = {.low = 1, .high = 2};
+    bool rejected = false;
+    try {
+        static_cast<void>(block.execute(faultState, &unmappedAddressSpace));
+    } catch (const std::runtime_error &error) {
+        rejected = std::string_view(error.what()).find("unmapped") != std::string_view::npos;
+    }
+    expect(rejected, "PCMPEQQ from unmapped guest memory did not fail");
+    expectEqual(faultState.xmm[0].low, std::uint64_t{1}, "failed PCMPEQQ changed low lane");
+    expectEqual(faultState.xmm[0].high, std::uint64_t{2}, "failed PCMPEQQ changed high lane");
 }
 
 void testMovlhpsRegister() {
@@ -36563,7 +36607,8 @@ int main() {
         {"CVTSS2SD float32 to XMM", testConvertFloat32ToDoubleXmm},
         {"scalar double arithmetic XMM", testScalarDoubleArithmeticXmm},
         {"MOVLHPS register execution", testMovlhpsRegister},
-        {"MOVDDUP registers execution", testMovddupRegisters},
+        {"PCMPEQQ registers execution", testPcmpeqqRegisterGeneratedExecution},
+        {"PCMPEQQ guest memory execution", testPcmpeqqGuestMemoryGeneratedExecution},
         {"BLENDVPD registers execution", testBlendvpdRegisters},
         {"MOVLHPS RIP memory execution", testMovlhpsRipMemory},
         {"PSHUFB register execution", testPshufbRegisters},

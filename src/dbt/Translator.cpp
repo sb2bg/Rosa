@@ -678,6 +678,37 @@ compareEqualGuestBytesXmm128(GuestExecutionContext *context, x86::X86State *stat
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+compareEqualGuestQwordsXmm128(GuestExecutionContext *context, x86::X86State *state,
+                              std::uint64_t address, std::uint64_t registerIndex) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated PCMPEQQ has no address space");
+        }
+        if (registerIndex >= state->xmm.size()) {
+            throw std::runtime_error("generated PCMPEQQ has an invalid register");
+        }
+        const auto bytes = context->addressSpace->readBytes(guest::GuestAddress{address}, 16);
+        std::uint64_t sourceLow = 0;
+        std::uint64_t sourceHigh = 0;
+        std::memcpy(&sourceLow, bytes.data(), sizeof(sourceLow));
+        std::memcpy(&sourceHigh, bytes.data() + sizeof(sourceLow), sizeof(sourceHigh));
+        const auto original = state->xmm[registerIndex];
+        state->xmm[registerIndex] = {
+            .low = original.low == sourceLow ? UINT64_MAX : 0,
+            .high = original.high == sourceHigh ? UINT64_MAX : 0,
+        };
+        return state;
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = 16;
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 xorGuestMemoryXmm128(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
                      std::uint64_t registerIndex) noexcept {
     try {
@@ -1020,6 +1051,21 @@ compareEqualXmmDwords128(x86::X86State *state, std::uint64_t destinationIndex,
         }
     }
     state->xmm[destinationIndex] = result;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+compareEqualXmmQwords128(x86::X86State *state, std::uint64_t destinationIndex,
+                         std::uint64_t sourceIndex) noexcept {
+    if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    const auto destination = state->xmm[destinationIndex];
+    const auto source = state->xmm[sourceIndex];
+    state->xmm[destinationIndex] = {
+        .low = destination.low == source.low ? UINT64_MAX : 0,
+        .high = destination.high == source.high ? UINT64_MAX : 0,
+    };
     return state;
 }
 
@@ -4223,31 +4269,31 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.writeGuestXmmLane(destination, false, value, instruction.address);
             break;
         }
-        case x86::Opcode::MovddupRegReg:
-        case x86::Opcode::MovddupRegMem: {
+        case x86::Opcode::PcmpeqqRegReg:
+        case x86::Opcode::PcmpeqqRegMem: {
             const bool fromMemory =
-                instruction.opcode == x86::Opcode::MovddupRegMem;
+                instruction.opcode == x86::Opcode::PcmpeqqRegMem;
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
-                    "internal decoder error: MOVDDUP operand count");
+                    "internal decoder error: PCMPEQQ operand count");
             }
             const auto destination =
                 std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
-            ir::ValueId duplicated{};
             if (!fromMemory) {
                 const auto source =
                     std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
-                duplicated = builder.readGuestXmmLane(source, false,
-                                                      instruction.address);
+                builder.compareEqualXmmQwords(destination, source,
+                                              instruction.address);
             } else {
                 const auto memory =
                     std::get<x86::MemoryOperand>(instruction.operands[1]);
-                if (memory.width != 64 ||
+                if (memory.width != 128 ||
                     (memory.ripRelative
                          ? memory.hasBase || memory.index.has_value()
-                         : !memory.hasBase) ||
+                         : !memory.hasBase || memory.index.has_value()) ||
                     memory.segment != x86::Segment::None) {
-                    throw std::runtime_error("unsupported qword MOVDDUP addressing");
+                    throw std::runtime_error(
+                        "only RIP-relative or based PCMPEQQ xmm, m128 is implemented");
                 }
                 auto address =
                     memory.ripRelative
@@ -4262,15 +4308,12 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                     address = builder.add(address, displacement, ir::Width::I64,
                                           instruction.address);
                 }
-                duplicated =
-                    builder.loadGuest(address, ir::Width::I64, instruction.address);
+                // A single guest-memory helper performs the whole
+                // read-and-compare: no IR value may stay live in a
+                // caller-saved host register across the call.
+                builder.compareEqualGuestQwordsXmm(address, destination,
+                                                   instruction.address);
             }
-            // A single load feeds both lanes; the value is consumed here, so
-            // no IR value stays live across its call.
-            builder.writeGuestXmmLane(destination, false, duplicated,
-                                      instruction.address);
-            builder.writeGuestXmmLane(destination, true, duplicated,
-                                      instruction.address);
             break;
         }
         case x86::Opcode::MovdXmmReg:
@@ -9925,8 +9968,10 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::AddGuestMemoryXmm ||
             operation.opcode == ir::Opcode::TestXmmBits ||
             operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
+            operation.opcode == ir::Opcode::CompareEqualGuestQwordsXmm ||
             operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
             operation.opcode == ir::Opcode::CompareEqualXmmDwords ||
+            operation.opcode == ir::Opcode::CompareEqualXmmQwords ||
             operation.opcode == ir::Opcode::ShiftLeftXmmDwords ||
             operation.opcode == ir::Opcode::AddXmmWords ||
             operation.opcode == ir::Opcode::ComparePackedDoubleXmm ||
@@ -9989,6 +10034,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::AndGuestMemoryXmm ||
             operation.opcode == ir::Opcode::AddGuestMemoryXmm ||
             operation.opcode == ir::Opcode::CompareEqualGuestBytesXmm ||
+            operation.opcode == ir::Opcode::CompareEqualGuestQwordsXmm ||
             (operation.opcode == ir::Opcode::ShuffleXmmBytes && operation.lhs.has_value()) ||
             operation.opcode == ir::Opcode::RepeatMoveByte ||
             operation.opcode == ir::Opcode::LoadGuest ||
@@ -11594,6 +11640,25 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.bind(compared);
             break;
         }
+        case ir::Opcode::CompareEqualGuestQwordsXmm: {
+            const auto fault = assembler.makeLabel();
+            const auto compared = assembler.makeLabel();
+            assembler.mov(arm64::x1, arm64::x0);
+            assembler.mov(arm64::x2, hostRegister(*operation.lhs));
+            assembler.movImmediate(arm64::x3,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.mov(arm64::x0, arm64::x19);
+            assembler.movImmediate(arm64::x16, pointerBits(&compareEqualGuestQwordsXmm128));
+            assembler.blr(arm64::x16);
+            assembler.cbz(arm64::x0, fault);
+            assembler.b(compared);
+            assembler.bind(fault);
+            emitEpilogue();
+            assembler.movImmediate(arm64::x0, static_cast<std::uint64_t>(BlockExit::MemoryFault));
+            assembler.ret();
+            assembler.bind(compared);
+            break;
+        }
         case ir::Opcode::XorGuestMemoryXmm: {
             const auto fault = assembler.makeLabel();
             const auto completed = assembler.makeLabel();
@@ -11673,6 +11738,14 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.movImmediate(arm64::x2,
                                    static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
             assembler.movImmediate(arm64::x16, pointerBits(&compareEqualXmmDwords128));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::CompareEqualXmmQwords:
+            assembler.movImmediate(arm64::x1,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(arm64::x2,
+                                   static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x16, pointerBits(&compareEqualXmmQwords128));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::ShiftLeftXmmDwords:
