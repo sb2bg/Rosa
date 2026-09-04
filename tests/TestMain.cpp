@@ -21286,6 +21286,21 @@ void testLockOrByteMemoryImmediate() {
     static_cast<void>(block.execute(state, &addressSpace));
     expectEqual(addressSpace.readU8(target), std::uint8_t{0xF2},
                 "LOCK OR byte did not set the bits");
+
+    // The RIP-relative form addresses RIP+length+displacement, not the
+    // placeholder base register.
+    constexpr std::array<std::uint8_t, 9> ripCode{0xF0, 0x80, 0x0D, 0xF8,
+                                                  0x70, 0x00, 0x00, 0x02, 0xC3};
+    const auto ripBlock =
+        translator.translate(ripCode, rosa::guest::GuestAddress{0x1000});
+    constexpr std::array<std::uint8_t, 1> ripInitial{0xF0};
+    addressSpace.writeBytes(target, ripInitial);
+    rosa::x86::X86State ripState;
+    ripState.rax = UINT64_C(0xDEADBEEF);
+    ripState.rflags = 0xAD7;
+    static_cast<void>(ripBlock.execute(ripState, &addressSpace));
+    expectEqual(addressSpace.readU8(target), std::uint8_t{0xF2},
+                "RIP-relative LOCK OR byte missed its target");
 }
 
 void testLockOrQwordMemoryImmediate() {

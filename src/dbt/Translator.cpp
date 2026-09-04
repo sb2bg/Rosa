@@ -6323,14 +6323,18 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                          "[base+disp], imm8/imm32, and LOCK OR/AND qword "
                                          "[base+disp], imm8/imm32 are implemented");
             }
-            const auto base =
-                builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
-            auto address = base;
+            auto address =
+                memory.ripRelative
+                    ? builder.constant(instruction.address.value + instruction.length,
+                                       ir::Width::I64, instruction.address)
+                    : builder.readGuestRegister(memory.base, ir::Width::I64,
+                                                instruction.address);
             if (memory.displacement != 0) {
                 const auto displacement =
                     builder.constant(static_cast<std::uint64_t>(memory.displacement),
                                      ir::Width::I64, instruction.address);
-                address = builder.add(base, displacement, ir::Width::I64, instruction.address);
+                address = builder.add(address, displacement, ir::Width::I64,
+                                      instruction.address);
             }
             const auto width = memory.width == 8    ? ir::Width::I8
                                : memory.width == 16 ? ir::Width::I16
