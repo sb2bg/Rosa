@@ -2939,14 +2939,16 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                     secondOpcode == 0x72U ? 0x6U : 0x2U;
                 const bool packedMemorySource =
                     !isImmediateShift && secondOpcode == 0xFEU && mode != 0x3U;
+                const bool isDwordShiftRight =
+                    isImmediateShift && secondOpcode == 0x72U && regEncoding == 0x2U;
                 if ((mode != 0x3U && !packedMemorySource) || (rex & 0xAU) != 0 ||
-                    (isImmediateShift &&
+                    (isImmediateShift && !isDwordShiftRight &&
                      (regEncoding != expectedOpcodeExtension ||
                       (rex & 0x4U) != 0))) {
                     throw DecodeError(
                         address, remaining,
                         secondOpcode == 0x72U
-                            ? "only register-direct PSLLD xmm, imm8 is supported"
+                            ? "only register-direct PSLLD/PSRLD xmm, imm8 is supported"
                         : secondOpcode == 0x73U
                             ? "only register-direct PSRLQ xmm, imm8 is supported"
                         : secondOpcode == 0xFEU
@@ -2954,9 +2956,9 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
                             : "only register-direct PADDQ xmm, xmm is supported");
                 }
                 if (isImmediateShift) {
-                    instruction.opcode = secondOpcode == 0x72U
-                                             ? Opcode::PslldRegImm
-                                             : Opcode::PsrlqRegImm;
+                    instruction.opcode = isDwordShiftRight ? Opcode::PsrldRegImm
+                                         : secondOpcode == 0x72U ? Opcode::PslldRegImm
+                                                                 : Opcode::PsrlqRegImm;
                     instruction.operands.push_back(XmmRegisterOperand{
                         static_cast<XmmRegister>(static_cast<std::uint8_t>(
                             rmEncoding | ((rex & 0x1U) != 0 ? 8U : 0U)))});

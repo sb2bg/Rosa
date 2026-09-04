@@ -129,6 +129,7 @@ enum class Opcode {
     PcmpeqbRegMem,
     PcmpeqdRegReg,
     PslldRegImm,
+    PsrldRegImm,
     PsrlqRegImm,
     PadddRegReg,
     PadddRegMem,

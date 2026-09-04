@@ -1944,6 +1944,18 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           instruction.operands[1])
                           .value;
             break;
+        case x86::Opcode::PsrldRegImm:
+            stream << "psrld "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << std::dec
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[1])
+                          .value;
+            break;
         case x86::Opcode::PsrlqRegImm:
             stream << "psrlq "
                    << x86::xmmRegisterName(

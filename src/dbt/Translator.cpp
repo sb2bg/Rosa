@@ -6706,6 +6706,46 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::PsrldRegImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: PSRLD operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto count = static_cast<std::uint8_t>(
+                std::get<x86::ImmediateOperand>(instruction.operands[1]).value);
+            if (count >= 32) {
+                const auto zero = builder.constant(0, ir::Width::I64, instruction.address);
+                builder.writeGuestXmmLane(destination, false, zero, instruction.address);
+                builder.writeGuestXmmLane(destination, true, zero, instruction.address);
+                break;
+            }
+            const auto dwordMask =
+                builder.constant(0xFFFFFFFFU, ir::Width::I64, instruction.address);
+            for (std::uint8_t lane = 0; lane < 2; ++lane) {
+                const bool high = lane != 0;
+                const auto laneValue =
+                    builder.readGuestXmmLane(destination, high, instruction.address);
+                const auto lowDword = builder.bitAnd(laneValue, dwordMask, ir::Width::I64,
+                                                     instruction.address);
+                const auto highDword = builder.shiftRightLogical(
+                    laneValue, 32, ir::Width::I64, instruction.address);
+                const auto shiftedLow =
+                    builder.shiftRightLogical(lowDword, count, ir::Width::I64,
+                                              instruction.address);
+                const auto shiftedHigh =
+                    builder.shiftRightLogical(highDword, count, ir::Width::I64,
+                                              instruction.address);
+                const auto combined = builder.bitOr(
+                    shiftedLow,
+                    builder.shiftLeft(shiftedHigh, 32, ir::Width::I64,
+                                      instruction.address),
+                    ir::Width::I64, instruction.address);
+                builder.writeGuestXmmLane(destination, high, combined,
+                                          instruction.address);
+            }
+            break;
+        }
         case x86::Opcode::PsrlqRegImm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: PSRLQ operand count");

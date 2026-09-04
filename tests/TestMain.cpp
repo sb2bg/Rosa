@@ -17937,6 +17937,43 @@ void testPcmpeqdRegisterGeneratedExecution() {
     expectEqual(extendedState.rflags, std::uint64_t{0x8D7}, "extended PCMPEQD changed flags");
 }
 
+void testPackedDwordLogicalRightShiftImmediate() {
+    // Observed in libswiftCore under an Objective-C fixture: PSRLD xmm0, 16.
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0x72, 0xD0, 0x10, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8171A33AAULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PsrldRegImm, "PSRLD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "PSRLD length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto count = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 && count.value == 16,
+           "PSRLD xmm0, 16 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("psrld xmm0, 16") != std::string::npos,
+           "PSRLD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x12345678ABCDEF00ULL, .high = 0xFEDCBA9876543210ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x000012340000ABCDULL},
+                "PSRLD low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x0000FEDC00007654ULL},
+                "PSRLD high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "PSRLD changed flags");
+
+    // Counts of 32 or more zero every dword.
+    constexpr std::array<std::uint8_t, 6> zeroCode{0x66, 0x0F, 0x72, 0xD0, 0x21, 0xC3};
+    const auto zeroBlock = translator.translate(zeroCode, observedRip);
+    rosa::x86::X86State zeroState;
+    zeroState.xmm[0] = {.low = UINT64_MAX, .high = UINT64_MAX};
+    static_cast<void>(zeroBlock.execute(zeroState));
+    expectEqual(zeroState.xmm[0].low, std::uint64_t{0}, "PSRLD count 33 did not zero low dwords");
+    expectEqual(zeroState.xmm[0].high, std::uint64_t{0}, "PSRLD count 33 did not zero high dwords");
+}
+
 void testPackedDwordShiftAndAddGeneratedExecution() {
     constexpr std::array<std::uint8_t, 6> shiftCode{0x66, 0x0F, 0x72, 0xF1, 0x06, 0xC3};
     constexpr rosa::guest::GuestAddress shiftRip{0x7FF802C76FB0ULL};
@@ -35607,6 +35644,7 @@ int main() {
         {"PCMPEQD register generated execution", testPcmpeqdRegisterGeneratedExecution},
         {"packed dword shift and add generated execution",
          testPackedDwordShiftAndAddGeneratedExecution},
+        {"packed dword logical right shift immediate", testPackedDwordLogicalRightShiftImmediate},
         {"packed qword logical right shift immediate", testPackedQwordLogicalRightShiftImmediate},
         {"packed dword add RIP-relative memory", testPackedDwordAddRipMemory},
         {"packed horizontal add and MOVD extract", testPackedHorizontalAddAndMovdExtract},
