@@ -69,6 +69,7 @@ enum class Opcode {
     AddXmmWords,
     ComparePackedDoubleXmm,
     UpdateUnorderedDoubleFlags,
+    UpdateUnorderedFloatFlags,
     ConvertIntToDoubleXmm,
     ConvertFloatToDoubleXmm,
     ScalarDoubleXmm,
@@ -259,6 +260,9 @@ class Builder {
     void updateUnorderedDoubleFlags(ValueId destinationBits,
                                         ValueId sourceBits,
                                         guest::GuestAddress rip);
+    void updateUnorderedFloatFlags(ValueId destinationBits,
+                                       ValueId sourceBits,
+                                       guest::GuestAddress rip);
     void convertIntToDoubleXmm(ValueId value, x86::XmmRegister destination,
                                Width width, guest::GuestAddress rip);
     void convertFloatToDoubleXmm(ValueId value, x86::XmmRegister destination,

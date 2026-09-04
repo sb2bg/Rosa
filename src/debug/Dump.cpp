@@ -2447,6 +2447,18 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           .value;
             break;
         }
+        case x86::Opcode::UcomissRegReg:
+            stream << "ucomiss "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg);
+            break;
         case x86::Opcode::PblendwRegRegImm:
             stream << "pblendw "
                    << x86::xmmRegisterName(
@@ -3853,6 +3865,10 @@ std::string dumpIr(const ir::Block &block) {
                 stream << "syscall next=0x" << std::hex << operation.target->value;
                 break;
             }
+        case ir::Opcode::UpdateUnorderedFloatFlags:
+            stream << "update_unordered_float_flags.i32 " << valueName(*operation.lhs)
+                   << ", " << valueName(*operation.rhs);
+            break;
             break;
         }
         stream << '\n';

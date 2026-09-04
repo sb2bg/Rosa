@@ -625,6 +625,18 @@ void Builder::updateUnorderedDoubleFlags(ValueId destinationBits,
         .rhs = sourceBits,
     });
 }
+void Builder::updateUnorderedFloatFlags(ValueId destinationBits,
+                                              ValueId sourceBits,
+                                              guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::UpdateUnorderedFloatFlags,
+        .width = Width::I32,
+        .guestRip = rip,
+        .lhs = destinationBits,
+        .rhs = sourceBits,
+    });
+}
+
 
 void Builder::convertIntToDoubleXmm(ValueId value, x86::XmmRegister destination,
                                     Width width, guest::GuestAddress rip) {
@@ -1782,6 +1794,14 @@ std::vector<std::string> verify(const Block &block) {
             if (operation.width != Width::I64) {
                 errors.emplace_back(
                     "update_unordered_double_flags currently requires i64");
+            }
+            break;
+        case Opcode::UpdateUnorderedFloatFlags:
+            checkUse(operation.lhs, "destination bits");
+            checkUse(operation.rhs, "source bits");
+            if (operation.width != Width::I32) {
+                errors.emplace_back(
+                    "update_unordered_float_flags currently requires i32");
             }
             break;
         case Opcode::ConvertIntToDoubleXmm:

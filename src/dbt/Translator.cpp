@@ -941,6 +941,25 @@ updateUnorderedDoubleFlags(x86::X86State *state, std::uint64_t destinationBits,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateUnorderedFloatFlags(x86::X86State *state, std::uint64_t destinationBits,
+                          std::uint64_t sourceBits) noexcept {
+    const auto destination = std::bit_cast<float>(
+        static_cast<std::uint32_t>(destinationBits));
+    const auto source = std::bit_cast<float>(static_cast<std::uint32_t>(sourceBits));
+    // UCOMISS zeroes OF, SF and AF exactly like UCOMISD.
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (std::isnan(destination) || std::isnan(source)) {
+        flags |= flagCarry | flagParity | flagZero;
+    } else if (destination < source) {
+        flags |= flagCarry;
+    } else if (destination == source) {
+        flags |= flagZero;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 compareEqualXmmBytes128(x86::X86State *state, std::uint64_t destinationIndex,
                         std::uint64_t sourceIndex) noexcept {
     if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
@@ -7708,6 +7727,22 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                                instruction.address);
             break;
         }
+        case x86::Opcode::UcomissRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: UCOMISS operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto destinationBits = builder.readGuestXmmLane(
+                destination, false, instruction.address);
+            const auto sourceBits = builder.readGuestXmmLane(
+                source, false, instruction.address);
+            builder.updateUnorderedFloatFlags(destinationBits, sourceBits,
+                                              instruction.address);
+            break;
+        }
         case x86::Opcode::PinsrwXmmMem:
         case x86::Opcode::PinsrwXmmReg: {
             const bool fromMemory =
@@ -9770,6 +9805,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::AddXmmWords ||
             operation.opcode == ir::Opcode::ComparePackedDoubleXmm ||
             operation.opcode == ir::Opcode::UpdateUnorderedDoubleFlags ||
+            operation.opcode == ir::Opcode::UpdateUnorderedFloatFlags ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
             operation.opcode == ir::Opcode::ConvertFloatToDoubleXmm ||
             operation.opcode == ir::Opcode::ScalarDoubleXmm ||
@@ -11542,6 +11578,13 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.movImmediate(arm64::x16, pointerBits(&updateUnorderedDoubleFlags));
             assembler.blr(arm64::x16);
             break;
+        case ir::Opcode::UpdateUnorderedFloatFlags: {
+            assembler.mov(arm64::x1, hostRegister(*operation.lhs));
+            assembler.mov(arm64::x2, hostRegister(*operation.rhs));
+            assembler.movImmediate(arm64::x16, pointerBits(&updateUnorderedFloatFlags));
+            assembler.blr(arm64::x16);
+            break;
+        }
         }
         case ir::Opcode::ConvertIntToDoubleXmm: {
             if (operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {

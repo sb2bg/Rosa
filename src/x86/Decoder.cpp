@@ -3869,6 +3869,43 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
             continue;
         }
 
+        if (code[cursor] == 0x66U && code.size() - cursor >= 3) {
+            const auto afterUcomissPrefix = cursor + 1;
+            const bool hasUcomissRex =
+                code[afterUcomissPrefix] >= 0x40U && code[afterUcomissPrefix] <= 0x4FU;
+            const auto ucomissOpcodeOffset =
+                afterUcomissPrefix + (hasUcomissRex ? 1U : 0U);
+            if (code.size() - ucomissOpcodeOffset >= 3 &&
+                code[ucomissOpcodeOffset] == 0x0FU &&
+                code[ucomissOpcodeOffset + 1] == 0x2EU) {
+                const auto rex = hasUcomissRex ? code[afterUcomissPrefix] : 0U;
+                const auto modrm = code[ucomissOpcodeOffset + 2];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                if (mode != 0x3U || (rex & 0xAU) != 0) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only register-direct UCOMISS xmm, xmm is supported");
+                }
+                instruction.opcode = Opcode::UcomissRegReg;
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        ((modrm >> 3U) & 0x7U) | ((rex & 0x4U) != 0 ? 8U : 0U)))});
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        (modrm & 0x7U) | ((rex & 0x1U) != 0 ? 8U : 0U)))});
+                const auto length = ucomissOpcodeOffset + 3 - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = ucomissOpcodeOffset + 3;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
         if (((code[cursor] == 0x0FU && code.size() - cursor >= 4) ||
              (code.size() - cursor >= 5 && code[cursor] >= 0x40U &&
               code[cursor] <= 0x4FU && code[cursor + 1] == 0x0FU)) &&

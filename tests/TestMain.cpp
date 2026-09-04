@@ -22397,6 +22397,52 @@ void testPinsrdGuestMemoryToXmm() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted PINSRD changed flags");
 }
 
+void testUnorderedCompareScalarFloat() {
+    // Observed in CoreGraphics under an Objective-C fixture: UCOMISS xmm0, xmm1.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0x2E, 0xC1, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF80968BF2DULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::UcomissRegReg,
+           "UCOMISS opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "UCOMISS length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "UCOMISS xmm0, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("ucomiss xmm0, xmm1") != std::string::npos,
+           "UCOMISS dump differs");
+
+    struct FloatCase {
+        std::uint32_t destinationBits;
+        std::uint32_t sourceBits;
+        std::uint64_t expectedFlags;
+        const char *name;
+    };
+    constexpr FloatCase cases[] = {
+        {0x3F800000U, 0x40000000U, 0x3ULL, "less"},
+        {0x40000000U, 0x40000000U, 0x42ULL, "equal"},
+        {0x40400000U, 0x40000000U, 0x2ULL, "greater"},
+        {0x7FC00000U, 0x3F800000U, 0x47ULL, "unordered"},
+        {0x80000000U, 0x00000000U, 0x42ULL, "signed-zero"},
+    };
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("update_unordered_float_flags.i32") != std::string::npos,
+           "UCOMISS did not lower through unordered-compare IR");
+    for (const auto &testCase : cases) {
+        rosa::x86::X86State state;
+        state.xmm[0] = {.low = testCase.destinationBits, .high = 0};
+        state.xmm[1] = {.low = testCase.sourceBits, .high = 0};
+        state.rflags = 0x8D7;
+        static_cast<void>(block.execute(state));
+        expectEqual(state.rflags, testCase.expectedFlags,
+                    std::string("UCOMISS ") + testCase.name + " flags differ");
+    }
+}
+
 void testUnorderedCompareScalarDouble() {
     // Observed in CoreGraphics under an Objective-C fixture: UCOMISD xmm1, xmm0.
     constexpr std::array<std::uint8_t, 4> code{0x0F, 0x2E, 0xC8, 0xC3};
@@ -36427,6 +36473,7 @@ int main() {
         {"PEXTRD register from XMM", testPextrdRegisterFromXmm},
         {"MOVMSKPS register from XMM", testMovmskpsRegisterFromXmm},
         {"UCOMISD registers unordered compare", testUnorderedCompareScalarDouble},
+        {"UCOMISS registers unordered compare", testUnorderedCompareScalarFloat},
         {"PINSRQ register to XMM", testPinsrqRegisterToXmm},
         {"PINSRB register to XMM", testPinsrbRegisterToXmm},
         {"PINSRB guest memory to XMM", testPinsrbGuestMemoryToXmm},
