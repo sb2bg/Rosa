@@ -22169,6 +22169,47 @@ void testExtractpsXmmToGuestMemory() {
     expectEqual(faultState.rflags, std::uint64_t{0xBD7}, "faulted EXTRACTPS changed flags");
 }
 
+void testPinsrwGuestMemoryToXmm() {
+    // Observed in CoreGraphics under an Objective-C fixture: PINSRW xmm1, [rbp-0x4b], 2.
+    constexpr std::array<std::uint8_t, 7> code{0x66, 0x0F, 0xC4, 0x4D, 0xB5, 0x02, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8099AB173ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PinsrwXmmMem,
+           "PINSRW xmm, [mem], imm8 opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{6}, "PINSRW xmm, [mem], imm8 length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    const auto immediate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm1 &&
+               memory.base == rosa::x86::Register::Rbp && memory.displacement == -0x4B &&
+               memory.width == 16 && immediate.value == 2,
+           "PINSRW xmm1, word [rbp-0x4b], 2 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("pinsrw xmm1, word [rbp-0x4b], 0x2") !=
+               std::string::npos,
+           "PINSRW xmm, [mem], imm8 dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress sourceAddress{0x8100};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeBytes(sourceAddress, std::array<std::uint8_t, 2>{0xCD, 0xAB});
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.rbp = sourceAddress.value + 0x4B;
+    state.xmm[1] = {.low = 0x1111222233334444ULL, .high = 0x5555666677778888ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[1].low, std::uint64_t{0x1111ABCD33334444ULL},
+                "PINSRW inserted the wrong word");
+    expectEqual(state.xmm[1].high, std::uint64_t{0x5555666677778888ULL},
+                "PINSRW changed the high lane");
+    expectEqual(state.rbp, sourceAddress.value + 0x4B, "PINSRW changed its base");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "PINSRW changed flags");
+}
+
 void testPinsrdGuestMemoryToXmm() {
     constexpr std::array<std::uint8_t, 8> code{0x66, 0x0F, 0x3A, 0x22, 0x4B, 0xF0, 0x02, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -36176,6 +36217,7 @@ int main() {
         {"MOVLPS XMM memory moves", testMovlpsXmmMemoryMoves},
         {"EXTRACTPS XMM to guest memory", testExtractpsXmmToGuestMemory},
         {"PINSRD guest memory to XMM", testPinsrdGuestMemoryToXmm},
+        {"PINSRW guest memory to XMM", testPinsrwGuestMemoryToXmm},
         {"PINSRD register to XMM", testPinsrdRegisterToXmm},
         {"PEXTRW register from XMM", testPextrwRegisterFromXmm},
         {"MOVMSKPS register from XMM", testMovmskpsRegisterFromXmm},

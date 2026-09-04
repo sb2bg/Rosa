@@ -2932,6 +2932,108 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
         }
 
         if (code[cursor] == 0x66U && code.size() - cursor >= 4) {
+            auto pinsrwCursor = cursor + 1;
+            std::uint8_t pinsrwRex = 0;
+            if (code[pinsrwCursor] >= 0x40U && code[pinsrwCursor] <= 0x4FU &&
+                code.size() - pinsrwCursor >= 5) {
+                pinsrwRex = code[pinsrwCursor++];
+            }
+            if (code.size() - pinsrwCursor >= 4 && code[pinsrwCursor] == 0x0FU &&
+                code[pinsrwCursor + 1] == 0xC4U) {
+                const auto modrm = code[pinsrwCursor + 2];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto regEncoding =
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+                const auto rmEncoding =
+                    static_cast<std::uint8_t>(modrm & 0x7U);
+                const bool sourceIs64 = (pinsrwRex & 0x8U) != 0;
+                if (mode == 0x3U) {
+                    if (pinsrwRex == 0 && rmEncoding >= 0x4U) {
+                        // Without any REX byte, encodings 4-7 name
+                        // AH/CH/DH/BH instead of SPL/BPL/SIL/DIL.
+                        throw DecodeError(
+                            address, remaining,
+                            "high-byte register PINSRW source is not supported");
+                    }
+                    instruction.opcode = Opcode::PinsrwXmmReg;
+                    instruction.operands.push_back(XmmRegisterOperand{
+                        static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                            regEncoding | ((pinsrwRex & 0x4U) != 0 ? 8U : 0U)))});
+                    instruction.operands.push_back(RegisterOperand{
+                        decodeRegister(rmEncoding, (pinsrwRex & 0x1U) != 0),
+                        static_cast<std::uint8_t>(sourceIs64 ? 64U : 32U)});
+                    instruction.operands.push_back(ImmediateOperand{
+                        static_cast<std::uint8_t>(code[pinsrwCursor + 3] & 0x7U), 8});
+                } else {
+                    if (sourceIs64 || (pinsrwRex & 0x2U) != 0) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only PINSRW xmm, m16, imm8 without REX.W/X is supported");
+                    }
+                    if (rmEncoding == 0x4U || (mode == 0 && rmEncoding == 0x5U)) {
+                        throw DecodeError(
+                            address, remaining,
+                            "only based PINSRW xmm, m16, imm8 is supported");
+                    }
+                    auto operandCursor = pinsrwCursor + 3;
+                    std::int64_t displacement = 0;
+                    if (mode == 0x1U) {
+                        if (operandCursor >= code.size()) {
+                            throw DecodeError(address, remaining,
+                                              "truncated PINSRW m16 disp8");
+                        }
+                        displacement =
+                            std::bit_cast<std::int8_t>(code[operandCursor++]);
+                    } else if (mode == 0x2U) {
+                        if (code.size() - operandCursor < 4) {
+                            throw DecodeError(address, remaining,
+                                              "truncated PINSRW m16 disp32");
+                        }
+                        displacement = readI32(code.subspan(operandCursor, 4));
+                        operandCursor += 4;
+                    }
+                    if (operandCursor >= code.size()) {
+                        throw DecodeError(address, remaining,
+                                          "truncated PINSRW m16 imm8");
+                    }
+                    instruction.opcode = Opcode::PinsrwXmmMem;
+                    instruction.operands.push_back(XmmRegisterOperand{
+                        static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                            regEncoding | ((pinsrwRex & 0x4U) != 0 ? 8U : 0U)))});
+                    instruction.operands.push_back(MemoryOperand{
+                        decodeRegister(rmEncoding, (pinsrwRex & 0x1U) != 0),
+                        displacement, 16});
+                    instruction.operands.push_back(ImmediateOperand{
+                        static_cast<std::uint8_t>(code[operandCursor] & 0x7U), 8});
+                    operandCursor += 1;
+                    const auto memoryLength = operandCursor - instructionStart;
+                    instruction.length =
+                        static_cast<std::uint8_t>(memoryLength);
+                    std::copy_n(
+                        code.begin() +
+                            static_cast<std::ptrdiff_t>(instructionStart),
+                        memoryLength, instruction.bytes.begin());
+                    result.push_back(std::move(instruction));
+                    cursor = operandCursor;
+                    if (result.size() == maximumInstructions) {
+                        return result;
+                    }
+                    continue;
+                }
+                const auto length = pinsrwCursor + 4 - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = pinsrwCursor + 4;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
+        if (code[cursor] == 0x66U && code.size() - cursor >= 4) {
             auto pextrwCursor = cursor + 1;
             std::uint8_t pextrwRex = 0;
             if (code[pextrwCursor] >= 0x40U && code[pextrwCursor] <= 0x4FU &&

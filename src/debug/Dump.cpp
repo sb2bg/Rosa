@@ -2370,6 +2370,36 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               instruction.operands[1])
                               .reg);
             break;
+        case x86::Opcode::PinsrwXmmMem:
+        case x86::Opcode::PinsrwXmmReg: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::PinsrwXmmMem;
+            stream << "pinsrw "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", ";
+            if (!fromMemory) {
+                stream << registerOperandName(
+                    std::get<x86::RegisterOperand>(instruction.operands[1]));
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                stream << "word [" << x86::registerName(memory.base);
+                if (memory.displacement < 0) {
+                    stream << "-0x" << -memory.displacement;
+                } else if (memory.displacement > 0) {
+                    stream << "+0x" << memory.displacement;
+                }
+                stream << ']';
+            }
+            stream << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[2])
+                          .value;
+            break;
+        }
         case x86::Opcode::ExtractpsMemXmmImm: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);

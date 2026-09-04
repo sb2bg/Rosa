@@ -7517,6 +7517,83 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
                                        instruction.address);
             break;
         }
+        case x86::Opcode::PinsrwXmmMem:
+        case x86::Opcode::PinsrwXmmReg: {
+            const bool fromMemory =
+                instruction.opcode == x86::Opcode::PinsrwXmmMem;
+            if (instruction.operands.size() != 3) {
+                throw std::runtime_error("internal decoder error: PINSRW operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto count = std::get<x86::ImmediateOperand>(instruction.operands[2]);
+            if (count.width != 8 || count.value > 7) {
+                throw std::runtime_error("only PINSRW word counts 0-7 are implemented");
+            }
+            ir::ValueId inserted{};
+            if (!fromMemory) {
+                const auto source =
+                    std::get<x86::RegisterOperand>(instruction.operands[1]);
+                if ((source.width != 32 && source.width != 64) ||
+                    source.byteOffset != 0) {
+                    throw std::runtime_error(
+                        "only PINSRW xmm, r32/r64, imm8 is implemented");
+                }
+                const auto sourceValue = builder.readGuestRegister(
+                    source.reg, ir::Width::I64, instruction.address);
+                inserted = builder.bitAnd(
+                    sourceValue,
+                    builder.constant(0xFFFFU, ir::Width::I64, instruction.address),
+                    ir::Width::I64, instruction.address);
+            } else {
+                const auto memory =
+                    std::get<x86::MemoryOperand>(instruction.operands[1]);
+                if (memory.width != 16 || !memory.hasBase || memory.index ||
+                    memory.ripRelative ||
+                    memory.segment != x86::Segment::None) {
+                    throw std::runtime_error(
+                        "only based PINSRW xmm, m16, imm8 is implemented");
+                }
+                auto address = builder.readGuestRegister(
+                    memory.base, ir::Width::I64, instruction.address);
+                if (memory.displacement != 0) {
+                    const auto displacement = builder.constant(
+                        static_cast<std::uint64_t>(memory.displacement),
+                        ir::Width::I64, instruction.address);
+                    address = builder.add(address, displacement, ir::Width::I64,
+                                          instruction.address);
+                }
+                inserted = builder.loadGuest(address, ir::Width::I16,
+                                             instruction.address);
+            }
+            // Splice the word into its lane: clear the target word, then OR
+            // in the shifted value. All pure IR around at most one load.
+            const bool high = (count.value & 4U) != 0;
+            const std::uint8_t shift =
+                static_cast<std::uint8_t>((count.value & 3U) * 16U);
+            const auto lane = builder.readGuestXmmLane(destination, high,
+                                                       instruction.address);
+            const auto wordMask = builder.shiftLeft(
+                builder.constant(0xFFFFU, ir::Width::I64, instruction.address), shift,
+                ir::Width::I64, instruction.address);
+            const auto allOnes =
+                builder.constant(UINT64_MAX, ir::Width::I64, instruction.address);
+            const auto cleared = builder.bitAnd(
+                lane,
+                builder.bitXor(wordMask, allOnes, ir::Width::I64,
+                               instruction.address),
+                ir::Width::I64, instruction.address);
+            auto placed = inserted;
+            if (shift != 0) {
+                placed = builder.shiftLeft(inserted, shift, ir::Width::I64,
+                                           instruction.address);
+            }
+            const auto combined = builder.bitOr(cleared, placed, ir::Width::I64,
+                                                instruction.address);
+            builder.writeGuestXmmLane(destination, high, combined,
+                                      instruction.address);
+            break;
+        }
         case x86::Opcode::ExtractpsMemXmmImm: {
             if (instruction.operands.size() != 3) {
                 throw std::runtime_error("internal decoder error: EXTRACTPS operand count");
