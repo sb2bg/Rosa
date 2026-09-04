@@ -29184,6 +29184,44 @@ void testMachThreadSelfTrap() {
            "repeated thread_self_trap did not add another send uref");
 }
 
+void testMachPortAllocateTrap() {
+    // Observed under an AppKit fixture: trap 16 allocates a port set.
+    rosa::guest::AddressSpace addressSpace;
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress output{0x8100};
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    rosa::darwin::SyscallDispatcher dispatcher;
+    const rosa::darwin::MachDispatcher mach;
+    rosa::x86::X86State state;
+    state.rax = rosa::darwin::MachDispatcher::portAllocateTrapNumber;
+    state.rdi = mach.taskSelfPortName().value;
+    state.rsi = 3; // MACH_PORT_RIGHT_PORT_SET.
+    state.rdx = output.value;
+    state.rflags = 0x8D7;
+    const auto outcome =
+        dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2F9F0ULL});
+    expect(!outcome.exited, "mach_port_allocate_trap terminated the guest");
+    expectEqual(state.rax, std::uint64_t{0}, "mach_port_allocate_trap did not succeed");
+    const rosa::darwin::GuestMachPortName name{addressSpace.readU32(output)};
+    const auto *port = dispatcher.machDispatcher().portSpace().lookup(name);
+    expect(port != nullptr && port->hasReceiveRight,
+           "allocated port set is absent from its namespace");
+    expectEqual(port->type, rosa::darwin::GuestPortType::PortSet,
+                "mach_port_allocate_trap created the wrong port type");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "mach_port_allocate_trap applied BSD carry-flag semantics");
+
+    state.rax = rosa::darwin::MachDispatcher::portAllocateTrapNumber;
+    state.rdi = mach.taskSelfPortName().value;
+    state.rsi = 0; // MACH_PORT_RIGHT_SEND is not allocatable.
+    state.rdx = output.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{18},
+                "mach_port_allocate_trap with a bad right returned the wrong code");
+}
+
 void testMachMessage2ReceiveTimedOut() {
     // A receive-only mach_msg2 call on an owned but always-empty port
     // times out instead of blocking forever.
@@ -38234,6 +38272,7 @@ int main() {
         {"generated Darwin thread_fast_set_cthread_self",
          testGeneratedDarwinThreadFastSetCthreadSelf},
         {"Mach thread-self trap", testMachThreadSelfTrap},
+        {"Mach port-allocate trap", testMachPortAllocateTrap},
         {"Mach message2 receive timed out", testMachMessage2ReceiveTimedOut},
         {"Mach timebase-info trap", testMachTimebaseInfoTrap},
         {"Mach task-self trap", testMachTaskSelfTrap},

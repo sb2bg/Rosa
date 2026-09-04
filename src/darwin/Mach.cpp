@@ -1479,6 +1479,38 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = kernSuccess;
         return;
     }
+    case 16U: {
+        // XNU trap 16 allocates a receive right, vanilla or port set, in
+        // the target task and copies out its name. Only RECEIVE and
+        // PORT_SET rights are valid here.
+        if (state.rdi != taskSelfPortName().value) {
+            state.rax = machSendInvalidDestination;
+            return;
+        }
+        const auto right = static_cast<std::uint32_t>(state.rsi);
+        if (right != 1 && right != 3) {
+            state.rax = kernInvalidValue;
+            return;
+        }
+        GuestPort port;
+        port.type = right == 3 ? GuestPortType::PortSet : GuestPortType::Ordinary;
+        port.queueLimit = machPortQlimitDefault;
+        const auto name = portSpace_.allocateReceiveRight(port);
+        if (!name) {
+            state.rax = kernNoSpace;
+            return;
+        }
+        try {
+            const auto encoded = encodeGuestPortName(*name);
+            addressSpace.writeBytes(guest::GuestAddress{state.rdx}, encoded);
+        } catch (const std::runtime_error &) {
+            portSpace_.rollbackLastAllocation(*name);
+            state.rax = kernInvalidAddress;
+            return;
+        }
+        state.rax = kernSuccess;
+        return;
+    }
     case 18U: {
         // XNU trap 18 drops one send, send-once, or dead-name uref in the
         // target task's IPC space. Rosa currently has explicit send and

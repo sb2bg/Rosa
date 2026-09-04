@@ -23,6 +23,7 @@ enum class GuestPortType : std::uint8_t {
     Bootstrap,
     Clock,
     Semaphore,
+    PortSet,
 };
 
 enum class GuestPortDeallocateResult : std::uint8_t {
