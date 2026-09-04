@@ -2920,6 +2920,53 @@ std::vector<DecodedInstruction> Decoder::decodeBlock(std::span<const std::uint8_
 
         if (code[cursor] == 0x66U && code.size() - cursor >= 3) {
             const auto afterPrefix = cursor + 1;
+            const bool hasPackedDoubleRex =
+                code[afterPrefix] >= 0x40U && code[afterPrefix] <= 0x4FU;
+            const auto opcodeOffset =
+                afterPrefix + (hasPackedDoubleRex ? 1U : 0U);
+            if (code.size() - opcodeOffset >= 3 &&
+                code[opcodeOffset] == 0x0FU &&
+                code[opcodeOffset + 1] == 0xC2U) {
+                const auto rex = hasPackedDoubleRex ? code[afterPrefix] : 0U;
+                const auto modrm = code[opcodeOffset + 2];
+                const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                if (mode != 0x3U || (rex & 0xAU) != 0) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only register-direct CMPPD xmm, xmm, imm8 is supported");
+                }
+                if (code.size() - opcodeOffset < 4) {
+                    throw DecodeError(address, remaining,
+                                      "truncated CMPPD xmm, xmm, imm8");
+                }
+                const auto regEncoding =
+                    static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
+                const auto rmEncoding =
+                    static_cast<std::uint8_t>(modrm & 0x7U);
+                instruction.opcode = Opcode::CmppdRegRegImm;
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        regEncoding | ((rex & 0x4U) != 0 ? 8U : 0U)))});
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        rmEncoding | ((rex & 0x1U) != 0 ? 8U : 0U)))});
+                instruction.operands.push_back(ImmediateOperand{
+                    static_cast<std::uint8_t>(code[opcodeOffset + 3] & 0x7U), 8});
+                const auto length = opcodeOffset + 4 - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                            length, instruction.bytes.begin());
+                result.push_back(std::move(instruction));
+                cursor = opcodeOffset + 4;
+                if (result.size() == maximumInstructions) {
+                    return result;
+                }
+                continue;
+            }
+        }
+
+        if (code[cursor] == 0x66U && code.size() - cursor >= 3) {
+            const auto afterPrefix = cursor + 1;
             const bool hasPackedWordRex =
                 code[afterPrefix] >= 0x40U && code[afterPrefix] <= 0x4FU;
             const auto opcodeOffset =

@@ -600,6 +600,20 @@ void Builder::addXmmWords(x86::XmmRegister destination,
     });
 }
 
+void Builder::comparePackedDoubleXmm(x86::XmmRegister destination,
+                                     x86::XmmRegister source,
+                                     std::uint8_t predicate,
+                                     guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::ComparePackedDoubleXmm,
+        .width = Width::I64,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+        .immediate = predicate,
+    });
+}
+
 void Builder::convertIntToDoubleXmm(ValueId value, x86::XmmRegister destination,
                                     Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -1729,6 +1743,14 @@ std::vector<std::string> verify(const Block &block) {
                 operation.width != Width::I16) {
                 errors.emplace_back(
                     "add_xmm_words has incomplete registers");
+            }
+            break;
+        case Opcode::ComparePackedDoubleXmm:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister ||
+                operation.width != Width::I64) {
+                errors.emplace_back(
+                    "compare_packed_double_xmm has incomplete registers");
             }
             break;
         case Opcode::ConvertIntToDoubleXmm:

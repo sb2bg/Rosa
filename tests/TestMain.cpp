@@ -18127,6 +18127,52 @@ void testPackedWordAddGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "PADDW changed flags");
 }
 
+void testPackedDoubleCompareGeneratedExecution() {
+    // Observed in ColorSync under an Objective-C fixture: CMPPD xmm4, xmm2, 0.
+    constexpr std::array<std::uint8_t, 6> code{0x66, 0x0F, 0xC2, 0xE2, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF809FA4EB0ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::CmppdRegRegImm, "CMPPD opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{5}, "CMPPD length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    const auto predicate = std::get<rosa::x86::ImmediateOperand>(decoded[0].operands[2]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm4 &&
+               source.reg == rosa::x86::XmmRegister::Xmm2 && predicate.value == 0,
+           "CMPPD xmm4, xmm2, 0 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("cmppd xmm4, xmm2, 0x0") != std::string::npos,
+           "CMPPD dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("compare_packed_double_xmm") != std::string::npos,
+           "CMPPD did not lower through packed-double IR");
+    rosa::x86::X86State state;
+    state.xmm[4] = {.low = 0x3FF0000000000000ULL, .high = 0x7FF8000000000000ULL};
+    state.xmm[2] = {.low = 0x3FF0000000000000ULL, .high = 0x4000000000000000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // Low lane equal (mask set); high lane NaN unordered (mask clear for EQ).
+    expectEqual(state.xmm[4].low, UINT64_MAX, "CMPPD equal lane differs");
+    expectEqual(state.xmm[4].high, std::uint64_t{0}, "CMPPD unordered lane differs");
+    expectEqual(state.xmm[2].low, std::uint64_t{0x3FF0000000000000ULL},
+                "CMPPD changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "CMPPD changed flags");
+
+    // Less-than predicate over distinct lanes.
+    constexpr std::array<std::uint8_t, 6> lessCode{0x66, 0x0F, 0xC2, 0xE2, 0x01, 0xC3};
+    const auto lessBlock = translator.translate(lessCode, observedRip);
+    rosa::x86::X86State lessState;
+    lessState.xmm[4] = {.low = 0x4008000000000000ULL, .high = 0x3FF0000000000000ULL};
+    lessState.xmm[2] = {.low = 0x4004000000000000ULL, .high = 0x4000000000000000ULL};
+    static_cast<void>(lessBlock.execute(lessState));
+    // 3.0 < 2.5 is false; 1.0 < 2.0 is true.
+    expectEqual(lessState.xmm[4].low, std::uint64_t{0}, "CMPPD less-than low lane differs");
+    expectEqual(lessState.xmm[4].high, UINT64_MAX, "CMPPD less-than high lane differs");
+}
+
 void testPackedDwordShiftAndAddGeneratedExecution() {
     constexpr std::array<std::uint8_t, 6> shiftCode{0x66, 0x0F, 0x72, 0xF1, 0x06, 0xC3};
     constexpr rosa::guest::GuestAddress shiftRip{0x7FF802C76FB0ULL};
@@ -35893,6 +35939,7 @@ int main() {
         {"packed dword shift and add generated execution",
          testPackedDwordShiftAndAddGeneratedExecution},
         {"packed word add generated execution", testPackedWordAddGeneratedExecution},
+        {"packed double compare generated execution", testPackedDoubleCompareGeneratedExecution},
         {"packed dword logical right shift immediate", testPackedDwordLogicalRightShiftImmediate},
         {"packed qword logical right shift immediate", testPackedQwordLogicalRightShiftImmediate},
         {"packed dword add RIP-relative memory", testPackedDwordAddRipMemory},

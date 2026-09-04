@@ -1999,6 +1999,22 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                               instruction.operands[1])
                               .reg);
             break;
+        case x86::Opcode::CmppdRegRegImm:
+            stream << "cmppd "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[0])
+                              .reg)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(
+                              instruction.operands[1])
+                              .reg)
+                   << ", 0x"
+                   << std::get<x86::ImmediateOperand>(
+                          instruction.operands[2])
+                          .value;
+            break;
         case x86::Opcode::PadddRegMem: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);
@@ -3389,6 +3405,14 @@ std::string dumpIr(const ir::Block &block) {
                    << ", "
                    << x86::xmmRegisterName(
                           *operation.sourceGuestXmmRegister);
+            break;
+        case ir::Opcode::ComparePackedDoubleXmm:
+            stream << "compare_packed_double_xmm.i64 "
+                   << x86::xmmRegisterName(*operation.guestXmmRegister)
+                   << ", "
+                   << x86::xmmRegisterName(
+                          *operation.sourceGuestXmmRegister)
+                   << ", " << operation.immediate;
             break;
         case ir::Opcode::ConvertIntToDoubleXmm:
             stream << "convert_int_to_double_xmm."

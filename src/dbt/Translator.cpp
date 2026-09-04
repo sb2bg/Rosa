@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -864,6 +865,40 @@ addXmmWords128(x86::X86State *state, std::uint64_t destinationIndex,
         resultLane |= static_cast<std::uint64_t>(sum) << shift;
     }
     state->xmm[destinationIndex] = result;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+comparePackedDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
+                       std::uint64_t sourceIndex, std::uint64_t predicate) noexcept {
+    if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    // Host IEEE-754 comparison matches SSE scalar semantics for every
+    // predicate, including unordered inputs (MXCSR exception flags, which
+    // Rosa does not model, aside).
+    const auto compareLane = [predicate](std::uint64_t destinationBits,
+                                         std::uint64_t sourceBits) {
+        const auto destination = std::bit_cast<double>(destinationBits);
+        const auto source = std::bit_cast<double>(sourceBits);
+        const bool satisfied =
+            (predicate & 7U) == 0U   ? destination == source
+            : (predicate & 7U) == 1U ? destination < source
+            : (predicate & 7U) == 2U ? destination <= source
+            : (predicate & 7U) == 3U
+                ? std::isnan(destination) || std::isnan(source)
+            : (predicate & 7U) == 4U ? destination != source
+            : (predicate & 7U) == 5U ? !(destination < source)
+            : (predicate & 7U) == 6U ? !(destination <= source)
+                                     : !std::isnan(destination) && !std::isnan(source);
+        return satisfied ? UINT64_MAX : std::uint64_t{0};
+    };
+    const auto destination = state->xmm[destinationIndex];
+    const auto source = state->xmm[sourceIndex];
+    state->xmm[destinationIndex] = {
+        .low = compareLane(destination.low, source.low),
+        .high = compareLane(destination.high, source.high),
+    };
     return state;
 }
 
@@ -6902,6 +6937,23 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.addXmmWords(destination, source, instruction.address);
             break;
         }
+        case x86::Opcode::CmppdRegRegImm: {
+            if (instruction.operands.size() != 3) {
+                throw std::runtime_error("internal decoder error: CMPPD operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            const auto predicate = std::get<x86::ImmediateOperand>(instruction.operands[2]);
+            if (predicate.width != 8 || predicate.value > 7) {
+                throw std::runtime_error("only CMPPD with predicate 0-7 is implemented");
+            }
+            builder.comparePackedDoubleXmm(
+                destination, source, static_cast<std::uint8_t>(predicate.value),
+                instruction.address);
+            break;
+        }
         case x86::Opcode::PadddRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
@@ -9219,6 +9271,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::CompareEqualXmmDwords ||
             operation.opcode == ir::Opcode::ShiftLeftXmmDwords ||
             operation.opcode == ir::Opcode::AddXmmWords ||
+            operation.opcode == ir::Opcode::ComparePackedDoubleXmm ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
             operation.opcode == ir::Opcode::ScalarDoubleXmm ||
             operation.opcode == ir::Opcode::AddXmmDwords ||
@@ -10973,6 +11026,15 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             assembler.movImmediate(arm64::x2,
                                    static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
             assembler.movImmediate(arm64::x16, pointerBits(&addXmmWords128));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::ComparePackedDoubleXmm:
+            assembler.movImmediate(arm64::x1,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(arm64::x2,
+                                   static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x3, operation.immediate);
+            assembler.movImmediate(arm64::x16, pointerBits(&comparePackedDoubleXmm));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::ConvertIntToDoubleXmm: {
