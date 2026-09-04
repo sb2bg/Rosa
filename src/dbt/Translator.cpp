@@ -845,6 +845,29 @@ scalarDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+addXmmWords128(x86::X86State *state, std::uint64_t destinationIndex,
+               std::uint64_t sourceIndex) noexcept {
+    if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    const auto destination = state->xmm[destinationIndex];
+    const auto source = state->xmm[sourceIndex];
+    x86::X86State::XmmValue result;
+    for (std::size_t index = 0; index < 8; ++index) {
+        const auto shift = static_cast<std::uint8_t>((index & 3U) * 16U);
+        const auto destinationLane = index < 4 ? destination.low : destination.high;
+        const auto sourceLane = index < 4 ? source.low : source.high;
+        const auto sum = static_cast<std::uint16_t>(
+            static_cast<std::uint16_t>(destinationLane >> shift) +
+            static_cast<std::uint16_t>(sourceLane >> shift));
+        auto &resultLane = index < 4 ? result.low : result.high;
+        resultLane |= static_cast<std::uint64_t>(sum) << shift;
+    }
+    state->xmm[destinationIndex] = result;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 compareEqualXmmBytes128(x86::X86State *state, std::uint64_t destinationIndex,
                         std::uint64_t sourceIndex) noexcept {
     if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
@@ -6778,6 +6801,17 @@ ir::Block lowerToIr(const std::vector<x86::DecodedInstruction> &decoded) {
             builder.addXmmDwords(destination, source, instruction.address);
             break;
         }
+        case x86::Opcode::PaddwRegReg: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: PADDW operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            builder.addXmmWords(destination, source, instruction.address);
+            break;
+        }
         case x86::Opcode::PadddRegMem: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error(
@@ -9094,6 +9128,7 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
             operation.opcode == ir::Opcode::CompareEqualXmmBytes ||
             operation.opcode == ir::Opcode::CompareEqualXmmDwords ||
             operation.opcode == ir::Opcode::ShiftLeftXmmDwords ||
+            operation.opcode == ir::Opcode::AddXmmWords ||
             operation.opcode == ir::Opcode::ConvertIntToDoubleXmm ||
             operation.opcode == ir::Opcode::ScalarDoubleXmm ||
             operation.opcode == ir::Opcode::AddXmmDwords ||
@@ -10840,6 +10875,14 @@ arm64::Program compileToArm64(const ir::Block &block, bool retainProgramListing)
                                    static_cast<std::uint64_t>(*operation.guestXmmRegister));
             assembler.movImmediate(arm64::x2, operation.immediate);
             assembler.movImmediate(arm64::x16, pointerBits(&shiftLeftXmmDwords128));
+            assembler.blr(arm64::x16);
+            break;
+        case ir::Opcode::AddXmmWords:
+            assembler.movImmediate(arm64::x1,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(arm64::x2,
+                                   static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x16, pointerBits(&addXmmWords128));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::ConvertIntToDoubleXmm: {

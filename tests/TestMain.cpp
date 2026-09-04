@@ -17974,6 +17974,42 @@ void testPackedDwordLogicalRightShiftImmediate() {
     expectEqual(zeroState.xmm[0].high, std::uint64_t{0}, "PSRLD count 33 did not zero high dwords");
 }
 
+void testPackedWordAddGeneratedExecution() {
+    // Observed in libswiftCore under an Objective-C fixture: PADDW xmm0, xmm1.
+    constexpr std::array<std::uint8_t, 5> code{0x66, 0x0F, 0xFD, 0xC1, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF8171A33AFULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PaddwRegReg, "PADDW opcode differs");
+    expectEqual(decoded[0].length, std::uint8_t{4}, "PADDW length differs");
+    const auto destination = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[0]);
+    const auto source = std::get<rosa::x86::XmmRegisterOperand>(decoded[0].operands[1]);
+    expect(destination.reg == rosa::x86::XmmRegister::Xmm0 &&
+               source.reg == rosa::x86::XmmRegister::Xmm1,
+           "PADDW xmm0, xmm1 operands differ");
+    expect(rosa::debug::dumpX86(decoded).find("paddw xmm0, xmm1") != std::string::npos,
+           "PADDW dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation())
+                   .find("add_xmm_words.i16 xmm0, xmm1") != std::string::npos,
+           "PADDW did not lower through packed-word IR");
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x00020003FFFE0004ULL, .high = 0x80007FFF00010000ULL};
+    state.xmm[1] = {.low = 0x0004000500060007ULL, .high = 0x8000800000010000ULL};
+    state.rflags = 0xAD7;
+    static_cast<void>(block.execute(state));
+    // Low words: B+7, 4+6, 3+5 (mod 2^16), 2+4; high words likewise.
+    expectEqual(state.xmm[0].low, std::uint64_t{0x000600080004000BULL},
+                "PADDW low lane differs");
+    expectEqual(state.xmm[0].high, std::uint64_t{0x0000FFFF00020000ULL},
+                "PADDW high lane differs");
+    expectEqual(state.xmm[1].low, std::uint64_t{0x0004000500060007ULL},
+                "PADDW changed its source");
+    expectEqual(state.rflags, std::uint64_t{0xAD7}, "PADDW changed flags");
+}
+
 void testPackedDwordShiftAndAddGeneratedExecution() {
     constexpr std::array<std::uint8_t, 6> shiftCode{0x66, 0x0F, 0x72, 0xF1, 0x06, 0xC3};
     constexpr rosa::guest::GuestAddress shiftRip{0x7FF802C76FB0ULL};
@@ -35644,6 +35680,7 @@ int main() {
         {"PCMPEQD register generated execution", testPcmpeqdRegisterGeneratedExecution},
         {"packed dword shift and add generated execution",
          testPackedDwordShiftAndAddGeneratedExecution},
+        {"packed word add generated execution", testPackedWordAddGeneratedExecution},
         {"packed dword logical right shift immediate", testPackedDwordLogicalRightShiftImmediate},
         {"packed qword logical right shift immediate", testPackedQwordLogicalRightShiftImmediate},
         {"packed dword add RIP-relative memory", testPackedDwordAddRipMemory},

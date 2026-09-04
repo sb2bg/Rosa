@@ -588,6 +588,18 @@ void Builder::shiftLeftXmmDwords(x86::XmmRegister destination,
     });
 }
 
+void Builder::addXmmWords(x86::XmmRegister destination,
+                          x86::XmmRegister source,
+                          guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::AddXmmWords,
+        .width = Width::I16,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+    });
+}
+
 void Builder::convertIntToDoubleXmm(ValueId value, x86::XmmRegister destination,
                                     Width width, guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
@@ -1698,6 +1710,14 @@ std::vector<std::string> verify(const Block &block) {
                 operation.width != Width::I32) {
                 errors.emplace_back(
                     "shift_left_xmm_dwords has incomplete operands");
+            }
+            break;
+        case Opcode::AddXmmWords:
+            if (!operation.guestXmmRegister ||
+                !operation.sourceGuestXmmRegister ||
+                operation.width != Width::I16) {
+                errors.emplace_back(
+                    "add_xmm_words has incomplete registers");
             }
             break;
         case Opcode::ConvertIntToDoubleXmm:
