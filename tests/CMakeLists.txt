@@ -202,7 +202,36 @@ option(ROSA_ENABLE_COMPAT_TESTS
 set(ROSA_COMPAT_PROGRAMS echo cat head basename grep)
 # Cases outside a program's current milestone, by tag.
 set(ROSA_COMPAT_ARGS_grep --exclude-tag compression)
+# Whole guest programs run through rosa exec on the host's x86_64 dyld and
+# shared cache. Each prints a line its test matches only when it succeeds.
+set(ROSA_GUEST_PROGRAMS pthread dispatch)
+set(ROSA_GUEST_EXPECT_pthread "THREADS counter=80000 joined=100")
+set(ROSA_GUEST_EXPECT_dispatch
+    "DISPATCH group total=136\nDISPATCH serial order=1234\nDISPATCH after fired")
+set(ROSA_GUEST_PROGRAM_OUTPUTS "")
+foreach(program IN LISTS ROSA_GUEST_PROGRAMS)
+    set(source "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${program}-x86_64.c")
+    set(output "${ROSA_TEST_FIXTURE_DIR}/${program}-x86_64")
+    add_custom_command(
+        OUTPUT "${output}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${ROSA_TEST_FIXTURE_DIR}"
+        COMMAND "${CMAKE_C_COMPILER}" -target x86_64-apple-macos11 -O2 "${source}"
+                ${ROSA_GUEST_FLAGS_${program}} -o "${output}"
+        DEPENDS "${source}"
+        VERBATIM
+    )
+    list(APPEND ROSA_GUEST_PROGRAM_OUTPUTS "${output}")
+endforeach()
+add_custom_target(rosa_guest_programs ALL DEPENDS ${ROSA_GUEST_PROGRAM_OUTPUTS})
+
 if(ROSA_ENABLE_COMPAT_TESTS)
+    foreach(program IN LISTS ROSA_GUEST_PROGRAMS)
+        add_test(NAME rosa_exec_${program}
+                 COMMAND rosa exec "${ROSA_TEST_FIXTURE_DIR}/${program}-x86_64")
+        set_tests_properties(rosa_exec_${program} PROPERTIES
+            LABELS "exec;${program}" TIMEOUT 300
+            PASS_REGULAR_EXPRESSION "${ROSA_GUEST_EXPECT_${program}}")
+    endforeach()
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     foreach(program IN LISTS ROSA_COMPAT_PROGRAMS)
         add_test(NAME rosa_compat_${program}
