@@ -40,6 +40,8 @@ struct DumpOptions {
 
 struct RunOptions {
     std::filesystem::path executable;
+    // The guest's argv[0]; the executable path when absent, as a shell would.
+    std::optional<std::string> argumentZero;
     std::vector<std::string> guestArguments;
     std::optional<std::filesystem::path> dyld;
     std::optional<std::filesystem::path> sharedCache;
@@ -72,7 +74,7 @@ void printUsage(std::ostream &stream) {
               "<x86_64-mach-o> [dump options] [-- <guest arguments>]\n"
               "  rosa exec [--dyld <x86_64-dyld>] [--shared-cache <cache>] "
               "[--max-blocks <count>] [--translation-cache <path>] [--trace-syscalls] "
-              "<x86_64-mach-o> [<guest arguments>...]\n";
+              "[--argv0 <name>] <x86_64-mach-o> [<guest arguments>...]\n";
 }
 
 DumpOptions parseDumpOptions(int argc, char **argv, int first) {
@@ -188,6 +190,11 @@ RunOptions parseExecOptions(int argc, char **argv) {
             options.maximumBlocks = parsed;
         } else if (argument == "--trace-syscalls") {
             options.traceSyscalls = true;
+        } else if (argument == "--argv0") {
+            if (++index >= argc || options.argumentZero) {
+                throw std::invalid_argument("--argv0 requires exactly one name");
+            }
+            options.argumentZero = argv[index];
         } else if (argument.starts_with("--")) {
             throw std::invalid_argument("invalid exec argument: " + std::string(argument));
         } else {
@@ -545,7 +552,7 @@ int runDyldExperiment(const RunOptions &run, std::size_t maximumProbeBlocks,
     rosa::darwin::mapX86Commpage(addressSpace, rosa::darwin::sampleHostContinuousTimebase(),
                                  rosa::darwin::sampleHostBootTimeUsec(),
                                  rosa::darwin::sampleHostDyldFlags());
-    std::vector<std::string> arguments{executableString};
+    std::vector<std::string> arguments{run.argumentZero.value_or(executableString)};
     arguments.insert(arguments.end(), guestArguments.begin(), guestArguments.end());
     std::vector<std::string> apple{"executable_path=" + executableString,
                                    std::string(rosa::darwin::pointerMungeApple)};
