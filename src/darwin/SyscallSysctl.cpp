@@ -81,6 +81,56 @@ std::vector<std::uint8_t> hostOsVariantStatus() {
     return bytes;
 }
 
+// Answers a read or size query of a read-only integer sysctl. Like XNU's
+// sysctl_io_number, a quad also fills a caller buffer of exactly int size.
+SyscallOutcome answerReadOnlyScalar(SyscallCall &call, std::string_view sysctlName,
+                                    std::int64_t value, std::size_t valueSize) {
+    auto &[addressSpace, state, syscallRip, task] = call;
+    static_cast<void>(task);
+    if (state.r10 == 0 || state.r8 != 0 || state.r9 != 0) {
+        std::ostringstream reason;
+        reason << "only a read or size query of guest " << sysctlName << " is implemented";
+        throw unsupported(state, syscallRip, reason.str());
+    }
+    std::uint64_t outputCapacity = 0;
+    try {
+        outputCapacity = addressSpace.readU64(guest::GuestAddress{state.r10});
+        addressSpace.validateAccess(guest::GuestAddress{state.r10}, sizeof(std::uint64_t),
+                                    guest::Permission::Write);
+    } catch (const std::runtime_error &) {
+        setError(state, EFAULT);
+        return {};
+    }
+    auto resultSize = valueSize;
+    if (state.rdx != 0 && valueSize == sizeof(std::int64_t) &&
+        outputCapacity == sizeof(std::int32_t) &&
+        value >= std::numeric_limits<std::int32_t>::min() &&
+        value <= std::numeric_limits<std::int32_t>::max()) {
+        resultSize = sizeof(std::int32_t);
+    }
+    if (state.rdx != 0) {
+        try {
+            addressSpace.validateAccess(guest::GuestAddress{state.rdx}, resultSize,
+                                        guest::Permission::Write);
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        if (outputCapacity < resultSize) {
+            addressSpace.writeU64(guest::GuestAddress{state.r10}, 0);
+            setError(state, ENOMEM);
+            return {};
+        }
+        std::array<std::uint8_t, sizeof(value)> bytes{};
+        std::memcpy(bytes.data(), &value, sizeof(value));
+        addressSpace.writeBytes(guest::GuestAddress{state.rdx},
+                                std::span<const std::uint8_t>{bytes}.first(resultSize));
+    }
+    addressSpace.writeU64(guest::GuestAddress{state.r10}, resultSize);
+    setSuccess(state, 0);
+    return {};
+}
+
 } // namespace
 
 SyscallOutcome handleSysctl(SyscallCall &call) {
@@ -138,6 +188,8 @@ SyscallOutcome handleSysctl(SyscallCall &call) {
             resultOid = guestOsVariantStatusOid;
         } else if (requestedName == guestHwNcpuName) {
             resultOid = guestHwNcpuOid;
+        } else if (requestedName == guestHwPagesizeName) {
+            resultOid = guestHwPagesizeOid;
         } else {
             std::ostringstream reason;
             reason << "unsupported guest sysctl name \"" << requestedName
@@ -210,43 +262,18 @@ SyscallOutcome handleSysctl(SyscallCall &call) {
     }
 
     if (std::ranges::equal(name, guestHwNcpuOid)) {
-        if (state.r10 == 0 || state.r8 != 0 || state.r9 != 0) {
-            throw unsupported(
-                state, syscallRip,
-                "only a read or size query of guest hw.ncpu is implemented");
-        }
         // Native and Rosetta x86 callers observe the same host CPU
         // count, so report it from a host-owned value like kern.version.
-        const auto count = hostLogicalCpuCount();
-        std::uint64_t outputCapacity = 0;
-        try {
-            outputCapacity = addressSpace.readU64(
-                guest::GuestAddress{state.r10});
-            addressSpace.validateAccess(
-                guest::GuestAddress{state.r10}, sizeof(std::uint64_t),
-                guest::Permission::Write);
-            if (state.rdx != 0) {
-                addressSpace.validateAccess(
-                    guest::GuestAddress{state.rdx}, sizeof(count),
-                    guest::Permission::Write);
-            }
-        } catch (const std::runtime_error &) {
-            setError(state, EFAULT);
-            return {};
-        }
-        if (state.rdx != 0 && outputCapacity < sizeof(count)) {
-            addressSpace.writeU64(guest::GuestAddress{state.r10}, 0);
-            setError(state, ENOMEM);
-            return {};
-        }
-        if (state.rdx != 0) {
-            std::array<std::uint8_t, sizeof(count)> countBytes{};
-            std::memcpy(countBytes.data(), &count, sizeof(count));
-            addressSpace.writeBytes(guest::GuestAddress{state.rdx}, countBytes);
-        }
-        addressSpace.writeU64(guest::GuestAddress{state.r10}, sizeof(count));
-        setSuccess(state, 0);
-        return {};
+        return answerReadOnlyScalar(call, guestHwNcpuName,
+                                    static_cast<std::int64_t>(hostLogicalCpuCount()),
+                                    sizeof(std::int32_t));
+    }
+    if (std::ranges::equal(name, guestHwPagesizeOid)) {
+        // A quad holding the guest's 4 KiB page size, which is also what
+        // Rosetta reports to x86_64 processes on 16 KiB arm64 hosts.
+        return answerReadOnlyScalar(call, guestHwPagesizeName,
+                                    static_cast<std::int64_t>(guest::guestPageSize),
+                                    sizeof(std::int64_t));
     }
 
     if (std::ranges::equal(name, guestProductVersionOid)) {

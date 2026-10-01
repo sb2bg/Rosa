@@ -1296,6 +1296,60 @@ void testDarwinHwNcpuSysctl() {
                 "short hw.ncpu buffer did not report zero copied bytes");
 }
 
+void testDarwinHwPagesizeSysctl() {
+    // Observed under cat: libc sizes its buffers from sysctl({CTL_HW, HW_PAGESIZE}).
+    constexpr auto sysctlNumber = UINT64_C(0x020000CA);
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    constexpr rosa::guest::GuestAddress mibAddress{0x8000};
+    constexpr rosa::guest::GuestAddress outputAddress{0x8100};
+    constexpr rosa::guest::GuestAddress lengthAddress{0x8180};
+    constexpr std::array<std::uint32_t, 2> pagesizeOid{6, 7};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    std::array<std::uint8_t, sizeof(pagesizeOid)> mibBytes{};
+    std::memcpy(mibBytes.data(), pagesizeOid.data(), mibBytes.size());
+    addressSpace.writeBytes(mibAddress, mibBytes);
+    rosa::darwin::SyscallDispatcher dispatcher;
+
+    const auto query = [&](std::uint64_t capacity, std::uint64_t output) {
+        addressSpace.writeU64(outputAddress, UINT64_MAX);
+        addressSpace.writeU64(lengthAddress, capacity);
+        rosa::x86::X86State state;
+        state.rax = sysctlNumber;
+        state.rdi = mibAddress.value;
+        state.rsi = pagesizeOid.size();
+        state.rdx = output;
+        state.r10 = lengthAddress.value;
+        state.rflags = 0x2;
+        static_cast<void>(
+            dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+        return state;
+    };
+
+    auto state = query(8, outputAddress.value);
+    expectEqual(state.rflags, std::uint64_t{0x2}, "hw.pagesize quad read failed");
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{8},
+                "hw.pagesize quad read returned the wrong size");
+    expectEqual(addressSpace.readU64(outputAddress), std::uint64_t{0x1000},
+                "hw.pagesize is not the 4 KiB guest page");
+
+    // Like XNU's sysctl_io_number, an int-sized buffer receives an int.
+    state = query(4, outputAddress.value);
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{4},
+                "hw.pagesize int read returned the wrong size");
+    expectEqual(addressSpace.readU64(outputAddress), UINT64_C(0xFFFFFFFF00001000),
+                "hw.pagesize int read wrote past an int");
+
+    state = query(0, 0);
+    expectEqual(addressSpace.readU64(lengthAddress), std::uint64_t{8},
+                "hw.pagesize size query returned the wrong size");
+
+    state = query(2, outputAddress.value);
+    expectEqual(state.rax, static_cast<std::uint64_t>(ENOMEM),
+                "short hw.pagesize buffer returned the wrong errno");
+}
+
 void testDarwinProductVersionSysctl() {
     constexpr auto sysctlNumber = UINT64_C(0x020000CA);
     constexpr rosa::guest::GuestAddress page{0x8000};
@@ -1698,6 +1752,7 @@ std::span<const TestCase> darwinProcessTests() {
         {"Darwin boot-arguments sysctl", testDarwinBootArgsSysctl},
         {"Darwin kernel-version sysctl", testDarwinKernelVersionSysctl},
         {"Darwin hw.ncpu sysctl", testDarwinHwNcpuSysctl},
+        {"Darwin hw.pagesize sysctl", testDarwinHwPagesizeSysctl},
         {"Darwin product-version sysctl", testDarwinProductVersionSysctl},
         {"Darwin iOS-support-version sysctl", testDarwinIosSupportVersionSysctl},
         {"Darwin OS-variant-status sysctl", testDarwinOsVariantStatusSysctl},

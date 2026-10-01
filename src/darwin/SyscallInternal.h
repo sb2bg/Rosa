@@ -211,6 +211,7 @@ inline constexpr std::array<std::uint32_t, 2> guestIosSupportVersionOid{1, 140};
 inline constexpr std::array<std::uint32_t, 2> guestOsVariantStatusOid{1, 141};
 inline constexpr std::array<std::uint32_t, 2> guestUserStack64Oid{1, 59};
 inline constexpr std::array<std::uint32_t, 2> guestHwNcpuOid{6, 3};
+inline constexpr std::array<std::uint32_t, 2> guestHwPagesizeOid{6, 7};
 inline constexpr std::string_view guestLockdownModeName =
     "security.mac.lockdown_mode_state";
 inline constexpr std::string_view guestBootArgsName = "kern.bootargs";
@@ -222,6 +223,7 @@ inline constexpr std::string_view guestIosSupportVersionName =
 inline constexpr std::string_view guestOsVariantStatusName =
     "kern.osvariant_status";
 inline constexpr std::string_view guestHwNcpuName = "hw.ncpu";
+inline constexpr std::string_view guestHwPagesizeName = "hw.pagesize";
 inline constexpr std::uint32_t guestLockdownModeState = 0;
 inline constexpr std::array<std::uint8_t, 1> guestBootArgs{0};
 inline constexpr std::size_t guestPthreadRegistrationDataSize = 56;
