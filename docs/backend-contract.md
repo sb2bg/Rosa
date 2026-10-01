@@ -50,9 +50,9 @@ A backend must treat every guest address as an integer in Rosa's guest address s
 Generated loads, stores, atomics, string operations, stack operations, and instruction fetches must use one of two mechanisms:
 
 - a backend-independent helper that calls `AddressSpace`; or
-- a future validated fast path whose metadata and slow path are owned by `AddressSpace` and preserve identical permissions, sparse-data behavior, cross-mapping behavior, and fault reporting.
+- a validated fast path whose metadata and slow path are owned by `AddressSpace` and that preserves identical permissions, sparse-data behavior, cross-mapping behavior, and fault reporting. The anonymous byte-window and monotonic-span paths described in [guest-memory.md](guest-memory.md#fast-paths) are of this kind.
 
-Direct host loads or stores are not permitted merely because a guest mapping currently has contiguous host backing.
+Contiguous host backing alone never justifies a direct host load or store.
 
 Self-modifying code and writable executable mappings require explicit translated-block invalidation. A backend must not assume generated translations remain valid after guest writes or permission changes.
 
@@ -97,23 +97,13 @@ Executable-code allocation is a backend capability with this logical lifecycle:
 4. synchronize the host instruction cache as required;
 5. transition to the host's executable state;
 6. publish an immutable entry point;
-7. release the immutable allocation and free its arena mapping when the owning
-   code cache dies.
+7. release the immutable allocation and free its arena mapping when the owning code cache dies.
 
-The Apple Silicon implementation pools immutable translations in bump-allocated
-`MAP_JIT` arenas and uses per-thread JIT write protection for each publication.
-Persistent programs encode helper addresses as fixed-width relocatable
-immediates. A cache load must validate its emitter fingerprint and guest source,
-resolve every helper for the current ASLR slide, and only then batch-publish
-the immutable programs.
-Other hosts may use different mechanisms, but writable and executable
-transitions must stay explicit. A backend must never publish a partially
-relocated program.
+The Apple Silicon implementation pools immutable translations in bump-allocated `MAP_JIT` arenas and uses per-thread JIT write protection for each publication. Persistent programs encode helper addresses as fixed-width relocatable immediates. A cache load must validate its emitter fingerprint and guest source, resolve every helper for the current ASLR slide, and only then batch-publish the immutable programs. Other hosts may use different mechanisms, but writable and executable transitions must stay explicit. A backend must never publish a partially relocated program.
 
 ## Backend interface direction
 
-`Translator` now orchestrates separately compiled frontend, optimization, and
-backend components:
+`Translator` chains separately compiled frontend, optimization, and backend components:
 
 ```text
 x86::Decoder::decodeBlock
@@ -123,20 +113,11 @@ x86::Decoder::decodeBlock
     -> dbt::TranslatedBlock
 ```
 
-`x86/Lowering.h` owns instruction semantics, `ir/Optimization.h` owns shared IR
-preparation, and `arm64/Backend.h` exposes host compilation. Cold translations
-and lazily reconstructed persistent-cache entries use the same IR preparation.
-Debug builds verify IR after lowering and again after optimization.
+`x86/Lowering.h` owns instruction semantics, `ir/Optimization.h` owns shared IR preparation, and `arm64/Backend.h` exposes host compilation. Cold translations and lazily reconstructed persistent-cache entries use the same IR preparation. Debug builds verify IR after lowering and again after optimization.
 
-`dbt/ExecutionContext.h` defines the private generated-code ABI shared by the
-emitter, runtime helpers, and block execution. `RuntimeHelpers.cpp`,
-`MemoryArithmetic.cpp`, and `FlagHelpers.cpp` implement the helper entry points. Fault exits record the
-instruction RIP in the context before restoring the host ABI; block execution
-restores that RIP before rethrowing the captured exception in C++.
+`dbt/ExecutionContext.h` defines the private generated-code ABI shared by the emitter, runtime helpers, and block execution. `RuntimeHelpers.cpp`, `MemoryArithmetic.cpp`, and `FlagHelpers.cpp` implement the helper entry points. Fault exits record the instruction RIP in the context before restoring the host ABI; block execution restores that RIP before rethrowing the captured exception in C++.
 
-The current block and executable-storage types still use AArch64 types. A future
-second backend should introduce capabilities rather than spreading host
-conditionals through the translator. Likely responsibilities include:
+Block and executable-storage types are still AArch64-specific. A second backend should introduce capabilities rather than spread host conditionals through the translator, for example:
 
 ```cpp
 class HostBackend {
@@ -148,9 +129,7 @@ class HostBackend {
 
 `ExecutableBlock` should own code bytes, relocations already applied, executable storage, diagnostic listing, and immutable entry metadata. `BackendCapabilities` should describe semantic facilities such as atomic widths or executable-memory constraints; it must not be used to silently weaken guest behavior.
 
-Keep the existing AArch64 path as the reference implementation and move one
-verified IR family at a time. Do not introduce an abstract backend layer that
-merely mirrors every AArch64 assembler method.
+Keep the existing AArch64 path as the reference implementation and move one verified IR family at a time. Do not introduce an abstract backend layer that merely mirrors every AArch64 assembler method.
 
 ## Additional host architectures
 

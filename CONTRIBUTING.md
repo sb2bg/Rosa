@@ -28,19 +28,14 @@ Avoid adding speculative instruction families in bulk. Encoding-specific support
 
 The code boundaries are explicit:
 
-- `x86/Decoder.cpp` owns instruction and block boundaries. Ordered recognition
-  families live in `x86/Decode*.cpp`; preserve their priority when adding forms.
+- `x86/Decoder.cpp` owns instruction and block boundaries. Ordered recognition families live in `x86/Decode*.cpp`; preserve their priority when adding forms.
 - `x86/Lowering.cpp` maps decoded instructions to IR without host emitter code.
-- `ir/Optimization.cpp` prepares IR for both cold translation and reconstructed
-  hot blocks. Add shared optimization passes here, retaining fault ordering.
+- `ir/Optimization.cpp` prepares IR for both cold translation and reconstructed hot blocks. Add shared optimization passes here, retaining fault ordering.
 - `arm64/Backend.cpp` owns host register assignment, scheduling, and emission.
-- `dbt/RuntimeHelpers.cpp`, `dbt/MemoryArithmetic.cpp`, and `dbt/FlagHelpers.cpp`
-  implement generated helper calls; `dbt/ExecutionContext.h` is their shared ABI
-  with generated code.
+- `dbt/RuntimeHelpers.cpp`, `dbt/MemoryArithmetic.cpp`, and `dbt/FlagHelpers.cpp` implement generated helper calls; `dbt/ExecutionContext.h` is their shared ABI with generated code.
 - `dbt/TranslatedBlock.cpp` owns execution, hot-tier promotion, and checked exits.
 
-Keep optimization changes separate from instruction recognition. A new fast
-path must still pass the independent semantic corpus and memory-fault tests.
+Keep optimization changes separate from instruction recognition. A new fast path must still pass the independent semantic corpus and memory-fault tests.
 
 An instruction change should account explicitly for:
 
@@ -73,6 +68,8 @@ Model Darwin behavior in guest terms:
 - Keep guest process, thread, port, and file identities separate from host identities unless the equivalence is intentional and documented.
 - Treat malformed Mach-O and shared-cache metadata as untrusted input and validate ranges before allocation, mapping, or pointer arithmetic.
 
+To add a BSD call, add its number to `darwin/SyscallInternal.h`, register a handler in the table in `darwin/Syscall.cpp`, implement it in the matching `Syscall*.cpp` domain file, and update [docs/darwin-boundary.md](docs/darwin-boundary.md). Implement only the argument forms a real program was observed to use, and make every other form fail with a diagnostic. `--trace-syscalls` shows which calls and arguments a program reaches.
+
 ## Performance changes
 
 The dispatcher, translated-block lookup, guest-memory lookup, generated memory helpers, and code cache are hot paths. Prefer moving work from repeated dispatch into translation or mapping setup while retaining deterministic diagnostics.
@@ -89,12 +86,9 @@ cmake --build --preset debug
 ctest --preset debug
 ```
 
-When relevant, also run the UBSan preset and the Rosetta differential suite. Shared-cache or dyld changes should be exercised with developer-supplied compatible artifacts that remain outside the repository.
+When relevant, also run the UBSan preset and the Rosetta differential suite. Darwin changes should also run the compatibility harness (`tests/compat/compat.py --rosa build/debug/rosa`). Exercise shared-cache or dyld changes with locally supplied artifacts that stay outside the repository.
 
-Tests are registered by subsystem in `tests/CMakeLists.txt`. That one list selects
-source files, generates the C++ suite registry, and creates labeled CTest entries.
-Add cases to the matching suite's explicit `TestCase` array; no global static
-registration is required. Test fixtures should own and clean up their files.
+Tests are registered by subsystem in `tests/CMakeLists.txt`. That one list selects source files, generates the C++ suite registry, and creates labeled CTest entries. Add cases to the matching suite's explicit `TestCase` array; no global static registration is required. Test fixtures should own and clean up their files.
 
 ```bash
 # Run an individual subsystem, or list suites.
@@ -102,14 +96,13 @@ registration is required. Test fixtures should own and clean up their files.
 ./build/debug/rosa_tests --list
 ctest --preset debug -L Decoder
 
-# Exercise the runtime without either optional dependency.
+# Build without either optional dependency.
 cmake --preset baseline
 cmake --build --preset baseline
 ctest --preset baseline
 ```
 
-The baseline preset disables LLVM and the Rosetta oracle. The differential suite
-is explicitly reported as skipped in that configuration.
+The baseline preset disables LLVM and the Rosetta oracle. The differential suite is explicitly reported as skipped in that configuration.
 
 Some changes can be reviewed statically but still require runtime validation. Commit messages and pull-request descriptions should say plainly when a change was not built or executed.
 

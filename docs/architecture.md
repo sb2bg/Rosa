@@ -1,129 +1,100 @@
 # Rosa architecture
 
-This document describes code that exists now. Longer-term direction belongs in milestone planning until a vertical slice validates it.
+This document describes the code as it exists. Planned work belongs in [milestones.md](milestones.md) until a tested slice lands.
 
-## Implemented pipeline through controlled R4 and the R5 probe
+## Pipeline
 
 ```text
-built-in bytes, controlled x86_64 Mach-O, or x86_64 dyld slice
+built-in bytes, x86_64 Mach-O, or x86_64 dyld
         ↓
-bounded parsing + complete segment mapping + initial stack
+bounded Mach-O parsing + segment mapping + initial stack
         ↓
-single-instruction recognition + bounded block formation
+instruction decode + bounded block formation
         ↓
-portable x86 lowering to typed SSA-like IR
+x86 lowering to typed SSA-like IR
         ↓
 shared IR optimization (guest-register forwarding)
         ↓
-local register allocation + AArch64 emission
-        ↓
-custom AArch64 encoder
+register allocation + AArch64 emission (custom encoder)
         ↓
 pooled MAP_JIT code arena
         ↓
-generated ARM64 and narrow semantic helpers mutate X86State
+generated AArch64 and narrow helpers update X86State
         ↓
-block cache + guest call/return stack handling
-        ↓
-semantic Darwin/Mach boundary or next guest block
+dispatcher: block cache, guest call/return, next block or Darwin boundary
 ```
 
-The CPU path is a real DBT path, not an interpreter: data operations, arithmetic, compare results, address construction, and conditional selection become AArch64 instructions in generated code mappings. Narrow C++ helpers calculate flags, perform permission-checked guest-memory accesses, and implement a few state operations that must commit atomically. The dispatcher handles cross-block guest control flow.
+Translated code does the real work: data movement, arithmetic, comparisons, address computation, and conditional selection become AArch64 instructions. Narrow C++ helpers compute some flags, perform permission-checked guest-memory accesses, and implement a few operations that must commit atomically. The dispatcher handles control flow between blocks. There is no interpreter.
 
 ## State boundaries
 
-Guest architectural state is represented by `x86::X86State`, including all general-purpose registers, RIP, RFLAGS, and explicit 128-bit XMM values. Generated blocks take an `X86State*` in host register `x0`. The first-tier backend uses `x8`–`x15` as temporary value registers and writes guest values back explicitly. Guest register identities are translated through `registerOffset`; their enum encoding is never used as a host struct offset.
+Guest architectural state lives in `x86::X86State`: general-purpose registers, RIP, RFLAGS, segment bases, and 128-bit XMM registers. Generated blocks receive an `X86State*` in `x0`. The baseline backend uses `x8`–`x15` for temporaries and writes guest values back explicitly. Guest register identities map to struct offsets through `registerOffset`; their enum encoding is never used as an offset.
 
-Every generated exit reconstructs guest state and writes the next guest RIP. Direct, conditional, and register-indirect branches select a guest RIP; they never branch to a guest address as a host pointer. The dispatcher handles guest `call` pushes and `ret` pops against the guest address space, so host return addresses never enter guest state.
+Every block exit leaves guest state consistent and writes the next guest RIP. Direct, conditional, and indirect branches select a guest RIP and never branch to a guest address as a host pointer. The dispatcher performs guest `call` pushes and `ret` pops in guest memory, so host return addresses never enter guest state.
 
-Guest addresses use the `GuestAddress` strong type. The address space provides permission-checked anonymous, sparse, commpage, and Mach-O segment mappings with a 4 KiB guest-page contract. Generated helpers cover guarded 8/16/32/64-bit integer and 128-bit XMM accesses. Repeated byte loops may cache a checked anonymous mapping as a host span, coalesce checks for adjacent loads, and elide per-iteration checks for monotonic read or write spans only after a runtime guard proves exact termination and the complete remaining range; executable and file-backed mappings stay on the helper path. Instruction fetches and syscall buffers come from the mapping model, and no guest virtual address is directly reinterpreted as a host pointer.
+Guest addresses use the `GuestAddress` strong type and are never reinterpreted as host pointers. See [guest-memory.md](guest-memory.md) for the address-space model and its fast paths.
 
-Guest Mach names live in a task-local `GuestPortSpace`. It records receive, send, and send-once rights, urefs, queue limits, contexts, guards, and synthetic task/host/reply object types without ever reusing a host `mach_port_t`. Guest file descriptors likewise live in a task-local `GuestFileSpace`: lowest-free numbering over shared open file descriptions that own host fds, with inherited standard streams and one path policy (see the Darwin boundary). The root and cryptex-directory capabilities are synthetic guest VFS objects, not host descriptors.
+Per-process Darwin state lives in `darwin::GuestTask`:
+
+- `GuestPortSpace` holds guest Mach names: receive, send, and send-once rights, urefs, queue limits, contexts, guards, and synthetic task, host, thread, and reply objects. Host `mach_port_t` values never enter it.
+- `GuestFileSpace` is the descriptor table: lowest-free numbering over shared open file descriptions, some backed by host fds and some synthetic. See [darwin-boundary.md](darwin-boundary.md#descriptors-and-paths).
+- Signal dispositions and dyld image registration are recorded without host side effects.
 
 ## Flags
 
-Observed 8/16/32/64-bit arithmetic and comparison forms eagerly compute `CF`, `PF`, `AF`, `ZF`, `SF`, and `OF` at the guest width. Logic forms clear `CF`/`OF` and compute `PF`/`ZF`/`SF`; Rosa deterministically clears undefined `AF`. `inc`/`dec` preserve `CF`. Signed `imul` replaces only its defined `CF`/`OF` and preserves other undefined flag bits. Narrow C++ helpers receive generated values through the host ABI.
+Arithmetic and comparison forms compute `CF`, `PF`, `AF`, `ZF`, `SF`, and `OF` at the operation width. Logic forms clear `CF`/`OF`, compute `PF`/`ZF`/`SF`, and clear the undefined `AF`. `inc`/`dec` preserve `CF`. Signed `imul` sets only its defined `CF`/`OF`. Flag computation may be deferred within a block, but flags are materialized before any exit or helper that can observe them.
 
-## Control flow and cache
+## Blocks and the translation cache
 
-The decoder ends blocks at direct/indirect transfers, conditional branches,
-calls, returns, or syscalls. A cache owns one immutable translation per guest
-start RIP. Generated conditional exits test the relevant stored x86 flag bits
-with AArch64 test branches. The dispatcher has an explicit block limit and
-fetches only from executable guest mappings. The dyld path caps straight-line
-translations at 16 guest instructions: control-flow boundaries usually end
-them earlier, while the cap keeps unsupported-instruction diagnostics
-attributable without paying a dispatch and cache entry per instruction.
+The decoder ends a block at a jump, conditional branch, call, return, or syscall. The dyld path also caps blocks at 32 instructions: long enough to amortize dispatch, short enough that an unsupported-instruction diagnostic points at a small region. Controlled fixtures have no cap.
 
-An opt-in persistent cache stores source bytes, immutable generated AArch64,
-block-exit metadata, and fixed-width helper-pointer relocations. Its build
-fingerprint rejects incompatible emitters. On a hit, source bytes are checked
-before execution, helper pointers are adjusted for the current ASLR slide, all
-cached programs are published as one JIT batch, and decoded x86 metadata is
-reconstructed only if diagnostics request it. Writable executable mappings
-still use the in-process source/version invalidation path.
+The block cache holds one immutable translation per guest start RIP. Conditional exits test stored x86 flag bits with AArch64 test-and-branch instructions. The dispatcher fetches only from executable guest mappings and enforces an optional block limit. A block that branches back to itself can run repeatedly inside generated code before returning to the dispatcher.
 
-The fingerprint hashes the linker UUID of the image containing the runtime
-helpers. This covers separately compiled lowering, optimization, emission,
-helper code, and their final layout, while remaining stable across ASLR slides.
-If the image has no usable UUID, persistence is bypassed. A translation-unit
-timestamp is insufficient once the pipeline spans multiple source files.
+A guest write to executable memory bumps the address space's executable version and stops a running batch. The next lookup of a block from an older version compares its saved x86 source bytes with guest memory and retranslates if they differ.
 
-## Mach-O boundary
+## Persistent translation cache
 
-The parser accepts little-endian, 64-bit x86 executables and dynamic linkers and extracts x86_64 slices from standard 32-bit or 64-bit universal containers. It bounds-checks the header, architecture table, complete load-command region, every command size, segment/section counts, file ranges, virtual ranges, and entry location. `LC_MAIN` is preferred; a correctly flavored x86_64 `LC_UNIXTHREAD` supplies the dyld entry.
+`--translation-cache` stores source bytes, generated AArch64, block-exit metadata, and fixed-width helper-address relocations. On load:
 
-The loader maps every nonempty segment at its guest virtual address plus an optional slide. File bytes are copied, the remaining virtual size is zero-filled, and `initprot` becomes guest permissions. No-access `__PAGEZERO` is represented sparsely. The startup builder creates a 16-byte-aligned stack containing `argc`, `argv`, `envp`, `apple[]`, their null terminators, and strings.
+1. the file's fingerprint must match the running build;
+2. each entry's x86 source bytes must match guest memory;
+3. helper addresses are relocated for the current ASLR slide;
+4. all programs are copied into the arena and published in one JIT write and instruction-cache transaction.
 
-Rosa relies on dyld guest code to interpret application and cache structures. A manually supplied Intel shared cache is validated with all declared subcaches, mapped as private file-backed guest regions at slide zero, and accompanied by a guest dynamic-data page. Version-2 chained fixups are applied once per 4 KiB guest page on first access rather than eagerly rewriting the entire cache. `shared_region_check_np` returns its guest base; no cache pointer is passed to the host kernel.
+The fingerprint is the linker UUID of the image containing the runtime helpers. It changes whenever lowering, optimization, emission, or helper code changes and stays stable across ASLR slides. Without a usable UUID, persistence is disabled. Decoded x86 and IR are reconstructed from the source bytes only when a dump or the optimizing tier needs them.
 
-Parsed cache image metadata resolves an executed guest PC to cache image index, UUID, and path. Fatal diagnostics include that provenance, recent guest instructions, registers, mappings, translation counts, hot blocks, and the guest Mach-port summary. This has verified execution in cache image 2, `/usr/lib/dyld`; it has not yet observed execution in another cached image.
+## Optimizing tier
+
+When built with Homebrew LLVM, CMake reports `Rosa LLVM optimizing JIT`. A self-loop block becomes a promotion candidate after 1,024 executions if it is register-only, or after 100 million if it touches memory, and only when at least ten million dispatcher executions remain in the block budget.
+
+The tier keeps guest registers in LLVM SSA, materializes x86 flags only at the side exit, and compiles at `-O2` through ORC. Memory loops are accepted only for anonymous byte reads and writes whose whole invocation range is proven in bounds before LLVM receives a host span. Executable, file-backed, wrapping, and faulting cases stay on the baseline. The high memory-loop threshold exists because ORC compilation costs about 29 ms for the prime-sieve loops, more than the roughly 8 ms it saves on that benchmark.
+
+`-DROSA_ENABLE_LLVM_JIT=OFF` (or the `baseline` preset) builds without the tier.
+
+## Mach-O and the shared cache
+
+The parser accepts little-endian 64-bit x86 executables and dynamic linkers, including x86_64 slices of 32- and 64-bit universal files. It bounds-checks the header, architecture table, load-command region, every command size, segment and section counts, file and virtual ranges, and the entry point. `LC_MAIN` is preferred; dyld's entry comes from an x86_64 `LC_UNIXTHREAD`.
+
+The loader maps every nonempty segment at its virtual address plus an optional slide, copies file bytes, zero-fills the rest, and converts `initprot` into guest permissions. `__PAGEZERO` is a sparse no-access mapping. The startup builder writes a 16-byte-aligned stack with `argc`, `argv`, `envp`, `apple[]`, their terminators, and their strings.
+
+Rosa leaves application and cache structure interpretation to the guest's own dyld. A supplied Intel shared cache is validated along with all of its subcaches, mapped as private file-backed guest regions at slide zero, and accompanied by a dynamic-data page. Version-2 chained fixups are applied lazily, one 4 KiB guest page at a time on first access. `shared_region_check_np` returns the guest cache base; no cache pointer reaches the host kernel.
+
+Fatal diagnostics resolve the faulting PC to its cache image index, UUID, and path, and list every cache image executed so far, recent instructions, registers, nearby mappings, translation counts, hot blocks, and the guest port namespace.
 
 ## Darwin syscall boundary
 
-Generated code recognizes x86 `0F 05`, records `RCX`, `R11`, and the next guest RIP, and returns a distinct syscall exit reason. The semantic dispatcher decodes x86 Darwin registers (`RAX`; arguments in `RDI`, `RSI`, `RDX`, `R10`, `R8`, `R9`) and distinguishes BSD, Mach, and x86 machdep classes. Guest buffers and ABI values are translated through `AddressSpace`; no guest pointer is passed to the host kernel. Success/error translation follows the relevant guest convention. Unsupported calls fail with the number, syscall RIP, and arguments. The exact narrow call set is documented in `darwin-boundary.md`.
+Generated code treats `0F 05` as a block terminator: it records `RCX`, `R11`, and the next RIP and exits with a syscall reason. The dispatcher decodes the x86_64 Darwin convention (`RAX` for the number; `RDI`, `RSI`, `RDX`, `R10`, `R8`, `R9` for arguments) and routes BSD, Mach, and machdep calls to their handlers. Guest buffers are copied through the address space. BSD results use the carry-flag convention; Mach traps return `kern_return_t` in `RAX`. Unsupported calls stop with the number, RIP, and arguments. [darwin-boundary.md](darwin-boundary.md) lists what is implemented.
 
 ## Executable memory
 
-`ExecutableArena` allocates 16 MiB chunks with Apple's `MAP_JIT` and bump
-allocates aligned immutable translations inside them. Each publication occurs
-inside an explicit `pthread_jit_write_protect_np(0/1)` scope and is followed by
-instruction-cache invalidation. An `ExecutableCode` keeps the shared arena
-alive; the arena unmaps its chunks with RAII after the last translated block
-releases them. A one-off generated function uses the same abstraction with a
-page-sized arena rather than reserving a full chunk. Persistent-cache programs
-are copied together and invalidate each contiguous arena range once.
+`ExecutableArena` allocates 16 MiB `MAP_JIT` chunks and bump-allocates immutable translations inside them. Each publication happens inside an explicit `pthread_jit_write_protect_np` scope followed by instruction-cache invalidation. `ExecutableCode` keeps its arena alive; the arena unmaps its chunks after the last block that uses them is released. One-off generated functions use a page-sized arena instead of a full chunk.
 
 ## Current constraints
 
-- arm64 macOS only;
-- eight temporary SSA values before the intentionally simple allocator rejects a block;
-- one host thread and one guest thread;
-- no general guest `mmap`, identity map, or unchecked host-pointer memory path; the observed BSD `munmap` and Mach VM operations are semantic guest-map operations;
-- only the failure-driven BSD, Mach, VFS, and x86 machdep operations listed in `darwin-boundary.md`;
-- only version-2 x86 shared-cache slide fixups; no general Mach-O binding/rebase engine;
-- instruction encodings remain deliberately incomplete and are added only after an observed failure.
-
-On the tested userspace, the ordinary C fixture completes through dyld,
-21 shared-cache images, libSystem initialization, libc `printf`, return from
-`main`, and guest exit. With 32-instruction translation bounds it executes
-about 784,000 blocks, creates about 12,847 translations, and consumes about
-3.97 MiB in one JIT arena mapping. Unsupported instructions and Darwin
-operations still fail with their precise guest address and diagnostic state.
-
-The scalar prime-sieve fixture uses the same dynamic path and executes about
-25.3 million blocks. Internal self-edge batching keeps repeated baseline blocks
-inside generated code. A checked first byte access can install an anonymous
-mapping window; adjacent loads share range guards, while monotonic read and
-write loops may reuse a host pointer only after a runtime guard proves exact
-termination, positive nonwrapping stride, and complete mapping containment. The
-LLVM tier accepts narrow read-only exact-stride and write-only unsigned-below
-forms after performing the same whole-invocation proof. It keeps mixed-width
-guest values and intermediate conditions in SSA and falls back to the baseline
-before executing when a direct anonymous view cannot be proven. Persistent
-blocks rebuild omitted IR only after a self-loop becomes hot. On the M1 Pro
-development host, 61 alternating warm process trials put the same scalar
-x86_64 binary at a 24.4 ms Rosetta median and a 65.0 ms baseline Rosa median, a
-2.7x gap rather than the earlier 21.0x. Forced LLVM promotion saved about 8 ms
-inside the traces but cost about 29 ms to compile, so the production memory-tier
-threshold is 100 million observed executions and this benchmark stays baseline.
+- arm64 macOS hosts only.
+- One host thread and one guest thread.
+- The baseline register allocator rejects a block that needs more than eight live temporaries.
+- No general guest `mmap`, no identity mapping, no unchecked host-pointer memory path. Observed BSD `mmap`, `munmap`, `mprotect`, and Mach VM calls operate on guest mappings.
+- Only the BSD, Mach, and machdep operations in [darwin-boundary.md](darwin-boundary.md).
+- Only version-2 x86 shared-cache slide fixups; no general Mach-O bind/rebase engine.
+- Instruction encodings are added when a real program needs them, not in bulk.

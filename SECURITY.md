@@ -6,6 +6,8 @@ Rosa is an experimental compatibility runtime and research tool. It is **not** a
 
 Rosa models a separate guest address space, permissions, registers, ports, syscalls, and Mach operations so translated programs cannot accidentally treat guest values as host pointers. Those design boundaries improve correctness and reduce unintended host exposure, but they have not been hardened or audited as a hostile-code containment system.
 
+`rosa exec` deliberately lets the guest read any host file the invoking user can read, and inherits the user's environment and standard streams. `rosa run` confines guest file access to the working directory. Neither mode is a sandbox.
+
 Do not run untrusted Mach-O files, dyld binaries, shared caches, or other guest inputs on a machine where host compromise would be unacceptable.
 
 ## In scope
@@ -17,7 +19,7 @@ Security reports are especially useful when they concern:
 - memory corruption in the decoder, IR pipeline, AArch64 emitter, executable-code allocator, Mach-O loader, or shared-cache parser;
 - integer overflow or range-validation failure that permits an out-of-bounds host access;
 - writable/executable memory being published before relocation or cache synchronization is complete;
-- guest file paths escaping an intended locally provisioned artifact set;
+- a guest path escaping the active path policy (the working directory under `rosa run`, read-only host access under `rosa exec`), or a guest write reaching a host file;
 - malformed input causing host resource leakage or uncontrolled resource growth;
 - a discrepancy between documented guest isolation and actual host-visible behavior.
 

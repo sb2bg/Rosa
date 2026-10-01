@@ -9,192 +9,128 @@
     <a href="#quick-start"><img alt="Host: macOS arm64" src="https://img.shields.io/badge/host-macOS%20arm64-111827?style=flat-square&logo=apple&logoColor=white"></a>
     <a href="CMakeLists.txt"><img alt="C++23" src="https://img.shields.io/badge/C%2B%2B-23-00599C?style=flat-square&logo=cplusplus&logoColor=white"></a>
     <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-D22128?style=flat-square"></a>
-    <a href="#project-status"><img alt="Status: experimental" src="https://img.shields.io/badge/status-experimental-E11D48?style=flat-square"></a>
+    <a href="#status"><img alt="Status: experimental" src="https://img.shields.io/badge/status-experimental-E11D48?style=flat-square"></a>
   </p>
 </div>
 
-Rosa dynamically translates Intel machine code to AArch64 and recreates the Darwin userspace boundary that translated programs need. Its goal is to run legacy Intel Mac software against a locally provisioned Intel macOS userspace without relying on Rosetta 2 at runtime.
+Rosa translates Intel machine code to AArch64 at run time and reimplements the Darwin userspace boundary that translated programs call into. The goal is to run Intel Mac software against an Intel macOS userspace (dyld and the x86_64 shared cache) without Rosetta 2 in the execution path.
 
 > [!IMPORTANT]
-> Rosa is a research project, not a Rosetta replacement you can use for everyday applications today. It can run a small ordinary x86_64 C executable through a locally supplied Intel dyld and matching shared cache, including `libSystem` startup and `printf`, but its instruction and Darwin ABI coverage remains deliberately narrow.
+> Rosa is a research project. It runs ordinary dynamically linked x86_64 C programs and small host command-line tools such as `grep` through the unmodified Intel dyld and shared cache, but instruction and Darwin ABI coverage is deliberately narrow. Most applications stop at their first unsupported instruction or system call.
 
 ## Why Rosa?
 
-Rosa is built to make the whole compatibility path observable. It owns the x86 decoder, intermediate representation, AArch64 emitter, guest address space, Mach-O loader, and Darwin ABI translation instead of hiding those boundaries behind an interpreter or the host kernel.
+Rosa owns every layer of the compatibility path (x86 decoder, IR, AArch64 emitter, guest address space, Mach-O loader, and Darwin ABI) so each boundary can be inspected and tested.
 
-- **Real dynamic binary translation.** Supported x86 instructions execute as generated AArch64 in pooled `MAP_JIT` mappings; there is no interpreter fallback.
-- **Explicit guest isolation.** Guest addresses, permissions, registers, ports, and syscalls are modeled separately from their host counterparts.
-- **Useful failure modes.** An unsupported instruction or Darwin operation stops with its guest RIP, bytes, registers, mappings, recent history, and translation counters.
-- **No bundled Apple binaries.** dyld and shared-cache experiments use files supplied locally by the developer. Rosa never patches or launches the guest Mach-O with `exec`.
+- **Dynamic binary translation, no interpreter.** Supported instructions run as generated AArch64 in pooled `MAP_JIT` memory. Anything else stops translation.
+- **Explicit guest isolation.** Guest addresses, permissions, registers, file descriptors, Mach ports, and syscalls are modeled separately from the host's.
+- **Loud failures.** An unsupported instruction or Darwin operation stops with its guest RIP, bytes, registers, mappings, recent history, and translation counters.
+- **No bundled Apple binaries.** dyld and the shared cache come from the local machine. Rosa never patches the guest Mach-O or launches it with `exec`.
 
-## Project status
+## Status
 
-| Layer        | Current capability                                                                                                           |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| Translation  | Decodes an encoding-specific x86_64 subset, lowers it through a typed SSA-like IR, and emits AArch64 with a custom assembler; an optional LLVM tier optimizes supported hot loops |
-| Execution    | Caches translated blocks in pooled executable arenas, maintains explicit x86 register/flag/XMM state, and dispatches guest control flow |
-| Memory       | Enforces a 4 KiB guest-page model with sparse, anonymous, Mach-O, commpage, and shared-cache mappings                        |
-| Mach-O       | Selects x86_64 universal slices, validates load commands, maps complete segments, and builds the initial Darwin stack        |
-| Darwin       | Implements the BSD, Mach, and machdep subset needed by the fixtures and the first ordinary dynamically linked C program       |
-| Verification | Runs 324 semantic cases against an independent x86_64 oracle when Rosetta is installed                                       |
-
-The [checked-in example](tests/fixtures/hello-darwin-x86_64.s) currently completes end to end:
-
-```text
-x86_64 Mach-O
-    → x86 decode → Rosa IR → AArch64 emission
-    → translated Darwin write(2)
-    → translated Darwin exit(2)
-
-hello from Intel Darwin
-guest exited: status=0, blocks=2, translations=2
-```
-
-The test suite also cross-compiles
-[a C `main`](tests/fixtures/c-main-x86_64.c). A minimal x86_64 entry stub
-passes the Darwin startup stack's `argc` and `argv`, calls compiler-generated
-code, and verifies that `main` returns 42. Its hot `INC`/`CMP` loop is promoted
-through the LLVM tier.
+| Layer        | Current capability |
+| ------------ | ------------------ |
+| Translation  | Encoding-specific x86_64 subset → typed SSA-like IR → AArch64 via a custom assembler; optional LLVM tier for hot loops |
+| Execution    | Block cache in pooled executable arenas, explicit x86 register/flag/XMM state, optional persistent translation cache |
+| Memory       | 4 KiB guest pages over anonymous, file-backed, Mach-O, commpage, and shared-cache mappings |
+| Mach-O       | Universal-slice selection, validated load commands, segment mapping, Darwin startup stack |
+| Darwin       | The BSD, Mach, and machdep calls reached by dyld, `libSystem` startup, and the tested programs ([list](docs/darwin-boundary.md)) |
+| Verification | Unit suites per subsystem, a differential corpus against an x86_64 oracle, byte-exact comparison against host tools |
 
 Not yet implemented:
 
-- general-purpose x86_64 instruction coverage
-- the complete Darwin syscall and Mach interfaces
-- broad compatibility across ordinary macOS applications and framework stacks
-- general filesystem, signal, process, thread, and Mach IPC behavior
-- multiple guest processes or threads
+- general x86_64 instruction coverage;
+- the complete BSD syscall and Mach interfaces;
+- signals, `fork`/`exec`, and multiple guest threads or processes;
+- guest filesystem writes;
+- Objective-C and framework-heavy applications.
 
-See the [milestone ledger](docs/milestones.md) for the exact implemented scope and verification notes.
+The [milestone ledger](docs/milestones.md) records exactly what is implemented and how it was verified.
 
 ## Quick start
 
-### Requirements
+Requirements:
 
 - an Apple Silicon Mac;
-- CMake 3.25 or newer;
-- Ninja;
-- Apple Clang from Xcode or the Command Line Tools;
+- CMake 3.25+, Ninja, and Apple Clang (Xcode or the Command Line Tools);
 - optionally, Homebrew LLVM for the optimizing JIT tier;
-- optionally, Rosetta 2 for the independent differential-test oracle only.
+- optionally, Rosetta 2, used only as the oracle for differential tests.
 
-Configure, build, and run the test suite:
+Build and test:
 
 ```bash
 git clone https://github.com/sb2bg/Rosa.git
 cd Rosa
-
 cmake --preset debug
 cmake --build --preset debug
 ctest --preset debug
 ```
 
-The build cross-links a small x86_64 Mach-O fixture from checked-in assembly. Run it through Rosa:
+The build cross-compiles its x86_64 test fixtures with the host toolchain. The simplest one is a hand-written Mach-O that calls `write` and `exit` directly:
 
-```bash
-./build/debug/rosa run \
-  ./build/debug/test-fixtures/hello-darwin-x86_64
-```
-
-Expected output:
-
-```text
+```console
+$ ./build/debug/rosa run ./build/debug/test-fixtures/hello-darwin-x86_64
 hello from Intel Darwin
 guest exited: status=0, blocks=2, translations=2
 ```
 
-macOS does not launch this fixture, so Rosetta is not part of the execution path. The fixture links against `libSystem` to obtain a conventional `LC_MAIN`, but makes no library calls.
+### Dynamically linked programs
 
-Run the controlled C program with two guest arguments:
-
-```bash
-./build/debug/rosa run --max-blocks 21000000 \
-  ./build/debug/test-fixtures/c-main-x86_64 -- rosa jit
-```
-
-Expected output:
-
-```text
-C main returned 42
-guest exited: status=0, blocks=20000011, translations=13
-```
-
-This is a real Clang-compiled `main(int, char **)`, but it uses Rosa's minimal
-checked-in entry stub and makes no C-library calls. The separate frontier
-fixture below exercises the ordinary dynamic path.
-
-Builds also produce a normal compiler-driver-linked x86_64 executable that
-calls `printf`. With a compatible Intel dyld and shared cache installed on the
-host, run it without a custom entry stub:
+A program linked against `libSystem` needs an Intel dyld and shared cache. A Mac with Rosetta installed already has both, and `rosa exec` uses them by default:
 
 ```bash
-./build/debug/rosa run \
-  --dyld /usr/lib/dyld \
-  --shared-cache /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64 \
-  --max-blocks 5000000 \
+lipo /usr/bin/grep -thin x86_64 -output /tmp/grep-x86_64
+LC_ALL=C ./build/debug/rosa exec /tmp/grep-x86_64 -n --color=always beta README.md
+```
+
+`LC_ALL=C` is currently required: under a UTF-8 locale, libc maps the locale data with a private writable `mmap` that Rosa does not implement yet.
+
+`rosa exec` behaves like a shell launching the program: it passes every argument after the executable to the guest, passes the host environment minus `DYLD_*`, gives the guest read-only access to the host filesystem, and has no block limit. The guest's exit status becomes Rosa's; a Rosa failure exits with 125 and writes its diagnostic to stderr. `--argv0 <name>` overrides the guest's `argv[0]`.
+
+`rosa run` is the lower-level entry point used for fixtures. It confines file access to the working directory, prints a status line on exit, takes guest arguments after `--`, and stops after a block limit (1,000,000 by default with `--dyld`):
+
+```bash
+CACHE=/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64
+
+./build/debug/rosa run --dyld /usr/lib/dyld --shared-cache "$CACHE" \
   ./build/debug/frontier-fixtures/ordinary-c-x86_64
 ```
-
-Expected output (the `argv[0]` path follows the invocation):
 
 ```text
 ordinary x86_64 C main: argc=1 argv[0]=./build/debug/frontier-fixtures/ordinary-c-x86_64
 dyld experiment exited: status=0, blocks=..., translations=..., cache-hits=..., jit-mappings=1, jit-used=...
 ```
 
-`rosa exec` runs a dynamically linked program the way a shell would: it uses
-the host's `/usr/lib/dyld` and x86_64 shared cache unless overridden, imposes no
-block limit, passes the host environment (minus `DYLD_*`), keeps Rosa's own
-status lines off stdout, and hands every argument after the executable to the
-guest. The guest's exit status becomes Rosa's; a Rosa failure exits with 125
-and writes its diagnostic to stderr.
+That run goes through dyld, `libSystem` initialization, and libc `printf`. Compatibility depends on the dyld and cache versions; inspect a cache with `rosa cache inspect <path>`.
 
-```bash
-lipo /usr/bin/grep -thin x86_64 -output /tmp/grep-x86_64
-./build/release/rosa exec /tmp/grep-x86_64 -n --color=always beta README.md
-```
+### Persistent translation cache
 
-For repeated launches, opt into the relocatable persistent translation cache.
-The first run fills the file; later runs validate the cached x86 source bytes,
-relocate helper calls for the current process ASLR slide, and batch-publish the
-cached AArch64 with one JIT write/instruction-cache transaction:
+`--translation-cache <path>` stores translated blocks on disk. The first run fills the file. Later runs check the cached x86 bytes against the guest, relocate helper calls for the current ASLR slide, and publish all cached code in one JIT transaction. `--timings` reports where launch time goes. Dump options bypass the cache so their output always comes from a fresh translation.
 
-```bash
-./build/release/rosa run \
-  --translation-cache /tmp/rosa-ordinary.translation-cache \
-  --dyld /usr/lib/dyld \
-  --shared-cache /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64 \
-  --max-blocks 5000000 \
-  ./build/release/frontier-fixtures/ordinary-c-x86_64
-```
+## Command reference
 
-`--timings` prints phase and translation-cache timing. Dump requests bypass the
-persistent cache so x86, IR, and AArch64 diagnostics always describe a freshly
-lowered block.
+| Command | Purpose |
+| ------- | ------- |
+| `rosa exec <mach-o> [args...]` | Run a dynamically linked x86_64 program like a shell would |
+| `rosa run <mach-o> [-- args...]` | Run a fixture, controlled or through dyld, with a status line and block limit |
+| `rosa inspect <mach-o>` | Describe an x86_64 thin or universal Mach-O (`--segments`, `--load-commands`) |
+| `rosa cache inspect <cache>` | Validate and describe an Intel dyld shared cache and its subcaches |
+| `rosa selftest r0` / `r1` / `r2` | Self-tests for AArch64 emission, one translated block, and multi-block control flow |
 
-The build also produces an ordinary dynamically linked, CPU-bound x86_64 prime
-sieve. It runs ten scalar Eratosthenes passes to one million and verifies an
-exact count, sum, and cross-round checksum:
-
-```bash
-./build/release/rosa run \
-  --translation-cache /tmp/rosa-sieve.translation-cache \
-  --dyld /usr/lib/dyld \
-  --shared-cache /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64 \
-  --max-blocks 1000000000 \
-  ./build/release/benchmarks/prime-sieve-x86_64
-```
-
-```text
-sieve limit=1000000 rounds=10 primes=78498 sum=37550402023 checksum=1876165121666630888
-```
-
-The reduction loop explicitly disables Clang vectorization while retaining
-`-O2`; the otherwise generated SSE4.1 reduction is beyond Rosa's current SIMD
-surface. Both Rosa and Rosetta measurements execute this same scalar binary.
+| Option | Applies to | Effect |
+| ------ | ---------- | ------ |
+| `--dyld <path>`, `--shared-cache <path>` | `run`, `exec` | Intel dyld and shared cache (`exec` defaults to the host's) |
+| `--max-blocks <n>` | `run`, `exec` | Stop after `n` dispatched blocks |
+| `--translation-cache <path>` | `run`, `exec` | Use a persistent translation cache |
+| `--trace-syscalls` | `run`, `exec` | Log each BSD call, its arguments, and its result to stderr |
+| `--argv0 <name>` | `exec` | Guest `argv[0]` (defaults to the executable path) |
+| `--timings` | `run` | Print phase and translation-cache timing |
+| `--dump-x86`, `--dump-ir`, `--dump-arm64` | `run`, `selftest` | Print each translation stage |
 
 ## Explore the translator
 
-Rosa can dump each stage of a translation. The R1 probe executes this block and verifies that the resulting guest `RAX` is 42:
+The R1 self-test translates and runs this block, then checks that guest `RAX` is 42:
 
 ```asm
 mov rax, 40
@@ -203,60 +139,8 @@ ret
 ```
 
 ```bash
-./build/debug/rosa selftest r1 \
-  --dump-x86 \
-  --dump-ir \
-  --dump-arm64
+./build/debug/rosa selftest r1 --dump-x86 --dump-ir --dump-arm64
 ```
-
-Inspect the generated fixture without running it:
-
-```bash
-./build/debug/rosa inspect \
-  --segments \
-  --load-commands \
-  ./build/debug/test-fixtures/hello-darwin-x86_64
-```
-
-### Command reference
-
-| Command                      | Purpose                                                            |
-| ---------------------------- | ------------------------------------------------------------------ |
-| `rosa selftest r0`           | Verify executable AArch64 emission                                 |
-| `rosa selftest r1`           | Decode, lower, emit, and execute one x86 basic block               |
-| `rosa selftest r2`           | Exercise multi-block control flow and the translation cache        |
-| `rosa inspect <mach-o>`      | Inspect an x86_64 thin or universal Mach-O                         |
-| `rosa cache inspect <cache>` | Validate and describe an Intel dyld shared cache and its subcaches |
-| `rosa run <mach-o>`          | Run a controlled x86_64 Mach-O through the DBT                     |
-
-The self-tests and `run` command accept `--dump-x86`, `--dump-ir`, and `--dump-arm64` where applicable. `run` also accepts `--max-blocks <count>` to bound guest execution.
-
-## dyld research probe
-
-Apple binaries are kept outside the repository. With a locally obtained compatible x86_64 dyld shared cache, inspect the cache first:
-
-```bash
-./build/debug/rosa cache inspect \
-  /path/to/dyld_shared_cache_x86_64
-```
-
-Then run the ordinary C frontier fixture through the unmodified x86_64 dyld
-path:
-
-```bash
-./build/debug/rosa run \
-  --dyld /usr/lib/dyld \
-  --shared-cache /path/to/dyld_shared_cache_x86_64 \
-  --max-blocks 5000000 \
-  ./build/debug/frontier-fixtures/ordinary-c-x86_64
-```
-
-This remains a version-sensitive research path: dyld and cache compatibility
-matter, and a larger program will still stop loudly at its first unsupported
-instruction or Darwin operation. On the tested macOS userspace, the fixture
-enters the intact cache at slide zero, executes code in 21 cached images,
-completes dyld and `libSystem` initialization, calls its normal `main`, prints
-through libc, and exits with status zero.
 
 ## Architecture
 
@@ -278,101 +162,72 @@ through libc, and exits with status zero.
                          arm64 macOS host
 ```
 
-Generated blocks receive an explicit `X86State*`, update architectural state, and return the next guest action to the dispatcher. Guest virtual addresses are never reinterpreted as host pointers; repeated-loop byte fast paths first resolve a permission-checked anonymous mapping, coalesce bounds checks for adjacent loads, and permit unchecked monotonic spans only after proving exact loop termination and complete containment of the remaining range. Syscalls leave generated code and cross a semantic compatibility boundary. An x86 `syscall` is never rewritten as an ARM `svc`.
+Generated blocks take an explicit `X86State*`, update guest state, and return the next guest RIP to the dispatcher. Guest addresses are never used as host pointers; every access goes through the guest address space, with narrow fast paths only where a runtime check has proven the range safe. An x86 `syscall` leaves generated code and is handled by Rosa's Darwin layer. It is never rewritten as an ARM `svc`.
 
-Instruction support is deliberately encoding-specific and failure-driven. The current surface covers the integer, control-flow, flag, memory, atomic, string, and SIMD forms needed by the controlled fixtures and dyld probe. Unsupported encodings fail rather than silently changing execution strategy.
+See [docs/architecture.md](docs/architecture.md) for details.
 
 ## Testing
 
-The default test suite covers the assembler, decoder, IR, translator, dispatcher, guest memory, Mach-O loader, Darwin boundary, shared-cache handling, and end-to-end fixture. When Rosetta 2 is available, it also builds a standalone x86_64 oracle and compares only architecturally defined registers, flags, XMM lanes, and memory.
-
-Rosetta is a test dependency only. Rosa never uses it to execute a guest in the runtime path.
-
 ```bash
-# Standard debug suite
-ctest --preset debug
+ctest --preset debug                  # full debug suite
+ctest --preset debug -L Optimization  # one subsystem
+./build/debug/rosa_tests --list       # list suites
 
-# Focus on one subsystem
-ctest --preset debug -L Optimization
+# Without LLVM or the Rosetta oracle
+cmake --preset baseline && cmake --build --preset baseline && ctest --preset baseline
 
-# Build and test without LLVM or the Rosetta oracle
-cmake --preset baseline
-cmake --build --preset baseline
-ctest --preset baseline
-
-# Byte-exact grep conformance against the host's arm64e grep (opt-in)
-tests/compat/grep.py --rosa build/release/rosa --verbose
-cmake -S . -B build/debug -DROSA_ENABLE_COMPAT_TESTS=ON
-ctest --preset debug -L compat
-
-# UndefinedBehaviorSanitizer build
-cmake --preset ubsan
-cmake --build --preset ubsan
-ctest --preset ubsan
+# UndefinedBehaviorSanitizer
+cmake --preset ubsan && cmake --build --preset ubsan && ctest --preset ubsan
 ```
 
-An AddressSanitizer preset is also provided. See the [verification notes](docs/milestones.md#verification-notes) for the current host-runtime caveat.
+When Rosetta is installed, the differential suite builds a standalone x86_64 oracle and compares architecturally defined registers, flags, XMM lanes, and memory against Rosa for every case in [`tests/differential/Cases.def`](tests/differential/Cases.def). Rosetta is a test dependency only.
 
-For a repeatable dispatcher benchmark, configure a release build and run the
-200-million-iteration x86 entrypoint fixture:
+The compatibility harness runs host tools under Rosa and compares stdout, stderr, and exit status byte for byte against the same universal binary run natively:
 
 ```bash
-cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build/release --target benchmark_entrypoint
+tests/compat/compat.py --rosa build/debug/rosa
+tests/compat/compat.py --rosa build/debug/rosa grep -v
 ```
 
-When Homebrew LLVM is installed, CMake reports `Rosa LLVM optimizing JIT` and
-eligible 64-bit, register-only conditional self-loops become hot after 1,024
-executions. A narrow memory tier also accepts proven anonymous byte read/write
-loops, including exact constant-stride reductions and unsigned dynamic-stride
-stores. It validates the complete invocation range before passing a host span
-to LLVM; rejected, executable, file-backed, wrapping, and faulting cases remain
-on the checked baseline. Because ORC compilation costs about 29 ms for the two
-sieve traces on the development host, memory loops require 100 million observed
-executions before promotion. Rosa also requires at least ten million dispatcher
-executions left in the current budget. The tier keeps guest registers in LLVM
-SSA, materializes lazy x86 flags only at the side exit, and optimizes at `-O2`.
-Persistent baseline blocks lazily reconstruct IR only after a self-loop becomes
-hot. Pass `-DROSA_ENABLE_LLVM_JIT=OFF` to measure or test the fallback path
-explicitly.
+An AddressSanitizer preset exists but currently hangs on the development host; see the [verification notes](docs/milestones.md#verification-notes).
 
-The ordinary dynamic fixture is also a cold-start benchmark. On the current
-M1 Pro development host, the uncached release path is roughly 0.09 seconds,
-down from 1.23 seconds before pooled executable allocation, lazy shared-cache
-rebasing, bounded multi-instruction blocks, allocation-free scalar memory
-accesses, and release IPO. Eleven alternating warm-cache process trials put the
-baseline-only Rosa median at 46.4 milliseconds and the same x86_64 fixture
-through Rosetta at 10.5 milliseconds: a remaining gap of about 4.4x, down from
-37x at the start of this optimization pass. This is a host- and
-userspace-specific frontier measurement, not a general application-performance
-claim.
+## Performance
 
-The prime sieve separates steady-state execution from launch overhead. With
-32-instruction dynamic blocks it executes about 25.3 million guest blocks per
-process. In 61 alternating warm process trials on the same M1 Pro host, the
-scalar x86_64 binary had a 24.4 ms Rosetta median and a 65.0 ms baseline Rosa
-median, a 2.7x gap. That is a 9.2x Rosa improvement over the earlier 598.1 ms
-baseline. Generated self-edge batching, anonymous byte-window fast paths,
-native and deferred flag lowering, native 32-bit arithmetic and immediate
-folding, guest-register forwarding and pinning, branchless `SET`/`CMOV`,
-adjacent-load guard coalescing, and guarded monotonic read/write spans account
-for the gain. A memory-loop LLVM experiment reduced trace execution by about
-8 ms but cost about 29 ms to compile, so this short benchmark deliberately
-remains on the faster baseline tier. Persisting optimized code or broader
-direct trace formation is the next structural performance step.
+Measured on an M1 Pro with warm process launches, using release builds (`cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release`). These numbers describe two small fixtures on one host, not application performance in general.
+
+| Fixture | Rosetta median | Rosa median (baseline tier) | Gap |
+| ------- | -------------: | --------------------------: | --: |
+| `ordinary-c-x86_64` (dyld startup + `printf`, persistent cache) | 10.5 ms | 46.4 ms | 4.4× |
+| `prime-sieve-x86_64` (10 scalar sieve passes to 1,000,000) | 24.4 ms | 65.0 ms | 2.7× |
+
+The sieve is built at `-O2` with vectorization disabled because the SSE4.1 reduction Clang would otherwise emit is outside Rosa's SIMD coverage. Both runtimes execute the same binary:
+
+```bash
+./build/release/rosa run --dyld /usr/lib/dyld --shared-cache "$CACHE" \
+  --translation-cache /tmp/rosa-sieve.translation-cache --max-blocks 1000000000 \
+  ./build/release/benchmarks/prime-sieve-x86_64
+```
+
+```text
+sieve limit=1000000 rounds=10 primes=78498 sum=37550402023 checksum=1876165121666630888
+```
+
+The [milestone ledger](docs/milestones.md#r5-performance) has the measurement history and what each optimization contributed.
 
 ## Documentation
 
-| Document                                   | Contents                                                                   |
-| ------------------------------------------ | -------------------------------------------------------------------------- |
-| [Architecture](docs/architecture.md)       | Translation pipeline, state boundaries, executable memory, and constraints |
-| [Guest memory](docs/guest-memory.md)       | Address-space model, permissions, mapping behavior, and safety invariants  |
-| [Darwin boundary](docs/darwin-boundary.md) | Implemented BSD calls, Mach traps, machdep behavior, and commpage fields   |
-| [Milestones](docs/milestones.md)           | R0–R5 progress, known boundaries, and verification status                  |
+| Document | Contents |
+| -------- | -------- |
+| [Architecture](docs/architecture.md) | Translation pipeline, state boundaries, caches, executable memory |
+| [Guest memory](docs/guest-memory.md) | Address-space model, permissions, fast paths, invariants |
+| [Darwin boundary](docs/darwin-boundary.md) | Implemented BSD calls, Mach traps, machdep calls, commpage, path policy |
+| [Backend contract](docs/backend-contract.md) | What a host backend owns and must preserve |
+| [Milestones](docs/milestones.md) | R0–R5 scope, current work, performance history, verification status |
+| [Contributing](CONTRIBUTING.md) | Invariants, workflow, and how to add instructions and syscalls |
 
-## Development philosophy
+## Development approach
 
-Rosa advances through narrow, tested vertical slices. New behavior should be justified by a controlled fixture or a captured real-world failure, preserve the guest/host boundary, and fail diagnostically when semantics are not yet implemented. That keeps partial compatibility measurable and avoids hiding correctness gaps behind permissive fallbacks.
+Rosa grows in narrow, tested vertical slices. New behavior should be motivated by a fixture or a captured real-program failure, keep guest and host state separate, and fail with a diagnostic where semantics are not yet implemented. Partial compatibility stays measurable because nothing falls back silently.
 
 ## License
 
