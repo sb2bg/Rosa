@@ -481,14 +481,25 @@ int runMachO(const std::filesystem::path &path, const std::vector<std::string> &
     return result.exitStatus;
 }
 
-int runDyldExperiment(const std::filesystem::path &executablePath,
-                      const std::optional<std::filesystem::path> &dyldPath,
-                      const std::optional<std::filesystem::path> &sharedCachePath,
-                      const std::vector<std::string> &guestArguments,
-                      const std::vector<std::string> &environment, const DumpOptions &options,
-                      std::size_t maximumProbeBlocks, bool collectTimings,
-                      const std::optional<std::filesystem::path> &translationCachePath,
-                      bool reportStatus, bool traceSyscalls) {
+// How a dyld-launched guest relates to the host: `rosa run` keeps the guest
+// controlled and reports its own progress; `rosa exec` behaves like the program.
+struct LaunchMode {
+    std::vector<std::string> environment;
+    rosa::darwin::GuestHostAccess hostAccess{rosa::darwin::GuestHostAccess::Controlled};
+    bool reportStatus{true};
+};
+
+int runDyldExperiment(const RunOptions &run, std::size_t maximumProbeBlocks,
+                      const LaunchMode &mode) {
+    const auto &executablePath = run.executable;
+    const auto &dyldPath = run.dyld;
+    const auto &sharedCachePath = run.sharedCache;
+    const auto &guestArguments = run.guestArguments;
+    const auto &environment = mode.environment;
+    const auto &options = run.dumps;
+    const auto &translationCachePath = run.translationCache;
+    const bool collectTimings = run.timings;
+    const bool reportStatus = mode.reportStatus;
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
     constexpr std::uint64_t standaloneDyldSlide = 0x00007FF800000000ULL;
@@ -571,7 +582,8 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
                                      sharedCache ? &*sharedCache : nullptr,
                                      executableFile.uuid().value_or(std::array<std::uint8_t, 16>{}),
                                      options.arm64, collectTimings, runtimeTranslationCache);
-    if (traceSyscalls) {
+    dispatcher.syscalls().setHostAccess(mode.hostAccess);
+    if (run.traceSyscalls) {
         dispatcher.syscalls().setTrace(&std::cerr);
     }
     try {
@@ -645,10 +657,8 @@ int main(int argc, char **argv) {
         if (command == "run") {
             const auto options = parseRunOptions(argc, argv);
             if (options.dyld || options.sharedCache) {
-                return runDyldExperiment(options.executable, options.dyld, options.sharedCache,
-                                         options.guestArguments, {}, options.dumps,
-                                         options.maximumBlocks.value_or(1'000'000), options.timings,
-                                         options.translationCache, true, options.traceSyscalls);
+                return runDyldExperiment(options, options.maximumBlocks.value_or(1'000'000),
+                                         LaunchMode{});
             }
             return runMachO(options.executable, options.guestArguments, options.dumps,
                             options.maximumBlocks.value_or(1'000));
@@ -657,10 +667,12 @@ int main(int argc, char **argv) {
             const auto options = parseExecOptions(argc, argv);
             try {
                 return runDyldExperiment(
-                    options.executable, options.dyld, options.sharedCache,
-                    options.guestArguments, hostEnvironment(), options.dumps,
-                    options.maximumBlocks.value_or(std::numeric_limits<std::size_t>::max()),
-                    false, options.translationCache, false, options.traceSyscalls);
+                    options, options.maximumBlocks.value_or(std::numeric_limits<std::size_t>::max()),
+                    LaunchMode{
+                        .environment = hostEnvironment(),
+                        .hostAccess = rosa::darwin::GuestHostAccess::HostReadOnly,
+                        .reportStatus = false,
+                    });
             } catch (const std::exception &error) {
                 std::cerr << "rosa: " << error.what() << '\n';
                 return execRuntimeFailureStatus;
