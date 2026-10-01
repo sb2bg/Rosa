@@ -26,12 +26,8 @@ bool decodeSimdLanes(DecodeContext &context) {
                     static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
                 const auto rmEncoding =
                     static_cast<std::uint8_t>(modrm & 0x7U);
-                if (mode != 0x3U &&
-                    (mode != 0 || rmEncoding != 0x5U ||
-                     (rex & 0xBU) != 0)) {
-                    throw DecodeError(
-                        address, remaining,
-                        "only register-direct or RIP-relative PSHUFB xmm, xmm/m128 is supported");
+                if ((rex & 0x8U) != 0) {
+                    throw DecodeError(address, remaining, "PSHUFB does not take REX.W");
                 }
                 instruction.operands.push_back(XmmRegisterOperand{
                     static_cast<XmmRegister>(static_cast<std::uint8_t>(
@@ -46,21 +42,9 @@ bool decodeSimdLanes(DecodeContext &context) {
                                 rmEncoding |
                                 ((rex & 0x1U) != 0 ? 8U : 0U)))});
                 } else {
-                    if (code.size() - operandCursor < 4) {
-                        throw DecodeError(
-                            address, remaining,
-                            "truncated RIP-relative PSHUFB displacement");
-                    }
-                    const auto displacement =
-                        readI32(code.subspan(operandCursor, 4));
-                    operandCursor += 4;
-                    static_cast<void>(relativeTarget(
-                        address, operandCursor - instructionStart,
-                        displacement));
                     instruction.opcode = Opcode::PshufbRegMem;
-                    instruction.operands.push_back(MemoryOperand{
-                        Register::Rax, displacement, 128,
-                        std::nullopt, 1, false, true});
+                    instruction.operands.push_back(decodeModrmMemory(
+                        context, operandCursor, modrm, static_cast<std::uint8_t>(rex), 128));
                 }
                 const auto length = operandCursor - instructionStart;
                 instruction.length = static_cast<std::uint8_t>(length);

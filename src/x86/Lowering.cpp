@@ -2,10 +2,52 @@
 
 #include <bit>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
 namespace rosa::x86 {
+namespace {
+
+// The guest effective address of a memory operand: RIP-relative from the
+// next instruction, or [base + index*scale + disp], plus the GS base when
+// segment-overridden. Use this for new memory forms instead of repeating the
+// arithmetic per instruction.
+ir::ValueId effectiveAddress(ir::Builder &builder, const MemoryOperand &memory,
+                             const DecodedInstruction &instruction) {
+    const auto rip = instruction.address;
+    if (memory.segment != Segment::None && memory.segment != Segment::Gs) {
+        throw std::runtime_error("only GS segment overrides are implemented");
+    }
+    if (memory.ripRelative) {
+        return builder.constant(instruction.address.value + instruction.length +
+                                    static_cast<std::uint64_t>(memory.displacement),
+                                ir::Width::I64, rip);
+    }
+    std::optional<ir::ValueId> address;
+    if (memory.hasBase) {
+        address = builder.readGuestRegister(memory.base, ir::Width::I64, rip);
+    }
+    if (memory.index) {
+        auto index = builder.readGuestRegister(*memory.index, ir::Width::I64, rip);
+        if (memory.scale != 1) {
+            index = builder.shiftLeft(index, static_cast<std::uint8_t>(std::countr_zero(memory.scale)),
+                                      ir::Width::I64, rip);
+        }
+        address = address ? builder.add(*address, index, ir::Width::I64, rip) : index;
+    }
+    if (memory.displacement != 0 || !address) {
+        const auto displacement =
+            builder.constant(static_cast<std::uint64_t>(memory.displacement), ir::Width::I64, rip);
+        address = address ? builder.add(*address, displacement, ir::Width::I64, rip) : displacement;
+    }
+    if (memory.segment == Segment::Gs) {
+        address = builder.add(builder.readGuestGsBase(rip), *address, ir::Width::I64, rip);
+    }
+    return *address;
+}
+
+} // namespace
 
 ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
     if (decoded.empty()) {
@@ -1902,6 +1944,21 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
             const auto sourceValue =
                 builder.constant(immediate.value, width, instruction.address);
             builder.addGuestMemory(address, sourceValue, width, instruction.address);
+            break;
+        }
+        case x86::Opcode::SubMemImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: memory immediate sub operand count");
+            }
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
+            const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
+            if (memory.width != 32 && memory.width != 64) {
+                throw std::runtime_error("only 32- and 64-bit memory-destination SUB imm8 is implemented");
+            }
+            const auto width = memory.width == 32 ? ir::Width::I32 : ir::Width::I64;
+            const auto address = effectiveAddress(builder, memory, instruction);
+            builder.subGuestMemory(address, builder.constant(immediate.value, width, instruction.address),
+                                   width, instruction.address);
             break;
         }
         case x86::Opcode::IncReg: {
@@ -4375,19 +4432,11 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
             }
             const auto destination = std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
-            if (!memory.ripRelative || memory.hasBase || memory.index || memory.width != 128 ||
-                memory.segment != x86::Segment::None) {
-                throw std::runtime_error(
-                    "only RIP-relative PSHUFB memory controls are implemented");
+            if (memory.width != 128) {
+                throw std::runtime_error("internal decoder error: PSHUFB memory width");
             }
-            const auto base = builder.constant(instruction.address.value + instruction.length,
-                                               ir::Width::I64, instruction.address);
-            const auto displacement =
-                builder.constant(static_cast<std::uint64_t>(memory.displacement), ir::Width::I64,
-                                 instruction.address);
-            const auto address =
-                builder.add(base, displacement, ir::Width::I64, instruction.address);
-            builder.shuffleGuestMemoryXmmBytes(address, destination, instruction.address);
+            builder.shuffleGuestMemoryXmmBytes(effectiveAddress(builder, memory, instruction),
+                                               destination, instruction.address);
             break;
         }
         case x86::Opcode::PshufdRegRegImm: {

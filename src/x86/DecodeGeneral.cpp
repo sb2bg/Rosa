@@ -5047,6 +5047,19 @@ bool decodeGeneral(DecodeContext &context) {
                 static_cast<std::uint64_t>(
                     static_cast<std::int64_t>(immediate)),
                 8});
+        } else if (extension == 0x5U && mode <= 0x2U && !rexR) {
+            // SUB r/m32/64, imm8 (sign-extended), any memory addressing form.
+            const auto memory = decodeModrmMemory(
+                context, cursor, modrm, static_cast<std::uint8_t>(rex),
+                static_cast<std::uint16_t>(rexW ? 64U : 32U));
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining, "truncated SUB memory immediate");
+            }
+            const auto immediate = std::bit_cast<std::int8_t>(code[cursor++]);
+            instruction.opcode = Opcode::SubMemImm;
+            instruction.operands.push_back(memory);
+            instruction.operands.push_back(ImmediateOperand{
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
         } else if (extension == 0x7U && mode <= 0x2U && !rexR) {
             const bool ripRelative =
                 mode == 0 && rmEncoding == 0x5U && !rexB;

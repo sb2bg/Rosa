@@ -1564,6 +1564,41 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        // corecrypto: pshufb xmm0, [rbx+0x40] with a byte-reversing mask.
+        auto testCase = make("pshufb_based_memory", CaseId::pshufb_based_memory,
+                             differentialBytes_pshufb_based_memory);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        testCase.request.state.xmm[0] = {.low = 0x0706050403020100ULL,
+                                         .high = 0x0F0E0D0C0B0A0908ULL};
+        constexpr std::array<std::uint8_t, 16> mask{3, 2, 1, 0, 7, 6, 5, 4,
+                                                    0x80, 10, 9, 8, 15, 14, 13, 12};
+        std::ranges::copy(mask, testCase.request.memory.begin() + 0x40);
+        run(testCase);
+    }
+    {
+        // corecrypto's block loop counter: sub qword [mem], 1 crossing zero.
+        auto testCase = make("sub64_memory_immediate_borrow",
+                             CaseId::sub64_memory_immediate_borrow,
+                             differentialBytes_sub64_memory_immediate_borrow);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        constexpr std::uint64_t value = 0;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value, sizeof(value));
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        auto testCase = make("sub32_memory_immediate_overflow",
+                             CaseId::sub32_memory_immediate_overflow,
+                             differentialBytes_sub32_memory_immediate_overflow);
+        bindMemory(testCase, rosa::x86::Register::Rbx, 0);
+        constexpr std::uint32_t value = 0x80000000U;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value, sizeof(value));
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
         auto testCase = make("std_sets_direction", CaseId::std_sets_direction,
                              differentialBytes_std_sets_direction);
         testCase.flagMask = arithmeticFlags | directionFlag;
