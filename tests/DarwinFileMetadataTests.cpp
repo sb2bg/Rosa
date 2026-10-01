@@ -453,7 +453,7 @@ void testDarwinOpenReadOnlyUserFile() {
                 "missing read-only guest file returned the wrong errno");
     expectEqual(state.rflags, std::uint64_t{0x3},
                 "missing read-only guest file did not set BSD carry");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{1},
                 "failed read-only guest open allocated a descriptor");
 }
 
@@ -512,7 +512,7 @@ void testDarwinOpenRelativeReadOnlyFile() {
                   std::string_view::npos;
     }
     expect(escaped, "read-only guest open outside the sandbox did not fail loudly");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{1},
                 "escaped read-only guest open allocated a descriptor");
 }
 
@@ -651,7 +651,7 @@ void testDarwinOpenSystemDatabasesAbsent() {
                     "system database open did not report absence");
         expect((state.rflags & 1U) != 0, "system database open did not set BSD carry");
     }
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{0},
                 "absent system database open allocated a descriptor");
 }
 
@@ -686,7 +686,7 @@ void testDarwinOpenFeatureFlagsDisclosuresAbsent() {
                     "FeatureFlags disclosure open did not report absence");
         expect((state.rflags & 1U) != 0, "FeatureFlags disclosure open did not set BSD carry");
     }
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{0},
                 "absent FeatureFlags disclosure open allocated a descriptor");
 }
 
@@ -806,7 +806,7 @@ void testDarwinFcntlGetPath() {
     expect(std::equal(expectedPath.begin(), expectedPath.end(), guestPathBytes.begin()) &&
                guestPathBytes.back() == 0,
            "fcntl F_GETPATH returned the wrong guest path");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{1},
                 "fcntl F_GETPATH changed the guest descriptor namespace");
 
     addressSpace.writeBytes(outputAddress, outputSentinel);
@@ -832,12 +832,13 @@ void testDarwinFcntlGetPath() {
     static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
                 "fcntl F_GETPATH invalid output returned the wrong errno");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{1},
                 "faulted fcntl F_GETPATH changed the descriptor namespace");
 
+    constexpr std::uint64_t setStatusFlags = 4; // F_SETFL
     state.rax = fcntlNumber;
     state.rdi = descriptor;
-    state.rsi = 0;
+    state.rsi = setStatusFlags;
     state.rdx = outputAddress.value;
     bool unsupportedCommand = false;
     try {
@@ -918,7 +919,7 @@ void testDarwinSimpleAslSocketFlow() {
     state.rflags = 0xAD7;
     static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     expectEqual(state.rax, std::uint64_t{0}, "simple-ASL socket close did not succeed");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{0},
                 "simple-ASL socket close retained its descriptor");
 }
 
@@ -942,7 +943,7 @@ void testDarwinCloseGuestDescriptor() {
     state.rdx = 0;
     static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     const auto descriptor = state.rax;
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{1},
                 "close setup did not create a guest descriptor");
 
     state.rax = closeNumber;
@@ -953,7 +954,7 @@ void testDarwinCloseGuestDescriptor() {
     expect(!outcome.exited, "close terminated the guest");
     expectEqual(state.rax, std::uint64_t{0}, "close did not return success");
     expectEqual(state.rflags, std::uint64_t{0x8D6}, "close did not clear BSD carry");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{0},
                 "close retained the guest descriptor");
     expect(dispatcher.fileSpace().lookup(
                rosa::darwin::GuestFileDescriptor{static_cast<std::int32_t>(descriptor)}) == nullptr,

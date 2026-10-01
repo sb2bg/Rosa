@@ -187,7 +187,7 @@ void testDarwinOpenDirectoryWithinCurrentDirectory() {
                 "directory open of a regular file returned the wrong errno");
     expectEqual(state.rflags, std::uint64_t{0x3},
                 "directory open of a regular file did not set BSD carry");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{1},
                 "failed directory open allocated a descriptor");
 
     // Directories outside the current directory stay loud.
@@ -233,7 +233,7 @@ void testDarwinOpenCurrentDirectory() {
                 "open current directory returned the wrong guest descriptor");
     expectEqual(state.rflags, std::uint64_t{0x8D6},
                 "open current directory did not clear BSD carry");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{1},
                 "open current directory did not create one guest descriptor");
     const auto *opened = dispatcher.fileSpace().lookup(rosa::darwin::GuestFileDescriptor{3});
     expect(opened != nullptr && opened->kind == rosa::darwin::GuestFileKind::CurrentDirectory &&
@@ -249,7 +249,7 @@ void testDarwinOpenCurrentDirectory() {
     static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     expectEqual(state.rax, std::uint64_t{4},
                 "repeated guest open did not allocate a unique descriptor");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{2},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{2},
                 "repeated guest open changed descriptor-space size incorrectly");
 
     state.rax = openNumber;
@@ -261,7 +261,7 @@ void testDarwinOpenCurrentDirectory() {
     expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
                 "open invalid guest path returned the wrong errno");
     expectEqual(state.rflags, std::uint64_t{0x3}, "open invalid guest path did not set BSD carry");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{2},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{2},
                 "faulted guest open allocated a descriptor");
 
     state.rax = openNumber;
@@ -273,11 +273,11 @@ void testDarwinOpenCurrentDirectory() {
         static_cast<void>(
             dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     } catch (const std::runtime_error &error) {
-        unsupportedFlags =
-            std::string_view(error.what()).find("mapped user-file open") != std::string_view::npos;
+        unsupportedFlags = std::string_view(error.what()).find("read-only open of host files") !=
+                           std::string_view::npos;
     }
     expect(unsupportedFlags, "unobserved guest open flags did not fail loudly");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{2},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{2},
                 "unsupported guest open allocated a descriptor");
 }
 
@@ -306,7 +306,7 @@ void testDarwinFeatureFlagsShmOpenProbe() {
                 "FeatureFlags shm_open probe returned the wrong errno");
     expectEqual(state.rflags, std::uint64_t{0x8D7},
                 "FeatureFlags shm_open probe did not set BSD carry");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{0},
                 "FeatureFlags shm_open probe allocated a guest descriptor");
 
     state.rax = shmOpenNumber;
@@ -591,7 +591,7 @@ void testDarwinOpenAndReadUrandomNoCancel() {
     expectEqual(state.rax, std::uint64_t{0}, "close_nocancel random device did not return success");
     expectEqual(state.rflags, std::uint64_t{0xAD6},
                 "close_nocancel random device did not clear BSD carry");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{0},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{0},
                 "close_nocancel did not release the guest descriptor");
 
     state.rax = closeNoCancelNumber;
@@ -641,7 +641,7 @@ void testDarwinOpenGuestRootDirectory() {
             std::string_view::npos;
     }
     expect(rejectedFlags, "guest root open accepted an unobserved flag combination");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{1},
                 "unsupported guest root open allocated a descriptor");
 }
 
@@ -691,14 +691,14 @@ void testDarwinOpenatGuestCryptexDirectory() {
                opened->flags == directoryFlag,
            "openat guest cryptex stored the wrong synthetic metadata");
 
-    const auto sizeBeforeFailure = dispatcher.fileSpace().size();
+    const auto sizeBeforeFailure = guestOpenedDescriptors(dispatcher);
     state.rax = openatNumber;
     state.rdi = 99;
     state.rflags = 0x2;
     static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
                 "openat invalid guest dirfd returned the wrong errno");
-    expectEqual(dispatcher.fileSpace().size(), sizeBeforeFailure,
+    expectEqual(guestOpenedDescriptors(dispatcher), sizeBeforeFailure,
                 "faulted openat allocated a guest descriptor");
 
     state.rax = openatNumber;
@@ -708,7 +708,7 @@ void testDarwinOpenatGuestCryptexDirectory() {
     static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     expectEqual(state.rax, static_cast<std::uint64_t>(EFAULT),
                 "openat invalid guest path returned the wrong errno");
-    expectEqual(dispatcher.fileSpace().size(), sizeBeforeFailure,
+    expectEqual(guestOpenedDescriptors(dispatcher), sizeBeforeFailure,
                 "faulted openat path allocated a guest descriptor");
 }
 
@@ -754,7 +754,7 @@ void testDarwinDuplicateGuestDescriptor() {
     static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     expectEqual(state.rax, static_cast<std::uint64_t>(EBADF),
                 "dup invalid guest descriptor returned the wrong errno");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{2},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{2},
                 "failed dup allocated a guest descriptor");
 }
 
@@ -1148,10 +1148,10 @@ void testDarwinFstatHostReadOnlyFile() {
                 "fstat64 mapped file with invalid output returned the wrong errno");
     expectEqual(state.rflags, std::uint64_t{0x3},
                 "fstat64 mapped file with invalid output did not set BSD carry");
-    expectEqual(dispatcher.fileSpace().size(), std::size_t{1},
+    expectEqual(guestOpenedDescriptors(dispatcher), std::size_t{1},
                 "faulted fstat64 changed descriptor-space size");
 
-    // A valid descriptor of an unmodeled kind stays loud.
+    // A hosted directory descriptor answers from its host descriptor.
     constexpr std::array<std::uint8_t, 2> directoryPath{'.', 0};
     addressSpace.writeBytes(pathAddress, directoryPath);
     state.rax = openNumber;
@@ -1164,15 +1164,36 @@ void testDarwinFstatHostReadOnlyFile() {
     state.rax = fstat64Number;
     state.rdi = 4;
     state.rsi = statAddress.value;
+    state.rflags = 0x8D7;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rflags, std::uint64_t{0x8D6}, "fstat64 hosted directory did not succeed");
+    std::uint16_t directoryMode = 0;
+    std::memcpy(&directoryMode, addressSpace.readBytes(rosa::guest::GuestAddress{statAddress.value + 4}, 2).data(),
+                sizeof(directoryMode));
+    expect(S_ISDIR(directoryMode), "fstat64 hosted directory did not report a directory");
+
+    // A synthetic descriptor has no host metadata and stays loud.
+    constexpr std::uint32_t rootFlags = 0x20100000;
+    constexpr std::array<std::uint8_t, 2> rootPath{'/', 0};
+    addressSpace.writeBytes(pathAddress, rootPath);
+    state.rax = openNumber;
+    state.rdi = pathAddress.value;
+    state.rsi = rootFlags;
+    state.rdx = 0;
+    static_cast<void>(dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
+    expectEqual(state.rax, std::uint64_t{5}, "fstat-test synthetic root open failed");
+    state.rax = fstat64Number;
+    state.rdi = 5;
+    state.rsi = statAddress.value;
     bool unsupportedKind = false;
     try {
         static_cast<void>(
             dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000}));
     } catch (const std::runtime_error &error) {
         unsupportedKind =
-            std::string_view(error.what()).find("mapped read-only files") != std::string_view::npos;
+            std::string_view(error.what()).find("synthetic guest descriptors") != std::string_view::npos;
     }
-    expect(unsupportedKind, "fstat64 directory descriptor did not fail loudly");
+    expect(unsupportedKind, "fstat64 synthetic descriptor did not fail loudly");
 }
 
 void testDarwinLseekHostReadOnlyFile() {

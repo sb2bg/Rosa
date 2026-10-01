@@ -708,7 +708,6 @@ SyscallOutcome handleCsrctl(SyscallCall &call) {
 
 SyscallOutcome handleMac(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
-    static_cast<void>(task);
     std::optional<std::string> policy;
     try {
         policy = readGuestCString(
@@ -808,7 +807,15 @@ SyscallOutcome handleMac(SyscallCall &call) {
         }
         machLookupCheck = true;
     }
-    if (!syscallUnixCheck && !machLookupCheck) {
+    // Observed when libsystem probes whether the executable's directory is
+    // writable through a descriptor it holds open. An unsandboxed process
+    // may use any descriptor it owns.
+    const bool selfDescriptorFileCheck =
+        request.pid == guestSandboxSelfTarget && operation->starts_with("file-") &&
+        request.filterType == guestSandboxDescriptorFilterType &&
+        request.flags == guestSandboxSelfDescriptorFlags &&
+        task.fileSpace.lookup(guestDescriptor(request.value)) != nullptr;
+    if (!syscallUnixCheck && !machLookupCheck && !selfDescriptorFileCheck) {
         std::ostringstream reason;
         reason << "unsupported Sandbox check: pid=0x" << std::hex
                << request.pid << " operation=\"" << *operation

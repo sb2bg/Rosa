@@ -76,6 +76,17 @@ inline void expect(bool condition, std::string_view message) {
     }
 }
 
+// Descriptors the guest opened itself, excluding the inherited standard
+// streams, so expectations do not depend on how the test runner was launched.
+inline std::size_t guestOpenedDescriptors(const rosa::darwin::SyscallDispatcher &dispatcher) {
+    std::size_t inherited = 0;
+    for (std::int32_t stream = 0; stream <= 2; ++stream) {
+        const auto *file = dispatcher.fileSpace().lookup(rosa::darwin::GuestFileDescriptor{stream});
+        inherited += file != nullptr && file->kind == rosa::darwin::GuestFileKind::StandardStream;
+    }
+    return dispatcher.fileSpace().size() - inherited;
+}
+
 inline std::uint64_t fixedTimestampCounter() { return 0x12345678ABCDEF01ULL; }
 
 constexpr std::array<std::uint8_t, 15> r1Code{

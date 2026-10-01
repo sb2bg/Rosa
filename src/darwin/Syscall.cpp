@@ -48,6 +48,7 @@ constexpr std::array syscallTable = std::to_array<SyscallEntry>({
     {detail::syscallLseek, "lseek", detail::handleLseek},
     {detail::syscallFstat64, "fstat64", detail::handleFstat64},
     {detail::syscallGetattrlist, "getattrlist", detail::handleGetattrlist},
+    {detail::syscallFgetattrlist, "fgetattrlist", detail::handleFgetattrlist},
     {detail::syscallGetfsstat64, "getfsstat64", detail::handleGetfsstat64},
     {detail::syscallFstatfs64, "fstatfs64", detail::handleFstatfs64},
     {detail::syscallGetdirentries64, "getdirentries64", detail::handleGetdirentries64},

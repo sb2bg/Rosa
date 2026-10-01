@@ -5,19 +5,22 @@ Rosa implements only the x86_64 Darwin operations reached by the controlled fixt
 | Guest operation | Guest `RAX` | Guest arguments | Host action |
 | --- | ---: | --- | --- |
 | `exit` | `0x02000001` | status in `RDI` | terminate the guest dispatch loop |
-| `write` / `write_nocancel` | `0x02000004` / `0x0200018d` | fd in `RDI`, address in `RSI`, count in `RDX` | copy guest bytes, then call host `write` |
-| `access` | `0x02000021` | guest path/mode | resolve relative paths against the guest working directory and answer F_OK/R_OK/W_OK/X_OK from host metadata inside it; report ENOENT/EINVAL without a VFS mapping outside it |
-| `open` | `0x02000005` | guest path/flags/mode | open controlled user files or allocate synthetic guest directory descriptors for the observed root operations; report `ENOENT` for the unprovisioned system user/group databases |
-| `close` | `0x02000006` | guest fd | remove a task-local guest descriptor |
+| `write` / `write_nocancel` | `0x02000004` / `0x0200018d` | fd in `RDI`, address in `RSI`, count in `RDX` | copy at most 16 MiB of guest bytes, then `write` the descriptor's host fd |
+| `access` | `0x02000021` | guest path/mode | canonicalize against the guest working directory, apply the path policy, and answer from host `access` |
+| `open` | `0x02000005` | guest path/flags/mode | read-only opens of files and directories (`O_DIRECTORY`, `O_CLOEXEC`) become host descriptors after the path policy; allocate synthetic root and urandom descriptors; report `ENOENT` for the unprovisioned system user/group databases |
+| `close` | `0x02000006` | guest fd | remove a guest descriptor; the host fd closes with its last descriptor |
+| `read` / `read_nocancel` | `0x02000003` / `0x0200018c` | fd/address/count | `read` at most 16 MiB from the host fd, or fill from host entropy for the synthetic urandom |
+| `lseek` | `0x020000c7` | fd/offset/whence | seek the host fd; directory positions are `getdirentries64` resume indexes |
+| `fgetattrlist` | `0x020000e4` | fd/attrlist/buffer/size/options | forward to the host fd; attribute buffers are layout-identical on x86_64 and arm64 |
 | `getpid` | `0x02000014` | none | return the single Rosa process identity used by the current one-process model |
 | `getuid` | `0x02000018` | none | return the host user ID as the guest real user ID |
 | `geteuid` | `0x02000019` | none | return the host effective user ID as the guest's |
 | `getrlimit` | `0x020000c2` | resource with `_RLIMIT_POSIX_FLAG`, 16-byte output | mask the POSIX flag, reject past `RLIM_NLIMITS`, and copy out the host process limits |
 | `sigaction` | `0x0200002e` | signal number, new 16-byte action, old-action copyout | record task-local signal dispositions without host delivery; report EINVAL/EFAULT for bad numbers and pointers |
-| `dup` | `0x02000029` | guest fd | allocate a unique guest fd sharing the same guest open-description identity |
+| `dup` | `0x02000029` | guest fd | allocate the lowest free guest fd sharing the same open file description |
 | `munmap` | `0x02000049` | guest address/size | validate BSD alignment/size semantics and deallocate only guest mappings |
-| `ioctl` | `0x02000036` | guest fd/request/output | answer `FIODTYPE` and a conventional 80x24 `TIOCGWINSZ` on the synthetic console streams |
-| `fcntl(F_GETPATH)` | `0x0200005c` | guest fd/cmd/output | copy the controlled guest path through guest memory |
+| `ioctl` | `0x02000036` | guest fd/request/output | forward `FIODTYPE`, `TIOCGWINSZ`, and `TIOCGETA` to host descriptors; a controlled guest's standard streams answer as an 80x24 synthetic console |
+| `fcntl` | `0x0200005c` | guest fd/cmd/argument | `F_DUPFD`, `F_DUPFD_CLOEXEC`, per-descriptor `F_GETFD`/`F_SETFD`, `F_GETFL` from the host fd, and `F_GETPATH` |
 | `sysctl` | `0x020000ca` | x86 Darwin MIB and guest buffers | implement name-to-OID plus observed lockdown, boot-argument, kernel-version, and CPU-count reads |
 | `shared_region_check_np` | `0x02000126` | guest address-pointer in `RDI` | copy out the installed Intel cache base, or return `EINVAL` when no compatible cache exists |
 | `proc_info` | `0x02000150` | observed `PROC_INFO_CALL_SET_DYLD_IMAGES` arguments | register/finalize guest TASK_DYLD_INFO metadata without copying or forwarding its pointer |
@@ -40,7 +43,24 @@ task state (descriptors, Mach ports, signal dispositions, dyld registration)
 through `GuestTask`. `rosa run --trace-syscalls` and `rosa exec --trace-syscalls`
 log every BSD call with its arguments and result to stderr.
 
-The controlled write implementation accepts stdout and stderr and rejects writes over 16 MiB. Guest root/cryptex descriptors never open or traverse the host root. `kern.version` is obtained with a host-owned buffer because native and Rosetta x86 callers observe the same current kernel string; only copied bytes enter guest memory. Every unsupported number reports its guest RIP and six ABI arguments. There is no generic syscall-number passthrough and no assumption that arm64 host numbers or structures match x86 Darwin.
+## Descriptors and paths
+
+`GuestFileSpace` is the task's descriptor table. Descriptors are allocated
+lowest-free, and a new task inherits duplicates of Rosa's standard streams as
+0, 1, and 2. Each descriptor points at a shared open file description, so `dup`
+and `F_DUPFD` share the file offset and status flags while close-on-exec stays
+per descriptor. Host-backed descriptions own a real host fd that closes with the
+last descriptor; root, cryptex, urandom, and socket descriptions are synthetic.
+
+Path access follows one policy, `GuestFileSpace::permitsHostPath`, chosen per
+task. `GuestHostAccess::Controlled` (the `rosa run` default) confines opens to
+the working directory and presents the standard streams as a synthetic console.
+`GuestHostAccess::HostReadOnly` (`rosa exec`) lets the guest read the host
+filesystem like an ordinary process and forwards terminal ioctls to the
+inherited streams. Opening a path outside the policy stops the guest with a
+diagnostic rather than inventing an errno.
+
+Writes are capped at 16 MiB per call; a short write is always legal. Guest root/cryptex descriptors never open or traverse the host root. `kern.version` is obtained with a host-owned buffer because native and Rosetta x86 callers observe the same current kernel string; only copied bytes enter guest memory. Every unsupported number reports its guest RIP and six ABI arguments. There is no generic syscall-number passthrough and no assumption that arm64 host numbers or structures match x86 Darwin.
 
 The x86 machdep class currently implements only `thread_fast_set_cthread_self` (call 3). It validates/canonicalizes the guest cthread pointer into explicit guest `GSBASE` state and returns the x86 `USER_CTHREAD` selector. It never changes a host segment register.
 

@@ -38,6 +38,7 @@
 #include <type_traits>
 #include <vector>
 
+#include <expected>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -87,6 +88,7 @@ inline constexpr std::uint64_t syscallMmap = unixSyscallClass | 197U;
 inline constexpr std::uint64_t syscallLseek = unixSyscallClass | 199U;
 inline constexpr std::uint64_t syscallSysctl = unixSyscallClass | 202U;
 inline constexpr std::uint64_t syscallGetattrlist = unixSyscallClass | 220U;
+inline constexpr std::uint64_t syscallFgetattrlist = unixSyscallClass | 228U;
 inline constexpr std::uint64_t syscallShmOpen = unixSyscallClass | 266U;
 inline constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 inline constexpr std::uint64_t syscallIssetugid = unixSyscallClass | 327U;
@@ -130,6 +132,8 @@ inline constexpr std::uint64_t reservedOneFlag = 1U << 1U;
 inline constexpr std::size_t maximumControlledWrite = 16U * 1024U * 1024U;
 inline constexpr std::size_t maximumLongPath = 8192;
 inline constexpr std::size_t guestPathMaximum = 1024;
+inline constexpr std::uint32_t guestOpenAccessMode = 0x3;
+inline constexpr std::uint32_t guestOpenReadOnly = 0x0;
 inline constexpr std::uint32_t guestOpenDirectory = 0x00100000;
 inline constexpr std::uint32_t guestOpenNoFollowAny = 0x20000000;
 inline constexpr std::uint32_t guestOpenCloseOnExec = 0x01000000;
@@ -160,8 +164,12 @@ inline constexpr std::string_view guestFeatureFlagsSharedMemory =
 inline constexpr std::string_view guestFeatureFlagsPathComponent = "/FeatureFlags/";
 inline constexpr std::uint16_t guestModeDirectory = 0040000;
 inline constexpr std::uint16_t guestModeReadExecute = 0555;
-inline constexpr std::uint32_t guestFcntlGetPath = 50;
+inline constexpr std::uint32_t guestFcntlDupFd = 0;
+inline constexpr std::uint32_t guestFcntlGetFd = 1;
 inline constexpr std::uint32_t guestFcntlSetFd = 2;
+inline constexpr std::uint32_t guestFcntlGetFl = 3;
+inline constexpr std::uint32_t guestFcntlGetPath = 50;
+inline constexpr std::uint32_t guestFcntlDupFdCloseOnExec = 67;
 inline constexpr std::uint32_t guestFdCloseOnExec = 1;
 inline constexpr std::uint32_t guestAddressFamilyUnix = 1;
 inline constexpr std::uint32_t guestSocketDatagram = 2;
@@ -169,6 +177,7 @@ inline constexpr std::size_t guestSockaddrUnixSize = 106;
 inline constexpr std::string_view guestSystemLogSocket = "/var/run/syslog";
 inline constexpr std::uint64_t guestIoctlFileDescriptorType = 0x4004667A;
 inline constexpr std::uint64_t guestIoctlWindowSize = 0x40087468U;
+inline constexpr std::uint64_t guestIoctlGetTermios = 0x40487413U;
 inline constexpr std::uint32_t guestDeviceTypeTerminal = 3;
 inline constexpr std::uint32_t guestMountWait = 1;
 inline constexpr std::uint32_t guestMountNowait = 2;
@@ -184,6 +193,11 @@ inline constexpr std::uint64_t observedGuestDerEntitlementsBufferSize = 0x408;
 inline constexpr std::uint64_t guestSandboxSyscallFilterType = 0x41;
 inline constexpr std::uint64_t guestSandboxMachLookupFilterType = 0x6;
 inline constexpr std::uint64_t guestSandboxObservedFlags = 1;
+// The self form of a Sandbox check names no pid and filters by one of the
+// caller's file descriptors.
+inline constexpr std::uint64_t guestSandboxSelfTarget = 1;
+inline constexpr std::uint64_t guestSandboxDescriptorFilterType = 0xF0;
+inline constexpr std::uint64_t guestSandboxSelfDescriptorFlags = 0x20000005;
 inline constexpr std::uint64_t guestMapWithLinkingSyscall = 550;
 inline constexpr std::uint32_t guestAmfiDyldPolicyCall = 90;
 inline constexpr std::uint64_t guestAmfiUnrestrictedDyldPolicy = 0x1DF;
@@ -256,6 +270,40 @@ inline bool isWithinDirectory(const std::filesystem::path &directory,
     return first == relative.end() || *first != "..";
 }
 
+inline GuestFileDescriptor guestDescriptor(std::uint64_t argument) {
+    return GuestFileDescriptor{std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(argument))};
+}
+
+// Reports a host call's result: a negative value means errno holds the error.
+template <typename Result>
+void setHostResult(x86::X86State &state, Result result) {
+    if (result < 0) {
+        setError(state, errno);
+    } else {
+        setSuccess(state, static_cast<std::uint64_t>(result));
+    }
+}
+
+// Resolves a guest path against the task's current directory to a canonical
+// host path. Callers still apply GuestFileSpace::permitsHostPath.
+inline std::expected<std::filesystem::path, int>
+canonicalGuestPath(const GuestFileSpace &files, const std::string &path) {
+    const auto direct = std::filesystem::path{path};
+    const auto query = direct.is_absolute() ? direct : files.currentDirectory() / direct;
+    std::error_code error;
+    auto canonical = std::filesystem::canonical(query, error);
+    if (error) {
+        return std::unexpected(error.value());
+    }
+    return canonical;
+}
+
+inline bool isHostDirectory(const GuestOpenFile &file) {
+    struct stat metadata {};
+    return file.hostBacked() && ::fstat(file.host.get(), &metadata) == 0 &&
+           S_ISDIR(metadata.st_mode);
+}
+
 inline std::runtime_error unsupported(const x86::X86State &state, guest::GuestAddress rip,
                                const std::string &reason) {
     std::ostringstream stream;
@@ -312,6 +360,7 @@ SyscallOutcome handleStat64(SyscallCall &call);
 SyscallOutcome handleLseek(SyscallCall &call);
 SyscallOutcome handleFstat64(SyscallCall &call);
 SyscallOutcome handleGetattrlist(SyscallCall &call);
+SyscallOutcome handleFgetattrlist(SyscallCall &call);
 SyscallOutcome handleGetfsstat64(SyscallCall &call);
 SyscallOutcome handleFstatfs64(SyscallCall &call);
 SyscallOutcome handleGetdirentries64(SyscallCall &call);

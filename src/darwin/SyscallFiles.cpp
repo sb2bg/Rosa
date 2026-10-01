@@ -1,5 +1,9 @@
 #include "darwin/SyscallInternal.h"
 
+#include <sys/attr.h>
+#include <sys/ioctl.h>
+#include <sys/param.h>
+
 namespace rosa::darwin::detail {
 namespace {
 
@@ -229,10 +233,7 @@ SyscallOutcome handleDup(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
     static_cast<void>(addressSpace);
     static_cast<void>(syscallRip);
-    const auto descriptor = GuestFileDescriptor{
-        std::bit_cast<std::int32_t>(
-            static_cast<std::uint32_t>(state.rdi))};
-    const auto duplicate = task.fileSpace.duplicate(descriptor);
+    const auto duplicate = task.fileSpace.duplicate(guestDescriptor(state.rdi));
     if (!duplicate) {
         setError(state, EBADF);
         return {};
@@ -243,48 +244,54 @@ SyscallOutcome handleDup(SyscallCall &call) {
 
 SyscallOutcome handleIoctl(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
-    static_cast<void>(task);
-    const auto descriptor = std::bit_cast<std::int32_t>(
-        static_cast<std::uint32_t>(state.rdi));
-    if (state.rsi == guestIoctlWindowSize) {
-        if (descriptor < STDIN_FILENO || descriptor > STDERR_FILENO) {
-            setError(state, EBADF);
-            return {};
-        }
-        // The synthetic console has no host terminal behind it; report
-        // the conventional 80x24 size callers use for formatting.
-        constexpr std::array<std::uint8_t, 8> windowSize{24, 0, 80, 0,
-                                                        0,  0, 0,  0};
-        try {
-            addressSpace.writeBytes(guest::GuestAddress{state.rdx},
-                                    windowSize);
-        } catch (const std::runtime_error &) {
-            setError(state, EFAULT);
-            return {};
-        }
-        setSuccess(state, 0);
-        return {};
-    }
-    if (state.rsi != guestIoctlFileDescriptorType) {
+    const auto descriptor = guestDescriptor(state.rdi);
+    const auto request = state.rsi;
+    // Read-only requests whose Darwin result layouts (an int device type,
+    // struct winsize, struct termios) match on x86_64 and arm64.
+    constexpr std::array forwardedRequests{guestIoctlFileDescriptorType, guestIoctlWindowSize,
+                                           guestIoctlGetTermios};
+    if (std::ranges::find(forwardedRequests, request) == forwardedRequests.end()) {
         std::ostringstream reason;
-        reason << "only ioctl(FIODTYPE/TIOCGWINSZ) on a standard guest descriptor is implemented; got fd="
-               << std::dec << descriptor << " request=0x" << std::hex
-               << state.rsi;
+        reason << "only ioctl(FIODTYPE/TIOCGWINSZ/TIOCGETA) is implemented; got fd="
+               << std::dec << descriptor.value << " request=0x" << std::hex << request;
         throw unsupported(state, syscallRip, reason.str());
     }
-    if (descriptor < STDIN_FILENO || descriptor > STDERR_FILENO) {
+    const auto *file = task.fileSpace.lookup(descriptor);
+    if (file == nullptr) {
         setError(state, EBADF);
         return {};
     }
+    std::array<std::uint8_t, IOCPARM_MAX> result{};
+    const auto resultSize = static_cast<std::size_t>(IOCPARM_LEN(request));
+    if (file->kind == GuestFileKind::StandardStream &&
+        task.fileSpace.hostAccess() == GuestHostAccess::Controlled) {
+        // A controlled guest's standard streams are Rosa's synthetic
+        // console: a Darwin tty with the conventional 80x24 size.
+        if (request == guestIoctlWindowSize) {
+            constexpr std::array<std::uint8_t, 8> console{24, 0, 80, 0, 0, 0, 0, 0};
+            std::ranges::copy(console, result.begin());
+        } else if (request == guestIoctlFileDescriptorType) {
+            std::memcpy(result.data(), &guestDeviceTypeTerminal, sizeof(guestDeviceTypeTerminal));
+        } else {
+            throw unsupported(state, syscallRip,
+                              "the synthetic console has no terminal attributes (TIOCGETA)");
+        }
+    } else if (file->hostBacked()) {
+        if (::ioctl(file->host.get(), static_cast<unsigned long>(request), result.data()) != 0) {
+            setError(state, errno);
+            return {};
+        }
+    } else {
+        setError(state, ENOTTY);
+        return {};
+    }
     try {
-        addressSpace.writeU32(guest::GuestAddress{state.rdx},
-                              guestDeviceTypeTerminal);
+        addressSpace.writeBytes(guest::GuestAddress{state.rdx},
+                                std::span<const std::uint8_t>{result}.first(resultSize));
     } catch (const std::runtime_error &) {
         setError(state, EFAULT);
         return {};
     }
-    // The initial standard streams are Rosa's synthetic console. Model
-    // them as a Darwin tty without exposing a host fd or host ioctl.
     setSuccess(state, 0);
     return {};
 }
@@ -316,28 +323,18 @@ SyscallOutcome handleAccess(SyscallCall &call) {
         setError(state, EINVAL);
         return {};
     }
-    // Resolve relative guest paths against the task's current directory,
-    // mirroring the read-only open policy: paths inside it are answered
-    // from host metadata, paths outside it have no guest VFS mapping.
-    const auto directPath = std::filesystem::path{*path};
-    const auto queryPath = directPath.is_absolute()
-                               ? directPath
-                               : task.fileSpace.currentDirectory() / directPath;
-    std::error_code canonicalError;
-    const auto canonicalPath =
-        std::filesystem::canonical(queryPath, canonicalError);
-    if (canonicalError) {
-        setError(state, canonicalError.value());
+    const auto canonicalPath = canonicalGuestPath(task.fileSpace, *path);
+    if (!canonicalPath) {
+        setError(state, canonicalPath.error());
         return {};
     }
-    if (!isWithinDirectory(task.fileSpace.currentDirectory(),
-                           canonicalPath)) {
+    if (!task.fileSpace.permitsHostPath(*canonicalPath)) {
         std::ostringstream reason;
         reason << "guest VFS has no mapping for access path \""
                << *path << '"';
         throw unsupported(state, syscallRip, reason.str());
     }
-    if (::access(canonicalPath.c_str(), static_cast<int>(mode)) != 0) {
+    if (::access(canonicalPath->c_str(), static_cast<int>(mode)) != 0) {
         setError(state, errno);
         return {};
     }
@@ -408,7 +405,7 @@ SyscallOutcome handleOpen(SyscallCall &call) {
         setError(state, ENOENT);
         return {};
     }
-    if ((flags & O_ACCMODE) == O_RDONLY &&
+    if ((flags & guestOpenAccessMode) == guestOpenReadOnly &&
         std::string_view(*path).find(guestFeatureFlagsPathComponent) !=
             std::string_view::npos) {
         // Rosa provisions no FeatureFlags disclosure domains anywhere;
@@ -417,87 +414,47 @@ SyscallOutcome handleOpen(SyscallCall &call) {
         setError(state, ENOENT);
         return {};
     }
-    if (*path == "." && flags == guestOpenDirectory && mode == 0) {
-        const auto descriptor = task.fileSpace.openCurrentDirectory(flags);
-        setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
-        return {};
-    }
     if (*path == "/" && flags == guestOpenRootDirectory && mode == 0) {
         const auto descriptor = task.fileSpace.openRootDirectory(flags);
         setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
         return {};
     }
-    if (mode == 0 && (flags == guestOpenDirectory ||
-                      flags == (guestOpenDirectory | guestOpenCloseOnExec))) {
-        // Read-only directory opens (NSBundle main-bundle probing opens
-        // the application directory). Resolve and confine exactly like
-        // regular files, but require a directory: the descriptors stay
-        // metadata-only and each operation reopens the host path.
-        const auto directPath = std::filesystem::path{*path};
-        const auto queryPath = directPath.is_absolute()
-                                   ? directPath
-                                   : task.fileSpace.currentDirectory() / directPath;
-        std::error_code error;
-        const auto canonicalPath = std::filesystem::canonical(queryPath, error);
-        if (error) {
-            setError(state, error.value());
-            return {};
-        }
-        if (!isWithinDirectory(task.fileSpace.currentDirectory(),
-                               canonicalPath)) {
-            std::ostringstream reason;
-            reason << "guest VFS has no mapping for read-only directory path \""
-                   << *path << '"';
-            throw unsupported(state, syscallRip, reason.str());
-        }
-        if (!std::filesystem::is_directory(canonicalPath, error) ||
-            error) {
-            setError(state, error ? error.value() : ENOTDIR);
-            return {};
-        }
-        const auto descriptor =
-            task.fileSpace.openReadOnlyFile(canonicalPath, flags);
-        setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
-        return {};
-    }
-    if (flags == 0 && mode == 0) {
-        // Resolve relative guest paths against the task's current
-        // directory, mirroring the stat64 policy below. The sandbox
-        // check still confines the result to the current directory.
-        const auto directPath = std::filesystem::path{*path};
-        const auto queryPath = directPath.is_absolute()
-                                   ? directPath
-                                   : task.fileSpace.currentDirectory() / directPath;
-        std::error_code error;
-        const auto canonicalPath = std::filesystem::canonical(queryPath, error);
-        if (error) {
-            setError(state, error.value());
-            return {};
-        }
-        if (!isWithinDirectory(task.fileSpace.currentDirectory(),
-                               canonicalPath)) {
-            std::ostringstream reason;
-            reason << "guest VFS has no mapping for read-only path \""
-                   << *path << '"';
-            throw unsupported(state, syscallRip, reason.str());
-        }
-        if (!std::filesystem::is_regular_file(canonicalPath, error) ||
-            error) {
-            setError(state, error ? error.value() : EINVAL);
-            return {};
-        }
-        const auto descriptor =
-            task.fileSpace.openReadOnlyFile(canonicalPath, flags);
-        setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
-        return {};
-    }
-    {
+    // Read-only opens of files and directories become host descriptors
+    // owned by the guest's open file description. Without O_CREAT the
+    // kernel ignores the mode argument.
+    constexpr std::uint32_t hostedReadOnlyFlags = guestOpenDirectory | guestOpenCloseOnExec;
+    if ((flags & guestOpenAccessMode) != guestOpenReadOnly ||
+        (flags & ~(guestOpenAccessMode | hostedReadOnlyFlags)) != 0) {
         std::ostringstream reason;
-        reason << "only the observed current-directory and mapped user-file open operations are implemented; got path=\""
+        reason << "only read-only open of host files and directories is implemented; got path=\""
                << *path << "\" flags=0x" << std::hex << flags
                << " mode=0x" << mode;
         throw unsupported(state, syscallRip, reason.str());
     }
+    const auto canonicalPath = canonicalGuestPath(task.fileSpace, *path);
+    if (!canonicalPath) {
+        setError(state, canonicalPath.error());
+        return {};
+    }
+    const bool wantsDirectory = (flags & guestOpenDirectory) != 0;
+    if (!task.fileSpace.permitsHostPath(*canonicalPath)) {
+        std::ostringstream reason;
+        reason << "guest VFS has no mapping for read-only "
+               << (wantsDirectory ? "directory path \"" : "path \"") << *path << '"';
+        throw unsupported(state, syscallRip, reason.str());
+    }
+    const int host = ::open(canonicalPath->c_str(),
+                            O_RDONLY | O_CLOEXEC | (wantsDirectory ? O_DIRECTORY : 0));
+    if (host < 0) {
+        setError(state, errno);
+        return {};
+    }
+    const auto descriptor =
+        task.fileSpace.openHostFile(*canonicalPath, flags, HostDescriptor{host});
+    static_cast<void>(task.fileSpace.setCloseOnExec(descriptor,
+                                                    (flags & guestOpenCloseOnExec) != 0));
+    setSuccess(state, static_cast<std::uint32_t>(descriptor.value));
+    return {};
 }
 
 SyscallOutcome handleOpenat(SyscallCall &call) {
@@ -619,90 +576,55 @@ SyscallOutcome handleStat64(SyscallCall &call) {
 SyscallOutcome handleLseek(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
     static_cast<void>(addressSpace);
-    const auto descriptor = std::bit_cast<std::int32_t>(
-        static_cast<std::uint32_t>(state.rdi));
+    const auto descriptor = guestDescriptor(state.rdi);
     const auto offset = std::bit_cast<std::int64_t>(state.rsi);
     const auto whence = std::bit_cast<int>(static_cast<std::uint32_t>(state.rdx));
-    if (descriptor == STDIN_FILENO || descriptor == STDOUT_FILENO ||
-        descriptor == STDERR_FILENO) {
-        // Guest standard descriptors alias the host ones, so host
-        // semantics (including ESPIPE) are exactly right.
-        const auto result = ::lseek(descriptor, offset, whence);
-        if (result < 0) {
-            setError(state, errno);
-            return {};
-        }
-        setSuccess(state, static_cast<std::uint64_t>(result));
-        return {};
-    }
-    auto *file = task.fileSpace.lookupMutable(GuestFileDescriptor{descriptor});
+    auto *file = task.fileSpace.lookupMutable(descriptor);
     if (file == nullptr) {
         setError(state, EBADF);
         return {};
     }
-    if (file->kind != GuestFileKind::HostReadOnlyFile) {
+    if (!file->hostBacked()) {
         std::ostringstream reason;
-        reason << "lseek currently accepts only standard descriptors and mapped read-only files; got fd="
-               << descriptor;
+        reason << "lseek is not implemented for synthetic guest descriptors; got fd="
+               << descriptor.value;
         throw unsupported(state, syscallRip, reason.str());
     }
-    if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END) {
+    if (!isHostDirectory(*file)) {
+        // Regular files, pipes, and terminals: the host descriptor owns the
+        // position, so host semantics (including ESPIPE) are exact.
+        setHostResult(state, ::lseek(file->host.get(), offset, whence));
+        return {};
+    }
+    // Directory positions are getdirentries64 resume indexes.
+    if (whence == SEEK_SET && offset >= 0) {
+        file->directoryIndex = static_cast<std::uint64_t>(offset);
+    } else if (whence != SEEK_CUR || offset != 0) {
         setError(state, EINVAL);
         return {};
     }
-    __int128 base = 0;
-    if (whence == SEEK_CUR) {
-        base = static_cast<__int128>(file->offset);
-    } else if (whence == SEEK_END) {
-        struct stat hostMetadata {};
-        if (::stat(file->guestPath.c_str(), &hostMetadata) != 0) {
-            setError(state, errno);
-            return {};
-        }
-        base = static_cast<__int128>(hostMetadata.st_size);
-    }
-    const __int128 positioned = base + static_cast<__int128>(offset);
-    if (positioned < 0 ||
-        positioned > static_cast<__int128>(
-                          std::numeric_limits<std::int64_t>::max())) {
-        setError(state, EINVAL);
-        return {};
-    }
-    file->offset = static_cast<std::uint64_t>(positioned);
-    setSuccess(state, file->offset);
+    setSuccess(state, file->directoryIndex);
     return {};
 }
 
 SyscallOutcome handleFstat64(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
-    const auto descriptor = std::bit_cast<std::int32_t>(
-        static_cast<std::uint32_t>(state.rdi));
+    const auto descriptor = guestDescriptor(state.rdi);
+    const auto *file = task.fileSpace.lookup(descriptor);
+    if (file == nullptr) {
+        setError(state, EBADF);
+        return {};
+    }
+    if (!file->hostBacked()) {
+        std::ostringstream reason;
+        reason << "fstat64 is not implemented for synthetic guest descriptors; got fd="
+               << descriptor.value;
+        throw unsupported(state, syscallRip, reason.str());
+    }
     struct stat hostMetadata {};
-    if (descriptor == STDIN_FILENO || descriptor == STDOUT_FILENO ||
-        descriptor == STDERR_FILENO) {
-        if (::fstat(descriptor, &hostMetadata) != 0) {
-            setError(state, errno);
-            return {};
-        }
-    } else {
-        // Guest descriptors stay metadata-only: stat the mapped host
-        // path instead of interpreting the guest descriptor as a host
-        // descriptor.
-        const auto *file = task.fileSpace.lookup(GuestFileDescriptor{descriptor});
-        if (file == nullptr) {
-            setError(state, EBADF);
-            return {};
-        }
-        if (file->kind != GuestFileKind::HostReadOnlyFile) {
-            std::ostringstream reason;
-            reason << "fstat64 currently accepts only standard descriptors and mapped read-only files; got fd="
-                   << descriptor;
-            throw unsupported(state, syscallRip, reason.str());
-        }
-        if (::stat(file->guestPath.c_str(), &hostMetadata) != 0) {
-            setError(state, errno);
-            return {};
-        }
+    if (::fstat(file->host.get(), &hostMetadata) != 0) {
+        setError(state, errno);
+        return {};
     }
 
     const auto metadata = guestStat64FromHost(hostMetadata);
@@ -763,8 +685,7 @@ SyscallOutcome handleGetattrlist(SyscallCall &call) {
             setError(state, error.value());
             return {};
         }
-        if (!isWithinDirectory(task.fileSpace.currentDirectory(),
-                               canonicalPath)) {
+        if (!task.fileSpace.permitsHostPath(canonicalPath)) {
             std::ostringstream reason;
             reason << "guest VFS has no mapping for full-path getattrlist path \""
                    << *path << '"';
@@ -838,6 +759,55 @@ SyscallOutcome handleGetattrlist(SyscallCall &call) {
     return {};
 }
 
+SyscallOutcome handleFgetattrlist(SyscallCall &call) {
+    auto &[addressSpace, state, syscallRip, task] = call;
+    const auto descriptor = guestDescriptor(state.rdi);
+    const auto *file = task.fileSpace.lookup(descriptor);
+    if (file == nullptr) {
+        setError(state, EBADF);
+        return {};
+    }
+    if (!file->hostBacked()) {
+        std::ostringstream reason;
+        reason << "fgetattrlist is not implemented for synthetic guest descriptors; got fd="
+               << descriptor.value;
+        throw unsupported(state, syscallRip, reason.str());
+    }
+    struct attrlist attributes {};
+    static_assert(sizeof(attributes) == sizeof(GuestAttrlist));
+    try {
+        const auto bytes = addressSpace.readBytes(guest::GuestAddress{state.rsi}, sizeof(attributes));
+        std::memcpy(&attributes, bytes.data(), sizeof(attributes));
+    } catch (const std::runtime_error &) {
+        setError(state, EFAULT);
+        return {};
+    }
+    // Attribute buffers hold self-relative references and LP64 types whose
+    // layouts match on x86_64 and arm64 Darwin, so the host answer is the
+    // guest answer. The returned length leads the buffer.
+    const auto size = static_cast<std::size_t>(
+        std::min<std::uint64_t>(state.rdx, maximumControlledWrite));
+    std::vector<std::uint8_t> output(size);
+    if (::fgetattrlist(file->host.get(), &attributes, output.data(), output.size(),
+                       static_cast<unsigned int>(state.r10)) != 0) {
+        setError(state, errno);
+        return {};
+    }
+    std::uint32_t length = 0;
+    if (output.size() >= sizeof(length)) {
+        std::memcpy(&length, output.data(), sizeof(length));
+    }
+    output.resize(std::min<std::size_t>(output.size(), length));
+    try {
+        addressSpace.writeBytes(guest::GuestAddress{state.rdx}, output);
+    } catch (const std::runtime_error &) {
+        setError(state, EFAULT);
+        return {};
+    }
+    setSuccess(state, 0);
+    return {};
+}
+
 SyscallOutcome handleGetfsstat64(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
     static_cast<void>(syscallRip);
@@ -878,19 +848,16 @@ SyscallOutcome handleGetfsstat64(SyscallCall &call) {
 
 SyscallOutcome handleFstatfs64(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
-    const auto descriptor = GuestFileDescriptor{
-        std::bit_cast<std::int32_t>(
-            static_cast<std::uint32_t>(state.rdi))};
+    const auto descriptor = guestDescriptor(state.rdi);
     const auto *file = task.fileSpace.lookup(descriptor);
     if (file == nullptr) {
         setError(state, EBADF);
         return {};
     }
     GuestStatfs64 filesystem{};
-    if (file->kind == GuestFileKind::HostReadOnlyFile ||
-        file->kind == GuestFileKind::CurrentDirectory) {
+    if (file->hostBacked()) {
         struct statfs host {};
-        if (::statfs(file->guestPath.c_str(), &host) != 0) {
+        if (::fstatfs(file->host.get(), &host) != 0) {
             setError(state, errno);
             return {};
         }
@@ -931,9 +898,7 @@ SyscallOutcome handleGetdirentries64(SyscallCall &call) {
         setError(state, EBADF);
         return {};
     }
-    if ((file->kind != GuestFileKind::HostReadOnlyFile &&
-         file->kind != GuestFileKind::CurrentDirectory) ||
-        !std::filesystem::is_directory(file->guestPath)) {
+    if (!file->hostBacked() || !isHostDirectory(*file)) {
         std::ostringstream reason;
         reason << "getdirentries64 is only implemented for hosted directory descriptors; got fd="
                << descriptor.value;
@@ -952,10 +917,9 @@ SyscallOutcome handleGetdirentries64(SyscallCall &call) {
         setError(state, EFAULT);
         return {};
     }
-    // The descriptor offset doubles as the directory resume index:
-    // descriptors are metadata-only, so each call reopens the host
-    // directory and skips entries already returned.
-    const std::uint64_t startIndex = file->offset;
+    // Each call rereads the host directory by path and skips the entries
+    // already returned; the resume index doubles as each entry's seek offset.
+    const std::uint64_t startIndex = file->directoryIndex;
     std::uint64_t resumeIndex = startIndex;
     std::vector<std::uint8_t> output;
     output.reserve(static_cast<std::size_t>(byteCount));
@@ -997,7 +961,7 @@ SyscallOutcome handleGetdirentries64(SyscallCall &call) {
         setError(state, hostError);
         return {};
     }
-    file->offset = resumeIndex;
+    file->directoryIndex = resumeIndex;
     if (!output.empty()) {
         addressSpace.writeBytes(guest::GuestAddress{state.rsi}, output);
     }
@@ -1179,70 +1143,27 @@ SyscallOutcome handleClose(SyscallCall &call) {
 
 SyscallOutcome handleRead(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
-    const auto descriptor = GuestFileDescriptor{
-        std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(state.rdi))};
+    const auto descriptor = guestDescriptor(state.rdi);
     const auto *file = task.fileSpace.lookup(descriptor);
     if (file == nullptr) {
         setError(state, EBADF);
         return {};
     }
-    if (file->kind != GuestFileKind::RandomDevice &&
-        file->kind != GuestFileKind::HostReadOnlyFile) {
-        std::ostringstream reason;
-        reason << "only reads from the synthetic /dev/urandom and mapped read-only files are implemented; got fd="
-               << descriptor.value << " count=" << state.rdx;
-        throw unsupported(state, syscallRip, reason.str());
-    }
-    if (file->kind == GuestFileKind::HostReadOnlyFile) {
-        // Guest descriptors stay metadata-only: bridge each read with a
-        // freshly opened host descriptor and the stored file position.
-        auto *mutableFile = task.fileSpace.lookupMutable(descriptor);
-        if (mutableFile == nullptr) {
-            setError(state, EBADF);
-            return {};
-        }
-        const auto count = static_cast<std::size_t>(state.rdx);
-        if (count == 0) {
-    setSuccess(state, 0);
-    return {};
-}
-        try {
-            addressSpace.validateAccess(guest::GuestAddress{state.rsi},
-                                        count,
-                                        guest::Permission::Write);
-        } catch (const std::runtime_error &) {
-            setError(state, EFAULT);
-            return {};
-        }
-        const int hostDescriptor =
-            ::open(mutableFile->guestPath.c_str(), O_RDONLY | O_CLOEXEC);
-        if (hostDescriptor < 0) {
-            setError(state, errno);
-            return {};
-        }
-        std::vector<std::uint8_t> bytes(count);
-        const auto readResult =
-            ::pread(hostDescriptor, bytes.data(), bytes.size(),
-                    static_cast<off_t>(mutableFile->offset));
-        const auto readErrno = errno;
-        ::close(hostDescriptor);
-        if (readResult < 0) {
-            setError(state, readErrno);
-            return {};
-        }
-        bytes.resize(static_cast<std::size_t>(readResult));
-        addressSpace.writeBytes(guest::GuestAddress{state.rsi}, bytes);
-        mutableFile->offset += static_cast<std::uint64_t>(readResult);
-        setSuccess(state, static_cast<std::uint64_t>(readResult));
-        return {};
-    }
-    if (state.rdx > 256U) {
+    if (file->kind == GuestFileKind::RandomDevice && state.rdx > 256U) {
         std::ostringstream reason;
         reason << "only reads of at most 256 bytes from the synthetic /dev/urandom are implemented; got fd="
                << descriptor.value << " count=" << state.rdx;
         throw unsupported(state, syscallRip, reason.str());
     }
-    const auto count = static_cast<std::size_t>(state.rdx);
+    if (file->kind != GuestFileKind::RandomDevice && !file->hostBacked()) {
+        std::ostringstream reason;
+        reason << "read is not implemented for this synthetic guest descriptor; got fd="
+               << descriptor.value << " count=" << state.rdx;
+        throw unsupported(state, syscallRip, reason.str());
+    }
+    // A short read is always legal, which bounds Rosa's staging buffer.
+    const auto count = static_cast<std::size_t>(
+        std::min<std::uint64_t>(state.rdx, maximumControlledWrite));
     if (count == 0) {
         setSuccess(state, 0);
         return {};
@@ -1255,36 +1176,78 @@ SyscallOutcome handleRead(SyscallCall &call) {
         return {};
     }
     std::vector<std::uint8_t> bytes(count);
-    if (::getentropy(bytes.data(), bytes.size()) != 0) {
-        setError(state, errno);
-        return {};
+    if (file->kind == GuestFileKind::RandomDevice) {
+        if (::getentropy(bytes.data(), bytes.size()) != 0) {
+            setError(state, errno);
+            return {};
+        }
+    } else {
+        const auto result = ::read(file->host.get(), bytes.data(), bytes.size());
+        if (result < 0) {
+            setError(state, errno);
+            return {};
+        }
+        bytes.resize(static_cast<std::size_t>(result));
     }
     addressSpace.writeBytes(guest::GuestAddress{state.rsi}, bytes);
-    setSuccess(state, count);
+    setSuccess(state, bytes.size());
     return {};
 }
-
 SyscallOutcome handleFcntl(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
-    const auto descriptor = GuestFileDescriptor{
-        std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(state.rdi))};
+    const auto descriptor = guestDescriptor(state.rdi);
     const auto command = static_cast<std::uint32_t>(state.rsi);
     const auto *file = task.fileSpace.lookup(descriptor);
     if (file == nullptr) {
         setError(state, EBADF);
         return {};
     }
-    if (command == guestFcntlSetFd &&
-        state.rdx == guestFdCloseOnExec) {
-        setSuccess(state, 0);
+    switch (command) {
+    case guestFcntlDupFd:
+    case guestFcntlDupFdCloseOnExec: {
+        const auto minimum = std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(state.rdx));
+        if (minimum < 0) {
+            setError(state, EINVAL);
+            return {};
+        }
+        const auto duplicate = task.fileSpace.duplicate(
+            descriptor, minimum, command == guestFcntlDupFdCloseOnExec);
+        setSuccess(state, static_cast<std::uint32_t>(duplicate->value));
         return {};
     }
-    if (command != guestFcntlGetPath) {
-        throw unsupported(
-            state, syscallRip,
-            "only observed fcntl(F_SETFD/F_GETPATH) operations are implemented");
+    case guestFcntlGetFd:
+        setSuccess(state, *task.fileSpace.closeOnExec(descriptor) ? guestFdCloseOnExec : 0U);
+        return {};
+    case guestFcntlSetFd:
+        static_cast<void>(task.fileSpace.setCloseOnExec(
+            descriptor, (state.rdx & guestFdCloseOnExec) != 0));
+        setSuccess(state, 0);
+        return {};
+    case guestFcntlGetFl:
+        if (file->hostBacked()) {
+            setHostResult(state, ::fcntl(file->host.get(), F_GETFL));
+        } else {
+            setSuccess(state, file->flags & guestOpenAccessMode);
+        }
+        return {};
+    case guestFcntlGetPath:
+        break;
+    default: {
+        std::ostringstream reason;
+        reason << "only fcntl F_DUPFD/F_GETFD/F_SETFD/F_GETFL/F_GETPATH/F_DUPFD_CLOEXEC are implemented; got command="
+               << std::dec << command;
+        throw unsupported(state, syscallRip, reason.str());
     }
-    const auto path = file->guestPath.string();
+    }
+    std::string path = file->guestPath.string();
+    if (file->kind == GuestFileKind::StandardStream) {
+        std::array<char, MAXPATHLEN> hostPath{};
+        if (::fcntl(file->host.get(), F_GETPATH, hostPath.data()) != 0) {
+            setError(state, errno);
+            return {};
+        }
+        path = hostPath.data();
+    }
     if (path.size() >= guestPathMaximum) {
         setError(state, ENAMETOOLONG);
         return {};
@@ -1353,29 +1316,30 @@ SyscallOutcome handleFsgetpath(SyscallCall &call) {
 
 SyscallOutcome handleWrite(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
-    static_cast<void>(task);
-if (state.rdi != STDOUT_FILENO && state.rdi != STDERR_FILENO) {
-    throw unsupported(state, syscallRip,
-                      "controlled write currently accepts only stdout or stderr");
-}
-if (state.rdx > maximumControlledWrite) {
-    throw unsupported(state, syscallRip, "controlled write exceeds the 16 MiB limit");
-}
-
-try {
-    const auto bytes = addressSpace.readBytes(
-        guest::GuestAddress{state.rsi}, static_cast<std::size_t>(state.rdx));
-    const auto result =
-        ::write(static_cast<int>(state.rdi), bytes.data(), bytes.size());
-    if (result < 0) {
-        setError(state, errno);
-    } else {
-        setSuccess(state, static_cast<std::uint64_t>(result));
+    const auto descriptor = guestDescriptor(state.rdi);
+    const auto *file = task.fileSpace.lookup(descriptor);
+    if (file == nullptr) {
+        setError(state, EBADF);
+        return {};
     }
-} catch (const std::runtime_error &) {
-    setError(state, EFAULT);
-}
-return {};
+    if (!file->hostBacked()) {
+        std::ostringstream reason;
+        reason << "write is not implemented for synthetic guest descriptors; got fd="
+               << descriptor.value;
+        throw unsupported(state, syscallRip, reason.str());
+    }
+    // A short write is always legal, which bounds Rosa's staging buffer.
+    const auto count = static_cast<std::size_t>(
+        std::min<std::uint64_t>(state.rdx, maximumControlledWrite));
+    std::vector<std::uint8_t> bytes;
+    try {
+        bytes = addressSpace.readBytes(guest::GuestAddress{state.rsi}, count);
+    } catch (const std::runtime_error &) {
+        setError(state, EFAULT);
+        return {};
+    }
+    setHostResult(state, ::write(file->host.get(), bytes.data(), bytes.size()));
+    return {};
 }
 
 } // namespace rosa::darwin::detail

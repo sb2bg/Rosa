@@ -89,6 +89,9 @@ class SyscallDispatcher {
         return found == task_.signalDispositions.end() ? GuestSignalDisposition{}
                                                        : found->second;
     }
+    void setHostAccess(GuestHostAccess access) noexcept {
+        task_.fileSpace.setHostAccess(access);
+    }
     // Logs each BSD syscall with its arguments and result; null disables.
     void setTrace(std::ostream *trace) noexcept { trace_ = trace; }
 
