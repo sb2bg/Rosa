@@ -116,6 +116,7 @@ set(ROSA_TEST_SUITES
     DarwinFileMetadata
     DarwinDescriptors
     DarwinMemory
+    DarwinThreads
     MachTraps
     MachMessages
     IntegerSemantics

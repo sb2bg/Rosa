@@ -16,6 +16,35 @@ T decodeGuestPthreadField(std::span<const std::uint8_t> bytes,
     return value;
 }
 
+template <typename T>
+void encodeGuestPthreadField(std::span<std::uint8_t> bytes, std::size_t offset, T value) {
+    static_assert(std::is_integral_v<T>);
+    if (offset > bytes.size() || sizeof(T) > bytes.size() - offset) {
+        throw std::runtime_error("guest pthread registration field exceeds its record");
+    }
+    std::memcpy(bytes.data() + offset, &value, sizeof(value));
+}
+
+// libpthread's kernel feature bits (kern_internal.h). Rosa provides the
+// workqueue with direct kevent delivery and workloops, which libdispatch
+// uses for every serial queue, but not the cooperative pool.
+constexpr std::uint32_t pthreadFeatureDispatchFunction = 0x01;
+constexpr std::uint32_t pthreadFeatureFinePriority = 0x02;
+constexpr std::uint32_t pthreadFeatureBsdthreadCtl = 0x04;
+constexpr std::uint32_t pthreadFeatureSetSelf = 0x08;
+constexpr std::uint32_t pthreadFeatureQosMaintenance = 0x10;
+constexpr std::uint32_t pthreadFeatureKevent = 0x40;
+constexpr std::uint32_t pthreadFeatureWorkloop = 0x80;
+constexpr std::uint32_t pthreadFeatureQosDefault = 0x40000000;
+constexpr std::uint64_t guestPthreadSupportedFeatures =
+    pthreadFeatureDispatchFunction | pthreadFeatureFinePriority | pthreadFeatureBsdthreadCtl |
+    pthreadFeatureSetSelf | pthreadFeatureQosMaintenance | pthreadFeatureKevent |
+    pthreadFeatureWorkloop | pthreadFeatureQosDefault;
+// _pthread_priority_make_from_thread_qos(THREAD_QOS_LEGACY, 0, 0).
+constexpr std::uint64_t guestMainThreadLegacyQos = 0x8FF;
+// _PTHREAD_REG_DEFAULT_USE_ULOCK with the default policy bits left zero.
+constexpr std::uint32_t guestMutexDefaultPolicyUseUlock = 0x100;
+
 audit_token_t currentProcessAuditToken() {
     audit_token_t token{};
     mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
@@ -216,9 +245,13 @@ SyscallOutcome handleBsdthreadRegister(SyscallCall &call) {
         throw unsupported(state, syscallRip, reason.str());
     }
 
-    // The kernel ABI copies this packed record back even when outgoing
-    // values are zero. Preserve those zeros: Rosa has no child-thread
-    // stack allocator or QoS/mutex policy to advertise yet.
+    // XNU copies the record back with the kernel's outgoing fields. An
+    // unspecified main thread gets the legacy QoS, and the default mutex
+    // policy asks libpthread for ulock-based mutexes and condition
+    // variables, which GuestScheduler models directly. The stack hint stays
+    // zero so libpthread maps thread stacks anywhere in the guest.
+    encodeGuestPthreadField(data, 16, guestMainThreadLegacyQos);
+    encodeGuestPthreadField(data, 44, guestMutexDefaultPolicyUseUlock);
     addressSpace.writeBytes(guest::GuestAddress{state.r10}, data);
     task.pthreadRegistration = GuestPthreadRegistration{
         .threadStart = guest::GuestAddress{state.rdi},
@@ -233,10 +266,7 @@ SyscallOutcome handleBsdthreadRegister(SyscallCall &call) {
         .joinableOffsetBits = joinableOffsetBits,
         .workqueueQuantumExpiryOffset = workqueueQuantumExpiryOffset,
     };
-    // A zero return is the ABI's documented old-kernel compatibility
-    // value. It avoids advertising workqueue/kevent/QoS features Rosa
-    // cannot yet provide while allowing single-thread pthread startup.
-    setSuccess(state, 0);
+    setSuccess(state, guestPthreadSupportedFeatures);
     return {};
 }
 
@@ -244,8 +274,9 @@ SyscallOutcome handleThreadSelfid(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
     static_cast<void>(addressSpace);
     static_cast<void>(syscallRip);
-    static_cast<void>(task);
-    setSuccess(state, initialGuestThreadId);
+    // Guest thread ids live in the guest namespace; no host pthread or Mach
+    // identifier is exposed.
+    setSuccess(state, task.scheduler.current().id);
     return {};
 }
 

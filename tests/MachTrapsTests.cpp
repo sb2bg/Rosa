@@ -171,9 +171,13 @@ void testMachPortAllocateTrap() {
 }
 
 void testMachMessage2ReceiveTimedOut() {
-    // A receive-only mach_msg2 call on an owned but always-empty port
-    // times out instead of blocking forever.
+    // A receive-only mach_msg2 call with MACH_RCV_TIMEOUT and a zero timeout
+    // on an empty owned port times out at once. The receive size and timeout
+    // are the 7th and 8th arguments, read from the guest stack.
     rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x7000000FF000ULL},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
     rosa::darwin::SyscallDispatcher dispatcher;
     rosa::x86::X86State allocateState;
     allocateState.rax = UINT64_C(0x0100001A);
@@ -532,10 +536,16 @@ void testMachSpecialReplyPortTrap() {
     expectEqual(state.rflags, std::uint64_t{0x8D7},
                 "thread_get_special_reply_port applied BSD carry-flag semantics");
 
+    // XNU's ipc_tt.c allocates a new port, with a send right, on every call
+    // (the caller caches it per thread).
+    const auto *firstPort = dispatcher.portSpace().lookup(first);
+    expect(firstPort != nullptr && firstPort->sendUrefs == 1,
+           "thread_get_special_reply_port did not include a send right");
     state.rax = rosa::darwin::MachDispatcher::specialReplyPortTrapNumber;
     dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E2FB70ULL});
     const rosa::darwin::GuestMachPortName second{static_cast<std::uint32_t>(state.rax)};
-    expect(second == first, "repeated thread_get_special_reply_port reallocated its right");
+    expect(second != first && dispatcher.ownsReceiveRight(second),
+           "repeated thread_get_special_reply_port did not allocate a new port");
 
     state.rax = rosa::darwin::MachDispatcher::replyPortTrapNumber;
     dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x1000});

@@ -1,5 +1,7 @@
 #include "darwin/Mach.h"
 
+#include "darwin/Commpage.h"
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -26,10 +28,8 @@ constexpr std::uint64_t kernInvalidRight = 17;
 constexpr std::uint64_t kernInvalidValue = 18;
 constexpr std::uint64_t kernUrefsOverflow = 19;
 constexpr std::uint64_t kernResourceShortage = 6;
+constexpr std::uint64_t kernOperationTimedOut = 49;
 constexpr std::uint64_t machSendInvalidDestination = 0x10000003U;
-constexpr std::uint64_t machMsgOptionSend = 0x1U;
-constexpr std::uint64_t machReceiveInvalidName = 0x10004002U;
-constexpr std::uint64_t machReceiveTimedOut = 0x10004003U;
 constexpr std::uint64_t vmProtectionMask = 0x7U;
 constexpr std::uint64_t vmProtectionCopy = 0x10U;
 constexpr std::uint64_t vmFlagsAnywhere = 0x1U;
@@ -390,7 +390,12 @@ std::optional<GuestMachPortName> decodeObservedHostGetSpecialPortRequest(
     return GuestMachPortName{receiveName};
 }
 
-std::optional<GuestMachPortName> decodeObservedTaskGetSpecialPortRequest(
+struct GuestTaskGetSpecialPortRequest {
+    GuestMachPortName receiveName;
+    std::uint32_t selector{};
+};
+
+std::optional<GuestTaskGetSpecialPortRequest> decodeObservedTaskGetSpecialPortRequest(
     std::span<const std::uint8_t> message, const x86::X86State &state,
     std::uint64_t receiveSizeAndPriority, std::uint64_t timeout,
     const GuestPortSpace &portSpace) {
@@ -429,12 +434,14 @@ std::optional<GuestMachPortName> decodeObservedTaskGetSpecialPortRequest(
         decodeGuestInteger<std::uint32_t>(message, 16) != 0 ||
         decodeGuestInteger<std::int32_t>(message, 20) !=
             taskGetSpecialPortMessageId ||
-        !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr) ||
-        decodeGuestInteger<std::uint32_t>(message, 32) !=
-            taskBootstrapPortSelector) {
+        !std::ranges::equal(message.subspan(24, nativeNdr.size()), nativeNdr)) {
         return std::nullopt;
     }
-    return GuestMachPortName{receiveName};
+    const auto selector = decodeGuestInteger<std::uint32_t>(message, 32);
+    if (selector != taskBootstrapPortSelector && selector != taskDebugControlPortSelector) {
+        return std::nullopt;
+    }
+    return GuestTaskGetSpecialPortRequest{GuestMachPortName{receiveName}, selector};
 }
 
 std::optional<GuestMachPortName> decodeObservedTaskAuditTokenRequest(
@@ -1109,42 +1116,6 @@ std::optional<std::uint64_t> alignUp(std::uint64_t value,
     return (value + mask) & ~mask;
 }
 
-std::optional<guest::GuestAddress>
-findAnywhereRange(const guest::AddressSpace &addressSpace,
-                  std::uint64_t hint, std::uint64_t size,
-                  std::uint64_t alignmentMask) {
-    const auto aligned =
-        alignUp(std::max(hint, minimumAnywhereAddress), alignmentMask);
-    if (!aligned) {
-        return std::nullopt;
-    }
-    auto candidate = *aligned;
-    auto mappings = addressSpace.mappingInfos();
-    std::ranges::sort(mappings, {},
-                      [](const guest::MappingInfo &mapping) {
-                          return mapping.base.value;
-                      });
-    for (const auto &mapping : mappings) {
-        const auto mappingEnd = mapping.base.value + mapping.size;
-        if (mappingEnd <= candidate) {
-            continue;
-        }
-        if (candidate <= mapping.base.value &&
-            size <= mapping.base.value - candidate) {
-            return guest::GuestAddress{candidate};
-        }
-        const auto next = alignUp(mappingEnd, alignmentMask);
-        if (!next) {
-            return std::nullopt;
-        }
-        candidate = *next;
-    }
-    if (candidate <= maximumUserMapEnd &&
-        size <= maximumUserMapEnd - candidate) {
-        return guest::GuestAddress{candidate};
-    }
-    return std::nullopt;
-}
 
 std::runtime_error unsupported(const x86::X86State &state, guest::GuestAddress rip) {
     std::ostringstream stream;
@@ -1273,6 +1244,121 @@ std::string MachDispatcher::portSpaceSummary() const {
     return stream.str();
 }
 
+std::optional<guest::GuestAddress>
+findGuestAnywhereRange(const guest::AddressSpace &addressSpace,
+                  std::uint64_t hint, std::uint64_t size,
+                  std::uint64_t alignmentMask) {
+    const auto aligned =
+        alignUp(std::max(hint, minimumAnywhereAddress), alignmentMask);
+    if (!aligned) {
+        return std::nullopt;
+    }
+    auto candidate = *aligned;
+    auto mappings = addressSpace.mappingInfos();
+    std::ranges::sort(mappings, {},
+                      [](const guest::MappingInfo &mapping) {
+                          return mapping.base.value;
+                      });
+    for (const auto &mapping : mappings) {
+        const auto mappingEnd = mapping.base.value + mapping.size;
+        if (mappingEnd <= candidate) {
+            continue;
+        }
+        if (candidate <= mapping.base.value &&
+            size <= mapping.base.value - candidate) {
+            return guest::GuestAddress{candidate};
+        }
+        const auto next = alignUp(mappingEnd, alignmentMask);
+        if (!next) {
+            return std::nullopt;
+        }
+        candidate = *next;
+    }
+    if (candidate <= maximumUserMapEnd &&
+        size <= maximumUserMapEnd - candidate) {
+        return guest::GuestAddress{candidate};
+    }
+    return std::nullopt;
+}
+
+GuestPort *MachDispatcher::timerPort(std::uint64_t name, std::uint64_t &error) {
+    auto *port = portSpace_.lookup(GuestMachPortName{static_cast<std::uint32_t>(name)});
+    if (port == nullptr) {
+        error = kernInvalidName;
+        return nullptr;
+    }
+    if (!port->hasReceiveRight) {
+        error = kernInvalidRight;
+        return nullptr;
+    }
+    if (port->type != GuestPortType::Timer) {
+        error = kernInvalidArgument;
+        return nullptr;
+    }
+    return port;
+}
+
+GuestPort *MachDispatcher::semaphorePort(std::uint64_t name) {
+    auto *port = portSpace_.lookup(GuestMachPortName{static_cast<std::uint32_t>(name)});
+    return port != nullptr && port->type == GuestPortType::Semaphore && port->sendUrefs != 0
+               ? port
+               : nullptr;
+}
+
+// XNU's semaphore_signal_internal: wake one waiter (or all), else count up.
+// The count never goes negative; waiters are the parked guest threads.
+void MachDispatcher::signalSemaphore(GuestPort &semaphore, bool all) {
+    const auto channel = semaphore.name.value;
+    const auto woken = scheduler_ != nullptr
+                           ? scheduler_->wake(GuestWaitKind::Semaphore, channel,
+                                              all ? SIZE_MAX : std::size_t{1})
+                           : 0;
+    if (all) {
+        auto count = std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(semaphore.context));
+        if (count < 0) {
+            semaphore.context = 0;
+        }
+        return;
+    }
+    if (woken == 0) {
+        const auto count = std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(semaphore.context));
+        semaphore.context = std::bit_cast<std::uint32_t>(count + 1);
+    }
+}
+
+void MachDispatcher::waitSemaphore(GuestPort &semaphore, x86::X86State &state,
+                                   std::optional<std::chrono::nanoseconds> timeout) {
+    const auto count = std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(semaphore.context));
+    if (count > 0) {
+        semaphore.context = std::bit_cast<std::uint32_t>(count - 1);
+        state.rax = kernSuccess;
+        return;
+    }
+    if (timeout && timeout->count() == 0) {
+        state.rax = kernOperationTimedOut;
+        return;
+    }
+    if (scheduler_ == nullptr) {
+        throw std::runtime_error("semaphore wait would block with no guest scheduler");
+    }
+    std::ostringstream description;
+    description << "semaphore_wait 0x" << std::hex << semaphore.name.value;
+    GuestWait wait{
+        .kind = GuestWaitKind::Semaphore,
+        .channel = semaphore.name.value,
+        .complete =
+            [](x86::X86State &waiter, GuestWakeReason reason) {
+                waiter.rax =
+                    reason == GuestWakeReason::TimedOut ? kernOperationTimedOut : kernSuccess;
+            },
+        .description = description.str(),
+    };
+    if (timeout) {
+        wait.deadline = GuestClock::now() + *timeout;
+    }
+    scheduler_->block(std::move(wait));
+}
+
 void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
                               guest::GuestAddress syscallRip) {
     if (!isMachTrap(state.rax)) {
@@ -1281,7 +1367,8 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
 
     // XNU's x86_64 mach_call_munger64 writes only the trap result to saved RAX. In particular,
     // Mach traps do not use the BSD carry-flag error convention.
-    switch (trapNumber(state.rax)) {
+    const auto trap = trapNumber(state.rax);
+    switch (trap) {
     case 10U: {
         // XNU trap 10 is _kernelrpc_mach_vm_allocate_trap. Its second
         // argument points to an in/out mach_vm_address_t. Anonymous task
@@ -1313,7 +1400,7 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         const auto roundedSize =
             (state.rdx + guestPageMask) &
             ~static_cast<std::uint64_t>(guestPageMask);
-        const auto mappedAddress = findAnywhereRange(
+        const auto mappedAddress = findGuestAnywhereRange(
             addressSpace, hint, roundedSize, guestPageMask);
         if (!mappedAddress) {
             state.rax = kernNoSpace;
@@ -1429,7 +1516,7 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             ~(static_cast<std::uint64_t>(guest::guestPageSize) - 1U);
         std::optional<guest::GuestAddress> mappedAddress;
         if (anywhere) {
-            mappedAddress = findAnywhereRange(
+            mappedAddress = findGuestAnywhereRange(
                 addressSpace, hint, roundedSize, alignmentMask);
             if (!mappedAddress) {
                 state.rax = kernNoSpace;
@@ -1692,6 +1779,38 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = kernSuccess;
         return;
     }
+    case 25U: {
+        // _kernelrpc_mach_port_destruct_trap(task, name, srdelta, guard):
+        // XNU's ipc_right_destruct drops -srdelta send urefs and destroys
+        // the receive right, checking the guard of a guarded port.
+        if (state.rdi != taskSelfPortName().value) {
+            state.rax = machSendInvalidDestination;
+            return;
+        }
+        const auto name = static_cast<std::uint32_t>(state.rsi);
+        const auto delta = std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(state.rdx));
+        const auto guard = state.r10;
+        auto *port = portSpace_.lookup(GuestMachPortName{name});
+        if (port == nullptr) {
+            state.rax = kernInvalidName;
+            return;
+        }
+        if (!port->hasReceiveRight || (delta != 0 && port->sendUrefs == 0)) {
+            state.rax = kernInvalidRight;
+            return;
+        }
+        if (delta > 0 || static_cast<std::int64_t>(port->sendUrefs) + delta < 0) {
+            state.rax = kernInvalidValue;
+            return;
+        }
+        if (port->guarded && guard != port->guard) {
+            throw unsupported(state, syscallRip);
+        }
+        port->sendUrefs = static_cast<std::uint32_t>(static_cast<std::int64_t>(port->sendUrefs) + delta);
+        destroyReceiveRight(addressSpace, *port);
+        state.rax = kernSuccess;
+        return;
+    }
     case 26U: {
         // mach_reply_port allocates a fresh receive right in the calling task on every call.
         GuestPort port;
@@ -1706,11 +1825,15 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         return;
     }
     case 27U: {
-        // thread_self_trap has no arguments. Rosa currently has one guest
-        // thread, so every copyout names the same thread object and adds one
-        // guest send uref without exposing the host thread or its Mach port.
-        const auto name =
-            portSpace_.copyoutThreadSendRight(machPortUrefsMaximum);
+        // thread_self_trap has no arguments. Each copyout names the calling
+        // guest thread's object and adds one guest send uref without exposing
+        // a host thread or its Mach port.
+        const auto threadId =
+            scheduler_ != nullptr ? scheduler_->current().id : GuestScheduler::mainThreadId;
+        const auto name = portSpace_.copyoutThreadSendRight(threadId, machPortUrefsMaximum);
+        if (name && scheduler_ != nullptr) {
+            scheduler_->current().port = name;
+        }
         state.rax = name ? name->value : 0;
         return;
     }
@@ -1727,6 +1850,41 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         state.rax = taskSelfPortName().value;
         return;
     }
+    case 33U:   // semaphore_signal_trap
+    case 34U: { // semaphore_signal_all_trap
+        auto *semaphore = semaphorePort(state.rdi);
+        if (semaphore == nullptr) {
+            state.rax = kernInvalidArgument;
+            return;
+        }
+        signalSemaphore(*semaphore, trap == 34U);
+        state.rax = kernSuccess;
+        return;
+    }
+    case 36U:   // semaphore_wait_trap
+    case 37U:   // semaphore_wait_signal_trap
+    case 38U:   // semaphore_timedwait_trap
+    case 39U: { // semaphore_timedwait_signal_trap
+        const bool signals = trap == 37U || trap == 39U;
+        const bool timed = trap == 38U || trap == 39U;
+        auto *semaphore = semaphorePort(state.rdi);
+        auto *signaled = signals ? semaphorePort(state.rsi) : nullptr;
+        if (semaphore == nullptr || (signals && signaled == nullptr)) {
+            state.rax = kernInvalidArgument;
+            return;
+        }
+        if (signaled != nullptr) {
+            signalSemaphore(*signaled, false);
+        }
+        std::optional<std::chrono::nanoseconds> timeout;
+        if (timed) {
+            const auto seconds = static_cast<std::uint32_t>(signals ? state.rdx : state.rsi);
+            const auto nanoseconds = static_cast<std::uint32_t>(signals ? state.r10 : state.rdx);
+            timeout = std::chrono::seconds{seconds} + std::chrono::nanoseconds{nanoseconds};
+        }
+        waitSemaphore(*semaphore, state, timeout);
+        return;
+    }
     case 29U: {
         // XNU host_self_trap has no arguments. It copies a send right for the
         // task's host object into the calling IPC space. Rosa keeps the
@@ -1737,20 +1895,10 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         return;
     }
     case 47U: {
-        // A receive-only call (no MACH_SEND_MSG bit) on an owned receive
-        // right can never observe a message: Rosa runs the single guest
-        // thread to completion and models no asynchronous senders, so the
-        // queue is always empty. Answer MACH_RCV_TIMED_OUT immediately
-        // instead of blocking forever; the result is identical, only the
-        // wait is skipped.
-        if ((static_cast<std::uint32_t>(state.rsi) & machMsgOptionSend) == 0) {
-            const auto receiveName = GuestMachPortName{
-                static_cast<std::uint32_t>(state.r9 >> 32U)};
-            if (!portSpace_.ownsReceiveRight(receiveName)) {
-                state.rax = machReceiveInvalidName;
-                return;
-            }
-            state.rax = machReceiveTimedOut;
+        // Messages to guest receive rights, and every receive, go through
+        // the guest message queues (MachIpc.cpp). What remains are requests
+        // to kernel objects, answered synchronously below.
+        if (dispatchGuestMessage(addressSpace, state)) {
             return;
         }
         // The first observed mach_msg2 call is the MIG mach_vm_map request
@@ -1886,7 +2034,7 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             return;
         }
 
-        if (const auto receiveName =
+        if (const auto request =
                 decodeObservedTaskGetSpecialPortRequest(
                     message, state, receiveSizeAndPriority, timeout,
                     portSpace_)) {
@@ -1899,14 +2047,24 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
                 throw inspectUnsupportedMachMessage2(addressSpace, state,
                                                      syscallRip);
             }
-            const auto bootstrap = portSpace_.copyoutBootstrapSendRight(
-                machPortUrefsMaximum);
-            if (!bootstrap) {
+            // The debug-control port is whatever task_set_special_port last
+            // stored, copied out with a new send uref; MACH_PORT_NULL when unset.
+            std::optional<GuestMachPortName> special;
+            if (request->selector == taskBootstrapPortSelector) {
+                special = portSpace_.copyoutBootstrapSendRight(machPortUrefsMaximum);
+            } else if (!taskDebugControlPort_) {
+                special = GuestMachPortName{};
+            } else if (auto *port = portSpace_.lookup(*taskDebugControlPort_);
+                       port != nullptr && port->sendUrefs < machPortUrefsMaximum) {
+                ++port->sendUrefs;
+                special = *taskDebugControlPort_;
+            }
+            if (!special) {
                 throw inspectUnsupportedMachMessage2(addressSpace, state,
                                                      syscallRip);
             }
             const auto reply = encodeTaskGetSpecialPortReply(
-                *receiveName, *bootstrap);
+                request->receiveName, *special);
             addressSpace.writeBytes(guest::GuestAddress{state.rdi}, reply);
             state.rax = kernSuccess;
             return;
@@ -2056,22 +2214,17 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
         return;
     }
     case 50U: {
-        // thread_get_special_reply_port takes no arguments and returns the
-        // calling thread's stable special reply port, creating it on first
-        // use. Rosa has one guest thread, so one synthetic reply receive
-        // right is cached for the process lifetime.
-        if (!specialReplyPort_) {
-            GuestPort port;
-            port.type = GuestPortType::Reply;
-            port.queueLimit = machPortQlimitDefault;
-            const auto name = portSpace_.allocateReceiveRight(port);
-            if (!name) {
-                state.rax = 0; // MACH_PORT_NULL models allocation exhaustion.
-                return;
-            }
-            specialReplyPort_ = *name;
-        }
-        state.rax = specialReplyPort_->value;
+        // thread_get_special_reply_port takes no arguments. Like XNU's
+        // ipc_tt.c, every call allocates a new special reply port, with a
+        // receive and a send right, for the calling thread (libdispatch
+        // caches it in that thread's TSD); a task-wide cache would hand one
+        // thread's port to another.
+        GuestPort port;
+        port.type = GuestPortType::Reply;
+        port.queueLimit = machPortQlimitDefault;
+        port.sendUrefs = 1;
+        const auto name = portSpace_.allocateReceiveRight(port);
+        state.rax = name ? name->value : 0; // MACH_PORT_NULL on exhaustion.
         return;
     }
     case 70U: {
@@ -2135,9 +2288,8 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
     }
     case 91U: {
         // XNU trap 91 creates a Mach timer object and returns its port
-        // name. Rosa models no timer expirations: the port carries a
-        // receive right so timer waits take the empty-queue timeout path,
-        // and arm/cancel/destroy stay loud until observed.
+        // name, a receive right that an armed timer's expiration message
+        // is queued on.
         GuestPort port;
         port.type = GuestPortType::Timer;
         port.queueLimit = machPortQlimitDefault;
@@ -2147,6 +2299,116 @@ void MachDispatcher::dispatch(guest::AddressSpace &addressSpace, x86::X86State &
             return;
         }
         state.rax = name->value;
+        return;
+    }
+    case 92U: { // mk_timer_destroy(name)
+        std::uint64_t error = kernSuccess;
+        auto *timer = timerPort(state.rdi, error);
+        if (timer == nullptr) {
+            state.rax = error;
+            return;
+        }
+        timer->timerDeadline.reset();
+        timer->sendUrefs = 0;
+        timer->sendOnceUrefs = 0;
+        destroyReceiveRight(addressSpace, *timer);
+        state.rax = kernSuccess;
+        return;
+    }
+    case 93U:   // mk_timer_arm(name, expire_time)
+    case 95U: { // mk_timer_arm_leeway(name, flags, expire_time, leeway)
+        std::uint64_t error = kernSuccess;
+        auto *timer = timerPort(state.rdi, error);
+        if (timer == nullptr) {
+            state.rax = error;
+            return;
+        }
+        const auto deadline = trap == 93U ? state.rsi : state.r10;
+        if (deadline <= sampleX86TimestampCounter()) {
+            timer->timerDeadline.reset();
+            queueTimerExpiration(addressSpace, *timer);
+        } else {
+            timer->timerDeadline = deadline;
+        }
+        state.rax = kernSuccess;
+        return;
+    }
+    case 94U: { // mk_timer_cancel(name, result_time)
+        std::uint64_t error = kernSuccess;
+        auto *timer = timerPort(state.rdi, error);
+        if (timer == nullptr) {
+            state.rax = error;
+            return;
+        }
+        const auto armed = timer->timerDeadline.value_or(0);
+        timer->timerDeadline.reset();
+        if (state.rsi != 0) {
+            try {
+                addressSpace.writeU64(guest::GuestAddress{state.rsi}, armed);
+            } catch (const std::runtime_error &) {
+                state.rax = kernInvalidAddress;
+                return;
+            }
+        }
+        state.rax = kernSuccess;
+        return;
+    }
+    case 43U: { // mach_generate_activity_id(target, count, activity_id)
+        constexpr std::int32_t activityIdCountMaximum = 16;
+        const auto count = std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(state.rsi));
+        if (state.rdi != taskSelfPortName().value) {
+            state.rax = kernInvalidArgument;
+            return;
+        }
+        if (count <= 0 || count > activityIdCountMaximum) {
+            state.rax = kernInvalidArgument;
+            return;
+        }
+        try {
+            addressSpace.writeU64(guest::GuestAddress{state.rdx}, nextActivityId_);
+        } catch (const std::runtime_error &) {
+            state.rax = kernInvalidAddress;
+            return;
+        }
+        nextActivityId_ += static_cast<std::uint64_t>(count);
+        state.rax = kernSuccess;
+        return;
+    }
+    case 59U:   // swtch_pri(pri)
+    case 60U: { // swtch()
+        // Both yield the processor and report whether another thread wanted
+        // it; the dispatcher rotates after the trap.
+        const bool others = scheduler_ != nullptr && scheduler_->hasOtherRunnable();
+        if (scheduler_ != nullptr) {
+            scheduler_->requestYield();
+        }
+        state.rax = others ? 1 : 0;
+        return;
+    }
+    case 61U: { // syscall_thread_switch(thread_name, option, option_time)
+        if (scheduler_ != nullptr) {
+            scheduler_->requestYield();
+        }
+        state.rax = kernSuccess;
+        return;
+    }
+    case 90U: { // mach_wait_until(deadline)
+        const auto deadline = state.rdi;
+        const auto now = sampleX86TimestampCounter();
+        if (deadline <= now || scheduler_ == nullptr) {
+            state.rax = kernSuccess;
+            if (deadline > now) {
+                throw unsupported(state, syscallRip);
+            }
+            return;
+        }
+        scheduler_->block(GuestWait{
+            .kind = GuestWaitKind::Sleep,
+            .deadline = GuestClock::now() +
+                        std::chrono::nanoseconds{(deadline - now) / guestMachTicksPerNanosecond},
+            .complete = [](x86::X86State &waiter, GuestWakeReason) { waiter.rax = kernSuccess; },
+            .description = "mach_wait_until",
+        });
         return;
     }
     default:

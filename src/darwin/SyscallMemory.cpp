@@ -1,7 +1,6 @@
 #include "darwin/SyscallInternal.h"
 
 namespace rosa::darwin::detail {
-namespace {
 
 std::optional<guest::GuestAddress>
 findMmapRange(const guest::AddressSpace &addressSpace, std::uint64_t size) {
@@ -41,6 +40,8 @@ findMmapRange(const guest::AddressSpace &addressSpace, std::uint64_t size) {
     }
     return std::nullopt;
 }
+
+namespace {
 
 // Layouts mirror Apple's mach/dyld_pager.h and mach-o/fixup-chains.h for the
 // map_with_linking_np blob. All integers are little-endian.

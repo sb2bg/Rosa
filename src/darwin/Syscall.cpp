@@ -23,6 +23,19 @@ constexpr std::array syscallTable = std::to_array<SyscallEntry>({
     {detail::syscallExit, "exit", detail::handleExit},
     {detail::syscallBsdthreadRegister, "bsdthread_register", detail::handleBsdthreadRegister},
     {detail::syscallThreadSelfid, "thread_selfid", detail::handleThreadSelfid},
+    {detail::syscallBsdthreadCreate, "bsdthread_create", detail::handleBsdthreadCreate},
+    {detail::syscallBsdthreadTerminate, "bsdthread_terminate", detail::handleBsdthreadTerminate},
+    {detail::syscallSigprocmask, "sigprocmask", detail::handlePthreadSigmask},
+    {detail::syscallPthreadSigmask, "__pthread_sigmask", detail::handlePthreadSigmask},
+    {detail::syscallDisableThreadsignal, "__disable_threadsignal",
+     detail::handleDisableThreadsignal},
+    {detail::syscallWorkqOpen, "workq_open", detail::handleWorkqOpen},
+    {detail::syscallKeventQos, "kevent_qos", detail::handleKeventQos},
+    {detail::syscallKeventId, "kevent_id", detail::handleKeventId},
+    {detail::syscallWorkqKernreturn, "workq_kernreturn", detail::handleWorkqKernreturn},
+    {detail::syscallUlockWait, "ulock_wait", detail::handleUlockWait},
+    {detail::syscallUlockWait2, "ulock_wait2", detail::handleUlockWait2},
+    {detail::syscallUlockWake, "ulock_wake", detail::handleUlockWake},
     {detail::syscallGettimeofday, "gettimeofday", detail::handleGettimeofday},
     {detail::syscallIssetugid, "issetugid", detail::handleIssetugid},
     {detail::syscallDup, "dup", detail::handleDup},
@@ -83,13 +96,58 @@ const SyscallEntry *findSyscall(std::uint64_t number) {
 
 } // namespace
 
+void SyscallDispatcher::portReadinessChanged(guest::AddressSpace &addressSpace,
+                                             GuestMachPortName port, bool ready) {
+    task_.workqueue.kqueue.setMachPortReady(port.value, ready);
+    for (auto &[id, workloop] : task_.workqueue.workloops) {
+        workloop.sources.setMachPortReady(port.value, ready);
+    }
+    if (ready) {
+        detail::serviceWorkqueue(addressSpace, task_, nullptr);
+    }
+}
+
+std::optional<GuestClock::time_point>
+SyscallDispatcher::serviceEvents(guest::AddressSpace &addressSpace) {
+    const auto now = detail::guestMachAbsoluteTime();
+    const auto nextTimer = task_.machDispatcher.fireDueTimers(addressSpace, now);
+    detail::serviceWorkqueue(addressSpace, task_, nullptr);
+    auto next = task_.workqueue.kqueue.nextTimerDeadline();
+    if (nextTimer) {
+        next = next ? std::min(*next, *nextTimer) : *nextTimer;
+    }
+    if (!next) {
+        return std::nullopt;
+    }
+    const auto remaining = *next > now ? (*next - now) / guestMachTicksPerNanosecond : 0;
+    return GuestClock::now() + std::chrono::nanoseconds{remaining};
+}
+
 SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
                                            x86::X86State &state,
                                            guest::GuestAddress syscallRip) {
     using namespace detail;
     const auto number = state.rax;
     if (MachDispatcher::isMachTrap(number)) {
+        if (trace_ == nullptr) {
+            task_.machDispatcher.dispatch(addressSpace, state, syscallRip);
+            return {};
+        }
+        const std::array arguments{state.rdi, state.rsi, state.rdx, state.r10, state.r8, state.r9};
+        const auto thread = task_.scheduler.current().id;
         task_.machDispatcher.dispatch(addressSpace, state, syscallRip);
+        *trace_ << "[mach] thread=" << std::dec << thread << " trap "
+                << MachDispatcher::trapNumber(number) << "(" << std::hex;
+        for (std::size_t index = 0; index < arguments.size(); ++index) {
+            *trace_ << (index == 0 ? "0x" : ", 0x") << arguments[index];
+        }
+        *trace_ << ") = ";
+        if (task_.scheduler.current().status == GuestThreadStatus::Blocked) {
+            *trace_ << "blocked";
+        } else {
+            *trace_ << "0x" << state.rax;
+        }
+        *trace_ << std::dec << '\n';
         return {};
     }
     if ((number & syscallClassMask) == machdepSyscallClass) {
@@ -114,7 +172,8 @@ SyscallOutcome SyscallDispatcher::dispatch(guest::AddressSpace &addressSpace,
     }
     const std::array arguments{state.rdi, state.rsi, state.rdx, state.r10, state.r8, state.r9};
     const auto outcome = entry->handler(call);
-    *trace_ << "[syscall] " << entry->name << "(" << std::hex;
+    *trace_ << "[syscall] thread=" << std::dec << task_.scheduler.current().id << ' '
+            << entry->name << "(" << std::hex;
     for (std::size_t index = 0; index < arguments.size(); ++index) {
         *trace_ << (index == 0 ? "0x" : ", 0x") << arguments[index];
     }

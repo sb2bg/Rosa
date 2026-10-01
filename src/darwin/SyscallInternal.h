@@ -103,6 +103,18 @@ inline constexpr std::uint64_t syscallFstatfs64 = unixSyscallClass | 346U;
 inline constexpr std::uint64_t syscallGetdirentries64 = unixSyscallClass | 344U;
 inline constexpr std::uint64_t syscallBsdthreadRegister = unixSyscallClass | 366U;
 inline constexpr std::uint64_t syscallThreadSelfid = unixSyscallClass | 372U;
+inline constexpr std::uint64_t syscallSigprocmask = unixSyscallClass | 48U;
+inline constexpr std::uint64_t syscallPthreadSigmask = unixSyscallClass | 329U;
+inline constexpr std::uint64_t syscallDisableThreadsignal = unixSyscallClass | 331U;
+inline constexpr std::uint64_t syscallKeventQos = unixSyscallClass | 374U;
+inline constexpr std::uint64_t syscallKeventId = unixSyscallClass | 375U;
+inline constexpr std::uint64_t syscallWorkqOpen = unixSyscallClass | 367U;
+inline constexpr std::uint64_t syscallWorkqKernreturn = unixSyscallClass | 368U;
+inline constexpr std::uint64_t syscallBsdthreadCreate = unixSyscallClass | 360U;
+inline constexpr std::uint64_t syscallBsdthreadTerminate = unixSyscallClass | 361U;
+inline constexpr std::uint64_t syscallUlockWait = unixSyscallClass | 515U;
+inline constexpr std::uint64_t syscallUlockWake = unixSyscallClass | 516U;
+inline constexpr std::uint64_t syscallUlockWait2 = unixSyscallClass | 544U;
 inline constexpr std::uint64_t syscallMac = unixSyscallClass | 381U;
 inline constexpr std::uint64_t syscallReadNoCancel = unixSyscallClass | 396U;
 inline constexpr std::uint64_t syscallWriteNoCancel = unixSyscallClass | 397U;
@@ -122,9 +134,6 @@ inline constexpr std::uint32_t guestCsrActiveConfig = 0;
 inline constexpr std::uint64_t machdepThreadFastSetCthreadSelf = 3U;
 inline constexpr std::uint64_t x86UserCthreadSelector = 0x0FU;
 inline constexpr std::uint64_t x86MaximumUserPageAddress = 0x00007FFFFFFFF000ULL;
-// Rosa currently executes exactly one guest thread. Keep its identity in the
-// guest namespace rather than exposing a host pthread or Mach identifier.
-inline constexpr std::uint64_t initialGuestThreadId = 1;
 inline constexpr std::int32_t procInfoCallPidInfo = 0x02;
 inline constexpr std::int32_t procInfoCallSetDyldImages = 0x0F;
 inline constexpr std::uint32_t procPidShortBsdInfo = 0x0D;
@@ -379,6 +388,38 @@ SyscallOutcome handleGetentropy(SyscallCall &call);
 SyscallOutcome handleCsrctl(SyscallCall &call);
 SyscallOutcome handleMac(SyscallCall &call);
 
+// SyscallThreads.cpp
+SyscallOutcome handleBsdthreadCreate(SyscallCall &call);
+SyscallOutcome handleBsdthreadTerminate(SyscallCall &call);
+SyscallOutcome handleDisableThreadsignal(SyscallCall &call);
+SyscallOutcome handlePthreadSigmask(SyscallCall &call);
+SyscallOutcome handleUlockWait(SyscallCall &call);
+SyscallOutcome handleUlockWait2(SyscallCall &call);
+SyscallOutcome handleUlockWake(SyscallCall &call);
+
+// SyscallKqueue.cpp
+SyscallOutcome handleKeventQos(SyscallCall &call);
+SyscallOutcome handleKeventId(SyscallCall &call);
+// A workloop with a thread request or ready source and no servicer.
+bool workloopDeliverable(const GuestWorkloop &workloop);
+// The events a workloop servicer handles next, marked delivered to `thread`.
+std::vector<GuestKevent> collectWorkloopEvents(GuestWorkloop &workloop, std::size_t maximum,
+                                               std::uint64_t now, std::uint64_t thread);
+// The pthread priority of a workloop's thread request, or zero.
+std::uint32_t workloopRequestPriority(const GuestWorkloop &workloop);
+void releaseWorkloopServicer(GuestWorkqueue &workqueue, GuestThread &thread);
+std::vector<GuestKevent> returnWorkloopServicer(guest::AddressSpace &addressSpace, GuestTask &task,
+                                                GuestThread &thread,
+                                                std::span<const GuestKevent> changes,
+                                                std::size_t room);
+
+// SyscallWorkqueue.cpp
+// The guest's mach_absolute_time, in its 2-ticks-per-nanosecond units.
+std::uint64_t guestMachAbsoluteTime();
+void serviceWorkqueue(guest::AddressSpace &addressSpace, GuestTask &task, GuestThread *returning);
+SyscallOutcome handleWorkqOpen(SyscallCall &call);
+SyscallOutcome handleWorkqKernreturn(SyscallCall &call);
+
 // SyscallSysctl.cpp
 SyscallOutcome handleSysctl(SyscallCall &call);
 
@@ -408,6 +449,10 @@ SyscallOutcome handleFsgetpath(SyscallCall &call);
 SyscallOutcome handleWrite(SyscallCall &call);
 
 // SyscallMemory.cpp
+// The lowest page-aligned free guest range of `size` bytes at or above the
+// mmap floor, as XNU's anywhere placement chooses.
+std::optional<guest::GuestAddress> findMmapRange(const guest::AddressSpace &addressSpace,
+                                                 std::uint64_t size);
 SyscallOutcome handleMprotect(SyscallCall &call);
 SyscallOutcome handleMadvise(SyscallCall &call);
 SyscallOutcome handleMunmap(SyscallCall &call);

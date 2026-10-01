@@ -42,9 +42,21 @@ std::span<const std::uint8_t> Dispatcher::codeAt(guest::GuestAddress address) co
     return addressSpace_.executableBytes(address);
 }
 
-DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
+DispatchResult Dispatcher::run(x86::X86State &mainState, std::size_t maximumBlocks,
                                std::optional<guest::GuestAddress> returnSentinel) {
     DispatchResult result;
+    auto &scheduler = syscallDispatcher_.scheduler();
+    scheduler.bindMainThread(mainState);
+    auto *thread = scheduler.schedule(false);
+    std::size_t sliceRemaining = schedulerSliceBlocks;
+    const auto serviceEvents = [&] { return syscallDispatcher_.serviceEvents(addressSpace_); };
+    const auto switchThread = [&](bool rotate) {
+        thread = scheduler.schedule(rotate, serviceEvents);
+        sliceRemaining = schedulerSliceBlocks;
+        if (thread == nullptr) {
+            throw std::runtime_error("every guest thread exited without a process exit");
+        }
+    };
     executedBlocks_ = 0;
     recentBlockCount_ = 0;
     nextRecentBlock_ = 0;
@@ -53,6 +65,7 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
     executedCacheImageIndexes_.clear();
     cacheImageExecutions_.clear();
     while (result.executedBlocks < maximumBlocks) {
+        auto &state = *thread->state;
         const auto blockAddress = guest::GuestAddress{state.rip};
         const auto executableVersion = addressSpace_.executableVersion();
         auto &dispatchEntry = dispatchCache_[(blockAddress.value >> 1U) & (dispatchCacheSize - 1U)];
@@ -95,6 +108,12 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
             }
             batchLimit = block->executionBatchLimit(remainingBlocks);
         }
+        // With several guest threads, a batch ends at the slice boundary so
+        // a spinning thread cannot starve the one it waits for.
+        const auto multithreaded = scheduler.threads().size() > 1;
+        if (multithreaded) {
+            batchLimit = std::min(batchLimit, sliceRemaining);
+        }
         const auto execution =
             block->executeRepeated(state, addressSpace_, timestampCounterReader_, batchLimit);
         result.executedBlocks += execution.executionCount;
@@ -112,6 +131,12 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
                     ++recentBlockCount_;
                 }
             }
+        }
+
+        auto rotate = false;
+        if (multithreaded) {
+            sliceRemaining -= std::min(sliceRemaining, execution.executionCount);
+            rotate = sliceRemaining == 0;
         }
 
         switch (execution.exit) {
@@ -138,7 +163,8 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
         case BlockExit::Return: {
             const auto target = addressSpace_.readU64(guest::GuestAddress{state.rsp});
             state.rsp += sizeof(std::uint64_t);
-            if (returnSentinel && target == returnSentinel->value) {
+            if (returnSentinel && target == returnSentinel->value &&
+                thread->id == darwin::GuestScheduler::mainThreadId) {
                 result.translatedBlocks = cache_.size();
                 return result;
             }
@@ -154,6 +180,14 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
                 result.exitStatus = outcome.exitStatus;
                 return result;
             }
+            if (thread->status != darwin::GuestThreadStatus::Runnable) {
+                switchThread(false);
+                continue;
+            }
+            if (scheduler.takeYieldRequest()) {
+                switchThread(true);
+                continue;
+            }
             break;
         }
         case BlockExit::MemoryFault:
@@ -162,6 +196,9 @@ DispatchResult Dispatcher::run(x86::X86State &state, std::size_t maximumBlocks,
         case BlockExit::ExecutionFault:
             throw std::runtime_error(
                 "generated block reported a guest execution fault without detail");
+        }
+        if (rotate) {
+            switchThread(true);
         }
     }
     throw std::runtime_error("guest block limit reached before exit or return sentinel");

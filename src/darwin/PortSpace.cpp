@@ -1,5 +1,6 @@
 #include "darwin/PortSpace.h"
 
+#include <algorithm>
 #include <bit>
 #include <iomanip>
 #include <limits>
@@ -57,9 +58,9 @@ GuestPortSpace::copyoutHostSendRight(std::uint32_t maximumUrefs) {
 }
 
 std::optional<GuestMachPortName>
-GuestPortSpace::copyoutThreadSendRight(std::uint32_t maximumUrefs) {
-    if (threadSelfName_) {
-        auto *port = lookup(*threadSelfName_);
+GuestPortSpace::copyoutThreadSendRight(std::uint64_t threadId, std::uint32_t maximumUrefs) {
+    if (const auto existing = threadNames_.find(threadId); existing != threadNames_.end()) {
+        auto *port = lookup(existing->second);
         if (port == nullptr || port->type != GuestPortType::Thread ||
             port->sendUrefs == 0) {
             return std::nullopt;
@@ -68,14 +69,23 @@ GuestPortSpace::copyoutThreadSendRight(std::uint32_t maximumUrefs) {
             return std::nullopt;
         }
         ++port->sendUrefs;
-        return threadSelfName_;
+        return existing->second;
     }
 
     GuestPort thread;
     thread.type = GuestPortType::Thread;
+    thread.context = threadId;
     thread.sendUrefs = 1;
-    threadSelfName_ = allocatePort(thread);
-    return threadSelfName_;
+    const auto name = allocatePort(thread);
+    if (name) {
+        threadNames_.emplace(threadId, *name);
+    }
+    return name;
+}
+
+std::optional<GuestMachPortName> GuestPortSpace::threadPortName(std::uint64_t threadId) const {
+    const auto found = threadNames_.find(threadId);
+    return found == threadNames_.end() ? std::nullopt : std::optional{found->second};
 }
 
 std::optional<GuestMachPortName>
@@ -161,8 +171,8 @@ GuestPortSpace::deallocateUref(GuestMachPortName name) {
         if (hostSelfName_ == name) {
             hostSelfName_.reset();
         }
-        if (threadSelfName_ == name) {
-            threadSelfName_.reset();
+        if (port.type == GuestPortType::Thread) {
+            threadNames_.erase(port.context);
         }
         if (bootstrapName_ == name) {
             bootstrapName_.reset();
@@ -205,12 +215,12 @@ void GuestPortSpace::rollbackLastAllocation(GuestMachPortName name) noexcept {
         clockServiceNames_.erase(
             static_cast<std::uint32_t>(found->second.context));
     }
+    if (found->second.type == GuestPortType::Thread) {
+        threadNames_.erase(found->second.context);
+    }
     ports_.erase(found);
     if (hostSelfName_ == name) {
         hostSelfName_.reset();
-    }
-    if (threadSelfName_ == name) {
-        threadSelfName_.reset();
     }
     if (bootstrapName_ == name) {
         bootstrapName_.reset();
@@ -220,6 +230,40 @@ void GuestPortSpace::rollbackLastAllocation(GuestMachPortName name) noexcept {
         name.value + syntheticNameStride == nextSyntheticName_) {
         nextSyntheticName_ = name.value;
     }
+}
+
+void GuestPortSpace::removeFromPortSets(GuestMachPortName member) {
+    for (auto &[name, port] : ports_) {
+        if (port.type == GuestPortType::PortSet) {
+            std::erase(port.members, member);
+        }
+    }
+}
+
+void GuestPortSpace::eraseIfEmpty(GuestMachPortName name) {
+    const auto found = ports_.find(name.value);
+    if (found == ports_.end() || name == taskSelfName) {
+        return;
+    }
+    const auto &port = found->second;
+    if (!port.hasReceiveRight && port.sendUrefs == 0 && port.sendOnceUrefs == 0 &&
+        port.type != GuestPortType::PortSet) {
+        if (port.type == GuestPortType::Thread) {
+            threadNames_.erase(port.context);
+        }
+        ports_.erase(found);
+    }
+}
+
+std::vector<GuestMachPortName> GuestPortSpace::portSetsContaining(GuestMachPortName member) const {
+    std::vector<GuestMachPortName> sets;
+    for (const auto &[name, port] : ports_) {
+        if (port.type == GuestPortType::PortSet &&
+            std::find(port.members.begin(), port.members.end(), member) != port.members.end()) {
+            sets.push_back(port.name);
+        }
+    }
+    return sets;
 }
 
 std::string GuestPortSpace::summary() const {
@@ -239,7 +283,8 @@ std::string GuestPortSpace::summary() const {
                << " receive=" << (port.hasReceiveRight ? "yes" : "no")
                << " send-urefs=" << port.sendUrefs
                << " send-once-urefs=" << port.sendOnceUrefs
-               << " qlimit=" << port.queueLimit
+               << " qlimit=" << port.queueLimit << " queued=" << port.messages.size()
+               << (port.dead ? " dead" : "")
                << " context=0x" << std::hex << port.context << std::dec;
         if (port.guarded) {
             stream << " guard=0x" << std::hex << port.guard << std::dec

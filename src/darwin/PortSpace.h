@@ -3,6 +3,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <optional>
 #include <string>
@@ -34,6 +35,25 @@ enum class GuestPortDeallocateResult : std::uint8_t {
     InvalidRight,
 };
 
+// A message queued on a guest receive right, already in the form the
+// receiver sees: header bits with the reply and destination types as
+// received, port descriptors rewritten, out-of-line memory carried as bytes.
+struct GuestMachMessage {
+    std::uint32_t bits{};
+    GuestMachPortName replyPort;
+    std::int32_t id{};
+    // Everything after the 24-byte header, descriptors included.
+    std::vector<std::uint8_t> body;
+    struct OutOfLine {
+        // Offset of the descriptor's address field within `body`.
+        std::size_t addressOffset{};
+        std::vector<std::uint8_t> bytes;
+    };
+    std::vector<OutOfLine> outOfLine;
+    // Task-wide arrival order, for receiving from a port set.
+    std::uint64_t arrival{};
+};
+
 struct GuestPort {
     GuestMachPortName name;
     GuestPortType type{GuestPortType::Ordinary};
@@ -48,6 +68,13 @@ struct GuestPort {
     bool importanceReceiver{};
     std::uint32_t optionFlags{};
     std::vector<GuestMachPortName> members{};
+    std::deque<GuestMachMessage> messages{};
+    std::uint32_t sequenceNumber{};
+    // A dead name: the port's receive right was destroyed while this space
+    // still held send rights to it.
+    bool dead{};
+    // An armed mk_timer's deadline, in guest mach_absolute_time units.
+    std::optional<std::uint64_t> timerDeadline{};
 };
 
 class GuestPortSpace {
@@ -63,8 +90,11 @@ class GuestPortSpace {
     allocateReceiveRight(GuestPort attributes = {});
     [[nodiscard]] std::optional<GuestMachPortName>
     copyoutHostSendRight(std::uint32_t maximumUrefs);
+    // Each guest thread has one thread object; its port's context is the
+    // guest thread id.
     [[nodiscard]] std::optional<GuestMachPortName>
-    copyoutThreadSendRight(std::uint32_t maximumUrefs);
+    copyoutThreadSendRight(std::uint64_t threadId, std::uint32_t maximumUrefs);
+    [[nodiscard]] std::optional<GuestMachPortName> threadPortName(std::uint64_t threadId) const;
     [[nodiscard]] std::optional<GuestMachPortName>
     copyoutBootstrapSendRight(std::uint32_t maximumUrefs);
     [[nodiscard]] std::optional<GuestMachPortName>
@@ -74,6 +104,20 @@ class GuestPortSpace {
     [[nodiscard]] GuestPortDeallocateResult
     deallocateUref(GuestMachPortName name);
     void rollbackLastAllocation(GuestMachPortName name) noexcept;
+
+    template <typename Visit> void forEachPort(Visit visit) {
+        for (auto &[name, port] : ports_) {
+            visit(port);
+        }
+    }
+
+    // Removes `member` from every port set.
+    void removeFromPortSets(GuestMachPortName member);
+    // Drops an entry that holds no rights.
+    void eraseIfEmpty(GuestMachPortName name);
+
+    // The port sets that hold `member`.
+    [[nodiscard]] std::vector<GuestMachPortName> portSetsContaining(GuestMachPortName member) const;
 
     [[nodiscard]] std::size_t size() const noexcept { return ports_.size(); }
     [[nodiscard]] std::string summary() const;
@@ -87,7 +131,7 @@ class GuestPortSpace {
     std::map<std::uint32_t, GuestPort> ports_;
     std::uint32_t nextSyntheticName_{0x203U};
     std::optional<GuestMachPortName> hostSelfName_;
-    std::optional<GuestMachPortName> threadSelfName_;
+    std::map<std::uint64_t, GuestMachPortName> threadNames_;
     std::optional<GuestMachPortName> bootstrapName_;
     std::map<std::uint32_t, GuestMachPortName> clockServiceNames_;
 };

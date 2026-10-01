@@ -72,6 +72,9 @@ class Dispatcher {
     [[nodiscard]] std::vector<BlockExecutionCount> hotBlocks(std::size_t minimumExecutions = 16,
                                                              std::size_t limit = 8) const;
     [[nodiscard]] darwin::SyscallDispatcher &syscalls() noexcept { return syscallDispatcher_; }
+    [[nodiscard]] const darwin::GuestScheduler &scheduler() const noexcept {
+        return syscallDispatcher_.scheduler();
+    }
     [[nodiscard]] const darwin::MachDispatcher &machDispatcher() const noexcept {
         return syscallDispatcher_.machDispatcher();
     }
@@ -89,6 +92,8 @@ class Dispatcher {
     };
 
     static constexpr std::size_t dispatchCacheSize = 256;
+    // Blocks a guest thread runs before another runnable thread gets a turn.
+    static constexpr std::size_t schedulerSliceBlocks = 20000;
 
     guest::AddressSpace &addressSpace_;
     BlockCache cache_;

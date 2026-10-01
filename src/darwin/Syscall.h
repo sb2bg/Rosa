@@ -2,6 +2,7 @@
 
 #include "darwin/Files.h"
 #include "darwin/Mach.h"
+#include "darwin/Threads.h"
 #include "guest/Address.h"
 #include "guest/AddressSpace.h"
 #include "x86/Registers.h"
@@ -52,6 +53,8 @@ struct GuestTask {
     const GuestSharedCache *sharedCache{};
     std::array<std::uint8_t, 16> executableUuid{};
     GuestFileSpace fileSpace;
+    GuestScheduler scheduler;
+    GuestWorkqueue workqueue;
     MachDispatcher machDispatcher;
     std::optional<GuestDyldInfo> dyldInfo;
     std::optional<GuestPthreadRegistration> pthreadRegistration;
@@ -66,7 +69,15 @@ class SyscallDispatcher {
     explicit SyscallDispatcher(
         const GuestSharedCache *sharedCache = nullptr,
         const std::array<std::uint8_t, 16> &executableUuid = {})
-        : task_{.sharedCache = sharedCache, .executableUuid = executableUuid} {}
+        : task_{.sharedCache = sharedCache, .executableUuid = executableUuid} {
+        task_.machDispatcher.setScheduler(&task_.scheduler);
+        task_.machDispatcher.setPortReadinessHandler(
+            [this](guest::AddressSpace &addressSpace, GuestMachPortName port, bool ready) {
+                portReadinessChanged(addressSpace, port, ready);
+            });
+    }
+    SyscallDispatcher(const SyscallDispatcher &) = delete;
+    SyscallDispatcher &operator=(const SyscallDispatcher &) = delete;
 
     [[nodiscard]] SyscallOutcome dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
                                           guest::GuestAddress syscallRip);
@@ -76,6 +87,8 @@ class SyscallDispatcher {
     [[nodiscard]] const MachDispatcher &machDispatcher() const noexcept {
         return task_.machDispatcher;
     }
+    [[nodiscard]] GuestScheduler &scheduler() noexcept { return task_.scheduler; }
+    [[nodiscard]] const GuestScheduler &scheduler() const noexcept { return task_.scheduler; }
     [[nodiscard]] const GuestFileSpace &fileSpace() const noexcept {
         return task_.fileSpace;
     }
@@ -92,10 +105,19 @@ class SyscallDispatcher {
     void setHostAccess(GuestHostAccess access) noexcept {
         task_.fileSpace.setHostAccess(access);
     }
+    // Fires due workqueue-kqueue timers and hands ready work to workqueue
+    // threads; returns when it next needs to run.
+    [[nodiscard]] std::optional<GuestClock::time_point>
+    serviceEvents(guest::AddressSpace &addressSpace);
     // Logs each BSD syscall with its arguments and result; null disables.
     void setTrace(std::ostream *trace) noexcept { trace_ = trace; }
 
   private:
+    // EVFILT_MACHPORT knotes follow their port's queue; a newly ready port
+    // may need a workqueue thread.
+    void portReadinessChanged(guest::AddressSpace &addressSpace, GuestMachPortName port,
+                              bool ready);
+
     GuestTask task_;
     std::ostream *trace_{};
 };

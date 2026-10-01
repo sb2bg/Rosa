@@ -48,12 +48,21 @@ void testDarwinBsdthreadRegister() {
     state.rflags = 0x8D7;
     static_cast<void>(
         dispatcher.dispatch(addressSpace, state, rosa::guest::GuestAddress{0x7FF802E345DCULL}));
-    expectEqual(state.rax, std::uint64_t{0},
-                "bsdthread_register did not return legacy feature success");
+    // DISPATCHFUNC|FINEPRIO|BSDTHREADCTL|SETSELF|QOS_MAINTENANCE|KEVENT|WORKLOOP|
+    // QOS_DEFAULT: the kevent workqueue and workloops, not the cooperative pool.
+    expectEqual(state.rax, std::uint64_t{0x400000DF},
+                "bsdthread_register returned the wrong kernel feature set");
     expectEqual(state.rflags, std::uint64_t{0x8D6}, "bsdthread_register did not clear BSD carry");
+    // The kernel's outgoing fields: legacy main-thread QoS and the ulock
+    // mutex policy. Every other byte is copied back unchanged.
+    auto expected = data;
+    const std::uint64_t legacyQos = 0x8FF;
+    const std::uint32_t ulockPolicy = 0x100;
+    std::memcpy(expected.data() + 16, &legacyQos, sizeof(legacyQos));
+    std::memcpy(expected.data() + 44, &ulockPolicy, sizeof(ulockPolicy));
     expectEqual(addressSpace.readBytes(dataAddress, data.size()),
-                std::vector<std::uint8_t>(data.begin(), data.end()),
-                "bsdthread_register changed unsupported outgoing fields");
+                std::vector<std::uint8_t>(expected.begin(), expected.end()),
+                "bsdthread_register wrote the wrong outgoing fields");
     const auto &registration = dispatcher.pthreadRegistration();
     expect(registration.has_value(), "bsdthread_register did not record the guest handshake");
     expectEqual(registration->threadStart, threadStart,
