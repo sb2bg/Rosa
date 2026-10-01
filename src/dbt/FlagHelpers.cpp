@@ -773,6 +773,27 @@ updateRotateRightFlags64(x86::X86State *state, std::uint64_t result, std::uint64
 }
 
 extern "C" __attribute__((noinline)) x86::X86State *
+updateRotateRightFlags32(x86::X86State *state, std::uint64_t resultValue,
+                         std::uint64_t unmaskedCount) {
+    const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x1FU);
+    if (count == 0) {
+        return state;
+    }
+    const auto result = static_cast<std::uint32_t>(resultValue);
+    auto replacedFlags = flagCarry;
+    if (count == 1) {
+        replacedFlags |= flagOverflow;
+    }
+    auto flags = (state->rflags & ~replacedFlags) | flagReservedOne;
+    flags |= result >> 31U;
+    if (count == 1 && (((result >> 31U) ^ (result >> 30U)) & 1U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
 updateShiftRightFlags8(x86::X86State *state, std::uint64_t lhsValue, std::uint64_t resultValue,
                        std::uint64_t unmaskedCount) {
     const auto count = static_cast<std::uint8_t>(unmaskedCount & 0x1FU);

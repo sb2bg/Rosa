@@ -1523,15 +1523,6 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
-        // A rotate count that masks to zero still writes, and so
-        // zero-extends, a 32-bit destination.
-        auto testCase = make("rol32_masked_zero_count", CaseId::rol32_masked_zero_count,
-                             differentialBytes_rol32_masked_zero_count);
-        testCase.request.state.rax = 0xFFFFFFFF12345679ULL;
-        testCase.flagMask = carryFlag | overflowFlag;
-        run(testCase);
-    }
-    {
         // Observed in liblzma under grep -X: xor dx, word [rcx+4].
         auto testCase = make("xor16_register_memory", CaseId::xor16_register_memory,
                              differentialBytes_xor16_register_memory);
@@ -1540,6 +1531,36 @@ void testRosettaDifferentialSemantics() {
         constexpr std::uint16_t value = 0x0F0F;
         std::memcpy(testCase.request.memory.data() + 0x24, &value, sizeof(value));
         testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        // Observed in corecrypto's SHA-256 rounds: ror eax, 14.
+        auto testCase =
+            make("ror32_immediate", CaseId::ror32_immediate, differentialBytes_ror32_immediate);
+        testCase.request.state.rax = 0xFFFFFFFF12345679ULL;
+        testCase.flagMask = carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("ror32_by_one_overflow", CaseId::ror32_by_one_overflow,
+                             differentialBytes_ror32_by_one_overflow);
+        testCase.request.state.r9 = 0xAAAAAAAA00000001ULL;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        // A count that masks to zero: do the upper 32 bits survive?
+        auto testCase = make("ror32_masked_zero_count", CaseId::ror32_masked_zero_count,
+                             differentialBytes_ror32_masked_zero_count);
+        testCase.request.state.rax = 0xFFFFFFFF12345679ULL;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("rol32_masked_zero_count", CaseId::rol32_masked_zero_count,
+                             differentialBytes_rol32_masked_zero_count);
+        testCase.request.state.rax = 0xFFFFFFFF12345679ULL;
+        testCase.flagMask = carryFlag | overflowFlag;
         run(testCase);
     }
     {

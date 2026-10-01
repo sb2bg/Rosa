@@ -631,6 +631,9 @@ extern "C" x86::X86State *
 updateRotateRightFlags64(x86::X86State *state, std::uint64_t result, std::uint64_t unmaskedCount);
 
 extern "C" x86::X86State *
+updateRotateRightFlags32(x86::X86State *state, std::uint64_t result, std::uint64_t unmaskedCount);
+
+extern "C" x86::X86State *
 updateShiftRightFlags8(x86::X86State *state, std::uint64_t lhsValue, std::uint64_t resultValue,
                        std::uint64_t unmaskedCount);
 

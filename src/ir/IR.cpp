@@ -2318,9 +2318,9 @@ std::vector<std::string> verify(const Block &block) {
             break;
         case Opcode::UpdateRotateRightFlags:
             checkUse(operation.lhs, "result");
-            if (operation.width != Width::I64) {
+            if (operation.width != Width::I32 && operation.width != Width::I64) {
                 errors.emplace_back(
-                    "update_rotate_right_flags currently requires i64");
+                    "update_rotate_right_flags requires i32 or i64");
             }
             break;
         case Opcode::ExitBlock:

@@ -3555,7 +3555,9 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
             } else {
                 assembler.movImmediate(arm64::x2, operation.immediate);
             }
-            assembler.movImmediate(arm64::x16, pointerBits(&updateRotateRightFlags64));
+            assembler.movImmediate(arm64::x16, operation.width == ir::Width::I32
+                                                   ? pointerBits(&updateRotateRightFlags32)
+                                                   : pointerBits(&updateRotateRightFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateMultiplyFlags:

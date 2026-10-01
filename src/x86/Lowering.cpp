@@ -2772,22 +2772,29 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            if (reg.width != 64) {
+            if (reg.width != 32 && reg.width != 64) {
                 throw std::runtime_error("internal decoder error: ROR width");
             }
-            const auto count = static_cast<std::uint8_t>(immediate.value & 0x3FU);
+            const auto count = static_cast<std::uint8_t>(
+                immediate.value & (reg.width == 64 ? 0x3FU : 0x1FU));
+            const auto width = reg.width == 64 ? ir::Width::I64 : ir::Width::I32;
             if (count == 0) {
+                // As for ROL: flags stay untouched, a 32-bit destination
+                // still zero-extends.
+                if (reg.width == 32) {
+                    builder.writeGuestRegister(
+                        reg.reg, builder.readGuestRegister(reg.reg, width, instruction.address),
+                        width, instruction.address);
+                }
                 break;
             }
-            const auto original =
-                builder.readGuestRegister(reg.reg, ir::Width::I64, instruction.address);
-            const auto right =
-                builder.shiftRightLogical(original, count, ir::Width::I64, instruction.address);
-            const auto left = builder.shiftLeft(original, static_cast<std::uint8_t>(64U - count),
-                                                ir::Width::I64, instruction.address);
-            const auto result = builder.bitOr(right, left, ir::Width::I64, instruction.address);
-            builder.writeGuestRegister(reg.reg, result, ir::Width::I64, instruction.address);
-            builder.updateRotateRightFlags(result, count, ir::Width::I64, instruction.address);
+            const auto original = builder.readGuestRegister(reg.reg, width, instruction.address);
+            const auto right = builder.shiftRightLogical(original, count, width, instruction.address);
+            const auto left = builder.shiftLeft(
+                original, static_cast<std::uint8_t>(reg.width - count), width, instruction.address);
+            const auto result = builder.bitOr(right, left, width, instruction.address);
+            builder.writeGuestRegister(reg.reg, result, width, instruction.address);
+            builder.updateRotateRightFlags(result, count, width, instruction.address);
             break;
         }
         case x86::Opcode::RorRegCl: {

@@ -3201,8 +3201,7 @@ bool decodeGeneral(DecodeContext &context) {
         const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
         const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
         const bool observedSar = extension == 0x7U;
-        const bool observedRor =
-            rexW && !rexR && !rexX && extension == 0x1U;
+        const bool observedRor = !rexR && !rexX && extension == 0x1U;
         const bool observedRol =
             !rexR && !rexX && extension == 0x0U;
         if (mode != 0x3U && extension == 0x5U && !rexR && !rexX) {
@@ -3279,7 +3278,7 @@ bool decodeGeneral(DecodeContext &context) {
                   (extension != 0x4U && extension != 0x5U)))) {
                 throw DecodeError(
                     address, remaining,
-                    "only ROL r32/r64, ROR r64, SHL/SHR r32/r64, and SAR r32/r64 register forms and SHR dword/qword memory from opcode C1 are supported");
+                    "only ROL/ROR/SHL/SHR/SAR r32/r64 register forms and SHR dword/qword memory from opcode C1 are supported");
             }
             instruction.opcode = extension == 0x0U   ? Opcode::RolRegImm
                                  : extension == 0x1U ? Opcode::RorRegImm
