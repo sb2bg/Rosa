@@ -11,6 +11,7 @@
 #include "guest/StartupStack.h"
 #include "macho/Loader.h"
 #include "macho/MachOFile.h"
+#include "x86/Decoder.h"
 #include "x86/Registers.h"
 
 #include <array>
@@ -24,6 +25,7 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -68,6 +70,7 @@ void printUsage(std::ostream &stream) {
               "  rosa selftest r2 [--dump-x86] [--dump-ir] [--dump-arm64]\n"
               "  rosa inspect [--segments] [--load-commands] <x86_64-mach-o>\n"
               "  rosa cache inspect <dyld_shared_cache_x86_64>\n"
+              "  rosa decode [--address <hex>] < hex-instructions\n"
               "  rosa run <controlled-x86_64-mach-o> [--dump-x86] [--dump-ir] [--dump-arm64]\n"
               "  rosa run [--dyld <x86_64-dyld>] [--shared-cache <cache>] "
               "[--max-blocks <count>] [--translation-cache <path>] [--timings] [--trace-syscalls] "
@@ -277,6 +280,45 @@ void inspectSharedCache(int argc, char **argv) {
                   << " max=" << permissionText(mapping.maximumPermissions) << " slide-info=0x"
                   << mapping.slideInfoFileOffset << "+0x" << mapping.slideInfoFileSize
                   << " flags=0x" << mapping.flags << std::dec << '\n';
+    }
+}
+
+// Decodes one instruction per stdin line, given as hex bytes ("66 0f 38 00 c1"),
+// and reports Rosa's disassembly or its decoder diagnostic. Paired with an
+// external disassembler for instruction boundaries, this lists every encoding
+// in a function Rosa cannot yet decode without running it.
+void decodeInstructions(int argc, char **argv) {
+    std::uint64_t address = 0x1000;
+    if (argc == 4 && std::string_view(argv[2]) == "--address") {
+        const std::string_view value(argv[3]);
+        const auto [end, error] =
+            std::from_chars(value.data(), value.data() + value.size(), address, 16);
+        if (error != std::errc{} || end != value.data() + value.size()) {
+            throw std::invalid_argument("--address requires a hexadecimal guest address");
+        }
+    } else if (argc != 2) {
+        throw std::invalid_argument("decode takes only an optional --address <hex>");
+    }
+    const rosa::x86::Decoder decoder;
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        std::vector<std::uint8_t> bytes;
+        std::istringstream tokens(line);
+        std::string token;
+        while (tokens >> token) {
+            bytes.push_back(static_cast<std::uint8_t>(std::stoul(token, nullptr, 16)));
+        }
+        if (bytes.empty()) {
+            continue;
+        }
+        try {
+            const auto instruction =
+                decoder.decodeInstruction(bytes, rosa::guest::GuestAddress{address});
+            std::cout << "ok\t" << rosa::debug::dumpX86(std::vector{instruction});
+        } catch (const rosa::x86::DecodeError &error) {
+            std::cout << "unsupported\t" << line << '\t' << error.what() << '\n';
+        }
+        address += bytes.size();
     }
 }
 
@@ -659,6 +701,10 @@ int main(int argc, char **argv) {
         }
         if (command == "cache") {
             inspectSharedCache(argc, argv);
+            return 0;
+        }
+        if (command == "decode") {
+            decodeInstructions(argc, argv);
             return 0;
         }
         if (command == "run") {
