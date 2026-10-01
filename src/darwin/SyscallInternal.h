@@ -90,6 +90,7 @@ inline constexpr std::uint64_t syscallLseek = unixSyscallClass | 199U;
 inline constexpr std::uint64_t syscallSysctl = unixSyscallClass | 202U;
 inline constexpr std::uint64_t syscallGetattrlist = unixSyscallClass | 220U;
 inline constexpr std::uint64_t syscallFgetattrlist = unixSyscallClass | 228U;
+inline constexpr std::uint64_t syscallGetattrlistbulk = unixSyscallClass | 461U;
 inline constexpr std::uint64_t syscallShmOpen = unixSyscallClass | 266U;
 inline constexpr std::uint64_t syscallSharedRegionCheck = unixSyscallClass | 294U;
 inline constexpr std::uint64_t syscallIssetugid = unixSyscallClass | 327U;
@@ -134,7 +135,11 @@ inline constexpr std::size_t maximumControlledWrite = 16U * 1024U * 1024U;
 inline constexpr std::size_t maximumLongPath = 8192;
 inline constexpr std::size_t guestPathMaximum = 1024;
 inline constexpr std::uint32_t guestOpenAccessMode = 0x3;
+inline constexpr std::int32_t guestAtCurrentDirectory = -2;
+inline constexpr std::uint64_t guestAtSymlinkNoFollow = 0x20;
 inline constexpr std::uint32_t guestOpenReadOnly = 0x0;
+inline constexpr std::uint32_t guestOpenNonblock = 0x4;
+inline constexpr std::uint32_t guestOpenNoFollow = 0x100;
 inline constexpr std::uint32_t guestOpenDirectory = 0x00100000;
 inline constexpr std::uint32_t guestOpenNoFollowAny = 0x20000000;
 inline constexpr std::uint32_t guestOpenCloseOnExec = 0x01000000;
@@ -293,18 +298,37 @@ void setHostResult(x86::X86State &state, Result result) {
     }
 }
 
-// Resolves a guest path against the task's current directory to a canonical
-// host path. Callers still apply GuestFileSpace::permitsHostPath.
+// Resolves a guest path against a base directory to a canonical host path.
+// Intermediate symlinks always resolve; the final component resolves only
+// when following, so lstat-style queries keep the link's own identity.
+// Callers still apply GuestFileSpace::permitsHostPath where it matters.
 inline std::expected<std::filesystem::path, int>
-canonicalGuestPath(const GuestFileSpace &files, const std::string &path) {
+canonicalGuestPathFrom(const std::filesystem::path &base, const std::string &path,
+                       bool followFinal = true) {
+    if (path.empty()) {
+        return std::unexpected(ENOENT);
+    }
     const auto direct = std::filesystem::path{path};
-    const auto query = direct.is_absolute() ? direct : files.currentDirectory() / direct;
+    const auto query = direct.is_absolute() ? direct : base / direct;
+    const auto finalName = query.filename();
     std::error_code error;
-    auto canonical = std::filesystem::canonical(query, error);
+    if (followFinal || finalName.empty() || finalName == "." || finalName == "..") {
+        auto canonical = std::filesystem::canonical(query, error);
+        if (error) {
+            return std::unexpected(error.value());
+        }
+        return canonical;
+    }
+    auto parent = std::filesystem::canonical(query.parent_path(), error);
     if (error) {
         return std::unexpected(error.value());
     }
-    return canonical;
+    return parent / finalName;
+}
+
+inline std::expected<std::filesystem::path, int>
+canonicalGuestPath(const GuestFileSpace &files, const std::string &path) {
+    return canonicalGuestPathFrom(files.currentDirectory(), path);
 }
 
 inline bool isHostDirectory(const GuestOpenFile &file) {
@@ -370,6 +394,7 @@ SyscallOutcome handleLseek(SyscallCall &call);
 SyscallOutcome handleFstat64(SyscallCall &call);
 SyscallOutcome handleGetattrlist(SyscallCall &call);
 SyscallOutcome handleFgetattrlist(SyscallCall &call);
+SyscallOutcome handleGetattrlistbulk(SyscallCall &call);
 SyscallOutcome handleGetfsstat64(SyscallCall &call);
 SyscallOutcome handleFstatfs64(SyscallCall &call);
 SyscallOutcome handleGetdirentries64(SyscallCall &call);

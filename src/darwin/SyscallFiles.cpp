@@ -422,7 +422,9 @@ SyscallOutcome handleOpen(SyscallCall &call) {
     // Read-only opens of files and directories become host descriptors
     // owned by the guest's open file description. Without O_CREAT the
     // kernel ignores the mode argument.
-    constexpr std::uint32_t hostedReadOnlyFlags = guestOpenDirectory | guestOpenCloseOnExec;
+    // Darwin's open flag values are identical for x86_64 and arm64.
+    constexpr std::uint32_t hostedReadOnlyFlags =
+        guestOpenDirectory | guestOpenCloseOnExec | guestOpenNonblock | guestOpenNoFollow;
     if ((flags & guestOpenAccessMode) != guestOpenReadOnly ||
         (flags & ~(guestOpenAccessMode | hostedReadOnlyFlags)) != 0) {
         std::ostringstream reason;
@@ -431,7 +433,10 @@ SyscallOutcome handleOpen(SyscallCall &call) {
                << " mode=0x" << mode;
         throw unsupported(state, syscallRip, reason.str());
     }
-    const auto canonicalPath = canonicalGuestPath(task.fileSpace, *path);
+    // O_NOFOLLOW must reach the host with the final symlink intact.
+    const bool followFinal = (flags & guestOpenNoFollow) == 0;
+    const auto canonicalPath =
+        canonicalGuestPathFrom(task.fileSpace.currentDirectory(), *path, followFinal);
     if (!canonicalPath) {
         setError(state, canonicalPath.error());
         return {};
@@ -444,7 +449,7 @@ SyscallOutcome handleOpen(SyscallCall &call) {
         throw unsupported(state, syscallRip, reason.str());
     }
     const int host = ::open(canonicalPath->c_str(),
-                            O_RDONLY | O_CLOEXEC | (wantsDirectory ? O_DIRECTORY : 0));
+                            static_cast<int>(flags & hostedReadOnlyFlags) | O_RDONLY | O_CLOEXEC);
     if (host < 0) {
         setError(state, errno);
         return {};
@@ -498,10 +503,48 @@ SyscallOutcome handleOpenat(SyscallCall &call) {
     return {};
 }
 
+// Copies host metadata for a guest path into the explicit x86_64 stat64
+// layout. Metadata is disclosure-only, so unlike open it answers for any
+// path that resolves: bundle-path ancestor walks stat containers outside
+// the working directory (for example /Users above a fixture tree).
+SyscallOutcome answerHostMetadata(SyscallCall &call, const std::filesystem::path &base,
+                                  const std::string &path, bool followFinal,
+                                  std::uint64_t outputAddress) {
+    auto &[addressSpace, state, syscallRip, task] = call;
+    static_cast<void>(syscallRip);
+    static_cast<void>(task);
+    const auto hostPath = canonicalGuestPathFrom(base, path, followFinal);
+    if (!hostPath) {
+        setError(state, hostPath.error());
+        return {};
+    }
+    struct stat hostMetadata {};
+    const int sampled = followFinal ? ::stat(hostPath->c_str(), &hostMetadata)
+                                    : ::lstat(hostPath->c_str(), &hostMetadata);
+    if (sampled != 0) {
+        setError(state, errno);
+        return {};
+    }
+    const auto metadata = guestStat64FromHost(hostMetadata);
+    try {
+        addressSpace.validateAccess(guest::GuestAddress{outputAddress}, sizeof(metadata),
+                                    guest::Permission::Write);
+        addressSpace.writeBytes(guest::GuestAddress{outputAddress},
+                                std::span<const std::uint8_t>{
+                                    reinterpret_cast<const std::uint8_t *>(&metadata),
+                                    sizeof(metadata)});
+    } catch (const std::runtime_error &) {
+        setError(state, EFAULT);
+        return {};
+    }
+    setSuccess(state, 0);
+    return {};
+}
+
 SyscallOutcome handleStat64(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
-    const auto number = state.rax;
-    const char *callName = number == syscallStat64 ? "stat64" : "lstat64";
+    static_cast<void>(syscallRip);
+    const bool followFinal = state.rax == syscallStat64;
     std::optional<std::string> path;
     try {
         path = readGuestCString(addressSpace,
@@ -522,55 +565,8 @@ SyscallOutcome handleStat64(SyscallCall &call) {
         setError(state, ENOENT);
         return {};
     }
-    // Resolve relative guest paths against the task's current directory,
-    // mirroring the read-only open and access policy.
-    const auto directPath = std::filesystem::path{*path};
-    const auto queryPath = directPath.is_absolute()
-                               ? directPath
-                               : task.fileSpace.currentDirectory() / directPath;
-    std::error_code error;
-    const auto canonicalPath = std::filesystem::canonical(queryPath, error);
-    if (error) {
-        setError(state, error.value());
-        return {};
-    }
-    // Bundle-path ancestor walks stat containers outside the working
-    // directory (for example /Users above the fixture tree). Metadata is
-    // disclosure-only: open and read stay confined, but stat answers real
-    // host metadata for any absolute path that canonicalizes.
-    struct stat hostMetadata {};
-    // Sandbox canonicalization resolves intermediate symlinks, matching
-    // the stat64 policy; only the final component keeps link identity.
-    const int sampled =
-        number == syscallStat64
-            ? ::stat(canonicalPath.c_str(), &hostMetadata)
-            : ::lstat(canonicalPath.c_str(), &hostMetadata);
-    if (sampled != 0) {
-        setError(state, errno);
-        return {};
-    }
-    if (!S_ISREG(hostMetadata.st_mode) && !S_ISDIR(hostMetadata.st_mode)) {
-        std::ostringstream reason;
-        reason << "only mapped regular-file and directory " << callName
-               << " is implemented; got path=\"" << *path << '"';
-        throw unsupported(state, syscallRip, reason.str());
-    }
-    const auto metadata = guestStat64FromHost(hostMetadata);
-    try {
-        addressSpace.validateAccess(guest::GuestAddress{state.rsi},
-                                    sizeof(metadata),
-                                    guest::Permission::Write);
-        addressSpace.writeBytes(
-            guest::GuestAddress{state.rsi},
-            std::span<const std::uint8_t>{
-                reinterpret_cast<const std::uint8_t *>(&metadata),
-                sizeof(metadata)});
-    } catch (const std::runtime_error &) {
-        setError(state, EFAULT);
-        return {};
-    }
-    setSuccess(state, 0);
-    return {};
+    return answerHostMetadata(call, task.fileSpace.currentDirectory(), *path, followFinal,
+                              state.rsi);
 }
 
 SyscallOutcome handleLseek(SyscallCall &call) {
@@ -808,6 +804,66 @@ SyscallOutcome handleFgetattrlist(SyscallCall &call) {
     return {};
 }
 
+SyscallOutcome handleGetattrlistbulk(SyscallCall &call) {
+    auto &[addressSpace, state, syscallRip, task] = call;
+    const auto descriptor = guestDescriptor(state.rdi);
+    const auto *file = task.fileSpace.lookup(descriptor);
+    if (file == nullptr) {
+        setError(state, EBADF);
+        return {};
+    }
+    if (!file->hostBacked()) {
+        std::ostringstream reason;
+        reason << "getattrlistbulk is not implemented for synthetic guest descriptors; got fd="
+               << descriptor.value;
+        throw unsupported(state, syscallRip, reason.str());
+    }
+    struct attrlist attributes {};
+    try {
+        const auto bytes = addressSpace.readBytes(guest::GuestAddress{state.rsi}, sizeof(attributes));
+        std::memcpy(&attributes, bytes.data(), sizeof(attributes));
+    } catch (const std::runtime_error &) {
+        setError(state, EFAULT);
+        return {};
+    }
+    // Each returned entry leads with its own u32 length and holds
+    // self-relative references to LP64 types laid out identically on x86_64
+    // and arm64. The host descriptor carries the directory position.
+    // Arguments: fd, attrlist, buffer (RDX), buffer size (R10), options (R8).
+    const auto size = static_cast<std::size_t>(
+        std::min<std::uint64_t>(state.r10, maximumControlledWrite));
+    std::vector<std::uint8_t> output(size);
+    const int count = ::getattrlistbulk(file->host.get(), &attributes, output.data(),
+                                        output.size(), state.r8);
+    if (count < 0) {
+        setError(state, errno);
+        return {};
+    }
+    std::size_t used = 0;
+    for (int entry = 0; entry < count; ++entry) {
+        std::uint32_t length = 0;
+        if (output.size() - used < sizeof(length)) {
+            throw std::runtime_error("host getattrlistbulk returned a truncated entry");
+        }
+        std::memcpy(&length, output.data() + used, sizeof(length));
+        if (length < sizeof(length) || length > output.size() - used) {
+            throw std::runtime_error("host getattrlistbulk returned a malformed entry");
+        }
+        used += length;
+    }
+    output.resize(used);
+    try {
+        if (!output.empty()) {
+            addressSpace.writeBytes(guest::GuestAddress{state.rdx}, output);
+        }
+    } catch (const std::runtime_error &) {
+        setError(state, EFAULT);
+        return {};
+    }
+    setSuccess(state, static_cast<std::uint64_t>(count));
+    return {};
+}
+
 SyscallOutcome handleGetfsstat64(SyscallCall &call) {
     auto &[addressSpace, state, syscallRip, task] = call;
     static_cast<void>(syscallRip);
@@ -999,24 +1055,38 @@ SyscallOutcome handleFstatat64(SyscallCall &call) {
         setError(state, ENAMETOOLONG);
         return {};
     }
-    const auto descriptor = GuestFileDescriptor{
-        std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(state.rdi))};
+    if ((state.r10 & ~guestAtSymlinkNoFollow) != 0) {
+        std::ostringstream reason;
+        reason << "only fstatat64 flags 0 and AT_SYMLINK_NOFOLLOW are implemented; got flags=0x"
+               << std::hex << state.r10;
+        throw unsupported(state, syscallRip, reason.str());
+    }
+    const bool followFinal = (state.r10 & guestAtSymlinkNoFollow) == 0;
+    const auto descriptor = guestDescriptor(state.rdi);
+    // As in XNU's nameiat, an absolute path never consults the descriptor.
+    if (descriptor.value == guestAtCurrentDirectory ||
+        std::filesystem::path{*path}.is_absolute()) {
+        return answerHostMetadata(call, task.fileSpace.currentDirectory(), *path, followFinal,
+                                  state.rdx);
+    }
     const auto *directory = task.fileSpace.lookup(descriptor);
     if (directory == nullptr) {
         setError(state, EBADF);
         return {};
     }
+    if (directory->hostBacked()) {
+        if (!isHostDirectory(*directory)) {
+            setError(state, ENOTDIR);
+            return {};
+        }
+        return answerHostMetadata(call, directory->guestPath, *path, followFinal, state.rdx);
+    }
+    // Synthetic root and cryptex directories answer only the provisioned
+    // dyld directory, without touching the host root.
     if (directory->kind != GuestFileKind::RootDirectory &&
-        directory->kind != GuestFileKind::CurrentDirectory &&
         directory->kind != GuestFileKind::SyntheticDirectory) {
         setError(state, ENOTDIR);
         return {};
-    }
-    if (state.r10 != 0) {
-        std::ostringstream reason;
-        reason << "only fstatat64 flags=0 is implemented; got flags=0x"
-               << std::hex << state.r10;
-        throw unsupported(state, syscallRip, reason.str());
     }
 
     auto relativePath = std::filesystem::path{*path};

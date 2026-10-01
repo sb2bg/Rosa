@@ -2,6 +2,8 @@
 #include "TestSuite.h"
 #include "TemporaryFile.h"
 
+#include <sys/attr.h>
+
 #include <fstream>
 #include <initializer_list>
 
@@ -16,6 +18,12 @@ constexpr std::uint64_t dupNumber = 0x02000029;
 constexpr std::uint64_t fcntlNumber = 0x0200005C;
 constexpr std::uint64_t lseekNumber = 0x020000C7;
 constexpr std::uint64_t fcntlNoCancelNumber = 0x02000196;
+constexpr std::uint64_t stat64Number = 0x02000152;
+constexpr std::uint64_t lstat64Number = 0x02000154;
+constexpr std::uint64_t fstatat64Number = 0x020001D6;
+constexpr std::uint64_t getattrlistbulkNumber = 0x020001CD;
+constexpr rosa::guest::GuestAddress secondPathAddress{0x8800};
+constexpr rosa::guest::GuestAddress statAddress{0x9400};
 constexpr rosa::guest::GuestAddress pathAddress{0x8000};
 constexpr rosa::guest::GuestAddress bufferAddress{0x9000};
 
@@ -71,6 +79,47 @@ class GuestTaskFixture {
 void writeFixture(const std::filesystem::path &path, std::string_view contents) {
     std::ofstream stream(path, std::ios::binary);
     stream << contents;
+}
+
+// A directory holding file.txt and link.txt -> file.txt, removed on exit.
+class LinkFixture {
+  public:
+    LinkFixture() {
+        std::string pattern = (std::filesystem::current_path() / ".rosa-test-dir-XXXXXX").string();
+        if (::mkdtemp(pattern.data()) == nullptr) {
+            throw std::runtime_error("cannot create temporary test directory");
+        }
+        path_ = pattern;
+        writeFixture(path_ / "file.txt", "contents");
+        std::filesystem::create_symlink("file.txt", path_ / "link.txt");
+    }
+    ~LinkFixture() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+    LinkFixture(const LinkFixture &) = delete;
+    LinkFixture &operator=(const LinkFixture &) = delete;
+
+    [[nodiscard]] const std::filesystem::path &path() const { return path_; }
+
+  private:
+    std::filesystem::path path_;
+};
+
+void writeGuestString(GuestTaskFixture &task, rosa::guest::GuestAddress address,
+                      const std::string &text) {
+    std::vector<std::uint8_t> bytes(text.begin(), text.end());
+    bytes.push_back(0);
+    task.addressSpace.writeBytes(address, bytes);
+}
+
+std::uint16_t statMode(GuestTaskFixture &task) {
+    std::uint16_t mode = 0;
+    std::memcpy(&mode,
+                task.addressSpace.readBytes(rosa::guest::GuestAddress{statAddress.value + 4}, 2)
+                    .data(),
+                sizeof(mode));
+    return mode;
 }
 
 void testDuplicatedDescriptorsShareTheFileOffset() {
@@ -192,6 +241,96 @@ void testAdvisoryLocksReachTheHost() {
     expectEqual(type, static_cast<std::int16_t>(F_UNLCK), "F_GETLK did not copy out the result");
 }
 
+void testMetadataQueriesKeepSymlinkIdentity() {
+    const LinkFixture fixture;
+    GuestTaskFixture task;
+    const auto link = (fixture.path() / "link.txt").string();
+    writeGuestString(task, pathAddress, link);
+
+    expect(!task.call(lstat64Number, {pathAddress.value, statAddress.value}).failed,
+           "lstat64 of a symlink failed");
+    expect(S_ISLNK(statMode(task)), "lstat64 followed the final symlink");
+    expect(!task.call(stat64Number, {pathAddress.value, statAddress.value}).failed,
+           "stat64 of a symlink failed");
+    expect(S_ISREG(statMode(task)), "stat64 did not follow the final symlink");
+
+    // Observed under grep -r: fts stats entries with fstatat64(AT_FDCWD, ...).
+    constexpr std::uint64_t atCurrentDirectory = 0xFFFFFFFE;
+    constexpr std::uint64_t symlinkNoFollow = 0x20;
+    expect(!task.call(fstatat64Number,
+                      {atCurrentDirectory, pathAddress.value, statAddress.value, symlinkNoFollow})
+                .failed,
+           "fstatat64 AT_SYMLINK_NOFOLLOW failed");
+    expect(S_ISLNK(statMode(task)), "fstatat64 AT_SYMLINK_NOFOLLOW followed the symlink");
+
+    // A relative path resolves against the directory descriptor.
+    const auto directory = task.open(fixture.path(), O_RDONLY | O_DIRECTORY);
+    writeGuestString(task, secondPathAddress, "link.txt");
+    expect(!task.call(fstatat64Number, {directory, secondPathAddress.value, statAddress.value, 0})
+                .failed,
+           "fstatat64 relative to a directory descriptor failed");
+    expect(S_ISREG(statMode(task)), "fstatat64 relative lookup did not follow the symlink");
+
+    const auto missing = task.call(lstat64Number, {secondPathAddress.value, statAddress.value});
+    expect(missing.failed && missing.value == ENOENT,
+           "a relative lstat64 resolved against the directory descriptor");
+}
+
+void testOpenNoFollowRefusesSymlink() {
+    const LinkFixture fixture;
+    GuestTaskFixture task;
+    writeGuestString(task, pathAddress, (fixture.path() / "link.txt").string());
+    const auto result = task.call(openNumber, {pathAddress.value, O_RDONLY | O_NOFOLLOW, 0});
+    expect(result.failed, "O_NOFOLLOW opened a symlink");
+    expectEqual(result.value, static_cast<std::uint64_t>(ELOOP),
+                "O_NOFOLLOW on a symlink returned the wrong errno");
+    expectEqual(guestOpenedDescriptors(task.dispatcher), std::size_t{0},
+                "a refused open allocated a descriptor");
+}
+
+void testGetattrlistbulkListsDirectory() {
+    // Observed under grep -r: macOS fts reads directories with getattrlistbulk.
+    const LinkFixture fixture;
+    GuestTaskFixture task;
+    const auto directory = task.open(fixture.path(), O_RDONLY | O_DIRECTORY);
+    struct attrlist attributes {};
+    attributes.bitmapcount = ATTR_BIT_MAP_COUNT;
+    attributes.commonattr = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME;
+    constexpr rosa::guest::GuestAddress listAddress{0x9600};
+    task.addressSpace.writeBytes(listAddress,
+                                 std::span<const std::uint8_t>{
+                                     reinterpret_cast<const std::uint8_t *>(&attributes),
+                                     sizeof(attributes)});
+    std::vector<std::string> names;
+    for (int round = 0; round < 4; ++round) {
+        const auto result = task.call(getattrlistbulkNumber,
+                                      {directory, listAddress.value, bufferAddress.value, 0x400});
+        expect(!result.failed, "getattrlistbulk failed");
+        if (result.value == 0) {
+            break;
+        }
+        std::uint64_t offset = 0;
+        for (std::uint64_t entry = 0; entry < result.value; ++entry) {
+            const auto base = bufferAddress.value + offset;
+            const auto length = task.addressSpace.readU32(rosa::guest::GuestAddress{base});
+            // length, attribute_set_t (20 bytes), then the name reference.
+            const auto referenceAddress = base + 4 + sizeof(attribute_set_t);
+            const auto dataOffset = static_cast<std::int32_t>(
+                task.addressSpace.readU32(rosa::guest::GuestAddress{referenceAddress}));
+            const auto nameLength =
+                task.addressSpace.readU32(rosa::guest::GuestAddress{referenceAddress + 4});
+            const auto name = task.addressSpace.readBytes(
+                rosa::guest::GuestAddress{referenceAddress + static_cast<std::uint64_t>(dataOffset)},
+                nameLength - 1);
+            names.emplace_back(name.begin(), name.end());
+            offset += length;
+        }
+    }
+    std::ranges::sort(names);
+    expect(names == std::vector<std::string>{"file.txt", "link.txt"},
+           "getattrlistbulk did not list the directory entries");
+}
+
 void testInheritedStandardInputIsReadable() {
     std::array<int, 2> pipe{};
     expect(::pipe(pipe.data()) == 0, "cannot create a standard-input pipe");
@@ -225,6 +364,9 @@ std::span<const TestCase> darwinDescriptorsTests() {
         {"host descriptors report host errors", testHostDescriptorsReportHostErrors},
         {"host access policy governs paths", testHostAccessPolicyGovernsPaths},
         {"advisory locks reach the host", testAdvisoryLocksReachTheHost},
+        {"metadata queries keep symlink identity", testMetadataQueriesKeepSymlinkIdentity},
+        {"O_NOFOLLOW refuses a symlink", testOpenNoFollowRefusesSymlink},
+        {"getattrlistbulk lists a directory", testGetattrlistbulkListsDirectory},
         {"inherited standard input is readable", testInheritedStandardInputIsReadable},
     };
     return cases;
