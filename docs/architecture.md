@@ -9,11 +9,13 @@ built-in bytes, controlled x86_64 Mach-O, or x86_64 dyld slice
         ↓
 bounded parsing + complete segment mapping + initial stack
         ↓
-Rosa x86 decoder
+single-instruction recognition + bounded block formation
         ↓
-small typed SSA-like IR
+portable x86 lowering to typed SSA-like IR
         ↓
-naive local value-to-register assignment
+shared IR optimization (guest-register forwarding)
+        ↓
+local register allocation + AArch64 emission
         ↓
 custom AArch64 encoder
         ↓
@@ -60,6 +62,12 @@ before execution, helper pointers are adjusted for the current ASLR slide, all
 cached programs are published as one JIT batch, and decoded x86 metadata is
 reconstructed only if diagnostics request it. Writable executable mappings
 still use the in-process source/version invalidation path.
+
+The fingerprint hashes the linker UUID of the image containing the runtime
+helpers. This covers separately compiled lowering, optimization, emission,
+helper code, and their final layout, while remaining stable across ASLR slides.
+If the image has no usable UUID, persistence is bypassed. A translation-unit
+timestamp is insufficient once the pipeline spans multiple source files.
 
 ## Mach-O boundary
 

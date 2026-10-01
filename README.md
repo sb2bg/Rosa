@@ -280,6 +280,14 @@ Rosetta is a test dependency only. Rosa never uses it to execute a guest in the 
 # Standard debug suite
 ctest --preset debug
 
+# Focus on one subsystem
+ctest --preset debug -L Optimization
+
+# Build and test without LLVM or the Rosetta oracle
+cmake --preset baseline
+cmake --build --preset baseline
+ctest --preset baseline
+
 # UndefinedBehaviorSanitizer build
 cmake --preset ubsan
 cmake --build --preset ubsan

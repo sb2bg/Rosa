@@ -112,17 +112,31 @@ relocated program.
 
 ## Backend interface direction
 
-The current `Translator` combines portable lowering and AArch64 emission. A future extraction should proceed without changing semantics:
+`Translator` now orchestrates separately compiled frontend, optimization, and
+backend components:
 
 ```text
-x86 Decoder
-    -> portable block builder
-    -> verified Rosa IR
-    -> HostBackend::compile(IR block)
-    -> ExecutableBlock
+x86::Decoder::decodeBlock
+    -> x86::lowerToIr
+    -> ir::optimizeBlock
+    -> arm64::compile
+    -> dbt::TranslatedBlock
 ```
 
-A minimal backend interface should expose capabilities rather than host conditionals throughout the translator. Likely responsibilities include:
+`x86/Lowering.h` owns instruction semantics, `ir/Optimization.h` owns shared IR
+preparation, and `arm64/Backend.h` exposes host compilation. Cold translations
+and lazily reconstructed persistent-cache entries use the same IR preparation.
+Debug builds verify IR after lowering and again after optimization.
+
+`dbt/ExecutionContext.h` defines the private generated-code ABI shared by the
+emitter, runtime helpers, and block execution. `RuntimeHelpers.cpp`,
+`MemoryArithmetic.cpp`, and `FlagHelpers.cpp` implement the helper entry points. Fault exits record the
+instruction RIP in the context before restoring the host ABI; block execution
+restores that RIP before rethrowing the captured exception in C++.
+
+The current block and executable-storage types still use AArch64 types. A future
+second backend should introduce capabilities rather than spreading host
+conditionals through the translator. Likely responsibilities include:
 
 ```cpp
 class HostBackend {
@@ -134,7 +148,9 @@ class HostBackend {
 
 `ExecutableBlock` should own code bytes, relocations already applied, executable storage, diagnostic listing, and immutable entry metadata. `BackendCapabilities` should describe semantic facilities such as atomic widths or executable-memory constraints; it must not be used to silently weaken guest behavior.
 
-The extraction should keep the existing AArch64 path as the reference implementation and move one verified IR family at a time. Do not introduce an abstract backend layer that merely mirrors every AArch64 assembler method.
+Keep the existing AArch64 path as the reference implementation and move one
+verified IR family at a time. Do not introduce an abstract backend layer that
+merely mirrors every AArch64 assembler method.
 
 ## Additional host architectures
 
