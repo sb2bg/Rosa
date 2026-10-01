@@ -719,8 +719,11 @@ bool decodeSimdLanes(DecodeContext &context) {
                 !isImmediateShift && secondOpcode == 0xFEU && mode != 0x3U;
             const bool isDwordShiftRight =
                 isImmediateShift && secondOpcode == 0x72U && regEncoding == 0x2U;
+            // PSRLDQ (/3) and PSLLDQ (/7) shift the whole register by bytes.
+            const bool isByteShift = isImmediateShift && secondOpcode == 0x73U &&
+                                     (regEncoding == 0x3U || regEncoding == 0x7U);
             if ((mode != 0x3U && !packedMemorySource) || (rex & 0xAU) != 0 ||
-                (isImmediateShift && !isDwordShiftRight &&
+                (isImmediateShift && !isDwordShiftRight && !isByteShift &&
                  (regEncoding != expectedOpcodeExtension ||
                   (rex & 0x4U) != 0))) {
                 throw DecodeError(
@@ -728,15 +731,18 @@ bool decodeSimdLanes(DecodeContext &context) {
                     secondOpcode == 0x72U
                         ? "only register-direct PSLLD/PSRLD xmm, imm8 is supported"
                     : secondOpcode == 0x73U
-                        ? "only register-direct PSRLQ xmm, imm8 is supported"
+                        ? "only register-direct PSRLQ/PSRLDQ/PSLLDQ xmm, imm8 is supported"
                     : secondOpcode == 0xFEU
                         ? "only PADDD xmm, xmm/m128 is supported"
                         : "only register-direct PADDQ xmm, xmm is supported");
             }
             if (isImmediateShift) {
-                instruction.opcode = isDwordShiftRight ? Opcode::PsrldRegImm
-                                     : secondOpcode == 0x72U ? Opcode::PslldRegImm
-                                                             : Opcode::PsrlqRegImm;
+                instruction.opcode =
+                    isDwordShiftRight ? Opcode::PsrldRegImm
+                    : isByteShift     ? (regEncoding == 0x3U ? Opcode::PsrldqRegImm
+                                                             : Opcode::PslldqRegImm)
+                    : secondOpcode == 0x72U ? Opcode::PslldRegImm
+                                            : Opcode::PsrlqRegImm;
                 instruction.operands.push_back(XmmRegisterOperand{
                     static_cast<XmmRegister>(static_cast<std::uint8_t>(
                         rmEncoding | ((rex & 0x1U) != 0 ? 8U : 0U)))});

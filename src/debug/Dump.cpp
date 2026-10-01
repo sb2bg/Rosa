@@ -2247,6 +2247,14 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                           instruction.operands[1])
                           .value;
             break;
+        case x86::Opcode::PsrldqRegImm:
+        case x86::Opcode::PslldqRegImm:
+            stream << (instruction.opcode == x86::Opcode::PsrldqRegImm ? "psrldq " : "pslldq ")
+                   << x86::xmmRegisterName(
+                          std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg)
+                   << ", " << std::dec
+                   << std::get<x86::ImmediateOperand>(instruction.operands[1]).value;
+            break;
         case x86::Opcode::PsrlqRegImm:
             stream << "psrlq "
                    << x86::xmmRegisterName(

@@ -136,6 +136,8 @@ enum class Opcode {
     PslldRegImm,
     PsrldRegImm,
     PsrlqRegImm,
+    PsrldqRegImm,
+    PslldqRegImm,
     PadddRegReg,
     PadddRegMem,
     PaddwRegReg,

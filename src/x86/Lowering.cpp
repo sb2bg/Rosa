@@ -1961,6 +1961,57 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
                                    width, instruction.address);
             break;
         }
+        case x86::Opcode::PsrldqRegImm:
+        case x86::Opcode::PslldqRegImm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: byte-shift operand count");
+            }
+            const auto reg = std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto bytes = std::get<x86::ImmediateOperand>(instruction.operands[1]).value & 0xFFU;
+            const bool right = instruction.opcode == x86::Opcode::PsrldqRegImm;
+            const auto rip = instruction.address;
+            if (bytes == 0) {
+                break;
+            }
+            const auto zero = builder.constant(0, ir::Width::I64, rip);
+            if (bytes >= 16) {
+                builder.writeGuestXmmLane(reg, false, zero, rip);
+                builder.writeGuestXmmLane(reg, true, zero, rip);
+                break;
+            }
+            const auto low = builder.readGuestXmmLane(reg, false, rip);
+            const auto high = builder.readGuestXmmLane(reg, true, rip);
+            if (bytes >= 8) {
+                // One lane crosses wholesale; the other becomes zero.
+                const auto bits = static_cast<std::uint8_t>((bytes - 8) * 8);
+                const auto source = right ? high : low;
+                const auto moved =
+                    bits == 0 ? source
+                    : right   ? builder.shiftRightLogical(source, bits, ir::Width::I64, rip)
+                              : builder.shiftLeft(source, bits, ir::Width::I64, rip);
+                builder.writeGuestXmmLane(reg, !right, moved, rip);
+                builder.writeGuestXmmLane(reg, right, zero, rip);
+                break;
+            }
+            const auto bits = static_cast<std::uint8_t>(bytes * 8);
+            const auto carry = static_cast<std::uint8_t>(64 - bits);
+            if (right) {
+                const auto newLow = builder.bitOr(
+                    builder.shiftRightLogical(low, bits, ir::Width::I64, rip),
+                    builder.shiftLeft(high, carry, ir::Width::I64, rip), ir::Width::I64, rip);
+                const auto newHigh = builder.shiftRightLogical(high, bits, ir::Width::I64, rip);
+                builder.writeGuestXmmLane(reg, false, newLow, rip);
+                builder.writeGuestXmmLane(reg, true, newHigh, rip);
+            } else {
+                const auto newHigh = builder.bitOr(
+                    builder.shiftLeft(high, bits, ir::Width::I64, rip),
+                    builder.shiftRightLogical(low, carry, ir::Width::I64, rip), ir::Width::I64, rip);
+                const auto newLow = builder.shiftLeft(low, bits, ir::Width::I64, rip);
+                builder.writeGuestXmmLane(reg, false, newLow, rip);
+                builder.writeGuestXmmLane(reg, true, newHigh, rip);
+            }
+            break;
+        }
         case x86::Opcode::IncReg: {
             if (instruction.operands.size() != 1) {
                 throw std::runtime_error("internal decoder error: increment operand count");
