@@ -15,6 +15,7 @@ constexpr std::uint64_t closeNumber = 0x02000006;
 constexpr std::uint64_t dupNumber = 0x02000029;
 constexpr std::uint64_t fcntlNumber = 0x0200005C;
 constexpr std::uint64_t lseekNumber = 0x020000C7;
+constexpr std::uint64_t fcntlNoCancelNumber = 0x02000196;
 constexpr rosa::guest::GuestAddress pathAddress{0x8000};
 constexpr rosa::guest::GuestAddress bufferAddress{0x9000};
 
@@ -162,6 +163,35 @@ void testHostAccessPolicyGovernsPaths() {
                 "a host-access guest could not read a host file");
 }
 
+void testAdvisoryLocksReachTheHost() {
+    // Observed under cat -l: F_SETLKW on standard output, via fcntl_nocancel.
+    const TemporaryFile file(std::filesystem::current_path());
+    GuestTaskFixture task;
+    const auto descriptor = task.open(file.path());
+    constexpr std::uint64_t getLock = 7;
+    constexpr std::uint64_t setLockWait = 9;
+    // struct flock {off_t start, off_t len, pid_t pid, short type, short whence}.
+    constexpr rosa::guest::GuestAddress lockAddress{0x9800};
+    const auto writeLock = [&](std::int16_t type) {
+        std::array<std::uint8_t, 24> lock{};
+        std::memcpy(lock.data() + 20, &type, sizeof(type));
+        task.addressSpace.writeBytes(lockAddress, lock);
+    };
+    writeLock(F_RDLCK);
+    expect(!task.call(fcntlNoCancelNumber, {descriptor, setLockWait, lockAddress.value}).failed,
+           "F_SETLKW through fcntl_nocancel failed");
+
+    // F_GETLK reports no conflict to the lock owner and copies the record back.
+    writeLock(F_WRLCK);
+    expect(!task.call(fcntlNumber, {descriptor, getLock, lockAddress.value}).failed,
+           "F_GETLK failed");
+    std::int16_t type = 0;
+    std::memcpy(&type, task.addressSpace.readBytes(
+                           rosa::guest::GuestAddress{lockAddress.value + 20}, 2).data(),
+                sizeof(type));
+    expectEqual(type, static_cast<std::int16_t>(F_UNLCK), "F_GETLK did not copy out the result");
+}
+
 void testInheritedStandardInputIsReadable() {
     std::array<int, 2> pipe{};
     expect(::pipe(pipe.data()) == 0, "cannot create a standard-input pipe");
@@ -194,6 +224,7 @@ std::span<const TestCase> darwinDescriptorsTests() {
         {"descriptors allocate lowest free", testDescriptorsAllocateLowestFree},
         {"host descriptors report host errors", testHostDescriptorsReportHostErrors},
         {"host access policy governs paths", testHostAccessPolicyGovernsPaths},
+        {"advisory locks reach the host", testAdvisoryLocksReachTheHost},
         {"inherited standard input is readable", testInheritedStandardInputIsReadable},
     };
     return cases;

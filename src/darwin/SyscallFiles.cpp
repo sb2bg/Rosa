@@ -1230,11 +1230,41 @@ SyscallOutcome handleFcntl(SyscallCall &call) {
             setSuccess(state, file->flags & guestOpenAccessMode);
         }
         return {};
+    case guestFcntlGetLock:
+    case guestFcntlSetLock:
+    case guestFcntlSetLockWait: {
+        // struct flock is {off_t, off_t, pid_t, short, short} on both
+        // architectures, and the guest pid is the host pid.
+        if (!file->hostBacked()) {
+            setError(state, EBADF);
+            return {};
+        }
+        struct flock lock {};
+        static_assert(sizeof(lock) == 24);
+        try {
+            const auto bytes = addressSpace.readBytes(guest::GuestAddress{state.rdx}, sizeof(lock));
+            std::memcpy(&lock, bytes.data(), sizeof(lock));
+        } catch (const std::runtime_error &) {
+            setError(state, EFAULT);
+            return {};
+        }
+        if (::fcntl(file->host.get(), static_cast<int>(command), &lock) != 0) {
+            setError(state, errno);
+            return {};
+        }
+        if (command == guestFcntlGetLock) {
+            addressSpace.writeBytes(guest::GuestAddress{state.rdx},
+                                    std::span<const std::uint8_t>{
+                                        reinterpret_cast<const std::uint8_t *>(&lock), sizeof(lock)});
+        }
+        setSuccess(state, 0);
+        return {};
+    }
     case guestFcntlGetPath:
         break;
     default: {
         std::ostringstream reason;
-        reason << "only fcntl F_DUPFD/F_GETFD/F_SETFD/F_GETFL/F_GETPATH/F_DUPFD_CLOEXEC are implemented; got command="
+        reason << "only fcntl F_DUPFD/F_GETFD/F_SETFD/F_GETFL/F_GETLK/F_SETLK/F_SETLKW/F_GETPATH/F_DUPFD_CLOEXEC are implemented; got command="
                << std::dec << command;
         throw unsupported(state, syscallRip, reason.str());
     }

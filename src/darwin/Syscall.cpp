@@ -60,6 +60,7 @@ constexpr std::array syscallTable = std::to_array<SyscallEntry>({
     {detail::syscallRead, "read", detail::handleRead},
     {detail::syscallReadNoCancel, "read_nocancel", detail::handleRead},
     {detail::syscallFcntl, "fcntl", detail::handleFcntl},
+    {detail::syscallFcntlNoCancel, "fcntl_nocancel", detail::handleFcntl},
     {detail::syscallMprotect, "mprotect", detail::handleMprotect},
     {detail::syscallMadvise, "madvise", detail::handleMadvise},
     {detail::syscallMunmap, "munmap", detail::handleMunmap},
