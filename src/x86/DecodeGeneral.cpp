@@ -80,10 +80,10 @@ bool decodeGeneral(DecodeContext &context) {
     const auto opcode = code[cursor++];
     if (hasOperandSizeOverride && opcode != 0x01U && opcode != 0x03U && opcode != 0x0BU && opcode != 0x39U &&
         opcode != 0x3BU && opcode != 0x89U && opcode != 0x8BU && opcode != 0xF7U &&
-        opcode != 0xFFU && opcode != 0x21U && opcode != 0x09U) {
+        opcode != 0xFFU && opcode != 0x21U && opcode != 0x09U && opcode != 0x33U) {
         throw DecodeError(
             address, remaining,
-            "operand-size override is only supported for 16-bit ADD, OR, CMP, MOV, and memory INC in the general decoder");
+            "operand-size override is only supported for 16-bit ADD, OR, CMP, MOV, XOR r16, [memory], and memory INC in the general decoder");
     }
     if (hasGsOverride && opcode != 0x89U && opcode != 0x8BU &&
         opcode != 0xC7U &&
@@ -1970,13 +1970,13 @@ bool decodeGeneral(DecodeContext &context) {
         const auto modrm = code[cursor++];
         const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
         const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-        const auto operandWidth =
-            static_cast<std::uint8_t>(rexW ? 64U : 32U);
+        const auto operandWidth = static_cast<std::uint8_t>(
+            rexW ? 64U : hasOperandSizeOverride ? 16U : 32U);
         if (mode == 0x3U) {
-            if (rexX) {
+            if (rexX || hasOperandSizeOverride) {
                 throw DecodeError(
                     address, remaining,
-                    "REX.X register-direct XOR from opcode 33 is unsupported");
+                    "REX.X or 16-bit register-direct XOR from opcode 33 is unsupported");
             }
             instruction.opcode = Opcode::XorRegReg;
             instruction.operands.push_back(RegisterOperand{

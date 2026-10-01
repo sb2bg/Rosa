@@ -1532,6 +1532,17 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        // Observed in liblzma under grep -X: xor dx, word [rcx+4].
+        auto testCase = make("xor16_register_memory", CaseId::xor16_register_memory,
+                             differentialBytes_xor16_register_memory);
+        bindMemory(testCase, rosa::x86::Register::Rcx, 0x20);
+        testCase.request.state.rdx = 0x1122334455668001ULL;
+        constexpr std::uint16_t value = 0x0F0F;
+        std::memcpy(testCase.request.memory.data() + 0x24, &value, sizeof(value));
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag | overflowFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("std_sets_direction", CaseId::std_sets_direction,
                              differentialBytes_std_sets_direction);
         testCase.flagMask = arithmeticFlags | directionFlag;

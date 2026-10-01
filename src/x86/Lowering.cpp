@@ -3457,7 +3457,12 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
             }
             const auto destination = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            if (destination.width != 8 && destination.width != 16 && destination.width != 32 &&
+                destination.width != 64) {
+                throw std::runtime_error("internal decoder error: XOR register, [memory] width");
+            }
             const auto width = destination.width == 8    ? ir::Width::I8
+                               : destination.width == 16 ? ir::Width::I16
                                : destination.width == 32 ? ir::Width::I32
                                                          : ir::Width::I64;
             auto address =
