@@ -332,6 +332,9 @@ extern "C" x86::X86State *updateSbbFlags8(x86::X86State *state,
                                                                      std::uint64_t rhsValue,
                                                                      std::uint64_t borrowValue);
 
+extern "C" x86::X86State *updateSbbFlags16(x86::X86State *state, std::uint64_t lhsValue,
+                                           std::uint64_t rhsValue, std::uint64_t borrowValue);
+
 extern "C" x86::X86State *updateSbbFlags32(x86::X86State *state,
                                                                      std::uint64_t lhsValue,
                                                                      std::uint64_t rhsValue,

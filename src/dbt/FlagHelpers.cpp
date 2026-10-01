@@ -256,6 +256,39 @@ extern "C" __attribute__((noinline)) x86::X86State *updateSbbFlags8(x86::X86Stat
     return state;
 }
 
+extern "C" __attribute__((noinline)) x86::X86State *updateSbbFlags16(x86::X86State *state,
+                                                                     std::uint64_t lhsValue,
+                                                                     std::uint64_t rhsValue,
+                                                                     std::uint64_t borrowValue) {
+    const auto lhs = static_cast<std::uint16_t>(lhsValue);
+    const auto rhs = static_cast<std::uint16_t>(rhsValue);
+    const auto borrow = static_cast<std::uint16_t>(borrowValue & 1U);
+    const auto wideSubtrahend = static_cast<std::uint32_t>(rhs) + borrow;
+    const auto result =
+        static_cast<std::uint16_t>(static_cast<std::uint32_t>(lhs) - wideSubtrahend);
+    auto flags = (state->rflags & ~arithmeticFlagMask) | flagReservedOne;
+    if (static_cast<std::uint32_t>(lhs) < wideSubtrahend) {
+        flags |= flagCarry;
+    }
+    if ((std::popcount(static_cast<unsigned>(result & 0xFFU)) % 2) == 0) {
+        flags |= flagParity;
+    }
+    if (((lhs ^ rhs ^ result) & 0x10U) != 0) {
+        flags |= flagAuxiliaryCarry;
+    }
+    if (result == 0) {
+        flags |= flagZero;
+    }
+    if ((result & 0x8000U) != 0) {
+        flags |= flagSign;
+    }
+    if ((((lhs ^ rhs) & (lhs ^ result)) & 0x8000U) != 0) {
+        flags |= flagOverflow;
+    }
+    state->rflags = flags;
+    return state;
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *updateSbbFlags32(x86::X86State *state,
                                                                      std::uint64_t lhsValue,
                                                                      std::uint64_t rhsValue,

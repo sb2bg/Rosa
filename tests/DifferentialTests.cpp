@@ -1492,6 +1492,22 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        // Observed in libsystem_c: sbb ax, 0 propagating a borrow.
+        auto testCase = make("sbb16_immediate_borrow_wraps", CaseId::sbb16_immediate_borrow_wraps,
+                             differentialBytes_sbb16_immediate_borrow_wraps);
+        testCase.request.state.rax = 0x1234567890AB0000ULL;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
+        // sbb r9w, 1 crossing the signed boundary, with REX.B.
+        auto testCase = make("sbb16_immediate_overflow", CaseId::sbb16_immediate_overflow,
+                             differentialBytes_sbb16_immediate_overflow);
+        testCase.request.state.r9 = 0xFFFFFFFFFFFF8000ULL;
+        testCase.request.state.rflags &= ~carryFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("std_sets_direction", CaseId::std_sets_direction,
                              differentialBytes_std_sets_direction);
         testCase.flagMask = arithmeticFlags | directionFlag;

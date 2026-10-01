@@ -3415,9 +3415,11 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
             assembler.mov(arm64::x3, hostRegister(*operation.third));
             assembler.movImmediate(arm64::x16, operation.width == ir::Width::I8
                                                    ? pointerBits(&updateSbbFlags8)
-                                                   : operation.width == ir::Width::I32
-                                                         ? pointerBits(&updateSbbFlags32)
-                                                         : pointerBits(&updateSbbFlags64));
+                                               : operation.width == ir::Width::I16
+                                                   ? pointerBits(&updateSbbFlags16)
+                                               : operation.width == ir::Width::I32
+                                                   ? pointerBits(&updateSbbFlags32)
+                                                   : pointerBits(&updateSbbFlags64));
             assembler.blr(arm64::x16);
             break;
         case ir::Opcode::UpdateIncFlags:

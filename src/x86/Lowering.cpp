@@ -2389,11 +2389,12 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
             }
             const auto reg = std::get<x86::RegisterOperand>(instruction.operands[0]);
             const auto immediate = std::get<x86::ImmediateOperand>(instruction.operands[1]);
-            if ((reg.width != 8 && reg.width != 32 && reg.width != 64) ||
+            if ((reg.width != 8 && reg.width != 16 && reg.width != 32 && reg.width != 64) ||
                 immediate.width != 8) {
-                throw std::runtime_error("only SBB r8/r32/r64, imm8 is implemented");
+                throw std::runtime_error("only SBB r8/r16/r32/r64, imm8 is implemented");
             }
             const auto width = reg.width == 8    ? ir::Width::I8
+                               : reg.width == 16 ? ir::Width::I16
                                : reg.width == 32 ? ir::Width::I32
                                                  : ir::Width::I64;
             const auto lhs = builder.readGuestRegister(reg.reg, width, instruction.address);
