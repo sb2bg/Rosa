@@ -21,11 +21,14 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <crt_externs.h>
 
 namespace {
 
@@ -46,6 +49,15 @@ struct RunOptions {
     DumpOptions dumps;
 };
 
+// `rosa exec` behaves like the guest program: host dyld and shared cache by
+// default, no block limit, the host environment, and no Rosa status output on
+// stdout. Every argument after the executable belongs to the guest.
+constexpr std::string_view hostDyldPath = "/usr/lib/dyld";
+constexpr std::string_view hostSharedCachePath =
+    "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64";
+// Distinguishes a Rosa failure from any guest exit status in scripts.
+constexpr int execRuntimeFailureStatus = 125;
+
 void printUsage(std::ostream &stream) {
     stream << "usage:\n"
               "  rosa selftest r0 [--dump-arm64]\n"
@@ -56,7 +68,10 @@ void printUsage(std::ostream &stream) {
               "  rosa run <controlled-x86_64-mach-o> [--dump-x86] [--dump-ir] [--dump-arm64]\n"
               "  rosa run [--dyld <x86_64-dyld>] [--shared-cache <cache>] "
               "[--max-blocks <count>] [--translation-cache <path>] [--timings] "
-              "<x86_64-mach-o> [dump options] [-- <guest arguments>]\n";
+              "<x86_64-mach-o> [dump options] [-- <guest arguments>]\n"
+              "  rosa exec [--dyld <x86_64-dyld>] [--shared-cache <cache>] "
+              "[--max-blocks <count>] [--translation-cache <path>] "
+              "<x86_64-mach-o> [<guest arguments>...]\n";
 }
 
 DumpOptions parseDumpOptions(int argc, char **argv, int first) {
@@ -137,6 +152,68 @@ RunOptions parseRunOptions(int argc, char **argv) {
         throw std::invalid_argument("run requires an x86_64 Mach-O path");
     }
     return options;
+}
+
+RunOptions parseExecOptions(int argc, char **argv) {
+    RunOptions options;
+    int index = 2;
+    for (; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        const auto takePath = [&](std::optional<std::filesystem::path> &target) {
+            if (++index >= argc || target) {
+                throw std::invalid_argument(std::string(argument) + " requires exactly one path");
+            }
+            target = std::filesystem::path(argv[index]);
+        };
+        if (argument == "--dyld") {
+            takePath(options.dyld);
+        } else if (argument == "--shared-cache") {
+            takePath(options.sharedCache);
+        } else if (argument == "--translation-cache") {
+            takePath(options.translationCache);
+        } else if (argument == "--max-blocks") {
+            if (++index >= argc || options.maximumBlocks) {
+                throw std::invalid_argument("--max-blocks requires exactly one positive count");
+            }
+            const std::string_view value(argv[index]);
+            std::size_t parsed = 0;
+            const auto [end, error] =
+                std::from_chars(value.data(), value.data() + value.size(), parsed);
+            if (error != std::errc{} || end != value.data() + value.size() || parsed == 0) {
+                throw std::invalid_argument("--max-blocks requires a positive decimal count");
+            }
+            options.maximumBlocks = parsed;
+        } else if (argument.starts_with("--")) {
+            throw std::invalid_argument("invalid exec argument: " + std::string(argument));
+        } else {
+            break;
+        }
+    }
+    if (index >= argc) {
+        throw std::invalid_argument("exec requires an x86_64 Mach-O path");
+    }
+    options.executable = std::filesystem::path(argv[index]);
+    options.guestArguments.assign(argv + index + 1, argv + argc);
+    if (!options.dyld) {
+        options.dyld = std::filesystem::path(hostDyldPath);
+    }
+    if (!options.sharedCache) {
+        options.sharedCache = std::filesystem::path(hostSharedCachePath);
+    }
+    return options;
+}
+
+// The host environment minus dyld controls, which describe the Rosa process
+// rather than the guest.
+std::vector<std::string> hostEnvironment() {
+    std::vector<std::string> result;
+    for (char **entry = *_NSGetEnviron(); entry != nullptr && *entry != nullptr; ++entry) {
+        const std::string_view variable(*entry);
+        if (!variable.starts_with("DYLD_")) {
+            result.emplace_back(variable);
+        }
+    }
+    return result;
 }
 
 std::string permissionText(rosa::guest::Permission permissions) {
@@ -402,9 +479,11 @@ int runMachO(const std::filesystem::path &path, const std::vector<std::string> &
 int runDyldExperiment(const std::filesystem::path &executablePath,
                       const std::optional<std::filesystem::path> &dyldPath,
                       const std::optional<std::filesystem::path> &sharedCachePath,
-                      const std::vector<std::string> &guestArguments, const DumpOptions &options,
+                      const std::vector<std::string> &guestArguments,
+                      const std::vector<std::string> &environment, const DumpOptions &options,
                       std::size_t maximumProbeBlocks, bool collectTimings,
-                      const std::optional<std::filesystem::path> &translationCachePath) {
+                      const std::optional<std::filesystem::path> &translationCachePath,
+                      bool reportStatus) {
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
     constexpr std::uint64_t standaloneDyldSlide = 0x00007FF800000000ULL;
@@ -452,7 +531,6 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
                                  rosa::darwin::sampleHostDyldFlags());
     std::vector<std::string> arguments{executableString};
     arguments.insert(arguments.end(), guestArguments.begin(), guestArguments.end());
-    const std::vector<std::string> environment;
     std::vector<std::string> apple{"executable_path=" + executableString,
                                    std::string(rosa::darwin::pointerMungeApple)};
     if (dyldPath) {
@@ -467,13 +545,15 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
     rosa::x86::X86State state;
     state.rip = dyld->entryPoint.value;
     state.rsp = stack.stackPointer.value;
-    std::cout << "dyld experiment: app-entry=0x" << std::hex << executable.entryPoint.value
-              << " dyld-entry=0x" << state.rip << " initial-rsp=0x" << state.rsp;
-    if (sharedCache) {
-        std::cout << " shared-cache=0x" << sharedCache->regionStart().value << " slide=0x"
-                  << sharedCache->slide();
+    if (reportStatus) {
+        std::cout << "dyld experiment: app-entry=0x" << std::hex << executable.entryPoint.value
+                  << " dyld-entry=0x" << state.rip << " initial-rsp=0x" << state.rsp;
+        if (sharedCache) {
+            std::cout << " shared-cache=0x" << sharedCache->regionStart().value << " slide=0x"
+                      << sharedCache->slide();
+        }
+        std::cout << std::dec << '\n';
     }
-    std::cout << std::dec << '\n';
 
     // Keep dyld blocks bounded for attributable translation failures without
     // paying a dispatcher and code-cache entry for every guest instruction.
@@ -490,13 +570,15 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
         const auto result = dispatcher.run(state, maximumProbeBlocks);
         const auto dispatchFinished = Clock::now();
         dumpCachedBlocks(dispatcher, options);
-        if (result.exited) {
+        if (result.exited && reportStatus) {
             std::cout << "dyld experiment exited: status=" << result.exitStatus
                       << ", blocks=" << result.executedBlocks
                       << ", translations=" << result.translatedBlocks
                       << ", cache-hits=" << dispatcher.cache().persistentHitCount()
                       << ", jit-mappings=" << dispatcher.cache().executableMappingCount()
                       << ", jit-used=" << dispatcher.cache().executableUsedBytes() << '\n';
+        }
+        if (result.exited) {
             if (collectTimings) {
                 const auto milliseconds = [](auto duration) {
                     return std::chrono::duration<double, std::milli>(duration).count();
@@ -556,12 +638,25 @@ int main(int argc, char **argv) {
             const auto options = parseRunOptions(argc, argv);
             if (options.dyld || options.sharedCache) {
                 return runDyldExperiment(options.executable, options.dyld, options.sharedCache,
-                                         options.guestArguments, options.dumps,
+                                         options.guestArguments, {}, options.dumps,
                                          options.maximumBlocks.value_or(1'000'000), options.timings,
-                                         options.translationCache);
+                                         options.translationCache, true);
             }
             return runMachO(options.executable, options.guestArguments, options.dumps,
                             options.maximumBlocks.value_or(1'000));
+        }
+        if (command == "exec") {
+            const auto options = parseExecOptions(argc, argv);
+            try {
+                return runDyldExperiment(
+                    options.executable, options.dyld, options.sharedCache,
+                    options.guestArguments, hostEnvironment(), options.dumps,
+                    options.maximumBlocks.value_or(std::numeric_limits<std::size_t>::max()),
+                    false, options.translationCache, false);
+            } catch (const std::exception &error) {
+                std::cerr << "rosa: " << error.what() << '\n';
+                return execRuntimeFailureStatus;
+            }
         }
         if (command != "selftest" || argc < 3) {
             printUsage(std::cerr);
