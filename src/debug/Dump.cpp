@@ -1154,7 +1154,8 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::DivMem: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[0]);
-            stream << "div dword [" << x86::registerName(memory.base);
+            stream << (memory.width == 64 ? "div qword [" : "div dword [")
+                   << x86::registerName(memory.base);
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {

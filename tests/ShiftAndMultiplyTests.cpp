@@ -2579,6 +2579,38 @@ void testUnsignedDivideDwordRegisterGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "DIV r32 changed undefined flags");
 }
 
+void testUnsignedDivideQwordMemoryGeneratedExecution() {
+    // Observed in libbz2 under grep -J: DIV qword [rbp-0x50].
+    constexpr std::array<std::uint8_t, 5> code{0x48, 0xF7, 0x75, 0xB0, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::DivMem && decoded[0].length == 4,
+           "DIV qword memory decode differs");
+    expect(std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]).width == 64,
+           "DIV qword memory width differs");
+    expect(rosa::debug::dumpX86(decoded).find("div qword [rbp-0x50]") != std::string::npos,
+           "DIV qword memory dump differs");
+
+    constexpr rosa::guest::GuestAddress page{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(page, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    // A divisor above 32 bits proves the full qword is loaded.
+    addressSpace.writeU64(rosa::guest::GuestAddress{0x8100 - 0x50}, 0x100000000ULL);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.rbp = 0x8100;
+    state.rdx = 0x5;
+    state.rax = 0x0000000700000009ULL;
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    // (5 << 64 | 0x0000000700000009) / 2^32
+    expectEqual(state.rax, std::uint64_t{0x0000000500000007ULL}, "DIV qword quotient differs");
+    expectEqual(state.rdx, std::uint64_t{9}, "DIV qword remainder differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "DIV qword changed undefined flags");
+}
+
 void testUnsignedDivideDwordMemoryGeneratedExecution() {
     constexpr std::array<std::uint8_t, 8> code{0x41, 0xF7, 0xB5, 0x60, 0x02, 0x00, 0x00, 0xC3};
     constexpr rosa::guest::GuestAddress codeAddress{0x7FF802C68D3AULL};
@@ -3346,6 +3378,7 @@ std::span<const TestCase> shiftAndMultiplyTests() {
         {"unsigned qword register DIV generated execution", testUnsignedDivideQwordRegisterGeneratedExecution},
         {"unsigned dword register DIV generated execution", testUnsignedDivideDwordRegisterGeneratedExecution},
         {"unsigned dword memory DIV generated execution", testUnsignedDivideDwordMemoryGeneratedExecution},
+        {"DIV qword memory generated execution", testUnsignedDivideQwordMemoryGeneratedExecution},
         {"signed dword register IDIV generated execution", testSignedDivideDwordRegisterGeneratedExecution},
         {"signed IMUL 64-bit generated execution", testSignedMultiply64GeneratedExecution},
         {"signed IMUL 64-bit RIP-relative memory execution", testSignedMultiply64RipMemoryGeneratedExecution},

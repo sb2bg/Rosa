@@ -3037,9 +3037,9 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
                 throw std::runtime_error("internal decoder error: memory div operand count");
             }
             const auto memory = std::get<x86::MemoryOperand>(instruction.operands[0]);
-            if (memory.width != 32 || !memory.hasBase || memory.ripRelative || memory.index ||
-                memory.segment != x86::Segment::None) {
-                throw std::runtime_error("only based dword memory DIV is implemented");
+            if ((memory.width != 32 && memory.width != 64) || !memory.hasBase ||
+                memory.ripRelative || memory.index || memory.segment != x86::Segment::None) {
+                throw std::runtime_error("only based dword and qword memory DIV is implemented");
             }
             auto address =
                 builder.readGuestRegister(memory.base, ir::Width::I64, instruction.address);
@@ -3049,8 +3049,13 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
                                      ir::Width::I64, instruction.address);
                 address = builder.add(address, displacement, ir::Width::I64, instruction.address);
             }
-            const auto divisor = builder.loadGuest(address, ir::Width::I32, instruction.address);
-            builder.divideUnsignedDword(divisor, instruction.address);
+            if (memory.width == 64) {
+                const auto divisor = builder.loadGuest(address, ir::Width::I64, instruction.address);
+                builder.divideUnsignedQword(divisor, instruction.address);
+            } else {
+                const auto divisor = builder.loadGuest(address, ir::Width::I32, instruction.address);
+                builder.divideUnsignedDword(divisor, instruction.address);
+            }
             break;
         }
         case x86::Opcode::IdivReg: {

@@ -3416,12 +3416,12 @@ bool decodeGeneral(DecodeContext &context) {
                     decodeRegister(rmEncoding, rexB),
                     static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             } else {
-            if (rexW || rexR || rexX || mode > 0x2U ||
+            if (rexR || rexX || mode > 0x2U ||
                 rmEncoding == 0x4U ||
                 (mode == 0 && rmEncoding == 0x5U)) {
                 throw DecodeError(
                     address, remaining,
-                    "only DIV r32/r64 or dword [base+disp8/disp32] is supported from opcode F7 /6");
+                    "only DIV r32/r64 or dword/qword [base+disp8/disp32] is supported from opcode F7 /6");
             }
             std::int64_t displacement = 0;
             if (mode == 0x1U) {
@@ -3441,7 +3441,8 @@ bool decodeGeneral(DecodeContext &context) {
             }
             instruction.opcode = Opcode::DivMem;
             instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, rexB), displacement, 32});
+                decodeRegister(rmEncoding, rexB), displacement,
+                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
             }
         } else if (extension == 0x4U && mode <= 0x2U && !rexR && !rexX &&
                    rmEncoding != 0x4U &&
