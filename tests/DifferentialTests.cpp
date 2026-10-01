@@ -1564,6 +1564,30 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        // SHA-256 message schedule: whole-register byte shifts. Counts at
+        // and across the qword boundary exercise every lowering path.
+        const std::array<std::pair<const char *, std::pair<CaseId, std::span<const std::uint8_t>>>, 7>
+            byteShifts{{
+                {"psrldq_by_1", {CaseId::psrldq_by_1, differentialBytes_psrldq_by_1}},
+                {"psrldq_by_8", {CaseId::psrldq_by_8, differentialBytes_psrldq_by_8}},
+                {"psrldq_by_12", {CaseId::psrldq_by_12, differentialBytes_psrldq_by_12}},
+                {"psrldq_by_16", {CaseId::psrldq_by_16, differentialBytes_psrldq_by_16}},
+                {"pslldq_by_3", {CaseId::pslldq_by_3, differentialBytes_pslldq_by_3}},
+                {"pslldq_by_8", {CaseId::pslldq_by_8, differentialBytes_pslldq_by_8}},
+                {"pslldq_by_15", {CaseId::pslldq_by_15, differentialBytes_pslldq_by_15}},
+            }};
+        for (const auto &[name, entry] : byteShifts) {
+            auto testCase = make(name, entry.first, entry.second);
+            testCase.request.state.xmm[0] = {.low = 0x0706050403020100ULL,
+                                             .high = 0x0F0E0D0C0B0A0908ULL};
+            testCase.request.state.xmm[4] = {.low = 0x1716151413121110ULL,
+                                             .high = 0x1F1E1D1C1B1A1918ULL};
+            testCase.request.state.xmm[9] = {.low = 0x2726252423222120ULL,
+                                             .high = 0x2F2E2D2C2B2A2928ULL};
+            run(testCase);
+        }
+    }
+    {
         // corecrypto: pshufb xmm0, [rbx+0x40] with a byte-reversing mask.
         auto testCase = make("pshufb_based_memory", CaseId::pshufb_based_memory,
                              differentialBytes_pshufb_based_memory);
@@ -1599,28 +1623,19 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
-        // SHA-256 message schedule: whole-register byte shifts. Counts at
-        // and across the qword boundary exercise every lowering path.
-        const std::array<std::pair<const char *, std::pair<CaseId, std::span<const std::uint8_t>>>, 7>
-            byteShifts{{
-                {"psrldq_by_1", {CaseId::psrldq_by_1, differentialBytes_psrldq_by_1}},
-                {"psrldq_by_8", {CaseId::psrldq_by_8, differentialBytes_psrldq_by_8}},
-                {"psrldq_by_12", {CaseId::psrldq_by_12, differentialBytes_psrldq_by_12}},
-                {"psrldq_by_16", {CaseId::psrldq_by_16, differentialBytes_psrldq_by_16}},
-                {"pslldq_by_3", {CaseId::pslldq_by_3, differentialBytes_pslldq_by_3}},
-                {"pslldq_by_8", {CaseId::pslldq_by_8, differentialBytes_pslldq_by_8}},
-                {"pslldq_by_15", {CaseId::pslldq_by_15, differentialBytes_pslldq_by_15}},
-            }};
-        for (const auto &[name, entry] : byteShifts) {
-            auto testCase = make(name, entry.first, entry.second);
-            testCase.request.state.xmm[0] = {.low = 0x0706050403020100ULL,
-                                             .high = 0x0F0E0D0C0B0A0908ULL};
-            testCase.request.state.xmm[4] = {.low = 0x1716151413121110ULL,
-                                             .high = 0x1F1E1D1C1B1A1918ULL};
-            testCase.request.state.xmm[9] = {.low = 0x2726252423222120ULL,
-                                             .high = 0x2F2E2D2C2B2A2928ULL};
-            run(testCase);
-        }
+        // liblzma's hash: imul eax, eax, 109 overflowing 32 bits.
+        auto testCase = make("imul32_immediate8_overflow", CaseId::imul32_immediate8_overflow,
+                             differentialBytes_imul32_immediate8_overflow);
+        testCase.request.state.rax = 0xFFFFFFFF7FFFFFFFULL;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("imul32_immediate8_negative", CaseId::imul32_immediate8_negative,
+                             differentialBytes_imul32_immediate8_negative);
+        testCase.request.state.rcx = 0xAAAAAAAA00000003ULL;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
     }
     {
         auto testCase = make("std_sets_direction", CaseId::std_sets_direction,

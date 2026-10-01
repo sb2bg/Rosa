@@ -45,7 +45,7 @@ bool decodeGeneral(DecodeContext &context) {
         code[cursor] != 0x09U && code[cursor] != 0x0AU &&
         code[cursor] != 0x0BU &&
         code[cursor] != 0x2DU &&
-        code[cursor] != 0x69U &&
+        code[cursor] != 0x69U && code[cursor] != 0x6BU &&
         code[cursor] != 0x86U &&
         code[cursor] != 0x87U &&
         code[cursor] != 0x28U && code[cursor] != 0x29U &&
@@ -103,7 +103,7 @@ bool decodeGeneral(DecodeContext &context) {
         opcode != 0x08U && opcode != 0x09U && opcode != 0x0AU &&
         opcode != 0x0BU &&
         opcode != 0x2DU &&
-        opcode != 0x69U &&
+        opcode != 0x69U && opcode != 0x6BU &&
         opcode != 0x86U &&
         opcode != 0x87U &&
         opcode != 0x84U && opcode != 0x83U && opcode != 0x3BU &&
@@ -349,10 +349,10 @@ bool decodeGeneral(DecodeContext &context) {
                  : static_cast<std::uint64_t>(
                        static_cast<std::uint32_t>(immediate)),
             32});
-    } else if (opcode == 0x6BU && rexW) {
+    } else if (opcode == 0x6BU) {
         if (code.size() - cursor < 2) {
             throw DecodeError(address, remaining,
-                              "truncated imul r64, r64, imm8");
+                              "truncated imul r32/r64, r32/r64, imm8");
         }
         const auto modrm = code[cursor++];
         const auto mode =
@@ -360,18 +360,19 @@ bool decodeGeneral(DecodeContext &context) {
         if (mode != 0x3U) {
             throw DecodeError(
                 address, remaining,
-                "only register-direct IMUL r64, r64, imm8 is supported");
+                "only register-direct IMUL r32/r64, r32/r64, imm8 is supported");
         }
         const auto immediate =
             std::bit_cast<std::int8_t>(code[cursor++]);
+        const auto operandWidth = static_cast<std::uint8_t>(rexW ? 64U : 32U);
         instruction.opcode = Opcode::ImulRegRegImm;
         instruction.operands.push_back(RegisterOperand{
             decodeRegister(
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR),
-            64});
+            operandWidth});
         instruction.operands.push_back(RegisterOperand{
             decodeRegister(static_cast<std::uint8_t>(modrm & 0x7U), rexB),
-            64});
+            operandWidth});
         instruction.operands.push_back(ImmediateOperand{
             static_cast<std::uint64_t>(
                 static_cast<std::int64_t>(immediate)),
