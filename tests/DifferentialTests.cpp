@@ -1508,6 +1508,21 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        // Observed in libbz2: rol eax, 1 defines OF as MSB(result) XOR CF.
+        auto testCase = make("rol32_by_one_overflow", CaseId::rol32_by_one_overflow,
+                             differentialBytes_rol32_by_one_overflow);
+        testCase.request.state.rax = 0xFFFFFFFF40000001ULL;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
+        auto testCase =
+            make("rol64_by_one", CaseId::rol64_by_one, differentialBytes_rol64_by_one);
+        testCase.request.state.r8 = 0x8000000000000001ULL;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("std_sets_direction", CaseId::std_sets_direction,
                              differentialBytes_std_sets_direction);
         testCase.flagMask = arithmeticFlags | directionFlag;
