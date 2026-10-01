@@ -2239,6 +2239,26 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        // Observed in dyld's memmove: register MOVSS keeps the upper dwords.
+        auto testCase = make("movss_register_load_form", CaseId::movss_register_load_form,
+                             differentialBytes_movss_register_load_form);
+        testCase.request.state.xmm[0] = {.low = 0x0123456789ABCDEFULL,
+                                         .high = 0xFEDCBA9876543210ULL};
+        testCase.request.state.xmm[1] = {.low = 0x1111111122222222ULL,
+                                         .high = 0x3333333344444444ULL};
+        run(testCase);
+    }
+    {
+        // movss xmm8, xmm9 through the 0F 11 encoding with REX.R and REX.B.
+        auto testCase = make("movss_register_store_form", CaseId::movss_register_store_form,
+                             differentialBytes_movss_register_store_form);
+        testCase.request.state.xmm[8] = {.low = 0x0123456789ABCDEFULL,
+                                         .high = 0xFEDCBA9876543210ULL};
+        testCase.request.state.xmm[9] = {.low = 0x1111111122222222ULL,
+                                         .high = 0x3333333344444444ULL};
+        run(testCase);
+    }
+    {
         auto testCase =
             make("pxor_register", CaseId::pxor_register, differentialBytes_pxor_register);
         testCase.request.state.xmm[0] = {.low = UINT64_MAX, .high = 0x0123456789ABCDEFULL};

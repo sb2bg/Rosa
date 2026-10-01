@@ -682,6 +682,37 @@ void testMovdXmmToGuestMemory() {
                 "faulted RIP-relative MOVD store changed flags");
 }
 
+void testMovssXmmRegisters() {
+    // Observed in dyld's memmove: MOVSS xmm0, xmm1, then the 0F 11 form with REX.
+    constexpr std::array<std::uint8_t, 10> code{0xF3, 0x0F, 0x10, 0xC1,
+                                                0xF3, 0x45, 0x0F, 0x11, 0xC8, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovssXmmXmm && decoded[0].length == 4,
+           "MOVSS xmm, xmm decode differs");
+    expect(decoded[1].opcode == rosa::x86::Opcode::MovssXmmXmm && decoded[1].length == 5,
+           "MOVSS 0F 11 register decode differs");
+    const auto listing = rosa::debug::dumpX86(decoded);
+    expect(listing.find("movss xmm0, xmm1") != std::string::npos &&
+               listing.find("movss xmm8, xmm9") != std::string::npos,
+           "MOVSS register dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    rosa::x86::X86State state;
+    state.xmm[0] = {.low = 0x0123456789ABCDEFULL, .high = 0xFEDCBA9876543210ULL};
+    state.xmm[1] = {.low = 0x1111111122222222ULL, .high = 0x3333333344444444ULL};
+    state.xmm[8] = {.low = 0x5555555566666666ULL, .high = 0x7777777788888888ULL};
+    state.xmm[9] = {.low = 0x99999999AAAAAAAAULL, .high = 0xBBBBBBBBCCCCCCCCULL};
+    static_cast<void>(block.execute(state));
+    expectEqual(state.xmm[0].low, std::uint64_t{0x0123456722222222ULL},
+                "MOVSS register did not keep the destination's dword 1");
+    expectEqual(state.xmm[0].high, std::uint64_t{0xFEDCBA9876543210ULL},
+                "MOVSS register changed the destination's upper qword");
+    expectEqual(state.xmm[8].low, std::uint64_t{0x55555555AAAAAAAAULL},
+                "MOVSS 0F 11 register form wrote the wrong operand");
+}
+
 void testMovssXmmFromGuestMemory() {
     // Observed in CoreGraphics under an Objective-C fixture: MOVSS xmm0, [rbp-0x2c].
     constexpr std::array<std::uint8_t, 6> code{0xF3, 0x0F, 0x10, 0x45, 0xD4, 0xC3};
@@ -1861,6 +1892,7 @@ void testDecoderRipRelativeLeaAndSyscall() {
 std::span<const TestCase> simdLanesTests() {
     static const TestCase cases[]{
         {"PSHUFB register execution", testPshufbRegisters},
+        {"MOVSS register execution", testMovssXmmRegisters},
         {"PSHUFB RIP-relative guest memory", testPshufbRipRelativeGuestMemory},
         {"PUNPCKLWD register execution", testPunpcklwdRegisters},
         {"PUNPCKLQDQ register execution", testPunpcklqdqRegisters},

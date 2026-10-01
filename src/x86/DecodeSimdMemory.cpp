@@ -694,9 +694,22 @@ bool decodeSimdMemory(DecodeContext &context) {
             static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) |
                                       (rexR ? 8U : 0U)))};
         if (mode == 0x3U) {
-            throw DecodeError(
-                address, remaining,
-                "register-direct MOVSS is not supported");
+            // Register form: 0F 10 writes reg from r/m, 0F 11 writes r/m
+            // from reg. Either way only the low dword moves.
+            const auto rm = XmmRegisterOperand{static_cast<XmmRegister>(
+                static_cast<std::uint8_t>(rmEncoding | (rexB ? 8U : 0U)))};
+            if (rexX) {
+                throw DecodeError(address, remaining,
+                                  "REX.X is invalid for register-direct MOVSS");
+            }
+            instruction.opcode = Opcode::MovssXmmXmm;
+            instruction.operands.push_back(isLoad ? xmm : rm);
+            instruction.operands.push_back(isLoad ? rm : xmm);
+            const auto length = opcodeOffset + 3 - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),
+                        length, instruction.bytes.begin());
+            return true;
         }
         const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
         if (mode == 0 && rmEncoding == 0x5U && rexB) {

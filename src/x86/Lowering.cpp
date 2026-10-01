@@ -1395,6 +1395,32 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
                 instruction.address);
             break;
         }
+        case x86::Opcode::MovssXmmXmm: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: MOVSS register operand count");
+            }
+            const auto destination =
+                std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto source = std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg;
+            // Unlike the load form, register MOVSS keeps the destination's
+            // upper three dwords.
+            const auto sourceLow =
+                builder.readGuestXmmLane(source, false, instruction.address);
+            const auto destinationLow =
+                builder.readGuestXmmLane(destination, false, instruction.address);
+            const auto merged = builder.bitOr(
+                builder.bitAnd(destinationLow,
+                               builder.constant(0xFFFFFFFF00000000ULL, ir::Width::I64,
+                                                instruction.address),
+                               ir::Width::I64, instruction.address),
+                builder.bitAnd(sourceLow,
+                               builder.constant(0xFFFFFFFFULL, ir::Width::I64,
+                                                instruction.address),
+                               ir::Width::I64, instruction.address),
+                ir::Width::I64, instruction.address);
+            builder.writeGuestXmmLane(destination, false, merged, instruction.address);
+            break;
+        }
         case x86::Opcode::MovdRegXmm: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: MOVD register-XMM operand count");
