@@ -106,11 +106,11 @@ void mapX86Commpage(guest::AddressSpace &addressSpace,
         guest::GuestAddress{x86CommpageBase.value +
                             x86CommpageMemorySizeOffset},
         memorySizeBytes);
-    // An unknown x86 CPU family selects libsystem_platform's conservative
-    // resolver. Do not claim a particular Intel microarchitecture until Rosa
-    // implements every instruction used by that family's optimized routines.
-    constexpr std::array<std::uint8_t, sizeof(x86CommpageCpuFamily)>
-        cpuFamilyBytes{};
+    // libsystem_platform's resolvers give SSE variants only to the Intel
+    // families they recognize; an unknown family (0) selects the AVX2
+    // routines. Report the Nehalem family that CPUID describes instead.
+    std::array<std::uint8_t, sizeof(x86CommpageCpuFamily)> cpuFamilyBytes{};
+    writeLittleEndian(cpuFamilyBytes, 0, x86CommpageCpuFamily, sizeof(x86CommpageCpuFamily));
     addressSpace.populateSparseReadOnly(
         guest::GuestAddress{x86CommpageBase.value +
                             x86CommpageCpuFamilyOffset},

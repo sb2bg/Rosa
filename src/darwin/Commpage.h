@@ -34,7 +34,11 @@ inline constexpr std::size_t x86CommpageUserPageShiftOffset = 0x4E;
 inline constexpr std::uint8_t x86CommpageKernelPageShift = 12;
 inline constexpr std::uint8_t x86CommpageUserPageShift = 12;
 inline constexpr std::size_t x86CommpageCpuFamilyOffset = 0x40;
-inline constexpr std::uint32_t x86CommpageCpuFamily = 0;
+// CPUFAMILY_INTEL_NEHALEM, matching the family 6 / model 26 that guest CPUID
+// reports. libsystem_platform's resolvers pick string-routine variants by
+// this value and treat an unknown family (0) as an AVX2-capable modern CPU,
+// which would contradict CPUID's lack of AVX.
+inline constexpr std::uint32_t x86CommpageCpuFamily = 0x6B5A4CD2;
 inline constexpr std::size_t x86CommpageKdebugEnableOffset = 0x44;
 inline constexpr std::size_t x86CommpageAtmDiagnosticConfigOffset = 0x48;
 inline constexpr std::size_t x86CommpageDtraceDofEnabledOffset = 0x4C;
