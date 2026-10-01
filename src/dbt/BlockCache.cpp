@@ -1,4 +1,5 @@
 #include "dbt/BlockCache.h"
+#include "dbt/CacheIdentity.h"
 
 #include <unistd.h>
 

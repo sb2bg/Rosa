@@ -28,28 +28,64 @@
       "cacheVariables": {
         "ROSA_SANITIZERS": "undefined"
       }
+    },
+    {
+      "name": "baseline",
+      "displayName": "Debug without LLVM or Rosetta",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build/baseline",
+      "cacheVariables": {
+        "ROSA_ENABLE_LLVM_JIT": "OFF",
+        "ROSA_ENABLE_ROSETTA_DIFFERENTIAL_TESTS": "OFF"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "debug", "configurePreset": "debug" },
-    { "name": "asan", "configurePreset": "asan" },
-    { "name": "ubsan", "configurePreset": "ubsan" }
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "ubsan",
+      "configurePreset": "ubsan"
+    },
+    {
+      "name": "baseline",
+      "configurePreset": "baseline"
+    }
   ],
   "testPresets": [
     {
       "name": "debug",
       "configurePreset": "debug",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "asan",
       "configurePreset": "asan",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "ubsan",
       "configurePreset": "ubsan",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "baseline",
+      "configurePreset": "baseline",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

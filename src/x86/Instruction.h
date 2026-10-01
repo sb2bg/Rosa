@@ -350,4 +350,22 @@ struct DecodedInstruction {
     std::optional<Condition> condition;
 };
 
+// Shared by block formation and IR lowering so their exit boundaries agree.
+[[nodiscard]] constexpr bool terminatesBlock(Opcode opcode) noexcept {
+    switch (opcode) {
+    case Opcode::JmpRelative:
+    case Opcode::JmpReg:
+    case Opcode::JmpMem:
+    case Opcode::JccRelative:
+    case Opcode::CallRelative:
+    case Opcode::CallReg:
+    case Opcode::CallMem:
+    case Opcode::Syscall:
+    case Opcode::Ret:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace rosa::x86

@@ -1,0 +1,12 @@
+#pragma once
+
+// Generated from ROSA_TEST_SUITES in tests/CMakeLists.txt.
+#include "TestSuite.h"
+
+namespace rosa::tests {
+
+@ROSA_SUITE_DECLARATIONS@
+inline constexpr TestSuite suites[]{
+@ROSA_SUITE_ENTRIES@};
+
+} // namespace rosa::tests

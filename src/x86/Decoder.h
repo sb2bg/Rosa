@@ -30,6 +30,10 @@ class DecodeError final : public std::runtime_error {
 
 class Decoder {
   public:
+    // Decode one instruction without requiring a terminator or constructing a block.
+    [[nodiscard]] DecodedInstruction
+    decodeInstruction(std::span<const std::uint8_t> code, guest::GuestAddress address) const;
+
     [[nodiscard]] std::vector<DecodedInstruction>
     decodeBlock(std::span<const std::uint8_t> code, guest::GuestAddress start,
                 std::size_t maximumInstructions = std::numeric_limits<std::size_t>::max()) const;
