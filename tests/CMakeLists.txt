@@ -185,15 +185,27 @@ else()
     )
 endif()
 
-# Whole-program conformance against host oracles. Opt-in: these measure
-# progress toward a compatibility goal and are expected to fail until it is met.
+# Whole-program conformance against host oracles (tests/compat/compat.py).
+# Each listed program must match its host binary byte for byte; a program
+# joins the list once it reaches 100%. Enabled by default when the host has
+# the x86_64 shared cache that rosa exec needs.
+set(ROSA_HOST_X86_SHARED_CACHE
+    "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64")
+if(EXISTS "${ROSA_HOST_X86_SHARED_CACHE}")
+    set(ROSA_COMPAT_DEFAULT ON)
+else()
+    set(ROSA_COMPAT_DEFAULT OFF)
+endif()
 option(ROSA_ENABLE_COMPAT_TESTS
-       "Run byte-exact program conformance suites such as tests/compat/grep.py" OFF)
+       "Run byte-exact conformance of host programs under rosa exec" ${ROSA_COMPAT_DEFAULT})
+set(ROSA_COMPAT_PROGRAMS echo cat head basename)
 if(ROSA_ENABLE_COMPAT_TESTS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    add_test(NAME rosa_compat_grep
-             COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/compat/grep.py"
-                     --rosa "$<TARGET_FILE:rosa>" --verbose)
-    set_tests_properties(rosa_compat_grep PROPERTIES
-        LABELS "compat" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+    foreach(program IN LISTS ROSA_COMPAT_PROGRAMS)
+        add_test(NAME rosa_compat_${program}
+                 COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/compat/compat.py"
+                         --rosa "$<TARGET_FILE:rosa>" --verbose ${program})
+        set_tests_properties(rosa_compat_${program} PROPERTIES
+            LABELS "compat;${program}" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+    endforeach()
 endif()
