@@ -158,6 +158,10 @@ def run_program(name, options, rosa, workspace, fixtures):
     failures = 0
     for case in cases:
         env = {"PATH": "/usr/bin:/bin", "HOME": workspace}
+        if options.env_padding:
+            # Shifts the initial stack and string alignments, which steer
+            # libc's alignment-dependent copy and compare paths.
+            env["ROSA_COMPAT_PADDING"] = "x" * options.env_padding
         env.update(case.env)
         expected, _ = run_one([name] + case.args, program.BINARY, fixtures, env, case.stdin, 30)
         actual, elapsed = run_one([rosa, "exec", "--argv0", name, guest] + case.args, rosa,
@@ -197,6 +201,8 @@ def main():
                         help="show expected and actual output for mismatches")
     parser.add_argument("--timeout", type=float, default=120.0,
                         help="per-case timeout in seconds for the Rosa run")
+    parser.add_argument("--env-padding", type=int, default=0, metavar="BYTES",
+                        help="add an environment variable of this many bytes")
     parser.add_argument("--list", action="store_true", help="list case names and exit")
     parser.add_argument("--keep", action="store_true", help="keep the fixture directory")
     options = parser.parse_args()

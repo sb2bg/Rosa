@@ -198,13 +198,16 @@ else()
 endif()
 option(ROSA_ENABLE_COMPAT_TESTS
        "Run byte-exact conformance of host programs under rosa exec" ${ROSA_COMPAT_DEFAULT})
-set(ROSA_COMPAT_PROGRAMS echo cat head basename)
+set(ROSA_COMPAT_PROGRAMS echo cat head basename grep)
+# Cases outside a program's current milestone, by tag.
+set(ROSA_COMPAT_ARGS_grep --exclude-tag compression)
 if(ROSA_ENABLE_COMPAT_TESTS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     foreach(program IN LISTS ROSA_COMPAT_PROGRAMS)
         add_test(NAME rosa_compat_${program}
                  COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/compat/compat.py"
-                         --rosa "$<TARGET_FILE:rosa>" --verbose ${program})
+                         --rosa "$<TARGET_FILE:rosa>" --verbose ${program}
+                         ${ROSA_COMPAT_ARGS_${program}})
         set_tests_properties(rosa_compat_${program} PROPERTIES
             LABELS "compat;${program}" SKIP_RETURN_CODE 77 TIMEOUT 1800)
     endforeach()
