@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Byte-exact grep conformance: Rosa versus the host's own grep.
 
-/usr/bin/grep is a universal binary. Rosa executes its x86_64 slice; the arm64e
-slice of the same build is the oracle. Every case compares stdout, stderr, and
+/usr/bin/grep is a universal binary. Rosa executes its x86_64 slice; the host
+runs the arm64e slice of the same build natively as the oracle. (A thinned copy
+of that slice is not runnable: it fails platform code-signing checks.) Every case compares stdout, stderr, and
 exit status byte for byte. Both run in the same generated fixture tree with the
 same controlled environment and the program name "grep".
 
@@ -259,11 +260,10 @@ def main():
     try:
         binaries = os.path.join(workspace, "bin")
         os.makedirs(os.path.join(binaries, "x86"))
-        os.makedirs(os.path.join(binaries, "host"))
         guest = os.path.join(binaries, "x86", "grep")
-        oracle = os.path.join(binaries, "host", "grep")
-        if not thin("x86_64", guest) or not thin("arm64e", oracle):
-            print("[skip] %s lacks x86_64 and arm64e slices" % HOST_GREP)
+        oracle = HOST_GREP
+        if not thin("x86_64", guest):
+            print("[skip] %s has no x86_64 slice" % HOST_GREP)
             return SKIP_STATUS
         fixtures = os.path.join(workspace, "fixtures")
         build_fixtures(fixtures)
