@@ -183,3 +183,16 @@ else()
         PASS_REGULAR_EXPRESSION "C main returned 42;guest exited: status=0"
     )
 endif()
+
+# Whole-program conformance against host oracles. Opt-in: these measure
+# progress toward a compatibility goal and are expected to fail until it is met.
+option(ROSA_ENABLE_COMPAT_TESTS
+       "Run byte-exact program conformance suites such as tests/compat/grep.py" OFF)
+if(ROSA_ENABLE_COMPAT_TESTS)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME rosa_compat_grep
+             COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/compat/grep.py"
+                     --rosa "$<TARGET_FILE:rosa>" --verbose)
+    set_tests_properties(rosa_compat_grep PROPERTIES
+        LABELS "compat" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()

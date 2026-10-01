@@ -141,6 +141,18 @@ ordinary x86_64 C main: argc=1 argv[0]=./build/debug/frontier-fixtures/ordinary-
 dyld experiment exited: status=0, blocks=..., translations=..., cache-hits=..., jit-mappings=1, jit-used=...
 ```
 
+`rosa exec` runs a dynamically linked program the way a shell would: it uses
+the host's `/usr/lib/dyld` and x86_64 shared cache unless overridden, imposes no
+block limit, passes the host environment (minus `DYLD_*`), keeps Rosa's own
+status lines off stdout, and hands every argument after the executable to the
+guest. The guest's exit status becomes Rosa's; a Rosa failure exits with 125
+and writes its diagnostic to stderr.
+
+```bash
+lipo /usr/bin/grep -thin x86_64 -output /tmp/grep-x86_64
+./build/release/rosa exec /tmp/grep-x86_64 -n --color=always beta README.md
+```
+
 For repeated launches, opt into the relocatable persistent translation cache.
 The first run fills the file; later runs validate the cached x86 source bytes,
 relocate helper calls for the current process ASLR slide, and batch-publish the
@@ -287,6 +299,11 @@ ctest --preset debug -L Optimization
 cmake --preset baseline
 cmake --build --preset baseline
 ctest --preset baseline
+
+# Byte-exact grep conformance against the host's arm64e grep (opt-in)
+tests/compat/grep.py --rosa build/release/rosa --verbose
+cmake -S . -B build/debug -DROSA_ENABLE_COMPAT_TESTS=ON
+ctest --preset debug -L compat
 
 # UndefinedBehaviorSanitizer build
 cmake --preset ubsan
