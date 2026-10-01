@@ -143,6 +143,7 @@ enum class Opcode {
     PhadddRegReg,
     PmovzxbdXmmReg,
     PmovsxbdRegMem,
+    PmovsxbqRegMem,
     PmovsxdqRegMem,
     PmovsxdqRegReg,
     PandRegReg,

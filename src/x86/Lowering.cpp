@@ -4885,6 +4885,33 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
             builder.loadGuestSignExtendedBytesXmm(address, destination, instruction.address);
             break;
         }
+        case x86::Opcode::PmovsxbqRegMem: {
+            if (instruction.operands.size() != 2) {
+                throw std::runtime_error("internal decoder error: PMOVSXBQ operand count");
+            }
+            const auto destination = std::get<x86::XmmRegisterOperand>(instruction.operands[0]).reg;
+            const auto memory = std::get<x86::MemoryOperand>(instruction.operands[1]);
+            if (!memory.ripRelative || memory.hasBase || memory.index || memory.width != 16) {
+                throw std::runtime_error("only RIP-relative PMOVSXBQ memory is implemented");
+            }
+            const auto address = builder.constant(
+                instruction.address.value + instruction.length +
+                    static_cast<std::uint64_t>(memory.displacement),
+                ir::Width::I64, instruction.address);
+            // One word load keeps the fault all-or-nothing and leaves no IR
+            // value live across the guest-memory helper call.
+            const auto word = builder.loadGuest(address, ir::Width::I16, instruction.address);
+            std::array<ir::ValueId, 2> lanes{};
+            for (std::size_t lane = 0; lane < lanes.size(); ++lane) {
+                lanes[lane] = builder.shiftRightArithmetic(
+                    builder.shiftLeft(word, static_cast<std::uint8_t>(56 - 8 * lane),
+                                      ir::Width::I64, instruction.address),
+                    56, ir::Width::I64, instruction.address);
+            }
+            builder.writeGuestXmmLane(destination, false, lanes[0], instruction.address);
+            builder.writeGuestXmmLane(destination, true, lanes[1], instruction.address);
+            break;
+        }
         case x86::Opcode::PmovsxdqRegReg: {
             if (instruction.operands.size() != 2) {
                 throw std::runtime_error("internal decoder error: PMOVSXDQ operand count");

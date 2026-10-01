@@ -986,6 +986,62 @@ void testPmovmskbGeneratedExecution() {
     expectEqual(state.rflags, std::uint64_t{0x8D7}, "PMOVMSKB changed flags");
 }
 
+void testPmovsxbqRipMemoryGeneratedExecution() {
+    // Observed in liblzma under grep -X: pmovsxbq xmm1, word [rip+0xd4a7].
+    constexpr std::array<std::uint8_t, 10> code{0x66, 0x0F, 0x38, 0x22, 0x0D,
+                                                0xA7, 0xD4, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress codeAddress{0x7FF814A80BB4ULL};
+    constexpr rosa::guest::GuestAddress target{0x7FF814A8E064ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, codeAddress);
+    expect(decoded[0].opcode == rosa::x86::Opcode::PmovsxbqRegMem && decoded[0].length == 9,
+           "PMOVSXBQ decode differs");
+    expect(std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]).width == 16,
+           "PMOVSXBQ memory width differs");
+    expect(rosa::debug::dumpX86(decoded).find(
+               "pmovsxbq xmm1, word [rip+0xd4a7] ; 0x7ff814a8e064") != std::string::npos,
+           "PMOVSXBQ disassembly differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x7FF814A8E000ULL},
+                              rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 2> source{0x80, 0x7F};
+    addressSpace.writeBytes(target, source);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, codeAddress);
+    rosa::x86::X86State state;
+    state.xmm[1] = {.low = 0xAAAAAAAAAAAAAAAAULL, .high = 0xBBBBBBBBBBBBBBBBULL};
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.xmm[1].low, std::uint64_t{0xFFFFFFFFFFFFFF80ULL},
+                "PMOVSXBQ low lane differs");
+    expectEqual(state.xmm[1].high, std::uint64_t{0x7F}, "PMOVSXBQ high lane differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7}, "PMOVSXBQ changed flags");
+
+    // A source straddling an unmapped page faults without a partial write.
+    constexpr std::array<std::uint8_t, 10> crossingCode{0x66, 0x0F, 0x38, 0x22, 0x0D,
+                                                        0xF6, 0x0F, 0x00, 0x00, 0xC3};
+    const auto crossingBlock =
+        translator.translate(crossingCode, rosa::guest::GuestAddress{0x1000});
+    rosa::guest::AddressSpace crossingAddressSpace;
+    crossingAddressSpace.mapAnonymous(rosa::guest::GuestAddress{0x1000},
+                                      rosa::guest::guestPageSize,
+                                      rosa::guest::Permission::Read |
+                                          rosa::guest::Permission::Write);
+    rosa::x86::X86State crossing;
+    crossing.xmm[1] = {.low = 0x1111111111111111ULL, .high = 0x2222222222222222ULL};
+    bool faulted = false;
+    try {
+        static_cast<void>(crossingBlock.execute(crossing, &crossingAddressSpace));
+    } catch (const std::runtime_error &) {
+        faulted = true;
+    }
+    expect(faulted, "PMOVSXBQ across an unmapped page did not fault");
+    expectEqual(crossing.xmm[1].low, std::uint64_t{0x1111111111111111ULL},
+                "faulted PMOVSXBQ wrote its low lane");
+}
+
 void testPmovsxbdRipMemoryGeneratedExecution() {
     constexpr std::array<std::uint8_t, 10> code{0x66, 0x0F, 0x38, 0x21, 0x0D,
                                                 0x57, 0xE2, 0x03, 0x00, 0xC3};
@@ -2252,6 +2308,7 @@ std::span<const TestCase> simdIntegerTests() {
         {"PANDN register generated execution", testPandnRegisterGeneratedExecution},
         {"PMOVMSKB generated execution", testPmovmskbGeneratedExecution},
         {"PMOVSXBD RIP-relative memory generated execution", testPmovsxbdRipMemoryGeneratedExecution},
+        {"PMOVSXBQ RIP-relative memory execution", testPmovsxbqRipMemoryGeneratedExecution},
         {"PMOVSXDQ RIP-relative memory generated execution", testPmovsxdqRipMemoryGeneratedExecution},
         {"PADDQ register execution", testPaddqRegisterExecution},
         {"PSHUFD register execution", testPshufdRegisterExecution},

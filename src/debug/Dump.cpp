@@ -2373,15 +2373,16 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(instruction.operands[1]).reg);
             break;
+        case x86::Opcode::PmovsxbqRegMem:
         case x86::Opcode::PmovsxbdRegMem: {
             const auto memory =
                 std::get<x86::MemoryOperand>(instruction.operands[1]);
-            stream << "pmovsxbd "
+            stream << (instruction.opcode == x86::Opcode::PmovsxbqRegMem ? "pmovsxbq " : "pmovsxbd ")
                    << x86::xmmRegisterName(
                           std::get<x86::XmmRegisterOperand>(
                               instruction.operands[0])
                               .reg)
-                   << ", dword [rip";
+                   << (instruction.opcode == x86::Opcode::PmovsxbqRegMem ? ", word [rip" : ", dword [rip");
             if (memory.displacement < 0) {
                 stream << "-0x" << -memory.displacement;
             } else if (memory.displacement > 0) {

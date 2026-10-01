@@ -126,6 +126,48 @@ bool decodeSimdLanes(DecodeContext &context) {
                     length, instruction.bytes.begin());
                 return true;
             }
+            if (code[opcodeOffset + 2] == 0x22U) {
+                // PMOVSXBQ xmm, word [rip+disp32]: two bytes to two qwords.
+                const auto rex = hasPshufbRex ? code[afterPrefix] : 0U;
+                const auto modrm = code[opcodeOffset + 3];
+                const auto mode =
+                    static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+                const auto rmEncoding =
+                    static_cast<std::uint8_t>(modrm & 0x7U);
+                if ((rex & 0xBU) != 0 || mode != 0 ||
+                    rmEncoding != 0x5U) {
+                    throw DecodeError(
+                        address, remaining,
+                        "only RIP-relative PMOVSXBQ xmm, word memory is supported");
+                }
+                auto operandCursor = opcodeOffset + 4;
+                if (code.size() - operandCursor < 4) {
+                    throw DecodeError(
+                        address, remaining,
+                        "truncated RIP-relative PMOVSXBQ displacement");
+                }
+                const auto displacement =
+                    readI32(code.subspan(operandCursor, 4));
+                operandCursor += 4;
+                static_cast<void>(relativeTarget(
+                    address, operandCursor - instructionStart,
+                    displacement));
+                instruction.opcode = Opcode::PmovsxbqRegMem;
+                instruction.operands.push_back(XmmRegisterOperand{
+                    static_cast<XmmRegister>(static_cast<std::uint8_t>(
+                        ((modrm >> 3U) & 0x7U) |
+                        ((rex & 0x4U) != 0 ? 8U : 0U)))});
+                instruction.operands.push_back(MemoryOperand{
+                    Register::Rax, displacement, 16, std::nullopt, 1,
+                    false, true});
+                const auto length = operandCursor - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(
+                    code.begin() +
+                        static_cast<std::ptrdiff_t>(instructionStart),
+                    length, instruction.bytes.begin());
+                return true;
+            }
             if (code[opcodeOffset + 2] == 0x21U) {
                 const auto rex = hasPshufbRex ? code[afterPrefix] : 0U;
                 const auto modrm = code[opcodeOffset + 3];
