@@ -32,6 +32,14 @@ Rosa implements only the x86_64 Darwin operations reached by the controlled fixt
 
 The x86 `syscall` instruction exits generated ARM64 to `darwin::SyscallDispatcher`. It is never converted to an ARM `svc`. Generated code records the next RIP in guest `RIP`/`RCX` and the input flags in guest `R11`. Successful writes clear x86 `CF`; host errors place `errno` in guest `RAX` and set `CF`.
 
+BSD syscalls are table-driven: `darwin/Syscall.cpp` maps each modeled number to a
+named handler, and a number outside the table stops the guest with a diagnostic.
+Handlers live by domain in `SyscallProcess.cpp`, `SyscallSysctl.cpp`,
+`SyscallFiles.cpp`, and `SyscallMemory.cpp`, share `SyscallInternal.h`, and reach
+task state (descriptors, Mach ports, signal dispositions, dyld registration)
+through `GuestTask`. `rosa run --trace-syscalls` and `rosa exec --trace-syscalls`
+log every BSD call with its arguments and result to stderr.
+
 The controlled write implementation accepts stdout and stderr and rejects writes over 16 MiB. Guest root/cryptex descriptors never open or traverse the host root. `kern.version` is obtained with a host-owned buffer because native and Rosetta x86 callers observe the same current kernel string; only copied bytes enter guest memory. Every unsupported number reports its guest RIP and six ABI arguments. There is no generic syscall-number passthrough and no assumption that arm64 host numbers or structures match x86 Darwin.
 
 The x86 machdep class currently implements only `thread_fast_set_cthread_self` (call 3). It validates/canonicalizes the guest cthread pointer into explicit guest `GSBASE` state and returns the x86 `USER_CTHREAD` selector. It never changes a host segment register.

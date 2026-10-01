@@ -46,6 +46,7 @@ struct RunOptions {
     std::optional<std::filesystem::path> translationCache;
     std::optional<std::size_t> maximumBlocks;
     bool timings{};
+    bool traceSyscalls{};
     DumpOptions dumps;
 };
 
@@ -67,10 +68,10 @@ void printUsage(std::ostream &stream) {
               "  rosa cache inspect <dyld_shared_cache_x86_64>\n"
               "  rosa run <controlled-x86_64-mach-o> [--dump-x86] [--dump-ir] [--dump-arm64]\n"
               "  rosa run [--dyld <x86_64-dyld>] [--shared-cache <cache>] "
-              "[--max-blocks <count>] [--translation-cache <path>] [--timings] "
+              "[--max-blocks <count>] [--translation-cache <path>] [--timings] [--trace-syscalls] "
               "<x86_64-mach-o> [dump options] [-- <guest arguments>]\n"
               "  rosa exec [--dyld <x86_64-dyld>] [--shared-cache <cache>] "
-              "[--max-blocks <count>] [--translation-cache <path>] "
+              "[--max-blocks <count>] [--translation-cache <path>] [--trace-syscalls] "
               "<x86_64-mach-o> [<guest arguments>...]\n";
 }
 
@@ -139,6 +140,8 @@ RunOptions parseRunOptions(int argc, char **argv) {
             options.dumps.arm64 = true;
         } else if (argument == "--timings") {
             options.timings = true;
+        } else if (argument == "--trace-syscalls") {
+            options.traceSyscalls = true;
         } else if (!argument.starts_with("--") && !sawExecutable) {
             options.executable = std::filesystem::path(argument);
             sawExecutable = true;
@@ -183,6 +186,8 @@ RunOptions parseExecOptions(int argc, char **argv) {
                 throw std::invalid_argument("--max-blocks requires a positive decimal count");
             }
             options.maximumBlocks = parsed;
+        } else if (argument == "--trace-syscalls") {
+            options.traceSyscalls = true;
         } else if (argument.starts_with("--")) {
             throw std::invalid_argument("invalid exec argument: " + std::string(argument));
         } else {
@@ -483,7 +488,7 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
                       const std::vector<std::string> &environment, const DumpOptions &options,
                       std::size_t maximumProbeBlocks, bool collectTimings,
                       const std::optional<std::filesystem::path> &translationCachePath,
-                      bool reportStatus) {
+                      bool reportStatus, bool traceSyscalls) {
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
     constexpr std::uint64_t standaloneDyldSlide = 0x00007FF800000000ULL;
@@ -566,6 +571,9 @@ int runDyldExperiment(const std::filesystem::path &executablePath,
                                      sharedCache ? &*sharedCache : nullptr,
                                      executableFile.uuid().value_or(std::array<std::uint8_t, 16>{}),
                                      options.arm64, collectTimings, runtimeTranslationCache);
+    if (traceSyscalls) {
+        dispatcher.syscalls().setTrace(&std::cerr);
+    }
     try {
         const auto result = dispatcher.run(state, maximumProbeBlocks);
         const auto dispatchFinished = Clock::now();
@@ -640,7 +648,7 @@ int main(int argc, char **argv) {
                 return runDyldExperiment(options.executable, options.dyld, options.sharedCache,
                                          options.guestArguments, {}, options.dumps,
                                          options.maximumBlocks.value_or(1'000'000), options.timings,
-                                         options.translationCache, true);
+                                         options.translationCache, true, options.traceSyscalls);
             }
             return runMachO(options.executable, options.guestArguments, options.dumps,
                             options.maximumBlocks.value_or(1'000));
@@ -652,7 +660,7 @@ int main(int argc, char **argv) {
                     options.executable, options.dyld, options.sharedCache,
                     options.guestArguments, hostEnvironment(), options.dumps,
                     options.maximumBlocks.value_or(std::numeric_limits<std::size_t>::max()),
-                    false, options.translationCache, false);
+                    false, options.translationCache, false, options.traceSyscalls);
             } catch (const std::exception &error) {
                 std::cerr << "rosa: " << error.what() << '\n';
                 return execRuntimeFailureStatus;

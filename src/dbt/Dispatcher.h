@@ -71,6 +71,7 @@ class Dispatcher {
     [[nodiscard]] std::vector<guest::GuestAddress> recentBlocks() const;
     [[nodiscard]] std::vector<BlockExecutionCount> hotBlocks(std::size_t minimumExecutions = 16,
                                                              std::size_t limit = 8) const;
+    [[nodiscard]] darwin::SyscallDispatcher &syscalls() noexcept { return syscallDispatcher_; }
     [[nodiscard]] const darwin::MachDispatcher &machDispatcher() const noexcept {
         return syscallDispatcher_.machDispatcher();
     }
