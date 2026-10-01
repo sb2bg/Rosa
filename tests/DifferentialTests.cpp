@@ -1523,6 +1523,15 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        // A rotate count that masks to zero still writes, and so
+        // zero-extends, a 32-bit destination.
+        auto testCase = make("rol32_masked_zero_count", CaseId::rol32_masked_zero_count,
+                             differentialBytes_rol32_masked_zero_count);
+        testCase.request.state.rax = 0xFFFFFFFF12345679ULL;
+        testCase.flagMask = carryFlag | overflowFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("std_sets_direction", CaseId::std_sets_direction,
                              differentialBytes_std_sets_direction);
         testCase.flagMask = arithmeticFlags | directionFlag;

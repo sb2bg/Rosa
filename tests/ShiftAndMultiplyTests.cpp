@@ -1593,7 +1593,10 @@ void testRotateLeft32ImmediateGeneratedExecution() {
     zeroState.rax = 0xFFFFFFFF89ABCDEFULL;
     zeroState.rflags = 0xAD7;
     static_cast<void>(zeroBlock.execute(zeroState));
-    expectEqual(zeroState.rax, std::uint64_t{0xFFFFFFFF89ABCDEFULL}, "ROL masked-zero changed RAX");
+    // The differential case rol32_masked_zero_count confirms hardware still
+    // writes, and so zero-extends, the 32-bit destination.
+    expectEqual(zeroState.rax, std::uint64_t{0x89ABCDEFULL},
+                "ROL masked-zero did not zero-extend RAX");
     expectEqual(zeroState.rflags, std::uint64_t{0xAD7}, "ROL masked-zero changed flags");
 }
 

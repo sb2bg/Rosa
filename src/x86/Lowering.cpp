@@ -2710,12 +2710,19 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
             const auto operandBits = reg.width;
             const auto count = static_cast<std::uint8_t>(
                 (immediate.value & (reg.width == 64 ? 0x3FU : 0x1FU)) % operandBits);
-            if (count == 0) {
-                break;
-            }
             const auto width = reg.width == 16   ? ir::Width::I16
                                : reg.width == 32 ? ir::Width::I32
                                                  : ir::Width::I64;
+            if (count == 0) {
+                // Flags stay untouched, but a 32-bit destination is still
+                // written and so zero-extends, as on hardware.
+                if (reg.width == 32) {
+                    builder.writeGuestRegister(
+                        reg.reg, builder.readGuestRegister(reg.reg, width, instruction.address),
+                        width, instruction.address);
+                }
+                break;
+            }
             const auto unmasked = builder.readGuestRegister(reg.reg, width, instruction.address);
             auto original = unmasked;
             if (reg.width == 16) {
