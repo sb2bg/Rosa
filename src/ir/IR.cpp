@@ -1231,6 +1231,15 @@ void Builder::loadFence(guest::GuestAddress rip) {
     });
 }
 
+void Builder::writeDirectionFlag(bool set, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::WriteDirectionFlag,
+        .width = Width::I64,
+        .guestRip = rip,
+        .immediate = set ? 1U : 0U,
+    });
+}
+
 void Builder::storeFence(guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::StoreFence,
@@ -2209,6 +2218,11 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::LoadFence:
         case Opcode::StoreFence:
         case Opcode::ReadTimestampCounter:
+            break;
+        case Opcode::WriteDirectionFlag:
+            if (operation.immediate > 1) {
+                errors.emplace_back("write_direction_flag immediate is not 0 or 1");
+            }
             break;
         case Opcode::Cpuid:
             break;

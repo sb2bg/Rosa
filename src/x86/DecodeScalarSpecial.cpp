@@ -485,6 +485,13 @@ bool decodeScalarSpecial(DecodeContext &context) {
         return true;
     }
 
+    if (code[cursor] == 0xFCU || code[cursor] == 0xFDU) {
+        instruction.opcode = code[cursor] == 0xFCU ? Opcode::Cld : Opcode::Std;
+        instruction.length = 1;
+        instruction.bytes[0] = code[cursor];
+        return true;
+    }
+
     if (code[cursor] == 0x0FU && code.size() - cursor >= 3 &&
         code[cursor + 1] == 0xAEU && code[cursor + 2] == 0xE8U) {
         instruction.opcode = Opcode::Lfence;

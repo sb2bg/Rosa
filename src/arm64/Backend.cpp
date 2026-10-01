@@ -3189,6 +3189,20 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
         case ir::Opcode::StoreFence:
             assembler.dmbIsh();
             break;
+        case ir::Opcode::WriteDirectionFlag:
+            assembler.ldr(arm64::x16, arm64::x0,
+                          static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
+            assembler.movImmediate(arm64::x17,
+                                   operation.immediate != 0 ? x86::flagDirection
+                                                            : ~x86::flagDirection);
+            if (operation.immediate != 0) {
+                assembler.bitOr(arm64::x16, arm64::x16, arm64::x17);
+            } else {
+                assembler.bitAnd(arm64::x16, arm64::x16, arm64::x17);
+            }
+            assembler.str(arm64::x16, arm64::x0,
+                          static_cast<std::uint32_t>(offsetof(x86::X86State, rflags)));
+            break;
         case ir::Opcode::Cpuid:
             assembler.movImmediate(arm64::x16, pointerBits(&cpuidGuest));
             assembler.blr(arm64::x16);

@@ -260,6 +260,8 @@ enum class Opcode {
     Leave,
     Nop,
     Lfence,
+    Cld,
+    Std,
     Mfence,
     Rdtsc,
     Cpuid,

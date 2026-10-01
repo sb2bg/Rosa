@@ -5513,6 +5513,11 @@ ir::Block lowerToIr(std::span<const DecodedInstruction> decoded) {
         case x86::Opcode::Lfence:
             builder.loadFence(instruction.address);
             break;
+        case x86::Opcode::Cld:
+        case x86::Opcode::Std:
+            builder.writeDirectionFlag(instruction.opcode == x86::Opcode::Std,
+                                       instruction.address);
+            break;
         case x86::Opcode::Mfence:
             builder.storeFence(instruction.address);
             break;

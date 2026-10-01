@@ -2057,6 +2057,44 @@ void testNeg64GeneratedExecution() {
     expectEqual(byteOverflow.rflags, std::uint64_t{0x883}, "NEG minimum CL flags differ");
 }
 
+void testDirectionFlagGeneratedExecution() {
+    // memmove's backward path: STD; REP MOVSB; CLD.
+    constexpr std::array<std::uint8_t, 5> code{0xFD, 0xF3, 0xA4, 0xFC, 0xC3};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, rosa::guest::GuestAddress{0x1000});
+    expect(decoded[0].opcode == rosa::x86::Opcode::Std && decoded[0].length == 1,
+           "STD decode differs");
+    expect(decoded[2].opcode == rosa::x86::Opcode::Cld && decoded[2].length == 1,
+           "CLD decode differs");
+    const auto listing = rosa::debug::dumpX86(decoded);
+    expect(listing.find("std") != std::string::npos && listing.find("cld") != std::string::npos,
+           "STD/CLD x86 dump differs");
+
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, rosa::guest::GuestAddress{0x1000});
+    expect(rosa::debug::dumpIr(block.intermediateRepresentation()).find("write_direction_flag 1") !=
+               std::string::npos,
+           "STD IR dump differs");
+
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(rosa::guest::GuestAddress{0x8000}, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    constexpr std::array<std::uint8_t, 4> bytes{1, 2, 3, 4};
+    addressSpace.writeBytes(rosa::guest::GuestAddress{0x8010}, bytes);
+    rosa::x86::X86State state;
+    state.rsi = 0x8013;
+    state.rdi = 0x8043;
+    state.rcx = bytes.size();
+    state.rflags = 0x8D7;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expect(addressSpace.readBytes(rosa::guest::GuestAddress{0x8040}, bytes.size()) ==
+               std::vector<std::uint8_t>(bytes.begin(), bytes.end()),
+           "STD did not make REP MOVSB copy backward");
+    expectEqual(state.rsi, std::uint64_t{0x800F}, "backward copy RSI differs");
+    expectEqual(state.rflags, std::uint64_t{0x8D7},
+                "CLD did not clear DF or STD/CLD changed arithmetic flags");
+}
+
 void testRepMovsbGeneratedExecution() {
     constexpr std::array<std::uint8_t, 3> code{0xF3, 0xA4, 0xC3};
     const rosa::x86::Decoder decoder;
@@ -3299,6 +3337,7 @@ std::span<const TestCase> shiftAndMultiplyTests() {
         {"NOT 32-bit generated execution", testNot32GeneratedExecution},
         {"NEG 64-bit generated execution", testNeg64GeneratedExecution},
         {"REP MOVSB generated execution", testRepMovsbGeneratedExecution},
+        {"STD/CLD direction flag generated execution", testDirectionFlagGeneratedExecution},
         {"unsigned MUL generated execution", testUnsignedMultiplyGeneratedExecution},
         {"unsigned MUL memory generated execution", testUnsignedMultiplyMemoryGeneratedExecution},
         {"signed IMUL memory generated execution", testSignedMultiplyMemoryGeneratedExecution},

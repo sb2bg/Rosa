@@ -1492,6 +1492,26 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        auto testCase = make("std_sets_direction", CaseId::std_sets_direction,
+                             differentialBytes_std_sets_direction);
+        testCase.flagMask = arithmeticFlags | directionFlag;
+        run(testCase);
+    }
+    {
+        // memmove's backward path: STD, copy, then CLD restores the ABI's DF=0.
+        auto testCase = make("std_rep_movsb_cld", CaseId::std_rep_movsb_cld,
+                             differentialBytes_std_rep_movsb_cld);
+        bindMemory(testCase, rosa::x86::Register::Rsi, 0x15);
+        bindSecondMemory(testCase, rosa::x86::Register::Rdi, 0x45);
+        testCase.request.state.rcx = 6;
+        constexpr std::array<std::uint8_t, 6> value{7, 8, 9, 10, 11, 12};
+        std::ranges::copy(value, testCase.request.memory.begin() + 0x10);
+        testCase.memoryCompareOffset = 0x40;
+        testCase.memoryCompareSize = value.size();
+        testCase.flagMask = arithmeticFlags | directionFlag;
+        run(testCase);
+    }
+    {
         auto testCase = make("rep_movsb_backward", CaseId::rep_movsb_backward,
                              differentialBytes_rep_movsb_backward);
         bindMemory(testCase, rosa::x86::Register::Rsi, 0x15);

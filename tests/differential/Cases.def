@@ -181,6 +181,8 @@ ROSA_DIFFERENTIAL_CASE(neg32_overflow, 0xF7, 0xD9)
 ROSA_DIFFERENTIAL_CASE(rep_movsb_forward, 0xF3, 0xA4)
 ROSA_DIFFERENTIAL_CASE(rep_movsb_backward, 0xF3, 0xA4)
 ROSA_DIFFERENTIAL_CASE(rep_movsb_overlap, 0xF3, 0xA4)
+ROSA_DIFFERENTIAL_CASE(std_sets_direction, 0xFD)
+ROSA_DIFFERENTIAL_CASE(std_rep_movsb_cld, 0xFD, 0xF3, 0xA4, 0xFC)
 ROSA_DIFFERENTIAL_CASE(mul64_wide, 0x48, 0xF7, 0xE1)
 ROSA_DIFFERENTIAL_CASE(imul64_overflow, 0x49, 0x0F, 0xAF, 0xCD)
 ROSA_DIFFERENTIAL_CASE(imul64_rip_memory_fit, 0x48, 0x0F, 0xAF, 0x35, 0x01,

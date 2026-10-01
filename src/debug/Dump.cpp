@@ -3593,6 +3593,12 @@ std::string dumpX86(std::span<const x86::DecodedInstruction> instructions) {
         case x86::Opcode::Lfence:
             stream << "lfence";
             break;
+        case x86::Opcode::Cld:
+            stream << "cld";
+            break;
+        case x86::Opcode::Std:
+            stream << "std";
+            break;
         case x86::Opcode::Mfence:
             stream << "mfence";
             break;
@@ -4222,6 +4228,9 @@ std::string dumpIr(const ir::Block &block) {
             break;
         case ir::Opcode::LoadFence:
             stream << "load_fence";
+            break;
+        case ir::Opcode::WriteDirectionFlag:
+            stream << "write_direction_flag " << operation.immediate;
             break;
         case ir::Opcode::StoreFence:
             stream << "store_fence";

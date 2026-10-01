@@ -122,6 +122,8 @@ enum class Opcode {
     LockedAndGuestMemory,
     StoreGuestIdtr,
     LoadFence,
+    // Sets (immediate 1) or clears (immediate 0) guest RFLAGS.DF.
+    WriteDirectionFlag,
     StoreFence,
     ReadTimestampCounter,
     Cpuid,
@@ -402,6 +404,7 @@ class Builder {
                               Width width, guest::GuestAddress rip);
     void storeGuestIdtr(ValueId address, guest::GuestAddress rip);
     void loadFence(guest::GuestAddress rip);
+    void writeDirectionFlag(bool set, guest::GuestAddress rip);
     void storeFence(guest::GuestAddress rip);
     void readTimestampCounter(guest::GuestAddress rip);
     void cpuid(guest::GuestAddress rip);
