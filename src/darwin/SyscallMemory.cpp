@@ -237,14 +237,20 @@ SyscallOutcome handleMmap(SyscallCall &call) {
         setError(state, EBADF);
         return {};
     }
-    if (state.rdi != 0 || state.rdx != guestProtectionRead ||
-        state.r10 != guestObservedFileMapFlags ||
+    // A private mapping is a copy-on-write snapshot of the file, so any
+    // read/write protection is exact. Without MAP_FIXED the address is only
+    // a hint, which the kernel may ignore and Rosa always does.
+    const auto protection = state.rdx;
+    const auto flags = state.r10;
+    if ((protection & ~(guestProtectionRead | guestProtectionWrite)) != 0 ||
+        (flags & guestMapPrivate) == 0 ||
+        (flags & ~(guestMapPrivate | guestAdvisoryFileMapFlags)) != 0 ||
         (state.r9 % guest::guestPageSize) != 0) {
         std::ostringstream reason;
-        reason << "only the observed anywhere read-only private resilient-codesign file mmap is implemented; got address=0x"
+        reason << "only private read/write file mmap without MAP_FIXED is implemented; got address=0x"
                << std::hex << state.rdi << " length=0x" << state.rsi
-               << " protection=0x" << state.rdx << " flags=0x"
-               << state.r10 << " fd=" << std::dec << descriptor.value
+               << " protection=0x" << protection << " flags=0x"
+               << flags << " fd=" << std::dec << descriptor.value
                << " offset=0x" << std::hex << state.r9;
         throw unsupported(state, syscallRip, reason.str());
     }
@@ -264,10 +270,19 @@ SyscallOutcome handleMmap(SyscallCall &call) {
         return {};
     }
     try {
+        auto permissions = guest::Permission::None;
+        if ((protection & guestProtectionRead) != 0) {
+            permissions = permissions | guest::Permission::Read;
+        }
+        if ((protection & guestProtectionWrite) != 0) {
+            permissions = permissions | guest::Permission::Write;
+        }
+        // The descriptor was opened read-only, but a private copy may still
+        // be made writable later, as XNU allows.
         addressSpace.mapFileSegment(
-            *mappedAddress, static_cast<std::size_t>(roundedSize),
-            guest::Permission::Read, guest::Permission::Read,
-            file->guestPath, state.r9, "mmap private file");
+            *mappedAddress, static_cast<std::size_t>(roundedSize), permissions,
+            guest::Permission::Read | guest::Permission::Write, file->guestPath, state.r9,
+            "mmap private file");
     } catch (const std::invalid_argument &) {
         setError(state, EINVAL);
         return {};

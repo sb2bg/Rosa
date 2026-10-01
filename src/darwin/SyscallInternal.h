@@ -147,8 +147,11 @@ inline constexpr std::uint64_t guestProtectionMask =
     guestProtectionRead | guestProtectionWrite | guestProtectionExecute;
 inline constexpr std::uint64_t guestMapPrivate = 0x2;
 inline constexpr std::uint64_t guestMapResilientCodesign = 0x00040000;
-inline constexpr std::uint64_t guestObservedFileMapFlags =
-    guestMapPrivate | guestMapResilientCodesign;
+inline constexpr std::uint64_t guestMapNoCache = 0x00000400;
+// Flags that only advise the kernel and never change what a private file
+// mapping contains.
+inline constexpr std::uint64_t guestAdvisoryFileMapFlags =
+    guestMapResilientCodesign | guestMapNoCache;
 inline constexpr std::uint64_t minimumMmapAddress = 0x0000000100000000ULL;
 inline constexpr std::uint64_t maximumUserMapEnd = 0x00007FFFFFFFF000ULL;
 inline constexpr std::string_view guestCryptexDirectory = "System/Cryptexes/OS";
