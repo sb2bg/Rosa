@@ -953,6 +953,7 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
             operation.opcode == ir::Opcode::AddGuestMemory ||
             operation.opcode == ir::Opcode::SubGuestMemory ||
             operation.opcode == ir::Opcode::OrGuestMemory ||
+            operation.opcode == ir::Opcode::XorGuestMemory ||
             operation.opcode == ir::Opcode::AndGuestMemory ||
             operation.opcode == ir::Opcode::ShiftLeftGuestMemory ||
             operation.opcode == ir::Opcode::ShiftRightGuestMemory ||
@@ -1005,6 +1006,7 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
             operation.opcode == ir::Opcode::ScalarDoubleXmm ||
             operation.opcode == ir::Opcode::AddXmmDwords ||
             operation.opcode == ir::Opcode::HorizontalAddXmmDwords ||
+            operation.opcode == ir::Opcode::XmmBinaryHelper ||
             operation.opcode == ir::Opcode::AndNotXmm ||
             operation.opcode == ir::Opcode::MoveXmmByteMask ||
             operation.opcode == ir::Opcode::ShuffleXmmBytes ||
@@ -1032,6 +1034,7 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
             operation.opcode == ir::Opcode::AddGuestMemory ||
             operation.opcode == ir::Opcode::SubGuestMemory ||
             operation.opcode == ir::Opcode::OrGuestMemory ||
+            operation.opcode == ir::Opcode::XorGuestMemory ||
             operation.opcode == ir::Opcode::AndGuestMemory ||
             operation.opcode == ir::Opcode::ShiftLeftGuestMemory ||
             operation.opcode == ir::Opcode::ShiftRightGuestMemory ||
@@ -2072,12 +2075,14 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
             assembler.bind(committed);
             break;
         }
-        case ir::Opcode::OrGuestMemory: {
+        case ir::Opcode::OrGuestMemory:
+        case ir::Opcode::XorGuestMemory: {
             if (operation.width != ir::Width::I8 && operation.width != ir::Width::I16 &&
                 operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 8-, 16-, 32-, or 64-bit guest memory OR");
+                    "ARM64 backend only implements 8-, 16-, 32-, or 64-bit guest memory OR/XOR");
             }
+            const bool isXor = operation.opcode == ir::Opcode::XorGuestMemory;
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
             assembler.mov(arm64::x4, arm64::x0);
@@ -2085,11 +2090,15 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
             assembler.mov(arm64::x2, hostRegister(*operation.lhs));
             assembler.mov(arm64::x3, hostRegister(*operation.rhs));
             assembler.mov(arm64::x0, arm64::x19);
-            assembler.movImmediate(arm64::x16,
-                                   operation.width == ir::Width::I8    ? pointerBits(&orGuest8)
-                                   : operation.width == ir::Width::I16 ? pointerBits(&orGuest16)
-                                   : operation.width == ir::Width::I32 ? pointerBits(&orGuest32)
-                                                                       : pointerBits(&orGuest64));
+            assembler.movImmediate(
+                arm64::x16,
+                operation.width == ir::Width::I8
+                    ? pointerBits(isXor ? &xorGuest8 : &orGuest8)
+                : operation.width == ir::Width::I16
+                    ? pointerBits(isXor ? &xorGuest16 : &orGuest16)
+                : operation.width == ir::Width::I32
+                    ? pointerBits(isXor ? &xorGuest32 : &orGuest32)
+                    : pointerBits(isXor ? &xorGuest64 : &orGuest64));
             assembler.blr(arm64::x16);
             assembler.cbz(arm64::x0, fault);
             assembler.b(committed);
@@ -2214,10 +2223,10 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
             break;
         }
         case ir::Opcode::CompareExchangeGuestMemory: {
-            if (operation.width != ir::Width::I8 && operation.width != ir::Width::I32 &&
-                operation.width != ir::Width::I64) {
+            if (operation.width != ir::Width::I8 && operation.width != ir::Width::I16 &&
+                operation.width != ir::Width::I32 && operation.width != ir::Width::I64) {
                 throw std::runtime_error(
-                    "ARM64 backend only implements 8-, 32-, and 64-bit guest-memory CMPXCHG");
+                    "ARM64 backend only implements 8-, 16-, 32-, and 64-bit guest-memory CMPXCHG");
             }
             const auto fault = assembler.makeLabel();
             const auto committed = assembler.makeLabel();
@@ -2228,6 +2237,8 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
             assembler.mov(arm64::x0, arm64::x19);
             assembler.movImmediate(arm64::x16, operation.width == ir::Width::I8
                                                    ? pointerBits(&compareExchangeGuest8)
+                                               : operation.width == ir::Width::I16
+                                                   ? pointerBits(&compareExchangeGuest16)
                                                : operation.width == ir::Width::I32
                                                    ? pointerBits(&compareExchangeGuest32)
                                                    : pointerBits(&compareExchangeGuest64));
@@ -2977,6 +2988,21 @@ Program compile(const ir::Block &block, bool retainProgramListing) {
             assembler.movImmediate(arm64::x16, pointerBits(&addXmmDwords128));
             assembler.blr(arm64::x16);
             break;
+        case ir::Opcode::XmmBinaryHelper: {
+            using Helper = x86::X86State *(*)(x86::X86State *, std::uint64_t, std::uint64_t) noexcept;
+            constexpr std::array<Helper, 1> helpers{&packUnsignedSaturateDwords128};
+            const auto helper = static_cast<std::size_t>(operation.immediate);
+            if (helper >= helpers.size()) {
+                throw std::runtime_error("unknown XMM helper");
+            }
+            assembler.movImmediate(arm64::x1,
+                                   static_cast<std::uint64_t>(*operation.guestXmmRegister));
+            assembler.movImmediate(arm64::x2,
+                                   static_cast<std::uint64_t>(*operation.sourceGuestXmmRegister));
+            assembler.movImmediate(arm64::x16, pointerBits(helpers[helper]));
+            assembler.blr(arm64::x16);
+            break;
+        }
         case ir::Opcode::HorizontalAddXmmDwords:
             assembler.movImmediate(arm64::x1,
                                    static_cast<std::uint64_t>(*operation.guestXmmRegister));

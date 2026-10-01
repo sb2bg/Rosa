@@ -31,6 +31,15 @@ ValueId Builder::readGuestRegister(x86::Register reg, Width width, guest::GuestA
     return result;
 }
 
+bool Builder::emittedSince(std::size_t first, Opcode opcode) const noexcept {
+    for (auto index = first; index < block_.operations.size(); ++index) {
+        if (block_.operations[index].opcode == opcode) {
+            return true;
+        }
+    }
+    return false;
+}
+
 ValueId Builder::readGuestGsBase(guest::GuestAddress rip) {
     const auto result = nextValue();
     block_.operations.push_back(Operation{
@@ -830,6 +839,17 @@ void Builder::addXmmDwords(x86::XmmRegister destination,
     });
 }
 
+void Builder::xmmBinaryHelper(XmmHelper helper, x86::XmmRegister destination,
+                              x86::XmmRegister source, guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::XmmBinaryHelper,
+        .guestRip = rip,
+        .guestXmmRegister = destination,
+        .sourceGuestXmmRegister = source,
+        .immediate = static_cast<std::uint64_t>(helper),
+    });
+}
+
 void Builder::horizontalAddXmmDwords(x86::XmmRegister destination,
                                      x86::XmmRegister source,
                                      guest::GuestAddress rip) {
@@ -1044,6 +1064,17 @@ void Builder::subGuestMemory(ValueId address, ValueId source, Width width,
                              guest::GuestAddress rip) {
     block_.operations.push_back(Operation{
         .opcode = Opcode::SubGuestMemory,
+        .width = width,
+        .guestRip = rip,
+        .lhs = address,
+        .rhs = source,
+    });
+}
+
+void Builder::xorGuestMemory(ValueId address, ValueId source, Width width,
+                             guest::GuestAddress rip) {
+    block_.operations.push_back(Operation{
+        .opcode = Opcode::XorGuestMemory,
         .width = width,
         .guestRip = rip,
         .lhs = address,
@@ -1744,6 +1775,7 @@ std::vector<std::string> verify(const Block &block) {
                     "sub_guest_memory currently requires i8, i32, or i64");
             }
             break;
+        case Opcode::XorGuestMemory:
         case Opcode::OrGuestMemory:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "source");
@@ -1787,10 +1819,10 @@ std::vector<std::string> verify(const Block &block) {
         case Opcode::CompareExchangeGuestMemory:
             checkUse(operation.lhs, "guest address");
             checkUse(operation.rhs, "source");
-            if (operation.width != Width::I8 && operation.width != Width::I32 &&
-                operation.width != Width::I64) {
+            if (operation.width != Width::I8 && operation.width != Width::I16 &&
+                operation.width != Width::I32 && operation.width != Width::I64) {
                 errors.emplace_back(
-                    "compare_exchange_guest_memory currently requires i8, i32, or i64");
+                    "compare_exchange_guest_memory currently requires i8, i16, i32, or i64");
             }
             break;
         case Opcode::CompareExchangeGuestPair:
@@ -2116,6 +2148,11 @@ std::vector<std::string> verify(const Block &block) {
                 operation.width != Width::I32) {
                 errors.emplace_back(
                     "add_xmm_dwords has incomplete registers");
+            }
+            break;
+        case Opcode::XmmBinaryHelper:
+            if (!operation.guestXmmRegister || !operation.sourceGuestXmmRegister) {
+                errors.emplace_back("xmm_helper has incomplete registers");
             }
             break;
         case Opcode::HorizontalAddXmmDwords:

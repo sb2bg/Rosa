@@ -1716,10 +1716,40 @@ void testXor8BitRegisterImmediate() {
            "XOR R12B, imm8 destination differs");
 }
 
+// libdispatch compares a lock word with its owner's thread port, read from
+// the TSD slot: xor eax, gs:[0x18].
+void testXorRegisterGsAbsoluteMemory() {
+    constexpr std::array<std::uint8_t, 9> code{0x65, 0x33, 0x04, 0x25, 0x18, 0x00, 0x00, 0x00, 0xC3};
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802CEB107ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::XorRegMem, "GS XOR opcode differs");
+    const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[1]);
+    expect(!memory.hasBase && !memory.index && memory.displacement == 0x18 &&
+               memory.segment == rosa::x86::Segment::Gs && memory.width == 32,
+           "GS XOR memory operand differs");
+    expect(rosa::debug::dumpX86(decoded).find("xor eax, [gs:0x18]") != std::string::npos,
+           "GS XOR dump differs");
+    constexpr rosa::guest::GuestAddress gsBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(gsBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU32(rosa::guest::GuestAddress{gsBase.value + 0x18}, 0x803);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.gsBase = gsBase.value;
+    state.rax = 0xFFFFFFFF00000803ULL;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(state.rax, std::uint64_t{0}, "GS XOR did not zero-extend its equal result");
+    expect((state.rflags & zeroFlag) != 0, "GS XOR equal result did not set ZF");
+}
+
 } // namespace
 
 std::span<const TestCase> logicTests() {
     static const TestCase cases[]{
+        {"XOR register with GS-absolute guest memory", testXorRegisterGsAbsoluteMemory},
         {"OR register generated execution", testOrRegisterGeneratedExecution},
         {"OR 8-bit registers generated execution", testOr8BitRegistersGeneratedExecution},
         {"OR 8-bit register from guest memory", testOr8BitRegisterFromGuestMemory},

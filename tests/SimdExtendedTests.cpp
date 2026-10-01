@@ -1102,8 +1102,9 @@ void testConvertFloat32ToDoubleXmm() {
     static_cast<void>(block.execute(state, &addressSpace));
     expectEqual(state.xmm[0].low, std::uint64_t{0x40091EB860000000ULL},
                 "CVTSS2SD converted the wrong double bits");
-    expectEqual(state.xmm[0].high, std::uint64_t{0},
-                "CVTSS2SD did not zero the high lane");
+    // Legacy SSE leaves the upper quadword unchanged (checked against Rosetta).
+    expectEqual(state.xmm[0].high, std::uint64_t{0xBBBBBBBBBBBBBBBBULL},
+                "CVTSS2SD changed the high lane");
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "CVTSS2SD changed flags");
 
     // Register form: CVTSS2SD xmm0, xmm1 with -0.5f.
@@ -1121,8 +1122,8 @@ void testConvertFloat32ToDoubleXmm() {
     static_cast<void>(regBlock.execute(regState));
     expectEqual(regState.xmm[0].low, std::uint64_t{0xBFE0000000000000ULL},
                 "CVTSS2SD register form converted the wrong double bits");
-    expectEqual(regState.xmm[0].high, std::uint64_t{0},
-                "CVTSS2SD register form did not zero the high lane");
+    expectEqual(regState.xmm[0].high, std::uint64_t{0xBBBBBBBBBBBBBBBBULL},
+                "CVTSS2SD register form changed the high lane");
 }
 
 void testConvertInt32ToDoubleXmm() {
@@ -1165,8 +1166,9 @@ void testConvertInt32ToDoubleXmm() {
     static_cast<void>(block.execute(state, &addressSpace));
     expectEqual(state.xmm[0].low, std::uint64_t{0xC19D6F3454000000ULL},
                 "CVTSI2SD converted the wrong double bits");
-    expectEqual(state.xmm[0].high, std::uint64_t{0},
-                "CVTSI2SD did not zero the high lane");
+    // Legacy SSE leaves the upper quadword unchanged (checked against Rosetta).
+    expectEqual(state.xmm[0].high, std::uint64_t{0xBBBBBBBBBBBBBBBBULL},
+                "CVTSI2SD changed the high lane");
     expectEqual(state.rbp, sourceAddress.value + 0x30, "CVTSI2SD changed its base register");
     expectEqual(state.rflags, std::uint64_t{0xAD7}, "CVTSI2SD changed flags");
 
@@ -1188,8 +1190,8 @@ void testConvertInt32ToDoubleXmm() {
     static_cast<void>(regBlock.execute(regState));
     expectEqual(regState.xmm[0].low, std::uint64_t{0x4045000000000000ULL},
                 "CVTSI2SD register form converted the wrong double bits");
-    expectEqual(regState.xmm[0].high, std::uint64_t{0},
-                "CVTSI2SD register form did not zero the high lane");
+    expectEqual(regState.xmm[0].high, std::uint64_t{0xBBBBBBBBBBBBBBBBULL},
+                "CVTSI2SD register form changed the high lane");
     expectEqual(regState.rflags, std::uint64_t{0xAD7}, "CVTSI2SD register form changed flags");
 }
 

@@ -224,6 +224,10 @@ addXmmDwords128(x86::X86State *state, std::uint64_t destinationIndex,
                 std::uint64_t sourceIndex) noexcept;
 
 extern "C" x86::X86State *
+packUnsignedSaturateDwords128(x86::X86State *state, std::uint64_t destinationIndex,
+                              std::uint64_t sourceIndex) noexcept;
+
+extern "C" x86::X86State *
 horizontalAddXmmDwords128(x86::X86State *state, std::uint64_t destinationIndex,
                           std::uint64_t sourceIndex) noexcept;
 
@@ -412,6 +416,15 @@ extern "C" x86::X86State *subGuest8(GuestExecutionContext *context,
                                                              std::uint64_t address,
                                                              std::uint64_t sourceValue) noexcept;
 
+extern "C" x86::X86State *xorGuest8(GuestExecutionContext *context, x86::X86State *state,
+                                    std::uint64_t address, std::uint64_t sourceValue) noexcept;
+extern "C" x86::X86State *xorGuest16(GuestExecutionContext *context, x86::X86State *state,
+                                     std::uint64_t address, std::uint64_t sourceValue) noexcept;
+extern "C" x86::X86State *xorGuest32(GuestExecutionContext *context, x86::X86State *state,
+                                     std::uint64_t address, std::uint64_t sourceValue) noexcept;
+extern "C" x86::X86State *xorGuest64(GuestExecutionContext *context, x86::X86State *state,
+                                     std::uint64_t address, std::uint64_t sourceValue) noexcept;
+
 extern "C" x86::X86State *orGuest8(GuestExecutionContext *context,
                                                              x86::X86State *state,
                                                              std::uint64_t address,
@@ -508,6 +521,10 @@ extern "C" x86::X86State *updateSubFlags16(x86::X86State *state,
 extern "C" x86::X86State *
 compareExchangeGuest8(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
                       std::uint64_t sourceValue) noexcept;
+
+extern "C" x86::X86State *
+compareExchangeGuest16(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                       std::uint64_t sourceValue) noexcept;
 
 extern "C" x86::X86State *
 compareExchangeGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,

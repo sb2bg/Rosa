@@ -314,6 +314,65 @@ extern "C" __attribute__((noinline)) x86::X86State *orGuest64(GuestExecutionCont
     }
 }
 
+namespace {
+
+// A memory-destination XOR of one width: read, combine, write, then the
+// logic flags of the result.
+template <typename Value>
+x86::X86State *xorGuestMemory(GuestExecutionContext *context, x86::X86State *state,
+                              std::uint64_t address, std::uint64_t sourceValue,
+                              x86::X86State *(*updateFlags)(x86::X86State *, std::uint64_t)) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated guest XOR has no address space");
+        }
+        auto &addressSpace = *context->addressSpace;
+        addressSpace.validateAccess(guest::GuestAddress{address}, sizeof(Value),
+                                    guest::Permission::Read | guest::Permission::Write);
+        const auto bytes = addressSpace.readBytes(guest::GuestAddress{address}, sizeof(Value));
+        Value original{};
+        std::memcpy(&original, bytes.data(), sizeof(Value));
+        const auto result = static_cast<Value>(original ^ static_cast<Value>(sourceValue));
+        std::array<std::uint8_t, sizeof(Value)> resultBytes{};
+        std::memcpy(resultBytes.data(), &result, sizeof(Value));
+        addressSpace.writeBytes(guest::GuestAddress{address}, resultBytes);
+        return updateFlags(state, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(Value);
+        }
+        return nullptr;
+    }
+}
+
+} // namespace
+
+extern "C" __attribute__((noinline)) x86::X86State *
+xorGuest8(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+          std::uint64_t sourceValue) noexcept {
+    return xorGuestMemory<std::uint8_t>(context, state, address, sourceValue, updateLogicFlags8);
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+xorGuest16(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+           std::uint64_t sourceValue) noexcept {
+    return xorGuestMemory<std::uint16_t>(context, state, address, sourceValue, updateLogicFlags16);
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+xorGuest32(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+           std::uint64_t sourceValue) noexcept {
+    return xorGuestMemory<std::uint32_t>(context, state, address, sourceValue, updateLogicFlags32);
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+xorGuest64(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+           std::uint64_t sourceValue) noexcept {
+    return xorGuestMemory<std::uint64_t>(context, state, address, sourceValue, updateLogicFlags64);
+}
+
 extern "C" __attribute__((noinline)) x86::X86State *andGuest8(GuestExecutionContext *context,
                                                               x86::X86State *state,
                                                               std::uint64_t address,
@@ -771,6 +830,41 @@ compareExchangeGuest8(GuestExecutionContext *context, x86::X86State *state, std:
             context->fault = std::current_exception();
             context->faultAddress = guest::GuestAddress{address};
             context->faultSize = sizeof(std::uint8_t);
+        }
+        return nullptr;
+    }
+}
+
+extern "C" __attribute__((noinline)) x86::X86State *
+compareExchangeGuest16(GuestExecutionContext *context, x86::X86State *state, std::uint64_t address,
+                       std::uint64_t sourceValue) noexcept {
+    try {
+        if (context == nullptr || context->addressSpace == nullptr) {
+            throw std::runtime_error("generated word CMPXCHG has no guest address space");
+        }
+        constexpr auto width = sizeof(std::uint16_t);
+        context->addressSpace->validateAccess(guest::GuestAddress{address}, width,
+                                              guest::Permission::Read | guest::Permission::Write);
+        const auto memoryValue = context->addressSpace->readU16(guest::GuestAddress{address});
+        const auto accumulator = static_cast<std::uint16_t>(state->rax);
+        const auto result = static_cast<std::uint16_t>(memoryValue - accumulator);
+        if (accumulator == memoryValue) {
+            const auto source = static_cast<std::uint16_t>(sourceValue);
+            const std::array bytes{
+                static_cast<std::uint8_t>(source),
+                static_cast<std::uint8_t>(source >> 8U),
+            };
+            context->addressSpace->writeBytes(guest::GuestAddress{address}, bytes);
+        } else {
+            // Only AX takes the memory value; the upper RAX bits are preserved.
+            state->rax = (state->rax & ~std::uint64_t{0xFFFF}) | memoryValue;
+        }
+        return updateSubFlags16(state, memoryValue, accumulator, result);
+    } catch (...) {
+        if (context != nullptr) {
+            context->fault = std::current_exception();
+            context->faultAddress = guest::GuestAddress{address};
+            context->faultSize = sizeof(std::uint16_t);
         }
         return nullptr;
     }

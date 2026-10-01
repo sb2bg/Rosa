@@ -30,7 +30,7 @@ bool decodeGeneral(DecodeContext &context) {
         code[cursor] != 0x02U && code[cursor] != 0x03U &&
         code[cursor] != 0x10U && code[cursor] != 0x11U &&
         code[cursor] != 0x19U && code[cursor] != 0x1CU &&
-        code[cursor] != 0x0CU &&
+        code[cursor] != 0x0CU && code[cursor] != 0x15U &&
         code[cursor] != 0x88U &&
         code[cursor] != 0x89U &&
         code[cursor] != 0x8AU && code[cursor] != 0x8BU &&
@@ -85,17 +85,11 @@ bool decodeGeneral(DecodeContext &context) {
             address, remaining,
             "operand-size override is only supported for 16-bit ADD, OR, CMP, MOV, XOR r16, [memory], and memory INC in the general decoder");
     }
-    if (hasGsOverride && opcode != 0x89U && opcode != 0x8BU &&
-        opcode != 0xC7U &&
-        opcode != 0x39U && opcode != 0x3BU) {
-        throw DecodeError(address, remaining,
-                          "GS segment override is only supported for MOV/CMP register/memory");
-    }
     if (!rexW && opcode != 0x05U && opcode != 0x0DU && opcode != 0x24U &&
         opcode != 0x25U && opcode != 0x34U &&
         opcode != 0x00U && opcode != 0x01U && opcode != 0x02U &&
         opcode != 0x03U && opcode != 0x11U &&
-        opcode != 0x19U && opcode != 0x1CU && opcode != 0x0CU &&
+        opcode != 0x19U && opcode != 0x1CU && opcode != 0x0CU && opcode != 0x15U &&
         opcode != 0x88U && opcode != 0x89U &&
         opcode != 0x8AU &&
         opcode != 0x8BU && opcode != 0x85U &&
@@ -210,6 +204,19 @@ bool decodeGeneral(DecodeContext &context) {
                        static_cast<std::int64_t>(immediate))
                  : static_cast<std::uint64_t>(
                        static_cast<std::uint32_t>(immediate)),
+            32});
+    } else if (opcode == 0x15U) {
+        if (code.size() - cursor < sizeof(std::uint32_t)) {
+            throw DecodeError(address, remaining, "truncated adc accumulator, imm32");
+        }
+        const auto immediate = readI32(code.subspan(cursor, sizeof(std::uint32_t)));
+        cursor += sizeof(std::uint32_t);
+        instruction.opcode = Opcode::AdcRegImm;
+        instruction.operands.push_back(
+            RegisterOperand{Register::Rax, static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+        instruction.operands.push_back(ImmediateOperand{
+            rexW ? static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate))
+                 : static_cast<std::uint64_t>(static_cast<std::uint32_t>(immediate)),
             32});
     } else if (opcode == 0x2DU) {
         if (code.size() - cursor < sizeof(std::uint32_t)) {
@@ -1799,11 +1806,17 @@ bool decodeGeneral(DecodeContext &context) {
         }
         const auto modrm = code[cursor++];
         const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-        if (mode != 0x3U || rexX) {
-            throw DecodeError(address, remaining,
-                              "only register-direct XOR from opcode 31 is supported");
-        }
         const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+        if (mode != 0x3U) {
+            instruction.opcode = Opcode::XorMemReg;
+            instruction.operands.push_back(
+                decodeModrmMemory(context, cursor, modrm, static_cast<std::uint8_t>(rex), width));
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR), width});
+        } else {
+        if (rexX) {
+            throw DecodeError(address, remaining, "REX.X on a register-direct XOR from opcode 31");
+        }
         const auto source =
             decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR);
         const auto destination =
@@ -1811,6 +1824,7 @@ bool decodeGeneral(DecodeContext &context) {
         instruction.opcode = Opcode::XorRegReg;
         instruction.operands.push_back(RegisterOperand{destination, width});
         instruction.operands.push_back(RegisterOperand{source, width});
+        }
     } else if (opcode == 0x32U) {
         if (cursor >= code.size()) {
             throw DecodeError(address, remaining,
@@ -1988,62 +2002,16 @@ bool decodeGeneral(DecodeContext &context) {
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(rmEncoding, rexB), operandWidth});
         } else {
-        const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !rexB;
-        if (mode == 0 && rmEncoding == 0x5U && rexB) {
-            throw DecodeError(
-                address, remaining,
-                "R13-based XOR from opcode 33 is not supported");
-        }
-        auto baseEncoding = rmEncoding;
-        std::optional<Register> index;
-        std::uint8_t scale = 1;
-        if (!ripRelative && rmEncoding == 0x4U) {
-            if (cursor >= code.size()) {
-                throw DecodeError(address, remaining, "truncated XOR memory SIB");
+            auto memory = decodeModrmMemory(context, cursor, modrm, static_cast<std::uint8_t>(rex),
+                                            operandWidth);
+            if (hasGsOverride) {
+                memory.segment = Segment::Gs;
             }
-            const auto sib = code[cursor++];
-            const auto scaleBits = static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
-            const auto indexEncoding = static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
-            baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-            if (mode == 0 && baseEncoding == 0x5U) {
-                throw DecodeError(address, remaining,
-                                  "no-base SIB addressing is not supported for XOR");
-            }
-            if (indexEncoding != 0x4U || rexX) {
-                index = decodeRegister(indexEncoding, rexX);
-                scale = static_cast<std::uint8_t>(1U << scaleBits);
-            }
-        } else if (!ripRelative && rexX) {
-            throw DecodeError(address, remaining,
-                              "REX.X requires an XOR memory SIB");
-        }
-        std::int64_t displacement = 0;
-        if (mode == 0x1U) {
-            if (cursor >= code.size()) {
-                throw DecodeError(address, remaining, "truncated XOR memory disp8");
-            }
-            displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-        } else if (mode == 0x2U || ripRelative) {
-            if (code.size() - cursor < 4) {
-                throw DecodeError(address, remaining, "truncated XOR memory disp32");
-            }
-            displacement = readI32(code.subspan(cursor, 4));
-            cursor += 4;
-        }
-        if (ripRelative) {
-            static_cast<void>(relativeTarget(
-                address, cursor - instructionStart, displacement));
-        }
-        instruction.opcode = Opcode::XorRegMem;
-        instruction.operands.push_back(RegisterOperand{
-            decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR),
-            operandWidth});
-        instruction.operands.push_back(
-            ripRelative
-                ? MemoryOperand{Register::Rax, displacement, operandWidth,
-                                std::nullopt, 1, false, true}
-                : MemoryOperand{decodeRegister(baseEncoding, rexB), displacement,
-                                operandWidth, index, scale});
+            instruction.opcode = Opcode::XorRegMem;
+            instruction.operands.push_back(RegisterOperand{
+                decodeRegister(static_cast<std::uint8_t>((modrm >> 3U) & 0x7U), rexR),
+                operandWidth});
+            instruction.operands.push_back(memory);
         }
     } else if (opcode == 0x38U) {
         if (cursor >= code.size()) {
@@ -3347,13 +3315,13 @@ bool decodeGeneral(DecodeContext &context) {
             static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
         const auto rmEncoding =
             static_cast<std::uint8_t>(modrm & 0x7U);
-        if (mode != 0x3U || extension != 0x4U || rexW ||
+        if (mode != 0x3U || (extension != 0x4U && extension != 0x5U) || rexW ||
             (!hasRex && rmEncoding >= 0x4U)) {
             throw DecodeError(
                 address, remaining,
-                "only SHL representable-byte-register, CL from opcode D2 /4 is supported");
+                "only SHL/SHR representable-byte-register, CL from opcode D2 /4,/5 is supported");
         }
-        instruction.opcode = Opcode::ShlRegCl;
+        instruction.opcode = extension == 0x4U ? Opcode::ShlRegCl : Opcode::ShrRegCl;
         instruction.operands.push_back(RegisterOperand{
             decodeRegister(rmEncoding, rexB), 8});
     } else if (opcode == 0xD3U) {
@@ -3491,25 +3459,11 @@ bool decodeGeneral(DecodeContext &context) {
             instruction.operands.push_back(MemoryOperand{
                 decodeRegister(rmEncoding, rexB), displacement,
                 static_cast<std::uint8_t>(rexW ? 64U : 32U)});
-        } else if (extension == 0x0U && mode <= 0x2U && !rexR && !rexX &&
-                   rmEncoding != 0x4U &&
-                   !(mode == 0 && rmEncoding == 0x5U)) {
-            std::int64_t displacement = 0;
-            if (mode == 0x1U) {
-                if (cursor >= code.size()) {
-                    throw DecodeError(address, remaining,
-                                      "truncated TEST memory disp8");
-                }
-                displacement =
-                    std::bit_cast<std::int8_t>(code[cursor++]);
-            } else if (mode == 0x2U) {
-                if (code.size() - cursor < 4) {
-                    throw DecodeError(address, remaining,
-                                      "truncated TEST memory disp32");
-                }
-                displacement = readI32(code.subspan(cursor, 4));
-                cursor += 4;
-            }
+        } else if (extension == 0x0U && mode <= 0x2U && !rexR) {
+            // TEST r/m32/r/m64, imm32 on any memory form.
+            const auto width = static_cast<std::uint8_t>(rexW ? 64U : 32U);
+            auto memory = decodeModrmMemory(context, cursor, modrm, static_cast<std::uint8_t>(rex),
+                                            width);
             if (code.size() - cursor < 4) {
                 throw DecodeError(address, remaining,
                                   "truncated TEST memory immediate");
@@ -3517,14 +3471,12 @@ bool decodeGeneral(DecodeContext &context) {
             const auto immediate = readI32(code.subspan(cursor, 4));
             cursor += 4;
             instruction.opcode = Opcode::TestMemImm;
-            instruction.operands.push_back(MemoryOperand{
-                decodeRegister(rmEncoding, rexB), displacement,
-                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+            instruction.operands.push_back(memory);
             instruction.operands.push_back(ImmediateOperand{
                 rexW ? static_cast<std::uint64_t>(
                            static_cast<std::int64_t>(immediate))
                      : static_cast<std::uint32_t>(immediate),
-                static_cast<std::uint8_t>(rexW ? 64U : 32U)});
+                width});
         } else {
         if (mode != 0x3U ||
             (extension != 0x0U && extension != 0x2U &&
@@ -4788,7 +4740,25 @@ bool decodeGeneral(DecodeContext &context) {
         const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
         const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
         const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-        if (extension == 0x4U && mode <= 0x2U && rexW && !rexR) {
+        if (hasGsOverride) {
+            // AND/CMP gs:[memory], imm8: libdispatch and libpthread reach
+            // their TSD slots through GS.
+            if (mode == 0x3U || rexR || (extension != 0x4U && extension != 0x7U)) {
+                throw DecodeError(address, remaining,
+                                  "only AND/CMP gs:[memory], imm8 is supported with a GS override");
+            }
+            auto memory = decodeModrmMemory(context, cursor, modrm, static_cast<std::uint8_t>(rex),
+                                            static_cast<std::uint16_t>(rexW ? 64U : 32U));
+            memory.segment = Segment::Gs;
+            if (cursor >= code.size()) {
+                throw DecodeError(address, remaining, "truncated GS memory immediate");
+            }
+            const auto immediate = std::bit_cast<std::int8_t>(code[cursor++]);
+            instruction.opcode = extension == 0x4U ? Opcode::AndMemImm : Opcode::CmpMemImm;
+            instruction.operands.push_back(memory);
+            instruction.operands.push_back(ImmediateOperand{
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
+        } else if (extension == 0x4U && mode <= 0x2U && rexW && !rexR) {
             if (mode == 0 && rmEncoding == 0x5U && !rexB) {
                 throw DecodeError(
                     address, remaining,
@@ -5170,6 +5140,21 @@ bool decodeGeneral(DecodeContext &context) {
         }
     } else {
         throw DecodeError(address, remaining, "opcode is not in the current Rosa subset");
+    }
+
+    // A GS override applies to the instruction's memory operand. Lowering
+    // rejects any form whose memory access ignores the segment.
+    if (hasGsOverride) {
+        bool tagged = false;
+        for (auto &operand : instruction.operands) {
+            if (auto *memory = std::get_if<MemoryOperand>(&operand)) {
+                memory->segment = Segment::Gs;
+                tagged = true;
+            }
+        }
+        if (!tagged) {
+            throw DecodeError(address, remaining, "GS segment override without a memory operand");
+        }
     }
 
     const auto length = cursor - instructionStart;

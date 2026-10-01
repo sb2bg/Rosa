@@ -87,6 +87,7 @@ enum class Opcode {
     ScalarDoubleXmm,
     AddXmmDwords,
     HorizontalAddXmmDwords,
+    XmmBinaryHelper,
     AndNotXmm,
     MoveXmmByteMask,
     ShuffleXmmBytes,
@@ -106,6 +107,7 @@ enum class Opcode {
     AddGuestMemory,
     SubGuestMemory,
     OrGuestMemory,
+    XorGuestMemory,
     AndGuestMemory,
     ShiftLeftGuestMemory,
     ShiftRightGuestMemory,
@@ -155,6 +157,12 @@ enum class ExitKind {
     Syscall,
 };
 
+// XMM register-to-register operations that a runtime helper computes on the
+// guest state (Opcode::XmmBinaryHelper's immediate).
+enum class XmmHelper : std::uint8_t {
+    PackUnsignedSaturateDwords, // PACKUSDW
+};
+
 struct Operation {
     Opcode opcode{};
     Width width{Width::I64};
@@ -182,6 +190,10 @@ struct Block {
 class Builder {
   public:
     explicit Builder(guest::GuestAddress start) : block_{.start = start} {}
+
+    [[nodiscard]] std::size_t operationCount() const noexcept { return block_.operations.size(); }
+    // Whether an operation with `opcode` was emitted at or after `first`.
+    [[nodiscard]] bool emittedSince(std::size_t first, Opcode opcode) const noexcept;
 
     ValueId constant(std::uint64_t value, Width width, guest::GuestAddress rip);
     ValueId readGuestRegister(x86::Register reg, Width width, guest::GuestAddress rip);
@@ -332,6 +344,8 @@ class Builder {
     void addXmmDwords(x86::XmmRegister destination,
                       x86::XmmRegister source,
                       guest::GuestAddress rip);
+    void xmmBinaryHelper(XmmHelper helper, x86::XmmRegister destination, x86::XmmRegister source,
+                         guest::GuestAddress rip);
     void horizontalAddXmmDwords(x86::XmmRegister destination,
                                 x86::XmmRegister source,
                                 guest::GuestAddress rip);
@@ -371,6 +385,7 @@ class Builder {
                         guest::GuestAddress rip);
     void subGuestMemory(ValueId address, ValueId source, Width width,
                         guest::GuestAddress rip);
+    void xorGuestMemory(ValueId address, ValueId source, Width width, guest::GuestAddress rip);
     void orGuestMemory(ValueId address, ValueId source, Width width,
                        guest::GuestAddress rip);
     void andGuestMemory(ValueId address, ValueId source, Width width,

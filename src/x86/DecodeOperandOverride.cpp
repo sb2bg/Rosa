@@ -844,13 +844,35 @@ bool decodeOperandOverride(DecodeContext &context) {
         const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
         const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
         const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+        if (mode != 0x3U && (extension == 0x1U || extension == 0x4U || extension == 0x7U)) {
+            // OR/AND/CMP word [memory], imm8 (sign-extended), any memory form.
+            auto memoryCursor = wordShortImmediateOpcodeOffset + 2;
+            const auto memory = decodeModrmMemory(context, memoryCursor, modrm,
+                                                  static_cast<std::uint8_t>(rex), 16);
+            if (memoryCursor >= code.size()) {
+                throw DecodeError(address, remaining, "truncated word [memory], imm8");
+            }
+            const auto immediate = std::bit_cast<std::int8_t>(code[memoryCursor++]);
+            instruction.opcode = extension == 0x1U   ? Opcode::OrMemImm
+                                 : extension == 0x4U ? Opcode::AndMemImm
+                                                     : Opcode::CmpMemImm;
+            instruction.operands.push_back(memory);
+            instruction.operands.push_back(ImmediateOperand{
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(immediate)), 8});
+            const auto length = memoryCursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,
+                        instruction.bytes.begin());
+            return true;
+        }
         if ((extension != 0x7U && !(extension == 0x4U && mode == 0x3U) &&
              !(extension == 0x3U && mode == 0x3U) &&
+             !(extension == 0x5U && mode == 0x3U) &&
              !(extension == 0x1U && mode != 0x3U)) ||
             (mode == 0 && rmEncoding == 0x5U)) {
             throw DecodeError(
                 address, remaining,
-                "only CMP r16 or word [base+index*scale+disp8/disp32], imm8, AND/SBB r16, imm8, and OR word [base+index*scale+disp8/disp32], imm8 are supported");
+                "only CMP r16 or word [base+index*scale+disp8/disp32], imm8, AND/SBB/SUB r16, imm8, and OR word [base+index*scale+disp8/disp32], imm8 are supported");
         }
         auto operandCursor = wordShortImmediateOpcodeOffset + 2;
         auto base = decodeRegister(rmEncoding, rexB);
@@ -900,8 +922,10 @@ bool decodeOperandOverride(DecodeContext &context) {
         }
         const auto immediate =
             std::bit_cast<std::int8_t>(code[operandCursor++]);
-        if (extension == 0x4U || extension == 0x3U) {
-            instruction.opcode = extension == 0x4U ? Opcode::AndRegImm : Opcode::SbbRegImm;
+        if (extension == 0x4U || extension == 0x3U || extension == 0x5U) {
+            instruction.opcode = extension == 0x4U   ? Opcode::AndRegImm
+                                 : extension == 0x3U ? Opcode::SbbRegImm
+                                                     : Opcode::SubRegImm;
             instruction.operands.push_back(RegisterOperand{
                 decodeRegister(rmEncoding, rexB), 16});
             instruction.operands.push_back(ImmediateOperand{

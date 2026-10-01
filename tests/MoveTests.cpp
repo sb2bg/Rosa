@@ -1385,6 +1385,47 @@ void testMovGuestMemoryToRegister() {
                 "failed guest-memory load changed the destination register");
 }
 
+// libdispatch spills and reloads XMM0 through a TSD slot:
+// movaps gs:[0xa0], xmm0 and movaps xmm1, gs:[0xa0].
+void testMovapsGsAbsoluteStoreAndLoad() {
+    constexpr std::array<std::uint8_t, 19> code{
+        0x65, 0x0F, 0x29, 0x04, 0x25, 0xA0, 0x00, 0x00, 0x00, // movaps gs:[0xa0], xmm0
+        0x65, 0x0F, 0x28, 0x0C, 0x25, 0xA0, 0x00, 0x00, 0x00, // movaps xmm1, gs:[0xa0]
+        0xC3,
+    };
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802CC1414ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::MovapsMemReg &&
+               decoded[1].opcode == rosa::x86::Opcode::MovapsRegMem,
+           "GS MOVAPS opcodes differ");
+    const auto store = std::get<rosa::x86::MemoryOperand>(decoded[0].operands[0]);
+    expect(!store.hasBase && !store.index && store.displacement == 0xA0 &&
+               store.segment == rosa::x86::Segment::Gs,
+           "GS MOVAPS memory operand differs");
+    const auto dump = rosa::debug::dumpX86(decoded);
+    expect(dump.find("movaps [gs:0xa0], xmm0") != std::string::npos &&
+               dump.find("movaps xmm1, [gs:0xa0]") != std::string::npos,
+           "GS MOVAPS dump differs");
+
+    constexpr rosa::guest::GuestAddress gsBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(gsBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.gsBase = gsBase.value;
+    state.xmm[0] = {0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL};
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{gsBase.value + 0xA0}),
+                std::uint64_t{0x0123456789ABCDEFULL}, "GS MOVAPS store low lane differs");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{gsBase.value + 0xA8}),
+                std::uint64_t{0xFEDCBA9876543210ULL}, "GS MOVAPS store high lane differs");
+    expect(state.xmm[1].low == 0x0123456789ABCDEFULL && state.xmm[1].high == 0xFEDCBA9876543210ULL,
+           "GS MOVAPS load differs");
+}
+
 void testMovGuestGsMemoryTo32BitRegister() {
     constexpr std::array<std::uint8_t, 9> code{0x65, 0x8B, 0x0C, 0x25, 0x18,
                                                0x00, 0x00, 0x00, 0xC3};
@@ -2951,6 +2992,7 @@ std::span<const TestCase> moveTests() {
         {"MOV word immediate to guest memory", testMovWordImmediateToGuestMemory},
         {"MOV word register to guest memory", testMovWordRegisterToGuestMemory},
         {"MOV guest memory to register", testMovGuestMemoryToRegister},
+        {"MOVAPS GS-absolute store and load", testMovapsGsAbsoluteStoreAndLoad},
         {"MOV guest GS memory to 32-bit register", testMovGuestGsMemoryTo32BitRegister},
         {"MOV guest GS memory with no-base scaled index", testMovGuestGsMemoryWithNoBaseScaledIndex},
         {"MOV immediate to guest GS memory", testMovImmediateToGuestGsMemory},

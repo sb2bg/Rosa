@@ -98,6 +98,52 @@ void testCompare32BitRegisterWithGsAbsoluteMemory() {
     expectEqual(faultState.rflags, std::uint64_t{0xAD7}, "faulted GS-absolute CMP changed flags");
 }
 
+// libdispatch clears and tests TSD slots through GS with the 83 group:
+// and qword gs:[0x3c0], 0 and cmp qword gs:[0xe0], 0.
+void testGsAbsoluteGroupOneImmediates() {
+    constexpr std::array<std::uint8_t, 21> code{
+        0x65, 0x48, 0x83, 0x24, 0x25, 0xC0, 0x03, 0x00, 0x00, 0x00, // and qword gs:[0x3c0], 0
+        0x65, 0x48, 0x83, 0x3C, 0x25, 0xE0, 0x00, 0x00, 0x00, 0x00, // cmp qword gs:[0xe0], 0
+        0xC3,
+    };
+    constexpr rosa::guest::GuestAddress observedRip{0x7FF802CEBC95ULL};
+    const rosa::x86::Decoder decoder;
+    const auto decoded = decoder.decodeBlock(code, observedRip);
+    expect(decoded[0].opcode == rosa::x86::Opcode::AndMemImm &&
+               decoded[1].opcode == rosa::x86::Opcode::CmpMemImm,
+           "GS group-one immediate opcodes differ");
+    for (std::size_t index = 0; index < 2; ++index) {
+        const auto memory = std::get<rosa::x86::MemoryOperand>(decoded[index].operands[0]);
+        expect(!memory.hasBase && !memory.index && memory.width == 64 &&
+                   memory.segment == rosa::x86::Segment::Gs,
+               "GS group-one memory operand differs");
+    }
+    const auto dump = rosa::debug::dumpX86(decoded);
+    expect(dump.find("and qword [gs:0x3c0], 0x0") != std::string::npos &&
+               dump.find("cmp qword [gs:0xe0], 0x0") != std::string::npos,
+           "GS group-one immediate dump differs");
+
+    constexpr rosa::guest::GuestAddress gsBase{0x8000};
+    rosa::guest::AddressSpace addressSpace;
+    addressSpace.mapAnonymous(gsBase, rosa::guest::guestPageSize,
+                              rosa::guest::Permission::Read | rosa::guest::Permission::Write);
+    addressSpace.writeU64(rosa::guest::GuestAddress{gsBase.value + 0x3C0}, 0xFFFF);
+    addressSpace.writeU64(rosa::guest::GuestAddress{gsBase.value + 0xE0}, 5);
+    const rosa::dbt::Translator translator;
+    const auto block = translator.translate(code, observedRip);
+    rosa::x86::X86State state;
+    state.gsBase = gsBase.value;
+    state.rflags = 0x2;
+    static_cast<void>(block.execute(state, &addressSpace));
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{gsBase.value + 0x3C0}),
+                std::uint64_t{0}, "GS AND did not clear the TSD slot");
+    expectEqual(addressSpace.readU64(rosa::guest::GuestAddress{gsBase.value + 0xE0}),
+                std::uint64_t{5}, "GS CMP changed memory");
+    // 5 - 0: not zero, no carry, positive.
+    expectEqual(state.rflags & (zeroFlag | carryFlag | signFlag), std::uint64_t{0},
+                "GS CMP flags differ");
+}
+
 void testTestByteGsAbsoluteMemory() {
     // Observed in libobjc under an Objective-C fixture: TEST byte gs:[0x160], 1.
     constexpr std::array<std::uint8_t, 10> observedCode{0x65, 0xF6, 0x04, 0x25, 0x60,
@@ -3952,6 +3998,7 @@ std::span<const TestCase> compareAndAtomicTests() {
         {"CMP 32-bit register with guest memory", testCompare32BitRegisterWithGuestMemory},
         {"CMP 32-bit register with GS-absolute guest memory", testCompare32BitRegisterWithGsAbsoluteMemory},
         {"TEST byte with GS-absolute guest memory", testTestByteGsAbsoluteMemory},
+        {"AND/CMP qword with GS-absolute guest memory, imm8", testGsAbsoluteGroupOneImmediates},
         {"CMP byte register with scaled guest memory", testCompareByteRegisterWithScaledGuestMemory},
         {"legacy CMP 32-bit register with guest memory", testLegacyCompare32BitRegisterWithGuestMemory},
         {"CMP 64-bit register with guest memory", testCompare64BitRegisterWithGuestMemory},

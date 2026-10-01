@@ -189,12 +189,11 @@ bool decodeAtomic(DecodeContext &context) {
         const auto immediateOpcode = code[lockImmOpcodeOffset];
         const auto lockImmRex = hasLockImmRex ? code[cursor + 1] : std::uint8_t{0};
         const bool lockImmRexW = (lockImmRex & 0x8U) != 0;
-        const bool lockImmRexB = (lockImmRex & 0x1U) != 0;
-        if ((lockImmRex & 0x6U) != 0 ||
+        if ((lockImmRex & 0x4U) != 0 ||
             (immediateOpcode == 0x80U && lockImmRexW)) {
             throw DecodeError(
                 address, remaining,
-                "LOCK OR/AND immediate does not support REX.R/X");
+                "LOCK ADD/OR/AND immediate does not support REX.R");
         }
         cursor = lockImmOpcodeOffset + 1;
         if (cursor >= code.size()) {
@@ -205,53 +204,14 @@ bool decodeAtomic(DecodeContext &context) {
         const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
         const auto extension =
             static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-        const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-        const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
-        if (mode == 0x3U || (extension != 0x1U && extension != 0x4U) ||
-            (ripRelative && lockImmRexB)) {
+        if (mode == 0x3U || (extension != 0x0U && extension != 0x1U && extension != 0x4U)) {
             throw DecodeError(
                 address, remaining,
-                "only LOCK OR/AND byte/dword/qword [base/RIP+disp8/disp32], imm8/imm32 is supported");
+                "only LOCK ADD/OR/AND byte/dword/qword memory, imm8/imm32 is supported");
         }
-        const auto lockImmWidth = static_cast<std::uint8_t>(
+        const auto lockImmWidth = static_cast<std::uint16_t>(
             immediateOpcode == 0x80U ? 8U : (lockImmRexW ? 64U : 32U));
-        auto base = decodeRegister(rmEncoding, lockImmRexB);
-        if (rmEncoding == 0x4U) {
-            if (cursor >= code.size()) {
-                throw DecodeError(address, remaining,
-                                  "truncated LOCK OR SIB");
-            }
-            const auto sib = code[cursor++];
-            const auto indexEncoding =
-                static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
-            const auto baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-            if (indexEncoding != 0x4U ||
-                (mode == 0 && baseEncoding == 0x5U)) {
-                throw DecodeError(
-                    address, remaining,
-                    "only no-index, based SIB is supported for LOCK OR");
-            }
-            base = decodeRegister(baseEncoding, lockImmRexB);
-        }
-        std::int64_t displacement = 0;
-        if (ripRelative || mode == 0x2U) {
-            if (code.size() - cursor < 4) {
-                throw DecodeError(address, remaining,
-                                  "truncated LOCK OR disp32");
-            }
-            displacement = readI32(code.subspan(cursor, 4));
-            cursor += 4;
-        } else if (mode == 0x1U) {
-            if (cursor >= code.size()) {
-                throw DecodeError(address, remaining,
-                                  "truncated LOCK OR disp8");
-            }
-            displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-        }
-        if (ripRelative) {
-            static_cast<void>(relativeTarget(
-                address, cursor - instructionStart, displacement));
-        }
+        const auto memory = decodeModrmMemory(context, cursor, modrm, lockImmRex, lockImmWidth);
         std::uint64_t immediate = 0;
         std::uint8_t immediateWidth = 0;
         if (immediateOpcode == 0x83U || immediateOpcode == 0x80U) {
@@ -276,13 +236,10 @@ bool decodeAtomic(DecodeContext &context) {
             cursor += 4;
             immediateWidth = 32;
         }
-        instruction.opcode = extension == 0x1U ? Opcode::LockOrMemImm
-                                                   : Opcode::LockAndMemImm;
-        instruction.operands.push_back(
-            ripRelative
-                ? MemoryOperand{Register::Rax, displacement, lockImmWidth,
-                                std::nullopt, 1, false, true}
-                : MemoryOperand{base, displacement, lockImmWidth});
+        instruction.opcode = extension == 0x0U   ? Opcode::LockAddMemImm
+                             : extension == 0x1U ? Opcode::LockOrMemImm
+                                                 : Opcode::LockAndMemImm;
+        instruction.operands.push_back(memory);
         instruction.operands.push_back(
             ImmediateOperand{immediate, immediateWidth});
         const auto length = cursor - instructionStart;
@@ -305,46 +262,13 @@ bool decodeAtomic(DecodeContext &context) {
         const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
         const auto extension =
             static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-        const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-        const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
-        if (mode == 0x3U || extension > 1U || rmEncoding == 0x4U) {
-            throw DecodeError(
-                address, remaining,
-                "only LOCK INC/DEC dword [base/RIP+disp8/disp32] is supported");
-        }
-        std::int64_t displacement = 0;
-        if (ripRelative) {
-            if (code.size() - cursor < 4) {
-                throw DecodeError(
-                    address, remaining,
-                    "truncated RIP-relative LOCK INC/DEC disp32");
-            }
-            displacement = readI32(code.subspan(cursor, 4));
-            cursor += 4;
-            static_cast<void>(relativeTarget(
-                address, cursor - instructionStart, displacement));
-        } else if (mode == 0x1U) {
-            if (cursor >= code.size()) {
-                throw DecodeError(address, remaining,
-                                  "truncated LOCK INC/DEC disp8");
-            }
-            displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-        } else if (mode == 0x2U) {
-            if (code.size() - cursor < 4) {
-                throw DecodeError(address, remaining,
-                                  "truncated LOCK INC/DEC disp32");
-            }
-            displacement = readI32(code.subspan(cursor, 4));
-            cursor += 4;
+        if (mode == 0x3U || extension > 1U) {
+            throw DecodeError(address, remaining,
+                              "only LOCK INC/DEC dword memory is supported");
         }
         instruction.opcode = extension == 0U ? Opcode::LockIncMem
                                              : Opcode::LockDecMem;
-        instruction.operands.push_back(
-            ripRelative
-                ? MemoryOperand{Register::Rax, displacement, 32,
-                                std::nullopt, 1, false, true}
-                : MemoryOperand{decodeRegister(rmEncoding, false),
-                                displacement, 32});
+        instruction.operands.push_back(decodeModrmMemory(context, cursor, modrm, 0, 32));
         const auto length = cursor - instructionStart;
         instruction.length = static_cast<std::uint8_t>(length);
         std::copy_n(
@@ -525,11 +449,36 @@ bool decodeAtomic(DecodeContext &context) {
         }
     }
 
+    // A word CMPXCHG may carry its operand-size prefix before or after LOCK.
+    bool lockWordOperand = false;
+    if (code.size() - cursor >= 2 && code[cursor] == 0x66U && code[cursor + 1] == 0xF0U) {
+        lockWordOperand = true;
+        ++cursor;
+    }
     if (code[cursor] == 0xF0U) {
         auto operandCursor = cursor + 1;
         if (operandCursor >= code.size()) {
             throw DecodeError(address, remaining,
                               "truncated after LOCK prefix");
+        }
+        if (code[operandCursor] == 0x66U) {
+            lockWordOperand = true;
+            if (++operandCursor >= code.size()) {
+                throw DecodeError(address, remaining,
+                                  "truncated after LOCK operand-size prefix");
+            }
+        }
+        if (lockWordOperand) {
+            auto opcodeCursor = operandCursor;
+            if (code[opcodeCursor] >= 0x40U && code[opcodeCursor] <= 0x4FU) {
+                ++opcodeCursor;
+            }
+            if (code.size() - opcodeCursor < 3 || code[opcodeCursor] != 0x0FU ||
+                code[opcodeCursor + 1] != 0xB1U) {
+                throw DecodeError(
+                    address, remaining,
+                    "only LOCK CMPXCHG r/m16, r16 is supported with an operand-size prefix");
+            }
         }
         const bool hasLockRex = code[operandCursor] >= 0x40U &&
                                 code[operandCursor] <= 0x4FU;
@@ -537,68 +486,21 @@ bool decodeAtomic(DecodeContext &context) {
             hasLockRex ? code[operandCursor++] : std::uint8_t{0};
         const bool lockRexW = (lockRex & 0x8U) != 0;
         const bool lockRexR = (lockRex & 0x4U) != 0;
-        const bool lockRexX = (lockRex & 0x2U) != 0;
-        const bool lockRexB = (lockRex & 0x1U) != 0;
         if (code.size() - operandCursor >= 2 && code[operandCursor] == 0xFFU) {
             const auto modrm = code[operandCursor + 1];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto extension = static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !lockRexB;
-            if ((extension != 0x0U && extension != 0x1U) || mode > 0x2U || lockRexR ||
-                lockRexX || (mode == 0 && rmEncoding == 0x5U && lockRexB)) {
+            if ((extension != 0x0U && extension != 0x1U) || mode > 0x2U || lockRexR) {
                 throw DecodeError(
                     address, remaining,
-                    "only LOCK INC/DEC dword/qword [base/SIB/RIP+disp8/disp32] is supported from prefix F0 FF /0/1");
+                    "only LOCK INC/DEC dword/qword memory is supported from prefix F0 FF /0/1");
             }
             operandCursor += 2;
-            auto lockBase = decodeRegister(rmEncoding, lockRexB);
-            if (!ripRelative && rmEncoding == 0x4U) {
-                if (operandCursor >= code.size()) {
-                    throw DecodeError(address, remaining,
-                                      "truncated LOCK INC/DEC SIB");
-                }
-                const auto sib = code[operandCursor++];
-                const auto indexEncoding =
-                    static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
-                const auto baseEncoding =
-                    static_cast<std::uint8_t>(sib & 0x7U);
-                if (indexEncoding != 0x4U ||
-                    (mode == 0 && baseEncoding == 0x5U)) {
-                    throw DecodeError(
-                        address, remaining,
-                        "only no-index, based SIB is supported for LOCK INC/DEC");
-                }
-                lockBase = decodeRegister(baseEncoding, lockRexB);
-            }
-            std::int64_t displacement = 0;
-            if (ripRelative || mode == 0x2U) {
-                if (code.size() - operandCursor < 4) {
-                    throw DecodeError(address, remaining,
-                                      "truncated LOCK DEC disp32");
-                }
-                displacement = readI32(code.subspan(operandCursor, 4));
-                operandCursor += 4;
-            } else if (mode == 0x1U) {
-                if (operandCursor >= code.size()) {
-                    throw DecodeError(address, remaining,
-                                      "truncated LOCK DEC disp8");
-                }
-                displacement =
-                    std::bit_cast<std::int8_t>(code[operandCursor++]);
-            }
-            if (ripRelative) {
-                static_cast<void>(relativeTarget(
-                    address, operandCursor - instructionStart, displacement));
-            }
-            const auto width = static_cast<std::uint8_t>(lockRexW ? 64U : 32U);
+            const auto width = static_cast<std::uint16_t>(lockRexW ? 64U : 32U);
             instruction.opcode = extension == 0x0U ? Opcode::LockIncMem
                                                    : Opcode::LockDecMem;
             instruction.operands.push_back(
-                ripRelative
-                    ? MemoryOperand{Register::Rax, displacement, width,
-                                    std::nullopt, 1, false, true}
-                    : MemoryOperand{lockBase, displacement, width});
+                decodeModrmMemory(context, operandCursor, modrm, lockRex, width));
             const auto length = operandCursor - instructionStart;
             instruction.length = static_cast<std::uint8_t>(length);
             std::copy_n(
@@ -607,60 +509,35 @@ bool decodeAtomic(DecodeContext &context) {
             return true;
         }
         if (code.size() - operandCursor >= 2 &&
-            (code[operandCursor] == 0x01U || code[operandCursor] == 0x09U)) {
-            const bool isLockAdd = code[operandCursor] == 0x01U;
+            (code[operandCursor] == 0x01U || code[operandCursor] == 0x09U ||
+             code[operandCursor] == 0x31U)) {
+            // LOCK ADD/OR/XOR r/m32/r/m64, r32/r64. Guest code runs on one host
+            // thread, so a locked XOR is the plain memory-destination XOR.
+            const auto operation = code[operandCursor];
             const auto modrm = code[operandCursor + 1];
             const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
             const auto regEncoding =
                 static_cast<std::uint8_t>((modrm >> 3U) & 0x7U);
-            const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-            const bool ripRelative = mode == 0 && rmEncoding == 0x5U && !lockRexB;
-            if (mode == 0x3U || rmEncoding == 0x4U || lockRexX ||
-                (mode == 0 && rmEncoding == 0x5U && lockRexB)) {
-                throw DecodeError(
-                    address, remaining,
-                    "only LOCK OR dword/qword [base/RIP+disp8/disp32], r32/r64 is supported");
+            if (mode == 0x3U) {
+                throw DecodeError(address, remaining,
+                                  "LOCK ADD/OR/XOR requires a memory destination");
             }
             operandCursor += 2;
-            std::int64_t displacement = 0;
-            if (ripRelative || mode == 0x2U) {
-                if (code.size() - operandCursor < 4) {
-                    throw DecodeError(address, remaining,
-                                      "truncated LOCK OR disp32");
-                }
-                displacement = readI32(code.subspan(operandCursor, 4));
-                operandCursor += 4;
-            } else if (mode == 0x1U) {
-                if (operandCursor >= code.size()) {
-                    throw DecodeError(address, remaining,
-                                      "truncated LOCK OR disp8");
-                }
-                displacement =
-                    std::bit_cast<std::int8_t>(code[operandCursor++]);
-            }
-            if (ripRelative) {
-                static_cast<void>(relativeTarget(
-                    address, operandCursor - instructionStart, displacement));
-            }
-            const auto lockOrWidth =
-                static_cast<std::uint8_t>(lockRexW ? 64U : 32U);
-            instruction.opcode = isLockAdd ? Opcode::LockAddMemReg
-                                                   : Opcode::LockOrMemReg;
-            instruction.operands.push_back(
-                ripRelative
-                    ? MemoryOperand{Register::Rax, displacement, lockOrWidth,
-                                    std::nullopt, 1, false, true}
-                    : MemoryOperand{decodeRegister(rmEncoding, lockRexB),
-                                    displacement, lockOrWidth});
+            const auto width = static_cast<std::uint16_t>(lockRexW ? 64U : 32U);
+            const auto memory = decodeModrmMemory(context, operandCursor, modrm, lockRex, width);
+            instruction.opcode = operation == 0x01U   ? Opcode::LockAddMemReg
+                                 : operation == 0x09U ? Opcode::LockOrMemReg
+                                                      : Opcode::XorMemReg;
+            instruction.operands.push_back(memory);
             instruction.operands.push_back(RegisterOperand{
-                decodeRegister(regEncoding, lockRexR), lockOrWidth});
+                decodeRegister(regEncoding, lockRexR), static_cast<std::uint8_t>(width)});
             cursor = operandCursor;
-            const auto lockOrLength = cursor - instructionStart;
-            instruction.length = static_cast<std::uint8_t>(lockOrLength);
+            const auto lockLength = cursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(lockLength);
             std::copy_n(
                 code.begin() +
                     static_cast<std::ptrdiff_t>(instructionStart),
-                lockOrLength, instruction.bytes.begin());
+                lockLength, instruction.bytes.begin());
             return true;
         }
         if (code.size() - operandCursor < 3 ||
@@ -828,7 +705,7 @@ bool decodeAtomic(DecodeContext &context) {
             cursor += 4;
         }
         const auto width = static_cast<std::uint8_t>(
-            isByteCmpxchg ? 8U : (rexW ? 64U : 32U));
+            isByteCmpxchg ? 8U : rexW ? 64U : lockWordOperand ? 16U : 32U);
         const bool highByteSource =
             isByteCmpxchg && !hasLockRex && regEncoding >= 0x4U;
         instruction.opcode = Opcode::CmpxchgMemReg;

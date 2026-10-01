@@ -894,199 +894,58 @@ bool decodeSimdMemory(DecodeContext &context) {
         return true;
     }
 
-    const bool movapdStore = code[cursor] == 0x66U;
-    const auto movapsStorePrefixEnd = cursor + (movapdStore ? 1U : 0U);
-    const bool movapsStoreHasRex =
-        movapsStorePrefixEnd < code.size() &&
-        code[movapsStorePrefixEnd] >= 0x40U &&
-        code[movapsStorePrefixEnd] <= 0x4FU;
-    const auto movapsStoreOpcodeOffset =
-        movapsStorePrefixEnd + (movapsStoreHasRex ? 1U : 0U);
-    if (code.size() - movapsStoreOpcodeOffset >= 2 &&
-        code[movapsStoreOpcodeOffset] == 0x0FU &&
-        code[movapsStoreOpcodeOffset + 1] == 0x29U) {
-        if (code.size() - movapsStoreOpcodeOffset < 3) {
-            throw DecodeError(address, remaining, "truncated movaps [base+disp], xmm");
-        }
-        const auto rex =
-            movapsStoreHasRex ? code[movapsStorePrefixEnd] : 0U;
-        const bool rexR = (rex & 0x4U) != 0;
-        const bool rexX = (rex & 0x2U) != 0;
-        const bool rexB = (rex & 0x1U) != 0;
-        const auto modrm = code[movapsStoreOpcodeOffset + 2];
-        const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-        const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-        const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
-        if (mode > 0x2U) {
-            throw DecodeError(
-                address, remaining,
-                "only MOVAPD/MOVAPS [base+index*scale/RIP+disp], xmm memory operands are supported");
-        }
-        cursor = movapsStoreOpcodeOffset + 3;
-        auto baseEncoding = rmEncoding;
-        std::optional<Register> index;
-        std::uint8_t scale = 1;
-        if (!ripRelative && rmEncoding == 0x4U) {
-            if (cursor >= code.size()) {
+    // MOVAPS/MOVAPD (0F 29) and MOVUPS/MOVUPD (0F 11) stores: [65] [66]
+    // [REX] opcode ModRM, any memory form. The GS override reaches TSD
+    // slots, where libdispatch saves XMM state.
+    {
+        const bool xmmStoreGs = code[cursor] == 0x65U;
+        const auto xmmStoreStart = cursor + (xmmStoreGs ? 1U : 0U);
+        const bool xmmStoreDouble = xmmStoreStart < code.size() && code[xmmStoreStart] == 0x66U;
+        const auto xmmStorePrefixEnd = xmmStoreStart + (xmmStoreDouble ? 1U : 0U);
+        const bool xmmStoreHasRex = xmmStorePrefixEnd < code.size() &&
+                                    code[xmmStorePrefixEnd] >= 0x40U &&
+                                    code[xmmStorePrefixEnd] <= 0x4FU;
+        const auto xmmStoreOpcodeOffset = xmmStorePrefixEnd + (xmmStoreHasRex ? 1U : 0U);
+        if (code.size() - xmmStoreOpcodeOffset >= 2 && code[xmmStoreOpcodeOffset] == 0x0FU &&
+            (code[xmmStoreOpcodeOffset + 1] == 0x29U || code[xmmStoreOpcodeOffset + 1] == 0x11U)) {
+            const bool aligned = code[xmmStoreOpcodeOffset + 1] == 0x29U;
+            if (code.size() - xmmStoreOpcodeOffset < 3) {
+                throw DecodeError(address, remaining, "truncated XMM store to memory");
+            }
+            const auto rex = xmmStoreHasRex ? code[xmmStorePrefixEnd] : 0U;
+            const bool rexR = (rex & 0x4U) != 0;
+            const auto modrm = code[xmmStoreOpcodeOffset + 2];
+            const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
+            if (mode > 0x2U) {
                 throw DecodeError(address, remaining,
-                                  "truncated aligned XMM store SIB byte");
+                                  "only memory destinations are supported for MOVAPS/MOVUPS stores");
             }
-            const auto sib = code[cursor++];
-            const auto scaleBits =
-                static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
-            const auto indexEncoding =
-                static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
-            baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-            if (mode == 0 && baseEncoding == 0x5U) {
-                throw DecodeError(
-                    address, remaining,
-                    "no-base aligned XMM store SIB is not supported");
+            cursor = xmmStoreOpcodeOffset + 3;
+            auto memory = decodeModrmMemory(context, cursor, modrm, static_cast<std::uint8_t>(rex), 128);
+            if (xmmStoreGs) {
+                memory.segment = Segment::Gs;
             }
-            if (indexEncoding != 0x4U || rexX) {
-                index = decodeRegister(indexEncoding, rexX);
-                scale = static_cast<std::uint8_t>(1U << scaleBits);
-            }
+            // MOVUPD stores exactly like MOVUPS.
+            instruction.opcode = !aligned        ? Opcode::MovupsMemReg
+                                 : xmmStoreDouble ? Opcode::MovapdMemReg
+                                                  : Opcode::MovapsMemReg;
+            instruction.operands.push_back(memory);
+            instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
+                static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) | (rexR ? 0x8U : 0U)))});
+            const auto length = cursor - instructionStart;
+            instruction.length = static_cast<std::uint8_t>(length);
+            std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,
+                        instruction.bytes.begin());
+            return true;
         }
-        std::int64_t displacement = 0;
-        if (ripRelative) {
-            if (code.size() - cursor < 4) {
-                throw DecodeError(address, remaining,
-                                  "truncated RIP-relative MOVAPS disp32");
-            }
-            displacement = readI32(code.subspan(cursor, 4));
-            cursor += 4;
-        } else if (mode == 0x1U) {
-            if (cursor >= code.size()) {
-                throw DecodeError(address, remaining, "truncated MOVAPS memory disp8");
-            }
-            displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-        } else if (mode == 0x2U) {
-            if (code.size() - cursor < 4) {
-                throw DecodeError(address, remaining, "truncated MOVAPS memory disp32");
-            }
-            displacement = readI32(code.subspan(cursor, 4));
-            cursor += 4;
-        }
-        if (ripRelative) {
-            static_cast<void>(relativeTarget(
-                address, cursor - instructionStart, displacement));
-        }
-        instruction.opcode = movapdStore ? Opcode::MovapdMemReg
-                                         : Opcode::MovapsMemReg;
-        instruction.operands.push_back(
-            ripRelative
-                ? MemoryOperand{Register::Rax, displacement, 128,
-                                std::nullopt, 1, false, true}
-                : MemoryOperand{decodeRegister(baseEncoding, rexB),
-                                displacement, 128, index, scale});
-        instruction.operands.push_back(XmmRegisterOperand{
-            static_cast<XmmRegister>(
-                static_cast<std::uint8_t>(
-                    ((modrm >> 3U) & 0x7U) |
-                    (rexR ? 0x8U : 0U)))});
-
-        const auto length = cursor - instructionStart;
-        instruction.length = static_cast<std::uint8_t>(length);
-        std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,
-                    instruction.bytes.begin());
-        return true;
     }
 
-    const bool movupdStore = code[cursor] == 0x66U;
-    const auto movupsStorePrefixEnd = cursor + (movupdStore ? 1U : 0U);
-    const bool movupsStoreHasRex =
-        movupsStorePrefixEnd < code.size() &&
-        code[movupsStorePrefixEnd] >= 0x40U &&
-        code[movupsStorePrefixEnd] <= 0x4FU;
-    const auto movupsStoreOpcodeOffset =
-        movupsStorePrefixEnd + (movupsStoreHasRex ? 1U : 0U);
-    if (code.size() - movupsStoreOpcodeOffset >= 2 &&
-        code[movupsStoreOpcodeOffset] == 0x0FU &&
-        code[movupsStoreOpcodeOffset + 1] == 0x11U) {
-        if (code.size() - movupsStoreOpcodeOffset < 3) {
-            throw DecodeError(address, remaining, "truncated movups [base+disp], xmm");
-        }
-        const auto rex = movupsStoreHasRex ? code[movupsStorePrefixEnd] : 0U;
-        const bool rexR = (rex & 0x4U) != 0;
-        const bool rexX = (rex & 0x2U) != 0;
-        const bool rexB = (rex & 0x1U) != 0;
-        const auto modrm = code[movupsStoreOpcodeOffset + 2];
-        const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
-        const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
-        if (mode > 0x2U) {
-            throw DecodeError(
-                address, remaining,
-                "only MOVUPS [base+disp8/disp32], xmm memory operands are supported");
-        }
-        cursor = movupsStoreOpcodeOffset + 3;
-        const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
-        auto baseEncoding = rmEncoding;
-        std::optional<Register> index;
-        std::uint8_t scale = 1;
-        if (!ripRelative && rmEncoding == 0x4U) {
-            if (cursor >= code.size()) {
-                throw DecodeError(address, remaining, "truncated MOVUPS SIB byte");
-            }
-            const auto sib = code[cursor++];
-            const auto scaleBits =
-                static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
-            const auto indexEncoding = static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
-            baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-            if (mode == 0 && baseEncoding == 0x5U) {
-                throw DecodeError(address, remaining,
-                                  "no-base MOVUPS SIB addressing is not supported");
-            }
-            if (indexEncoding != 0x4U || rexX) {
-                index = decodeRegister(indexEncoding, rexX);
-                scale = static_cast<std::uint8_t>(1U << scaleBits);
-            }
-        }
-        std::int64_t displacement = 0;
-        if (ripRelative) {
-            if (code.size() - cursor < 4) {
-                throw DecodeError(address, remaining,
-                                  "truncated RIP-relative MOVUPS disp32");
-            }
-            displacement = readI32(code.subspan(cursor, 4));
-            cursor += 4;
-        } else if (mode == 0x1U) {
-            if (cursor >= code.size()) {
-                throw DecodeError(address, remaining, "truncated MOVUPS memory disp8");
-            }
-            displacement = std::bit_cast<std::int8_t>(code[cursor++]);
-        } else if (mode == 0x2U) {
-            if (code.size() - cursor < 4) {
-                throw DecodeError(address, remaining, "truncated MOVUPS memory disp32");
-            }
-            displacement = readI32(code.subspan(cursor, 4));
-            cursor += 4;
-        }
-        if (ripRelative) {
-            static_cast<void>(relativeTarget(
-                address, cursor - instructionStart, displacement));
-        }
-        instruction.opcode = Opcode::MovupsMemReg;
-        instruction.operands.push_back(
-            ripRelative
-                ? MemoryOperand{Register::Rax, displacement, 128,
-                                std::nullopt, 1, false, true}
-                : MemoryOperand{decodeRegister(baseEncoding, rexB),
-                                displacement, 128, index, scale});
-        instruction.operands.push_back(XmmRegisterOperand{
-            static_cast<XmmRegister>(
-                static_cast<std::uint8_t>(
-                    ((modrm >> 3U) & 0x7U) |
-                    (rexR ? 0x8U : 0U)))});
-
-        const auto length = cursor - instructionStart;
-        instruction.length = static_cast<std::uint8_t>(length);
-        std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,
-                    instruction.bytes.begin());
-        return true;
-    }
-
-    const bool movapdLoad = code[cursor] == 0x66U;
-    const auto movupsLoadPrefixEnd = cursor + (movapdLoad ? 1U : 0U);
+    // An optional GS override reaches TSD slots (libdispatch saves XMM state
+    // there), ahead of the 66 that selects MOVAPD/MOVUPD.
+    const bool movupsLoadGs = code[cursor] == 0x65U;
+    const auto movupsLoadStart = cursor + (movupsLoadGs ? 1U : 0U);
+    const bool movapdLoad = movupsLoadStart < code.size() && code[movupsLoadStart] == 0x66U;
+    const auto movupsLoadPrefixEnd = movupsLoadStart + (movapdLoad ? 1U : 0U);
     const bool movupsLoadHasRex =
         movupsLoadPrefixEnd < code.size() &&
         code[movupsLoadPrefixEnd] >= 0x40U &&
@@ -1110,11 +969,13 @@ bool decodeSimdMemory(DecodeContext &context) {
         const auto rex =
             movupsLoadHasRex ? code[movupsLoadPrefixEnd] : 0U;
         const bool rexR = (rex & 0x4U) != 0;
-        const bool rexX = (rex & 0x2U) != 0;
         const bool rexB = (rex & 0x1U) != 0;
         const auto modrm = code[movupsLoadOpcodeOffset + 2];
         const auto mode = static_cast<std::uint8_t>((modrm >> 6U) & 0x3U);
         const auto rmEncoding = static_cast<std::uint8_t>(modrm & 0x7U);
+        if (mode == 0x3U && movupsLoadGs) {
+            throw DecodeError(address, remaining, "GS override on a register XMM move");
+        }
         if (mode == 0x3U) {
             // 0F 10/0F 28 and 66 0F 10/66 0F 28 with a register source
             // are all full 128-bit copies; alignment only matters for
@@ -1137,57 +998,11 @@ bool decodeSimdMemory(DecodeContext &context) {
                 length, instruction.bytes.begin());
             return true;
         }
-        const bool ripRelative = mode == 0 && rmEncoding == 0x5U;
         auto operandCursor = movupsLoadOpcodeOffset + 3;
-        auto baseEncoding = rmEncoding;
-        std::optional<Register> index;
-        std::uint8_t scale = 1;
-        if (!ripRelative && rmEncoding == 0x4U) {
-            if (operandCursor >= code.size()) {
-                throw DecodeError(address, remaining,
-                                  "truncated aligned/unaligned XMM load SIB byte");
-            }
-            const auto sib = code[operandCursor++];
-            const auto scaleBits =
-                static_cast<std::uint8_t>((sib >> 6U) & 0x3U);
-            const auto indexEncoding =
-                static_cast<std::uint8_t>((sib >> 3U) & 0x7U);
-            baseEncoding = static_cast<std::uint8_t>(sib & 0x7U);
-            if (mode == 0 && baseEncoding == 0x5U) {
-                throw DecodeError(
-                    address, remaining,
-                    "no-base aligned/unaligned XMM load SIB addressing is not supported");
-            }
-            if (indexEncoding != 0x4U || rexX) {
-                index = decodeRegister(indexEncoding, rexX);
-                scale = static_cast<std::uint8_t>(1U << scaleBits);
-            }
-        }
-        std::int64_t displacement = 0;
-        if (ripRelative) {
-            if (code.size() - operandCursor < 4) {
-                throw DecodeError(address, remaining,
-                                  "truncated RIP-relative XMM load disp32");
-            }
-            displacement = readI32(code.subspan(operandCursor, 4));
-            operandCursor += 4;
-        } else if (mode == 0x1U) {
-            if (operandCursor >= code.size()) {
-                throw DecodeError(address, remaining,
-                                  "truncated MOVUPS load disp8");
-            }
-            displacement = std::bit_cast<std::int8_t>(code[operandCursor++]);
-        } else if (mode == 0x2U) {
-            if (code.size() - operandCursor < 4) {
-                throw DecodeError(address, remaining,
-                                  "truncated MOVUPS load disp32");
-            }
-            displacement = readI32(code.subspan(operandCursor, 4));
-            operandCursor += 4;
-        }
-        if (ripRelative) {
-            static_cast<void>(relativeTarget(
-                address, operandCursor - instructionStart, displacement));
+        auto memory = decodeModrmMemory(context, operandCursor, modrm,
+                                        static_cast<std::uint8_t>(rex), 128);
+        if (movupsLoadGs) {
+            memory.segment = Segment::Gs;
         }
         instruction.opcode = movapdLoad && code[movupsLoadOpcodeOffset + 1] != 0x10U
                                  ? Opcode::MovapdRegMem
@@ -1196,12 +1011,7 @@ bool decodeSimdMemory(DecodeContext &context) {
         instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
             static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) |
                                       (rexR ? 0x8U : 0U)))});
-        instruction.operands.push_back(
-            ripRelative
-                ? MemoryOperand{Register::Rax, displacement, 128,
-                                std::nullopt, 1, false, true}
-                : MemoryOperand{decodeRegister(baseEncoding, rexB),
-                                displacement, 128, index, scale});
+        instruction.operands.push_back(memory);
         const auto length = operandCursor - instructionStart;
         instruction.length = static_cast<std::uint8_t>(length);
         std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart),

@@ -923,7 +923,8 @@ convertInt32ToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
     // guest default MXCSR rounding mode (round to nearest).
     const auto bits = std::bit_cast<std::uint64_t>(
         static_cast<double>(static_cast<std::int32_t>(intValue)));
-    state->xmm[destinationIndex] = {.low = bits, .high = 0};
+    // Legacy-SSE scalar conversions leave the upper quadword unchanged.
+    state->xmm[destinationIndex].low = bits;
     return state;
 }
 
@@ -975,7 +976,8 @@ convertInt64ToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
     }
     const auto bits = std::bit_cast<std::uint64_t>(
         static_cast<double>(static_cast<std::int64_t>(intValue)));
-    state->xmm[destinationIndex] = {.low = bits, .high = 0};
+    // Legacy-SSE scalar conversions leave the upper quadword unchanged.
+    state->xmm[destinationIndex].low = bits;
     return state;
 }
 
@@ -990,7 +992,8 @@ convertFloatToDoubleXmm(x86::X86State *state, std::uint64_t destinationIndex,
     const auto bits = std::bit_cast<std::uint64_t>(
         static_cast<double>(std::bit_cast<float>(
             static_cast<std::uint32_t>(floatBits))));
-    state->xmm[destinationIndex] = {.low = bits, .high = 0};
+    // Legacy-SSE scalar conversions leave the upper quadword unchanged.
+    state->xmm[destinationIndex].low = bits;
     return state;
 }
 
@@ -1336,6 +1339,32 @@ addXmmDwords128(x86::X86State *state, std::uint64_t destinationIndex,
         resultLane |= static_cast<std::uint64_t>(sum) << shift;
     }
     state->xmm[destinationIndex] = result;
+    return state;
+}
+
+// PACKUSDW: the destination's and source's signed dwords, saturated to
+// unsigned words, become the low and high halves.
+extern "C" __attribute__((noinline)) x86::X86State *
+packUnsignedSaturateDwords128(x86::X86State *state, std::uint64_t destinationIndex,
+                              std::uint64_t sourceIndex) noexcept {
+    if (destinationIndex >= state->xmm.size() || sourceIndex >= state->xmm.size()) {
+        return state;
+    }
+    const auto destination = state->xmm[destinationIndex];
+    const auto source = state->xmm[sourceIndex];
+    const auto saturated = [](x86::X86State::XmmValue value, std::size_t index) {
+        const auto lane = index < 2 ? value.low : value.high;
+        const auto dword = static_cast<std::int32_t>(static_cast<std::uint32_t>(lane >> ((index & 1U) * 32U)));
+        return static_cast<std::uint64_t>(std::clamp<std::int32_t>(dword, 0, 0xFFFF));
+    };
+    const auto pack = [&](x86::X86State::XmmValue value) {
+        std::uint64_t words = 0;
+        for (std::size_t index = 0; index < 4; ++index) {
+            words |= saturated(value, index) << (index * 16U);
+        }
+        return words;
+    };
+    state->xmm[destinationIndex] = {.low = pack(destination), .high = pack(source)};
     return state;
 }
 

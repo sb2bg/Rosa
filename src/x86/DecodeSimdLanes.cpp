@@ -54,6 +54,25 @@ bool decodeSimdLanes(DecodeContext &context) {
                     length, instruction.bytes.begin());
                 return true;
             }
+            if (code[opcodeOffset + 2] == 0x2BU) {
+                // PACKUSDW xmm, xmm (SSE4.1).
+                const auto rex = hasPshufbRex ? code[afterPrefix] : 0U;
+                const auto modrm = code[opcodeOffset + 3];
+                if (((modrm >> 6U) & 0x3U) != 0x3U || (rex & 0xAU) != 0) {
+                    throw DecodeError(address, remaining,
+                                      "only register-direct PACKUSDW xmm, xmm is supported");
+                }
+                instruction.opcode = Opcode::PackusdwRegReg;
+                instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
+                    static_cast<std::uint8_t>(((modrm >> 3U) & 0x7U) | ((rex & 0x4U) != 0 ? 8U : 0U)))});
+                instruction.operands.push_back(XmmRegisterOperand{static_cast<XmmRegister>(
+                    static_cast<std::uint8_t>((modrm & 0x7U) | ((rex & 0x1U) != 0 ? 8U : 0U)))});
+                const auto length = opcodeOffset + 4 - instructionStart;
+                instruction.length = static_cast<std::uint8_t>(length);
+                std::copy_n(code.begin() + static_cast<std::ptrdiff_t>(instructionStart), length,
+                            instruction.bytes.begin());
+                return true;
+            }
             if (code[opcodeOffset + 2] == 0x02U) {
                 const auto rex = hasPshufbRex ? code[afterPrefix] : 0U;
                 const auto modrm = code[opcodeOffset + 3];

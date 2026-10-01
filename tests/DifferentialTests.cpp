@@ -1508,6 +1508,180 @@ void testRosettaDifferentialSemantics() {
         run(testCase);
     }
     {
+        // lock cmpxchg [rdi+0x10], cx with AX equal to memory stores CX.
+        auto testCase = make("lock_cmpxchg16_memory_equal", CaseId::lock_cmpxchg16_memory_equal,
+                             differentialBytes_lock_cmpxchg16_memory_equal);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 0xAAAAAAAAAAAA1234ULL;
+        testCase.request.state.rcx = 0xBBBBBBBBBBBB5678ULL;
+        const std::uint64_t value = 0xCCCCCCCCCCCC1234ULL;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value, sizeof(value));
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        // With AX different, only AX takes the memory word (F0 66 order).
+        auto testCase = make("lock_cmpxchg16_memory_differs",
+                             CaseId::lock_cmpxchg16_memory_differs,
+                             differentialBytes_lock_cmpxchg16_memory_differs);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 0xAAAAAAAAAAAA8000ULL;
+        testCase.request.state.rcx = 0xBBBBBBBBBBBB5678ULL;
+        const std::uint64_t value = 0xCCCCCCCCCCCC0001ULL;
+        std::memcpy(testCase.request.memory.data() + 0x10, &value, sizeof(value));
+        testCase.memoryCompareOffset = 0x10;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        // shr dl, cl: only DL changes; CF takes the last bit shifted out.
+        auto testCase = make("shr8_register_cl", CaseId::shr8_register_cl,
+                             differentialBytes_shr8_register_cl);
+        testCase.request.state.rdx = 0x123456789ABCDE96ULL;
+        testCase.request.state.rcx = 0x23; // masked to 3
+        // AF is undefined after a shift, and OF for counts other than one.
+        testCase.flagMask = carryFlag | parityFlag | zeroFlag | signFlag;
+        run(testCase);
+    }
+    {
+        // A count that masks to zero leaves DL and every flag unchanged.
+        auto testCase = make("shr8_register_cl_zero_count", CaseId::shr8_register_cl_zero_count,
+                             differentialBytes_shr8_register_cl_zero_count);
+        testCase.request.state.rdx = 0x1234567890ABCD81ULL;
+        testCase.request.state.rcx = 0x20;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
+        // lock dec dword [rdi+rcx+8], as libdispatch releases a refcount.
+        auto testCase = make("lock_dec32_indexed_memory", CaseId::lock_dec32_indexed_memory,
+                             differentialBytes_lock_dec32_indexed_memory);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rcx = 0x10;
+        const std::uint64_t value = 0xAAAAAAAA00000001ULL;
+        std::memcpy(testCase.request.memory.data() + 0x18, &value, sizeof(value));
+        testCase.memoryCompareOffset = 0x18;
+        testCase.memoryCompareSize = sizeof(value);
+        // DEC leaves CF unchanged.
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
+        // lock add dword [rdi+8], 2 carrying out of the dword.
+        auto testCase = make("lock_add32_memory_immediate", CaseId::lock_add32_memory_immediate,
+                             differentialBytes_lock_add32_memory_immediate);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        const std::uint64_t value = 0xBBBBBBBBFFFFFFFFULL;
+        std::memcpy(testCase.request.memory.data() + 0x08, &value, sizeof(value));
+        testCase.memoryCompareOffset = 0x08;
+        testCase.memoryCompareSize = sizeof(value);
+        run(testCase);
+    }
+    {
+        // lock and dword [rdi+rcx*8+0x10], -2 with a scaled index.
+        auto testCase = make("lock_and32_indexed_memory_immediate",
+                             CaseId::lock_and32_indexed_memory_immediate,
+                             differentialBytes_lock_and32_indexed_memory_immediate);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rcx = 2;
+        const std::uint64_t value = 0xCCCCCCCC80000001ULL;
+        std::memcpy(testCase.request.memory.data() + 0x20, &value, sizeof(value));
+        testCase.memoryCompareOffset = 0x20;
+        testCase.memoryCompareSize = sizeof(value);
+        // AF is undefined after a logical operation.
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        // bts ecx, eax: the index masks to five bits and the result
+        // zero-extends; CF takes the old bit.
+        auto testCase = make("bts32_register_register", CaseId::bts32_register_register,
+                             differentialBytes_bts32_register_register);
+        testCase.request.state.rcx = 0xFFFFFFFF00000010ULL;
+        testCase.request.state.rax = 0x24; // bit 4, already set
+        testCase.flagMask = carryFlag;
+        run(testCase);
+    }
+    for (const auto locked : {false, true}) {
+        // (lock) xor qword [rdi+8], rax, as libdispatch toggles queue bits.
+        auto testCase =
+            locked ? make("lock_xor64_memory_register", CaseId::lock_xor64_memory_register,
+                          differentialBytes_lock_xor64_memory_register)
+                   : make("xor64_memory_register", CaseId::xor64_memory_register,
+                          differentialBytes_xor64_memory_register);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        testCase.request.state.rax = 0x8000000000000001ULL;
+        const std::uint64_t value = 0x0123456789ABCDEFULL;
+        std::memcpy(testCase.request.memory.data() + 0x08, &value, sizeof(value));
+        testCase.memoryCompareOffset = 0x08;
+        testCase.memoryCompareSize = sizeof(value);
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        // and word [rdi+8], -16: only the word changes.
+        auto testCase = make("and16_memory_immediate", CaseId::and16_memory_immediate,
+                             differentialBytes_and16_memory_immediate);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        const std::uint64_t value = 0x1122334455668FFFULL;
+        std::memcpy(testCase.request.memory.data() + 0x08, &value, sizeof(value));
+        testCase.memoryCompareOffset = 0x08;
+        testCase.memoryCompareSize = sizeof(value);
+        testCase.flagMask = logicDefinedFlags;
+        run(testCase);
+    }
+    {
+        // cmp word [rdi+8], -1 against 0xFFFF sets ZF.
+        auto testCase = make("cmp16_memory_immediate", CaseId::cmp16_memory_immediate,
+                             differentialBytes_cmp16_memory_immediate);
+        bindMemory(testCase, rosa::x86::Register::Rdi, 0);
+        const std::uint64_t value = 0x112233445566FFFFULL;
+        std::memcpy(testCase.request.memory.data() + 0x08, &value, sizeof(value));
+        run(testCase);
+    }
+    {
+        // packusdw xmm0, xmm1: negative dwords clamp to 0, large ones to 0xffff.
+        auto testCase = make("packusdw_register", CaseId::packusdw_register,
+                             differentialBytes_packusdw_register);
+        testCase.request.state.xmm[0] = {0xFFFFFFFF00001234ULL, 0x0001000000007FFFULL};
+        testCase.request.state.xmm[1] = {0x8000000000010000ULL, 0x000000050000FFFFULL};
+        run(testCase);
+    }
+    {
+        // Legacy-SSE cvtsi2sd xmm0, ecx writes only the low quadword.
+        auto testCase = make("cvtsi2sd_keeps_upper_quadword", CaseId::cvtsi2sd_keeps_upper_quadword,
+                             differentialBytes_cvtsi2sd_keeps_upper_quadword);
+        testCase.request.state.rcx = 0xFFFFFFFF00000007ULL;
+        testCase.request.state.xmm[0] = {0x1111111111111111ULL, 0x2222222222222222ULL};
+        run(testCase);
+    }
+    {
+        // sub di, 1 from zero: the low word wraps and the upper bits stay.
+        auto testCase = make("sub16_immediate_borrow_wraps", CaseId::sub16_immediate_borrow_wraps,
+                             differentialBytes_sub16_immediate_borrow_wraps);
+        testCase.request.state.rdi = 0x1234567890AB0000ULL;
+        run(testCase);
+    }
+    {
+        // adc eax, 0x434f4e45 after libpthread's bt: the incoming carry is
+        // added and the result zero-extends.
+        auto testCase = make("adc32_accumulator_immediate_carry",
+                             CaseId::adc32_accumulator_immediate_carry,
+                             differentialBytes_adc32_accumulator_immediate_carry);
+        testCase.request.state.rax = 0xFFFFFFFF00000000ULL;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
+        auto testCase = make("adc64_accumulator_sign_extended",
+                             CaseId::adc64_accumulator_sign_extended,
+                             differentialBytes_adc64_accumulator_sign_extended);
+        testCase.request.state.rax = 1;
+        testCase.request.state.rflags |= carryFlag;
+        run(testCase);
+    }
+    {
         // Observed in libbz2: rol eax, 1 defines OF as MSB(result) XOR CF.
         auto testCase = make("rol32_by_one_overflow", CaseId::rol32_by_one_overflow,
                              differentialBytes_rol32_by_one_overflow);

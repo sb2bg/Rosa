@@ -68,10 +68,12 @@ bool decodeExtended(DecodeContext &context) {
                 decodeRegister(baseEncoding, false), displacement, 80});
             return true;
         }
-        if (code.size() - cursor >= 2 && code[cursor + 1] == 0xA3U) {
+        if (code.size() - cursor >= 2 &&
+            (code[cursor + 1] == 0xA3U || code[cursor + 1] == 0xABU)) {
+            const bool isSet = code[cursor + 1] == 0xABU;
             if (code.size() - cursor < 3) {
                 throw DecodeError(address, remaining,
-                                  "truncated BT r32, r32");
+                                  "truncated BT/BTS r32, r32");
             }
             const auto modrm = code[cursor + 2];
             const auto mode =
@@ -79,9 +81,9 @@ bool decodeExtended(DecodeContext &context) {
             if (mode != 0x3U) {
                 throw DecodeError(
                     address, remaining,
-                    "only register-direct BT r32, r32 is supported");
+                    "only register-direct BT/BTS r32, r32 is supported");
             }
-            instruction.opcode = Opcode::BitTestRegReg;
+            instruction.opcode = isSet ? Opcode::BitSetRegReg : Opcode::BitTestRegReg;
             instruction.length = 3;
             std::copy_n(
                 code.begin() + static_cast<std::ptrdiff_t>(cursor), 3,
