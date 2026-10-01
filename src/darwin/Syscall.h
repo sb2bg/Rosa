@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <iosfwd>
 #include <optional>
 
 namespace rosa::darwin {
@@ -46,44 +47,54 @@ struct GuestSignalDisposition {
     std::int32_t flags{};
 };
 
+// Task-wide Darwin state shared by every syscall handler.
+struct GuestTask {
+    const GuestSharedCache *sharedCache{};
+    std::array<std::uint8_t, 16> executableUuid{};
+    GuestFileSpace fileSpace;
+    MachDispatcher machDispatcher;
+    std::optional<GuestDyldInfo> dyldInfo;
+    std::optional<GuestPthreadRegistration> pthreadRegistration;
+    std::map<std::int32_t, GuestSignalDisposition> signalDispositions;
+    bool dyldInfoFinal{};
+};
+
+// Routes Mach traps, machdep calls, and table-driven BSD syscalls. Handlers
+// live in Syscall{Process,Sysctl,Files,Memory}.cpp.
 class SyscallDispatcher {
   public:
     explicit SyscallDispatcher(
         const GuestSharedCache *sharedCache = nullptr,
         const std::array<std::uint8_t, 16> &executableUuid = {})
-        : sharedCache_(sharedCache), executableUuid_(executableUuid) {}
+        : task_{.sharedCache = sharedCache, .executableUuid = executableUuid} {}
 
     [[nodiscard]] SyscallOutcome dispatch(guest::AddressSpace &addressSpace, x86::X86State &state,
                                           guest::GuestAddress syscallRip);
     [[nodiscard]] const std::optional<GuestDyldInfo> &dyldInfo() const noexcept {
-        return dyldInfo_;
+        return task_.dyldInfo;
     }
     [[nodiscard]] const MachDispatcher &machDispatcher() const noexcept {
-        return machDispatcher_;
+        return task_.machDispatcher;
     }
     [[nodiscard]] const GuestFileSpace &fileSpace() const noexcept {
-        return fileSpace_;
+        return task_.fileSpace;
     }
     [[nodiscard]] const std::optional<GuestPthreadRegistration> &
     pthreadRegistration() const noexcept {
-        return pthreadRegistration_;
+        return task_.pthreadRegistration;
     }
     [[nodiscard]] GuestSignalDisposition
     signalDisposition(std::int32_t signum) const noexcept {
-        const auto found = signalDispositions_.find(signum);
-        return found == signalDispositions_.end() ? GuestSignalDisposition{}
-                                                  : found->second;
+        const auto found = task_.signalDispositions.find(signum);
+        return found == task_.signalDispositions.end() ? GuestSignalDisposition{}
+                                                       : found->second;
     }
+    // Logs each BSD syscall with its arguments and result; null disables.
+    void setTrace(std::ostream *trace) noexcept { trace_ = trace; }
 
   private:
-    const GuestSharedCache *sharedCache_{};
-    std::array<std::uint8_t, 16> executableUuid_{};
-    GuestFileSpace fileSpace_;
-    MachDispatcher machDispatcher_;
-    std::optional<GuestDyldInfo> dyldInfo_;
-    std::optional<GuestPthreadRegistration> pthreadRegistration_;
-    std::map<std::int32_t, GuestSignalDisposition> signalDispositions_;
-    bool dyldInfoFinal_{};
+    GuestTask task_;
+    std::ostream *trace_{};
 };
 
 } // namespace rosa::darwin

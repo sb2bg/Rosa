@@ -67,6 +67,10 @@ add_library(rosa_core
     src/darwin/PortSpace.cpp
     src/darwin/SharedCache.cpp
     src/darwin/Syscall.cpp
+    src/darwin/SyscallFiles.cpp
+    src/darwin/SyscallMemory.cpp
+    src/darwin/SyscallProcess.cpp
+    src/darwin/SyscallSysctl.cpp
     src/ir/IR.cpp
     src/ir/Optimization.cpp
     src/guest/AddressSpace.cpp
